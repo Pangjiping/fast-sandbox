@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="title description">
   <title id="title">Fast Sandbox system overview</title>
-  <desc id="description">Fast Sandbox control plane and data plane with pluggable Infra Components on a Kubernetes foundation.</desc>
+  <desc id="description">Fast Sandbox control plane and data plane, from network-slot management to Sandbox-private networking and pluggable Infra Components, on a Kubernetes foundation.</desc>
 
   <defs>
     <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
@@ -50,6 +50,21 @@
         font-size: 12px;
         font-weight: 400;
       }
+      .sandbox-title {
+        fill: #18181b;
+        font-size: 15px;
+        font-weight: 500;
+      }
+      .sandbox-note {
+        fill: #71717a;
+        font-size: 11px;
+        font-weight: 400;
+      }
+      .control-detail {
+        fill: #52525b;
+        font-size: 10px;
+        font-weight: 400;
+      }
       .foundation-title {
         fill: #172554;
         font-size: 28px;
@@ -88,15 +103,28 @@
   <line x1="340" y1="220" x2="462" y2="220" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
 
   <rect x="472" y="168" width="382" height="104" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="494" y="213" class="mono node-title">fast-path / reconciler</text>
-  <text x="494" y="241" class="mono node-note">create fast / converge state</text>
+  <text x="494" y="202" class="mono node-title">fast-path × N / reconciler</text>
+  <text x="494" y="229" class="mono node-note">multi-active / leader-elected</text>
+  <text x="494" y="253" class="mono runtime">Top-K · image affinity / converge state</text>
 
-  <line x1="854" y1="220" x2="976" y2="220" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <line x1="854" y1="220" x2="922" y2="220" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
 
-  <rect x="986" y="168" width="390" height="104" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="1008" y="207" class="mono node-title">Fastlet Pod</text>
-  <text x="1008" y="235" class="mono node-note">pod-side runtime control</text>
-  <text x="1008" y="257" class="mono runtime">[ runc ]  [ gVisor ]  [ Kata ]  [ BoxLite ]</text>
+  <rect x="916" y="154" width="460" height="142" rx="8" fill="#f8fbff" fill-opacity="0.58" stroke="#93c5fd" stroke-dasharray="4 4"/>
+  <text x="932" y="176" class="mono section" fill="#2563eb">Fastlet Pod</text>
+
+  <rect x="932" y="187" width="166" height="94" rx="5" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="1015" y="211" text-anchor="middle" class="mono sandbox-title">Fastlet</text>
+  <text x="1015" y="233" text-anchor="middle" class="mono sandbox-note">admission · runtime</text>
+  <text x="1015" y="252" text-anchor="middle" class="mono sandbox-note">network · image cache</text>
+  <text x="1015" y="271" text-anchor="middle" class="mono sandbox-note">Infra · recovery</text>
+
+  <line x1="1098" y1="234" x2="1128" y2="234" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <rect x="1138" y="181" width="222" height="106" rx="5" fill="#fbfbfa" stroke="#93c5fd"/>
+  <text x="1152" y="204" class="mono sandbox-title">Sandbox</text>
+  <text x="1152" y="226" class="mono sandbox-note">user workload + Infra Component</text>
+  <text x="1152" y="249" class="mono control-detail">runc · gVisor · Kata · BoxLite</text>
+  <text x="1152" y="271" class="mono control-detail">network slot · private network</text>
 
   <text x="64" y="329" class="mono section">02 / data plane</text>
   <line x1="64" y1="346" x2="1376" y2="346" stroke="#d4d4d0" stroke-dasharray="3 6"/>
@@ -111,7 +139,7 @@
   <text x="432" y="426" class="mono node-title">Sandbox Proxy</text>
   <text x="432" y="454" class="mono node-note">cluster entry</text>
 
-  <rect x="700" y="360" width="676" height="144" rx="8" fill="#faf8ff" fill-opacity="0.45" stroke="#c4b5fd" stroke-dasharray="4 5"/>
+  <rect x="700" y="360" width="676" height="150" rx="8" fill="#faf8ff" fill-opacity="0.45" stroke="#c4b5fd" stroke-dasharray="4 5"/>
   <text x="718" y="379" class="mono section" fill="#7c3aed">Fastlet Pod</text>
 
   <line x1="660" y1="434" x2="714" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
@@ -120,13 +148,21 @@
   <text x="746" y="426" class="mono node-title">Fastlet Proxy</text>
   <text x="746" y="454" class="mono node-note">pod-local routing</text>
 
-  <line x1="974" y1="434" x2="1028" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <line x1="974" y1="434" x2="1018" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
 
-  <rect x="1038" y="386" width="338" height="96" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="1060" y="426" class="mono node-title">Infra Component</text>
-  <text x="1060" y="454" class="mono node-note">[ execd ]  [ custom ]  [ ... ]</text>
+  <rect x="1028" y="374" width="348" height="100" rx="7" fill="#f8fbff" stroke="#93c5fd" stroke-dasharray="4 4"/>
+  <text x="1044" y="394" class="mono section" fill="#2563eb">Sandbox · private network</text>
 
-  <text x="1376" y="526" text-anchor="end" class="mono node-note">transparent proxy / no protocol translation</text>
+  <rect x="1042" y="405" width="126" height="56" rx="5" fill="#fbfbfa" stroke="#cbd5e1"/>
+  <text x="1105" y="429" text-anchor="middle" class="mono sandbox-title">user workload</text>
+  <text x="1105" y="449" text-anchor="middle" class="mono sandbox-note">OCI image</text>
+
+  <rect x="1178" y="405" width="184" height="56" rx="5" fill="#fbfbfa" stroke="#c4b5fd"/>
+  <text x="1270" y="429" text-anchor="middle" class="mono sandbox-title">Infra Component</text>
+  <text x="1270" y="449" text-anchor="middle" class="mono sandbox-note">execd / custom / ...</text>
+
+  <text x="849" y="498" text-anchor="middle" class="mono control-detail">ingress · transparent / no translation</text>
+  <text x="1202" y="498" text-anchor="middle" class="mono control-detail">egress · private CIDR → MASQUERADE → Pod network</text>
 
   <rect x="64" y="548" width="1312" height="142" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
   <text x="88" y="582" class="mono section" fill="#3b82f6">03 / foundation</text>
