@@ -36,7 +36,9 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 		observability.End(span, resultErr)
 		recordAdmission("create", resultErr)
 	}()
+	_, finishValidation := startFastletCreateStage(ctx, m.runtimeName, "validation")
 	if failure := m.validateCreateRequest(req); failure != nil {
+		finishValidation(failure)
 		return createFailure(failure, fastletapi.AdmissionStatus{})
 	}
 	spec := req.Sandbox
@@ -51,13 +53,17 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	}
 	spec.FastletPodUID = req.Identity.FastletPodUID
 	if err := m.validateProfiles(&spec); err != nil {
+		finishValidation(err)
 		return createFailure(fastletErrorWithOutcome(fastletapi.ErrorProfileMismatch, err.Error(), false, fastletapi.OutcomeRejectedBeforeSideEffects), fastletapi.AdmissionStatus{})
 	}
+	finishValidation(nil)
 
+	_, finishAdmission := startFastletCreateStage(ctx, m.runtimeName, "admission")
 	m.mu.Lock()
 	if m.recovering || !m.runtimeReady {
 		response, err := createFailure(fastletErrorWithOutcome(fastletapi.ErrorRuntimeUnavailable, "Fastlet runtime recovery/capability probe is incomplete", true, fastletapi.OutcomeRejectedBeforeSideEffects), m.admissionStatusLocked())
 		m.mu.Unlock()
+		finishAdmission(err)
 		return response, err
 	}
 	if !m.infraReady {
@@ -67,9 +73,11 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 		}
 		response, err := createFailure(fastletErrorWithOutcome(fastletapi.ErrorInfraUnavailable, message, true, fastletapi.OutcomeRejectedBeforeSideEffects), m.admissionStatusLocked())
 		m.mu.Unlock()
+		finishAdmission(err)
 		return response, err
 	}
 	if existing := m.sandboxes[spec.SandboxID]; existing != nil {
+		finishAdmission(nil)
 		if existing.Phase == "create-cleanup-failed" {
 			return m.retryFailedCreateCleanup(ctx, req, &spec, existing)
 		}
@@ -80,21 +88,25 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	if tombstone, found := m.tombstones[spec.SandboxID]; found && identityAtOrBefore(spec.InstanceGeneration, spec.AssignmentAttempt, tombstone) {
 		response, err := createFailure(fastletErrorWithOutcome(fastletapi.ErrorGenerationFenced, "Sandbox generation was already deleted", false, fastletapi.OutcomeGenerationFenced), m.admissionStatusLocked())
 		m.mu.Unlock()
+		finishAdmission(err)
 		return response, err
 	}
 	if m.draining {
 		response, err := createFailure(fastletErrorWithOutcome(fastletapi.ErrorDraining, m.drainReason, true, fastletapi.OutcomeRejectedBeforeSideEffects), m.admissionStatusLocked())
 		m.mu.Unlock()
+		finishAdmission(err)
 		return response, err
 	}
 	if len(m.sandboxes) >= m.capacity {
 		response, err := createFailure(fastletErrorWithOutcome(fastletapi.ErrorCapacityRejected, "Fastlet admission capacity is exhausted", true, fastletapi.OutcomeRejectedBeforeSideEffects), m.admissionStatusLocked())
 		m.mu.Unlock()
+		finishAdmission(err)
 		return response, err
 	}
 	if !m.runtimeResourceAvailable() {
 		response, err := createFailure(fastletErrorWithOutcome(fastletapi.ErrorNetworkUnavailable, "Fastlet has no clean runtime/network resource available", true, fastletapi.OutcomeRejectedBeforeSideEffects), m.admissionStatusLocked())
 		m.mu.Unlock()
+		finishAdmission(err)
 		return response, err
 	}
 
@@ -102,10 +114,13 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	m.sandboxes[spec.SandboxID] = placeholder
 	admission := m.admissionStatusLocked()
 	m.mu.Unlock()
+	finishAdmission(nil)
 	m.recordDiagnostic(spec.SandboxID, "info", "admission", "creating", "Fastlet admission accepted; atomic runtime creation started")
 
 	runtimeStarted := time.Now()
-	metadata, err := m.runtime.EnsureSandbox(ctx, &spec)
+	runtimeContext, finishRuntime := startFastletCreateStage(ctx, m.runtimeName, "runtime_ensure")
+	metadata, err := m.runtime.EnsureSandbox(runtimeContext, &spec)
+	finishRuntime(err)
 	observeRuntimeCreate(m.runtimeName, runtimeStarted, err)
 	observeUserProcessStart(m.runtimeName, m.infraProfile, started, metadata)
 	if err != nil {

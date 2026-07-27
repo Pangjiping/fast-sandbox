@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"fast-sandbox/internal/observability"
 )
 
 const currentSlotVersion = 1
@@ -177,7 +179,14 @@ func (m *Manager) Reconcile(ctx context.Context, runtimeOwners []Owner) error {
 	return m.Replenish(ctx)
 }
 
-func (m *Manager) Acquire(ctx context.Context, owner Owner) (*Slot, error) {
+func (m *Manager) Acquire(ctx context.Context, owner Owner) (_ *Slot, resultErr error) {
+	started := time.Now()
+	ctx, span := observability.Start(ctx, "fastlet.network.acquire")
+	result := "error"
+	defer func() {
+		observeSlotAcquire(result, started)
+		observability.End(span, resultErr)
+	}()
 	if owner.SandboxUID == "" || owner.InstanceGeneration <= 0 || owner.AssignmentAttempt <= 0 {
 		return nil, fmt.Errorf("invalid network slot owner")
 	}
@@ -190,6 +199,7 @@ func (m *Manager) Acquire(ctx context.Context, owner Owner) (*Slot, error) {
 			}
 			m.hit.Add(1)
 			recordSlotAcquire("hit")
+			result = "existing"
 			return cloneSlot(slot), nil
 		}
 	}
@@ -205,17 +215,24 @@ func (m *Manager) Acquire(ctx context.Context, owner Owner) (*Slot, error) {
 		candidate.Owner = owner
 		candidate.BoundAt = &now
 		candidate.Access = AccessDescriptor{Kind: AccessKindDirectIP, Address: candidate.IP, NetNSPath: candidate.HostNetNSPath}
-		if err := m.store.Save(ctx, &candidate); err != nil {
+		persistStarted := time.Now()
+		persistContext, persistSpan := observability.Start(ctx, "fastlet.network.acquire.persist")
+		err := m.store.Save(persistContext, &candidate)
+		observeSlotPersist(persistStarted, err)
+		observability.End(persistSpan, err)
+		if err != nil {
 			return nil, err
 		}
 		*slot = candidate
 		m.hit.Add(1)
 		recordSlotAcquire("hit")
 		m.recordPhasesLocked()
+		result = "bound"
 		return cloneSlot(slot), nil
 	}
 	m.miss.Add(1)
 	recordSlotAcquire("miss")
+	result = "empty"
 	return nil, ErrNoCleanSlot
 }
 

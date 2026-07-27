@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"time"
 
+	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,6 +44,11 @@ var (
 		Name: "fast_sandbox_warm_image_pull_total",
 		Help: "Pool warm image preparation attempts by bounded result; image references are intentionally not labels.",
 	}, []string{"result"})
+	fastletCreateStageLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "fast_sandbox_fastlet_create_stage_latency_seconds",
+		Help:    "Latency of bounded synchronous Fastlet admission stages before and around RuntimeDriver Ensure.",
+		Buckets: prometheus.ExponentialBuckets(.00025, 2, 15),
+	}, []string{"runtime", "stage", "result"})
 )
 
 func recordAdmission(operation string, err error) {
@@ -82,6 +89,18 @@ func observeRuntimeCreate(runtimeName string, started time.Time, err error) {
 	// RuntimeDriver does not yet expose a trustworthy per-create cache-hit bit.
 	// Keep the bounded label explicit instead of inferring from a stale inventory.
 	runtimeCreateLatency.WithLabelValues(runtimeName, "unknown", metricResult(err)).Observe(time.Since(started).Seconds())
+}
+
+func startFastletCreateStage(ctx context.Context, runtimeName, stage string) (context.Context, func(error)) {
+	if runtimeName == "" {
+		runtimeName = "unknown"
+	}
+	started := time.Now()
+	stageContext, span := observability.Start(ctx, "fastlet.create."+stage)
+	return stageContext, func(err error) {
+		fastletCreateStageLatency.WithLabelValues(runtimeName, stage, metricResult(err)).Observe(time.Since(started).Seconds())
+		observability.End(span, err)
+	}
 }
 
 func observeDataPlaneReady(runtimeName, infraProfile string, started time.Time, err error) {

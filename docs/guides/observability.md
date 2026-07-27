@@ -79,6 +79,20 @@ Important metric families cover:
 
 `fast_sandbox_warm_image_pull_total{result}` records actual cache pull results without image, Pool, Pod, or Sandbox labels.
 
+The synchronous Create trace is decomposed without changing the public RPC
+boundary:
+
+| Process | Bounded stages |
+|---|---|
+| Fast-Path | candidate selection, CRD create, idempotency read, assignment CAS, Fastlet create |
+| Fastlet | validation, admission, runtime ensure |
+| Network | slot acquire and durable owner binding |
+| Infra | per-instance config/state persistence |
+| containerd | existing-runtime inspect, network acquire, image, spec, container, log, task create, task start |
+
+Stage names and results are safe Prometheus labels. Request, Sandbox, and Fastlet
+identities remain trace/log fields only.
+
 See [Performance](performance.md) for the complete latency boundary and benchmark contract.
 
 ## Diagnostics

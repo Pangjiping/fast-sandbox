@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	controllermetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 func TestTopKMetricsClassifyImageAffinityWithoutIdentityLabels(t *testing.T) {
@@ -45,7 +45,7 @@ func TestHeartbeatAgeSummaryEmitsAtMostOneSamplePerState(t *testing.T) {
 
 func gatheredCounterValue(t *testing.T, name string, labels map[string]string) float64 {
 	t.Helper()
-	families, err := prometheus.DefaultGatherer.Gather()
+	families, err := controllermetrics.Registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
 		if family.GetName() != name {
@@ -70,7 +70,7 @@ func gatheredCounterValue(t *testing.T, name string, labels map[string]string) f
 
 func gatheredHistogramCount(t *testing.T, name string, labels map[string]string) uint64 {
 	t.Helper()
-	families, err := prometheus.DefaultGatherer.Gather()
+	families, err := controllermetrics.Registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
 		if family.GetName() != name {

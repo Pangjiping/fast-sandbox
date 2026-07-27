@@ -55,6 +55,9 @@ go run ./test/performance/create_load \
   --requests 100 \
   --concurrency 10 \
   --cleanup \
+  --cleanup-network-slots 10 \
+  --cleanup-registry-settle 25s \
+  --fastlet-metrics-url http://127.0.0.1:18081/metrics \
   --commit "$(git rev-parse HEAD)" \
   --environment '8c/32GiB, Linux kernel X, kind X, containerd X' \
   --runtime container \
@@ -70,7 +73,23 @@ go run ./test/performance/create_load \
 
 Use a unique request-ID prefix for every sample. Reusing it measures idempotent replay.
 
-The process reports cleanup separately and exits non-zero on Create failure, duplicate identity, or requested cleanup failure while still writing JSON.
+Cleanup submits deletion for every deterministic request ID, including a request
+whose RPC failed after its CRD was persisted. It then waits until those CRDs are
+gone. For repeatable batches, forward each participating Fastlet metrics endpoint,
+repeat `--fastlet-metrics-url`, and set `--cleanup-network-slots` to the aggregate
+clean-slot baseline. This additionally waits for asynchronous network-slot
+replenishment before the process exits.
+
+Fast-Path replicas maintain local heartbeat-driven registries. For immediately
+repeated batches, set `--cleanup-registry-settle` to at least the configured
+heartbeat interval plus jitter. Network readiness and scheduling-view freshness
+are reported as separate waits; neither is silently included in Create latency.
+
+The JSON includes both percentile summaries and sorted per-request RPC latency
+samples so independent runs can be merged without averaging percentiles. The
+process reports deletion submission and convergence separately. It exits non-zero
+on Create failure, duplicate identity, cleanup submission failure, or cleanup
+convergence timeout while still writing JSON.
 
 ## Scheduler microbenchmark
 
@@ -87,7 +106,10 @@ Relevant series include:
 
 - `fast_sandbox_create_accepted_latency_seconds`;
 - `fast_sandbox_create_runtime_ready_latency_seconds`;
+- `fast_sandbox_create_stage_latency_seconds`;
+- `fast_sandbox_fastlet_create_stage_latency_seconds`;
 - `fast_sandbox_runtime_create_latency_seconds`;
+- `fast_sandbox_containerd_create_stage_latency_seconds`;
 - `fast_sandbox_user_process_start_latency_seconds`;
 - `fast_sandbox_data_plane_ready_latency_seconds`;
 - `fast_sandbox_registry_heartbeat_age_seconds`;
@@ -97,6 +119,9 @@ Relevant series include:
 - `fast_sandbox_fastlet_admission_total`;
 - `fast_sandbox_network_slot_available`;
 - `fast_sandbox_network_slot_inuse`;
+- `fast_sandbox_network_slot_acquire_latency_seconds`;
+- `fast_sandbox_network_slot_persist_latency_seconds`;
+- `fast_sandbox_infra_instance_stage_latency_seconds`;
 - `fast_sandbox_infra_ready_latency_seconds`;
 - `fast_sandbox_sandbox_proxy_route_latency_seconds`;
 - `fast_sandbox_fastlet_proxy_upstream_latency_seconds`.

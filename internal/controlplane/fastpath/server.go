@@ -190,7 +190,9 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv1.CreateRe
 
 	sandbox := sandboxFromCreateRequest(request, createSpecHash)
 	ctx = observability.WithIdentity(ctx, observability.Identity{SandboxName: sandbox.Name})
+	_, finishCandidates := startCreateStage(ctx, "candidate_selection")
 	candidates, err := orchestrator.FastPathCandidates(sandbox, request.RequestId)
+	finishCandidates(err)
 	if err != nil {
 		if errors.Is(err, orchestration.ErrNoCandidate) {
 			return nil, status.Error(codes.ResourceExhausted, err.Error())
@@ -210,9 +212,14 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv1.CreateRe
 	}
 
 	// IO 1: CRD Create. The happy path does not preflight with a Get/List.
-	if createErr := s.K8sClient.Create(ctx, sandbox); createErr != nil {
+	crdContext, finishCRDCreate := startCreateStage(ctx, "crd_create")
+	createErr := s.K8sClient.Create(crdContext, sandbox)
+	finishCRDCreate(createErr)
+	if createErr != nil {
 		var existing apiv1alpha1.Sandbox
-		getErr := s.K8sClient.Get(ctx, client.ObjectKeyFromObject(sandbox), &existing)
+		getContext, finishIdempotencyRead := startCreateStage(ctx, "idempotency_read")
+		getErr := s.K8sClient.Get(getContext, client.ObjectKeyFromObject(sandbox), &existing)
+		finishIdempotencyRead(getErr)
 		if getErr != nil {
 			if apierrors.IsNotFound(getErr) && !apierrors.IsAlreadyExists(createErr) {
 				return nil, createErr
@@ -255,7 +262,9 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv1.CreateRe
 			if nextErr != nil {
 				return nil, status.Errorf(codes.FailedPrecondition, "invalid Fastlet candidate: %v", nextErr)
 			}
-			sandbox, err = assignment.CASAssignmentAnnotation(ctx, s.K8sClient, client.ObjectKeyFromObject(sandbox), envelope, next)
+			casContext, finishAssignmentCAS := startCreateStage(ctx, "assignment_cas")
+			sandbox, err = assignment.CASAssignmentAnnotation(casContext, s.K8sClient, client.ObjectKeyFromObject(sandbox), envelope, next)
+			finishAssignmentCAS(err)
 			if err != nil {
 				return nil, status.Errorf(codes.Aborted, "assignment changed concurrently: %v", err)
 			}
@@ -263,7 +272,9 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv1.CreateRe
 		}
 
 		// IO 2 on the happy path: one atomic Fastlet admission/create call.
-		_, createErr := orchestrator.CreateRuntimeOnCandidate(ctx, sandbox, candidate, envelope)
+		fastletContext, finishFastletCreate := startCreateStage(ctx, "fastlet_create")
+		_, createErr := orchestrator.CreateRuntimeOnCandidate(fastletContext, sandbox, candidate, envelope)
+		finishFastletCreate(createErr)
 		if createErr == nil {
 			if index > 0 {
 				orchestration.RecordTopKRetry("accepted")

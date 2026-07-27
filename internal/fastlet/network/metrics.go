@@ -1,6 +1,8 @@
 package network
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -22,6 +24,16 @@ var (
 		Name: "fast_sandbox_network_slot_inuse",
 		Help: "Current number of bound or destroying Fastlet-owned network slots.",
 	})
+	networkSlotAcquireLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "fast_sandbox_network_slot_acquire_latency_seconds",
+		Help:    "Latency to resolve or durably bind a pre-created network slot.",
+		Buckets: prometheus.ExponentialBuckets(.00025, 2, 15),
+	}, []string{"result"})
+	networkSlotPersistLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "fast_sandbox_network_slot_persist_latency_seconds",
+		Help:    "Latency of the durable state write performed when a clean network slot is bound.",
+		Buckets: prometheus.ExponentialBuckets(.00025, 2, 15),
+	}, []string{"result"})
 )
 
 func recordSlotAcquire(result string) {
@@ -34,4 +46,16 @@ func recordSlotPhases(clean, bound, destroying int) {
 	networkSlots.WithLabelValues("destroying").Set(float64(destroying))
 	networkSlotAvailable.Set(float64(clean))
 	networkSlotInUse.Set(float64(bound + destroying))
+}
+
+func observeSlotAcquire(result string, started time.Time) {
+	networkSlotAcquireLatency.WithLabelValues(result).Observe(time.Since(started).Seconds())
+}
+
+func observeSlotPersist(started time.Time, err error) {
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	networkSlotPersistLatency.WithLabelValues(result).Observe(time.Since(started).Seconds())
 }

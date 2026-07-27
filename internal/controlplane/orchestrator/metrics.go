@@ -3,9 +3,10 @@ package orchestrator
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	controllermetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-var topKRetryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+var topKRetryTotal = promauto.With(controllermetrics.Registry).NewCounterVec(prometheus.CounterOpts{
 	Name: "fast_sandbox_topk_retry_total",
 	Help: "Top-K atomic Create retries after a candidate rejects admission before side effects.",
 }, []string{"result"})

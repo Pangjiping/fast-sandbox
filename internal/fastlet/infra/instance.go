@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	infracontract "fast-sandbox/internal/infra/contract"
+	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/sandbox/supervisor"
 )
@@ -60,7 +62,13 @@ type instanceIdentity struct {
 	AssignmentAttempt  int64  `json:"assignmentAttempt"`
 }
 
-func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxSpec) (PreparedInstance, error) {
+func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxSpec) (_ PreparedInstance, resultErr error) {
+	started := time.Now()
+	ctx, span := observability.Start(ctx, "fastlet.infra.prepare_instance")
+	defer func() {
+		observeInstanceStage("total", started, resultErr)
+		observability.End(span, resultErr)
+	}()
 	if spec == nil || spec.SandboxID == "" || spec.InstanceGeneration <= 0 || spec.AssignmentAttempt <= 0 {
 		return PreparedInstance{}, errors.New("Sandbox UID, instance generation, and assignment attempt are required for Infra init")
 	}
@@ -210,10 +218,20 @@ func (m *Manager) writeInstance(ctx context.Context, persisted persistedInstance
 		return "", "", err
 	}
 	podPath, hostPath := m.instancePaths(persisted.Identity.SandboxUID, persisted.Identity.InstanceGeneration, persisted.Identity.AssignmentAttempt)
-	if err := atomicWriteJSON(podPath, persisted.Init, 0400); err != nil {
+	configStarted := time.Now()
+	_, configSpan := observability.Start(ctx, "fastlet.infra.persist_config")
+	err := atomicWriteJSON(podPath, persisted.Init, 0400)
+	observeInstanceStage("config_persist", configStarted, err)
+	observability.End(configSpan, err)
+	if err != nil {
 		return "", "", err
 	}
-	if err := atomicWriteJSON(m.instanceStatePath(persisted.Identity.SandboxUID, persisted.Identity.InstanceGeneration, persisted.Identity.AssignmentAttempt), persisted, 0400); err != nil {
+	stateStarted := time.Now()
+	_, stateSpan := observability.Start(ctx, "fastlet.infra.persist_state")
+	err = atomicWriteJSON(m.instanceStatePath(persisted.Identity.SandboxUID, persisted.Identity.InstanceGeneration, persisted.Identity.AssignmentAttempt), persisted, 0400)
+	observeInstanceStage("state_persist", stateStarted, err)
+	observability.End(stateSpan, err)
+	if err != nil {
 		return "", "", err
 	}
 	return podPath, hostPath, nil

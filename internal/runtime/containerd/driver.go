@@ -94,8 +94,10 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	return nil
 }
 
-func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (*SandboxMetadata, error) {
+func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (_ *SandboxMetadata, resultErr error) {
 	totalStart := time.Now()
+	ctx, finishTotal := startContainerdCreateStage(ctx, string(r.runtimeName), "total")
+	defer func() { finishTotal(resultErr) }()
 	logger := klog.FromContext(ctx).WithValues("sandbox_id", config.SandboxID)
 
 	logger.Info("Creating sandbox", "image", config.Image, "runtime", r.config.Handler, "netns", config.NetworkNamespacePath)
@@ -105,7 +107,9 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 
 	// 1. Image preparation
 	pullStart := time.Now()
-	image, err := r.prepareImage(ctx, config.Image)
+	imageContext, finishImage := startContainerdCreateStage(ctx, string(r.runtimeName), "image")
+	image, err := r.prepareImage(imageContext, config.Image)
+	finishImage(err)
 	if err != nil {
 		logger.Error(err, "Failed to prepare image")
 		return nil, err
@@ -113,7 +117,9 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	pullDuration := time.Since(pullStart)
 
 	containerID := config.SandboxID
-	specOpts, infraInstance, err := r.prepareSpecOpts(ctx, config, image)
+	specContext, finishSpec := startContainerdCreateStage(ctx, string(r.runtimeName), "spec")
+	specOpts, infraInstance, err := r.prepareSpecOpts(specContext, config, image)
+	finishSpec(err)
 	if err != nil {
 		return nil, fmt.Errorf("invalid sandbox resource profile: %w", err)
 	}
@@ -131,8 +137,9 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	createStart := time.Now()
 	logger.Info("Creating containerd container object")
 
+	containerContext, finishContainer := startContainerdCreateStage(ctx, string(r.runtimeName), "container")
 	container, err := r.client.NewContainer(
-		ctx,
+		containerContext,
 		containerID,
 		containerd.WithImage(image),
 		containerd.WithNewSnapshot(snapShotName(containerID), image),
@@ -140,25 +147,31 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		containerd.WithNewSpec(specOpts...),
 		containerd.WithContainerLabels(labels),
 	)
+	finishContainer(err)
 	if err != nil {
 		logger.Error(err, "Failed to create container object")
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}
 	createDuration := time.Since(createStart)
 
+	logStarted := time.Now()
+	_, finishLog := startContainerdCreateStage(ctx, string(r.runtimeName), "log")
 	logDir := "/var/log/fast-sandbox"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
+		finishLog(err)
 		return nil, fmt.Errorf("failed to create log dir: %w", err)
 	}
 	logPath := filepath.Join(logDir, fmt.Sprintf("%s.log", containerID))
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
+		finishLog(err)
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
+	finishLog(nil)
+	logDuration := time.Since(logStarted)
 
 	// 3. Start container
-	startStart := time.Now()
 	logger.Info("Creating containerd task")
 
 	// Build CIO options based on runtime configuration
@@ -173,23 +186,31 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		taskOpts = append(taskOpts, containerd.WithRuntimePath(r.config.RuntimePath))
 	}
 
-	task, err := container.NewTask(ctx, cio.NewCreator(cioOpts...), taskOpts...)
+	taskCreateStarted := time.Now()
+	taskContext, finishTaskCreate := startContainerdCreateStage(ctx, string(r.runtimeName), "task_create")
+	task, err := container.NewTask(taskContext, cio.NewCreator(cioOpts...), taskOpts...)
+	finishTaskCreate(err)
 	if err != nil {
 		logger.Error(err, "Failed to create containerd task", "logPath", logPath)
 		logFile.Close()
 		_ = container.Delete(ctx, containerd.WithSnapshotCleanup)
 		return nil, fmt.Errorf("failed to create task: %w", err)
 	}
+	taskCreateDuration := time.Since(taskCreateStarted)
 
 	logger.Info("Starting containerd task", "pid", task.Pid())
-	if err = task.Start(ctx); err != nil {
+	taskStartStarted := time.Now()
+	taskStartContext, finishTaskStart := startContainerdCreateStage(ctx, string(r.runtimeName), "task_start")
+	err = task.Start(taskStartContext)
+	finishTaskStart(err)
+	if err != nil {
 		logger.Error(err, "Failed to start containerd task")
 		_, _ = task.Delete(ctx, containerd.WithProcessKill)
 		_ = container.Delete(ctx, containerd.WithSnapshotCleanup)
 		return nil, fmt.Errorf("failed to start task: %w", err)
 	}
 	userProcessStartedAt, userProcessStartSource := userProcessStartAfterTaskStart(infraInstance, time.Now())
-	startDuration := time.Since(startStart)
+	taskStartDuration := time.Since(taskStartStarted)
 
 	totalDuration := time.Since(totalStart)
 
@@ -197,7 +218,10 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		"total_ms", totalDuration.Milliseconds(),
 		"pull_ms", pullDuration.Milliseconds(),
 		"create_ms", createDuration.Milliseconds(),
-		"start_ms", startDuration.Milliseconds())
+		"log_ms", logDuration.Milliseconds(),
+		"task_create_ms", taskCreateDuration.Milliseconds(),
+		"task_start_ms", taskStartDuration.Milliseconds(),
+		"start_ms", (taskCreateDuration + taskStartDuration).Milliseconds())
 
 	metadata := &SandboxMetadata{
 		SandboxSpec:            *config,
@@ -220,7 +244,13 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 // EnsureSandbox is idempotent for a Sandbox runtime identity. It returns the
 // existing managed runtime when a retry observes an already-created Sandbox.
 func (r *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (*SandboxMetadata, error) {
-	existing, err := r.InspectSandbox(ctx, config.SandboxID)
+	inspectContext, finishInspect := startContainerdCreateStage(ctx, string(r.runtimeName), "inspect_existing")
+	existing, err := r.InspectSandbox(inspectContext, config.SandboxID)
+	inspectErr := err
+	if errors.Is(err, ErrSandboxNotFound) {
+		inspectErr = nil
+	}
+	finishInspect(inspectErr)
 	if err == nil {
 		if sameRuntimeIdentity(existing, config) {
 			if err := validateExistingRuntimeProfile(existing, config); err != nil {
@@ -247,7 +277,9 @@ func (r *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	var owner fastletnetwork.Owner
 	if r.networkManager != nil {
 		owner = networkOwner(config)
-		slot, acquireErr := r.networkManager.Acquire(ctx, owner)
+		networkContext, finishNetwork := startContainerdCreateStage(ctx, string(r.runtimeName), "network_acquire")
+		slot, acquireErr := r.networkManager.Acquire(networkContext, owner)
+		finishNetwork(acquireErr)
 		if acquireErr != nil {
 			return nil, fmt.Errorf("%w: %v", ErrNetworkUnavailable, acquireErr)
 		}

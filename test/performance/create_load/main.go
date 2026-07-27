@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -64,32 +66,37 @@ func (values *envList) Set(value string) error {
 }
 
 type config struct {
-	Endpoint           string
-	Namespace          string
-	Pool               string
-	Image              string
-	Command            string
-	Args               []string
-	Envs               map[string]string
-	WorkingDir         string
-	Requests           int
-	Concurrency        int
-	Rate               float64
-	RequestTimeout     time.Duration
-	RequestIDPrefix    string
-	Cleanup            bool
-	CleanupTimeout     time.Duration
-	Commit             string
-	Environment        string
-	Runtime            string
-	InfraProfile       string
-	ImageState         string
-	ImageAffinity      string
-	NetworkSlotState   string
-	CreatePath         string
-	FastPathReplicas   int
-	ControllerReplicas int
-	ProxyReplicas      int
+	Endpoint              string
+	Namespace             string
+	Pool                  string
+	Image                 string
+	Command               string
+	Args                  []string
+	Envs                  map[string]string
+	WorkingDir            string
+	Requests              int
+	Concurrency           int
+	Rate                  float64
+	RequestTimeout        time.Duration
+	RequestIDPrefix       string
+	Cleanup               bool
+	CleanupTimeout        time.Duration
+	CleanupPollInterval   time.Duration
+	CleanupRegistrySettle time.Duration
+	CleanupNetworkSlots   int
+	FastletMetricsURLs    []string
+	MetricsHTTPClient     *http.Client
+	Commit                string
+	Environment           string
+	Runtime               string
+	InfraProfile          string
+	ImageState            string
+	ImageAffinity         string
+	NetworkSlotState      string
+	CreatePath            string
+	FastPathReplicas      int
+	ControllerReplicas    int
+	ProxyReplicas         int
 }
 
 type dimensions struct {
@@ -131,42 +138,51 @@ type identitySummary struct {
 }
 
 type cleanupReport struct {
-	Attempted int            `json:"attempted"`
-	Succeeded int            `json:"succeeded"`
-	Failed    int            `json:"failed"`
-	Codes     map[string]int `json:"grpc_codes,omitempty"`
-	Duration  float64        `json:"duration_ms"`
+	Attempted              int            `json:"attempted"`
+	Succeeded              int            `json:"succeeded"`
+	Failed                 int            `json:"failed"`
+	Codes                  map[string]int `json:"grpc_codes,omitempty"`
+	Duration               float64        `json:"duration_ms"`
+	Converged              bool           `json:"converged"`
+	ConvergenceDuration    float64        `json:"convergence_duration_ms"`
+	RegistrySettleDuration float64        `json:"registry_settle_duration_ms,omitempty"`
+	ExpectedNetworkSlots   int            `json:"expected_network_slots,omitempty"`
+	AvailableNetworkSlots  int            `json:"available_network_slots,omitempty"`
+	Error                  string         `json:"error,omitempty"`
 }
 
 type report struct {
-	SchemaVersion              string          `json:"schema_version"`
-	Commit                     string          `json:"commit"`
-	Environment                string          `json:"environment"`
-	Endpoint                   string          `json:"endpoint"`
-	Namespace                  string          `json:"namespace"`
-	Pool                       string          `json:"pool"`
-	Image                      string          `json:"image"`
-	RequestIDPrefix            string          `json:"request_id_prefix"`
-	StartedAt                  time.Time       `json:"started_at"`
-	FinishedAt                 time.Time       `json:"finished_at"`
-	Duration                   float64         `json:"duration_ms"`
-	Dimensions                 dimensions      `json:"dimensions"`
-	Load                       loadShape       `json:"load"`
-	Succeeded                  int             `json:"succeeded"`
-	Failed                     int             `json:"failed"`
-	Attempted                  int             `json:"attempted"`
-	NotAttempted               int             `json:"not_attempted"`
-	FailureRate                float64         `json:"failure_rate"`
-	GRPCCodes                  map[string]int  `json:"grpc_codes"`
-	CreateRPCLatency           latencySummary  `json:"create_rpc_latency_ms"`
-	SuccessfulCreateRPCLatency latencySummary  `json:"successful_create_rpc_latency_ms"`
-	Identity                   identitySummary `json:"identity"`
-	Cleanup                    *cleanupReport  `json:"cleanup,omitempty"`
+	SchemaVersion                     string          `json:"schema_version"`
+	Commit                            string          `json:"commit"`
+	Environment                       string          `json:"environment"`
+	Endpoint                          string          `json:"endpoint"`
+	Namespace                         string          `json:"namespace"`
+	Pool                              string          `json:"pool"`
+	Image                             string          `json:"image"`
+	RequestIDPrefix                   string          `json:"request_id_prefix"`
+	StartedAt                         time.Time       `json:"started_at"`
+	FinishedAt                        time.Time       `json:"finished_at"`
+	Duration                          float64         `json:"duration_ms"`
+	Dimensions                        dimensions      `json:"dimensions"`
+	Load                              loadShape       `json:"load"`
+	Succeeded                         int             `json:"succeeded"`
+	Failed                            int             `json:"failed"`
+	Attempted                         int             `json:"attempted"`
+	NotAttempted                      int             `json:"not_attempted"`
+	FailureRate                       float64         `json:"failure_rate"`
+	GRPCCodes                         map[string]int  `json:"grpc_codes"`
+	CreateRPCLatency                  latencySummary  `json:"create_rpc_latency_ms"`
+	CreateRPCLatencySamples           []float64       `json:"create_rpc_latency_samples_ms"`
+	SuccessfulCreateRPCLatency        latencySummary  `json:"successful_create_rpc_latency_ms"`
+	SuccessfulCreateRPCLatencySamples []float64       `json:"successful_create_rpc_latency_samples_ms"`
+	Identity                          identitySummary `json:"identity"`
+	Cleanup                           *cleanupReport  `json:"cleanup,omitempty"`
 }
 
 type fastPathClient interface {
 	CreateSandbox(context.Context, *fastpathv1.CreateRequest, ...grpc.CallOption) (*fastpathv1.CreateResponse, error)
 	DeleteSandbox(context.Context, *fastpathv1.DeleteRequest, ...grpc.CallOption) (*fastpathv1.DeleteResponse, error)
+	ListSandboxes(context.Context, *fastpathv1.ListRequest, ...grpc.CallOption) (*fastpathv1.ListResponse, error)
 }
 
 type outcome struct {
@@ -226,7 +242,7 @@ func execute(ctx context.Context, arguments []string, output, errorOutput io.Wri
 		report.Identity.MissingSandboxUIDs > 0 || report.Identity.MissingSandboxNames > 0 {
 		return 1
 	}
-	if report.Cleanup != nil && report.Cleanup.Failed > 0 {
+	if report.Cleanup != nil && (report.Cleanup.Failed > 0 || !report.Cleanup.Converged) {
 		return 1
 	}
 	return 0
@@ -238,6 +254,7 @@ func parseConfig(arguments []string, errorOutput io.Writer) (config, error) {
 	cfg := config{}
 	var args stringList
 	var envs envList
+	var fastletMetricsURLs stringList
 	flags.StringVar(&cfg.Endpoint, "endpoint", "127.0.0.1:9090", "FastPath gRPC endpoint")
 	flags.StringVar(&cfg.Namespace, "namespace", "default", "Sandbox namespace")
 	flags.StringVar(&cfg.Pool, "pool", "default-pool", "SandboxPool name")
@@ -251,8 +268,12 @@ func parseConfig(arguments []string, errorOutput io.Writer) (config, error) {
 	flags.Float64Var(&cfg.Rate, "rate", 0, "optional global request rate per second; 0 is unlimited")
 	flags.DurationVar(&cfg.RequestTimeout, "request-timeout", 30*time.Second, "timeout for dial and each RPC")
 	flags.StringVar(&cfg.RequestIDPrefix, "request-id-prefix", "", "stable unique prefix; defaults to a timestamped run ID")
-	flags.BoolVar(&cfg.Cleanup, "cleanup", false, "submit declarative deletion for successful creates")
+	flags.BoolVar(&cfg.Cleanup, "cleanup", false, "delete every deterministic request_id and wait for declarative deletion to converge")
 	flags.DurationVar(&cfg.CleanupTimeout, "cleanup-timeout", 2*time.Minute, "total cleanup timeout")
+	flags.DurationVar(&cfg.CleanupPollInterval, "cleanup-poll-interval", 100*time.Millisecond, "poll interval while waiting for cleanup convergence")
+	flags.DurationVar(&cfg.CleanupRegistrySettle, "cleanup-registry-settle", 0, "additional wait for the FastPath registry to observe restored capacity")
+	flags.IntVar(&cfg.CleanupNetworkSlots, "cleanup-network-slots", 0, "optional clean network-slot count required after deletion")
+	flags.Var(&fastletMetricsURLs, "fastlet-metrics-url", "Fastlet /metrics URL used to verify clean network-slot recovery; repeat for multiple Fastlets")
 	flags.StringVar(&cfg.Commit, "commit", "unspecified", "tested commit SHA")
 	flags.StringVar(&cfg.Environment, "environment", "unspecified", "cluster/hardware/runtime version description")
 	flags.StringVar(&cfg.Runtime, "runtime", "unspecified", "runtime profile")
@@ -275,6 +296,7 @@ func parseConfig(arguments []string, errorOutput io.Writer) (config, error) {
 	}
 	cfg.Args = append([]string(nil), args...)
 	cfg.Envs = map[string]string(envs)
+	cfg.FastletMetricsURLs = append([]string(nil), fastletMetricsURLs...)
 	if cfg.RequestIDPrefix == "" {
 		cfg.RequestIDPrefix = "fsb-load-" + time.Now().UTC().Format("20060102t150405.000000000z")
 	}
@@ -291,14 +313,28 @@ func validateConfig(cfg config) error {
 	if cfg.Rate < 0 || cfg.Rate > 100000 {
 		return errors.New("rate must be between 0 and 100000 requests per second")
 	}
-	if cfg.RequestTimeout <= 0 || cfg.CleanupTimeout <= 0 {
-		return errors.New("request-timeout and cleanup-timeout must be positive")
+	if cfg.RequestTimeout <= 0 || cfg.CleanupTimeout <= 0 || cfg.CleanupPollInterval <= 0 {
+		return errors.New("request-timeout, cleanup-timeout, and cleanup-poll-interval must be positive")
+	}
+	if cfg.CleanupRegistrySettle < 0 {
+		return errors.New("cleanup-registry-settle cannot be negative")
 	}
 	if cfg.CreatePath != "fastpath" {
 		return errors.New("create-load only drives the fastpath RPC; create-path must be fastpath")
 	}
 	if cfg.FastPathReplicas < 0 || cfg.ControllerReplicas < 0 || cfg.ProxyReplicas < 0 {
 		return errors.New("replica counts cannot be negative")
+	}
+	if cfg.CleanupNetworkSlots < 0 {
+		return errors.New("cleanup-network-slots cannot be negative")
+	}
+	if cfg.CleanupNetworkSlots > 0 && len(cfg.FastletMetricsURLs) == 0 {
+		return errors.New("cleanup-network-slots requires at least one fastlet-metrics-url")
+	}
+	for _, endpoint := range cfg.FastletMetricsURLs {
+		if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+			return fmt.Errorf("fastlet-metrics-url must be an HTTP(S) URL: %q", endpoint)
+		}
 	}
 	if !oneOf(cfg.ImageState, "warm", "cold", "unspecified") {
 		return errors.New("image-state must be warm, cold, or unspecified")
@@ -386,7 +422,6 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 	names := make(map[string]int)
 	uids := make(map[string]int)
 	missingNames, missingUIDs := 0, 0
-	createdNames := make([]string, 0, cfg.Requests)
 	succeeded, attempted := 0, 0
 	for item := range outcomes {
 		if item.attempted {
@@ -408,7 +443,6 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 			missingNames++
 		} else {
 			names[item.response.SandboxName]++
-			createdNames = append(createdNames, item.response.SandboxName)
 		}
 	}
 	finished := time.Now()
@@ -425,14 +459,20 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 		Succeeded: succeeded, Failed: cfg.Requests - succeeded, Attempted: attempted, NotAttempted: cfg.Requests - attempted,
 		FailureRate: float64(cfg.Requests-succeeded) / float64(cfg.Requests),
 		GRPCCodes:   codesByName, CreateRPCLatency: summarizeLatencies(allLatencies),
-		SuccessfulCreateRPCLatency: summarizeLatencies(successLatencies),
+		CreateRPCLatencySamples:           latencySamples(allLatencies),
+		SuccessfulCreateRPCLatency:        summarizeLatencies(successLatencies),
+		SuccessfulCreateRPCLatencySamples: latencySamples(successLatencies),
 		Identity: identitySummary{
 			UniqueSandboxUIDs: len(nonEmptyCounts(uids)), DuplicateSandboxUIDs: duplicateCount(uids), MissingSandboxUIDs: missingUIDs,
 			UniqueSandboxNames: len(nonEmptyCounts(names)), DuplicateSandboxNames: duplicateCount(names), MissingSandboxNames: missingNames,
 		},
 	}
 	if cfg.Cleanup {
-		result.Cleanup = cleanup(ctx, client, cfg, createdNames)
+		cleanupNames := make([]string, cfg.Requests)
+		for index := range cleanupNames {
+			cleanupNames[index] = requestID(cfg.RequestIDPrefix, index)
+		}
+		result.Cleanup = cleanup(ctx, client, cfg, cleanupNames)
 	}
 	return result
 }
@@ -459,8 +499,107 @@ func cleanup(ctx context.Context, client fastPathClient, cfg config, names []str
 		result.Failed++
 		result.Codes[code.String()]++
 	}
+	convergenceStarted := time.Now()
+	available, err := waitForCleanup(cleanupContext, client, cfg, unique)
+	result.ConvergenceDuration = milliseconds(time.Since(convergenceStarted))
+	result.AvailableNetworkSlots = available
+	result.ExpectedNetworkSlots = cfg.CleanupNetworkSlots
+	result.Converged = err == nil
+	if err != nil {
+		result.Error = err.Error()
+	} else if cfg.CleanupRegistrySettle > 0 {
+		settleStarted := time.Now()
+		select {
+		case <-cleanupContext.Done():
+			result.Converged = false
+			result.Error = fmt.Sprintf("registry settle did not complete: %v", cleanupContext.Err())
+		case <-time.After(cfg.CleanupRegistrySettle):
+		}
+		result.RegistrySettleDuration = milliseconds(time.Since(settleStarted))
+	}
 	result.Duration = milliseconds(time.Since(started))
 	return result
+}
+
+func waitForCleanup(ctx context.Context, client fastPathClient, cfg config, names map[string]int) (int, error) {
+	ticker := time.NewTicker(cfg.CleanupPollInterval)
+	defer ticker.Stop()
+	httpClient := cfg.MetricsHTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: min(cfg.RequestTimeout, 5*time.Second)}
+	}
+	for {
+		response, err := client.ListSandboxes(ctx, &fastpathv1.ListRequest{Namespace: cfg.Namespace})
+		if err != nil {
+			return 0, fmt.Errorf("list Sandboxes while waiting for cleanup: %w", err)
+		}
+		pending := 0
+		if response != nil {
+			for _, sandbox := range response.Items {
+				if sandbox != nil && names[sandbox.SandboxName] > 0 {
+					pending++
+				}
+			}
+		}
+		available := 0
+		if pending == 0 && cfg.CleanupNetworkSlots > 0 {
+			available, err = availableNetworkSlots(ctx, httpClient, cfg.FastletMetricsURLs)
+			if err != nil {
+				return 0, err
+			}
+		}
+		if pending == 0 && (cfg.CleanupNetworkSlots == 0 || available >= cfg.CleanupNetworkSlots) {
+			return available, nil
+		}
+		select {
+		case <-ctx.Done():
+			return available, fmt.Errorf("cleanup did not converge: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func availableNetworkSlots(ctx context.Context, client *http.Client, endpoints []string) (int, error) {
+	total := 0
+	for _, endpoint := range endpoints {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return 0, err
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return 0, fmt.Errorf("read Fastlet metrics %s: %w", endpoint, err)
+		}
+		value, parseErr := parseNetworkSlotAvailable(response.Body)
+		closeErr := response.Body.Close()
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			return 0, fmt.Errorf("read Fastlet metrics %s: status %d", endpoint, response.StatusCode)
+		}
+		if parseErr != nil || closeErr != nil {
+			return 0, errors.Join(parseErr, closeErr)
+		}
+		total += value
+	}
+	return total, nil
+}
+
+func parseNetworkSlotAvailable(reader io.Reader) (int, error) {
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 || fields[0] != "fast_sandbox_network_slot_available" {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil || value < 0 || math.Trunc(value) != value {
+			return 0, fmt.Errorf("invalid fast_sandbox_network_slot_available value %q", fields[1])
+		}
+		return int(value), nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return 0, errors.New("fast_sandbox_network_slot_available metric is missing")
 }
 
 func requestID(prefix string, index int) string {
@@ -492,6 +631,19 @@ func summarizeLatencies(values []time.Duration) latencySummary {
 		P50: milliseconds(percentile(sorted, 0.50)), P95: milliseconds(percentile(sorted, 0.95)),
 		P99: milliseconds(percentile(sorted, 0.99)), Max: milliseconds(sorted[len(sorted)-1]),
 	}
+}
+
+func latencySamples(values []time.Duration) []float64 {
+	if len(values) == 0 {
+		return []float64{}
+	}
+	sorted := append([]time.Duration(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	result := make([]float64, len(sorted))
+	for index, value := range sorted {
+		result[index] = milliseconds(value)
+	}
+	return result
 }
 
 func percentile(sorted []time.Duration, quantile float64) time.Duration {
