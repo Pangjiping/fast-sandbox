@@ -95,6 +95,9 @@ serves the Pod-local API, and `state` owns durable recovery records.
 
 BoxLite networking produces a local-forward access descriptor rather than a Fastlet-managed netns. The current profile remains fail closed because the upstream API cannot yet prove the required host-enforced per-Box resource contract.
 
+See [BoxLite runtime](boxlite-runtime.md) for the implemented adapter, capability
+gaps, and proposed Prepared Runtime architecture.
+
 ## Fixed Pool resources
 
 Every Sandbox in one Pool uses the same immutable CPU, memory, and PID limits. Fastlet passes those values to the selected RuntimeDriver and is the enforcement boundary.

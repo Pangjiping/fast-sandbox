@@ -47,7 +47,7 @@ See [Secure runtimes](../guides/secure-runtimes.md).
 
 The profile remains unsupported with reason `BoxLiteResourceEnforcementIncomplete`. The sidecar integration exists, but host-enforced CPU, memory, and PID semantics are incomplete.
 
-See [BoxLite integration](../guides/boxlite.md).
+See [BoxLite runtime](../concepts/boxlite-runtime.md).
 
 ## Infra profile compatibility
 
