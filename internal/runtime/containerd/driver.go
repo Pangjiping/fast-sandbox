@@ -3,7 +3,6 @@ package containerd
 import (
 	"context"
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 
 	apiv1alpha1 "fast-sandbox/api/v1alpha1"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
@@ -25,6 +25,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
 )
@@ -82,7 +83,13 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOperationTimeout)
 	defer cancel()
 
-	client, err := containerd.New(r.socketPath, containerd.WithDefaultNamespace("k8s.io"))
+	client, err := containerd.New(
+		r.socketPath,
+		containerd.WithDefaultNamespace("k8s.io"),
+		containerd.WithExtraDialOpts([]grpc.DialOption{
+			grpc.WithChainUnaryInterceptor(containerdCreateRPCInterceptor),
+		}),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create containerd client: %w", err)
 	}
@@ -104,6 +111,7 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	ctx, cancel := context.WithTimeout(ctx, defaultOperationTimeout)
 	defer cancel()
 	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = withContainerdCreateRPCMetrics(ctx, string(r.runtimeName))
 
 	// 1. Image preparation
 	pullStart := time.Now()
@@ -141,11 +149,11 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	container, err := r.client.NewContainer(
 		containerContext,
 		containerID,
-		containerd.WithImage(image),
-		containerd.WithNewSnapshot(snapShotName(containerID), image),
-		containerd.WithRuntime(r.config.Handler, r.getRuntimeOptions()),
-		containerd.WithNewSpec(specOpts...),
-		containerd.WithContainerLabels(labels),
+		instrumentContainerOption(string(r.runtimeName), "container_image_opt", containerd.WithImage(image)),
+		instrumentContainerOption(string(r.runtimeName), "snapshot_prepare_opt", containerd.WithNewSnapshot(snapShotName(containerID), image)),
+		instrumentContainerOption(string(r.runtimeName), "container_runtime_opt", containerd.WithRuntime(r.config.Handler, r.getRuntimeOptions())),
+		instrumentContainerOption(string(r.runtimeName), "spec_generate_opt", containerd.WithNewSpec(specOpts...)),
+		instrumentContainerOption(string(r.runtimeName), "container_labels_opt", containerd.WithContainerLabels(labels)),
 	)
 	finishContainer(err)
 	if err != nil {
@@ -188,7 +196,14 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 
 	taskCreateStarted := time.Now()
 	taskContext, finishTaskCreate := startContainerdCreateStage(ctx, string(r.runtimeName), "task_create")
-	task, err := container.NewTask(taskContext, cio.NewCreator(cioOpts...), taskOpts...)
+	ioCreator := cio.NewCreator(cioOpts...)
+	instrumentedIOCreator := func(id string) (cio.IO, error) {
+		_, finishIO := startContainerdCreateStage(taskContext, string(r.runtimeName), "task_io")
+		taskIO, createErr := ioCreator(id)
+		finishIO(createErr)
+		return taskIO, createErr
+	}
+	task, err := container.NewTask(taskContext, instrumentedIOCreator, taskOpts...)
 	finishTaskCreate(err)
 	if err != nil {
 		logger.Error(err, "Failed to create containerd task", "logPath", logPath)

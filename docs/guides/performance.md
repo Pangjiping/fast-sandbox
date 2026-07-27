@@ -6,14 +6,131 @@ Fast Sandbox does not use one unqualified startup number as a performance claim.
 
 There is no release-grade Sandbox Create benchmark report published in this repository.
 
-The repository contains runtime smoke observations, a scheduler microbenchmark, and a public Create load generator. They are engineering tools, not a fair cross-product or production baseline:
+The repository contains the dated engineering baseline below, runtime smoke observations, a scheduler microbenchmark, and a public Create load generator. They are engineering tools, not a fair cross-product or production baseline:
 
 - `BenchmarkRegistryTopK1000` measures in-process candidate ranking, not Sandbox creation;
 - percentile fixtures under `test/performance` are synthetic unit-test data;
 - isolated warm-container samples are not a latency distribution;
 - runtime results cannot be compared while hardware, cache state, readiness boundary, or workload changes.
 
-A result may be published only with its raw report, command, commit, environment, and interpretation.
+A release claim may be published only with its raw report, command, commit,
+environment, and interpretation. The engineering baseline is retained to explain
+the current architecture and to guide optimization; it is not a release claim.
+
+## Current engineering baseline
+
+The following measurements were collected on 2026-07-27 while investigating the
+imperative Create path. They describe the current architecture at base revision
+`42fe03549598c3ab730b989c7757634b486697cf`. Additional measurement-only
+instrumentation split the containerd client calls into RPC sub-stages without
+changing lifecycle ordering.
+
+### Environment
+
+| Dimension | Value |
+|---|---|
+| Execution environment | KVM virtual machine |
+| CPU | 8 vCPUs, Intel Xeon Platinum 8269CY at 2.50 GHz |
+| Memory | 15 GiB, no swap |
+| Kernel | Linux 5.15.0-173-generic, x86-64 |
+| Cluster | Single-node kind v0.31.0 |
+| Kubernetes node | v1.27.3 |
+| Runtime used by the kind node | containerd 1.7.1 |
+| Virtualization note | Kata runs with nested KVM in this environment |
+
+### Measurement contract
+
+- The client issued one request at a time; this is latency at concurrency 1,
+  not a throughput result.
+- Images and runtime artifacts were already present. Registry pull and first
+  unpack latency are excluded.
+- The public measurement starts before the FastPath Create RPC and ends when
+  Create returns at `RuntimeReady`.
+- `RuntimeReady` means the RuntimeDriver created the runtime and started the
+  user process. It does not wait for Infra readiness, proxy route publication,
+  `DataPlaneReady`, or CRD status projection.
+- The container sample used the minimal Infra profile. The gVisor and Kata
+  validation samples injected OpenSandbox Execd; Execd readiness remained
+  asynchronous and is outside the reported Create latency.
+- Kata Firecracker and BoxLite were capability-gate tests only and therefore
+  have no positive Create result.
+
+### RuntimeReady observations
+
+| Runtime | Samples | Mean client-observed Create | Mean RuntimeDriver work | Dominant runtime stage |
+|---|---:|---:|---:|---|
+| container (`runc`) | 20 | 76.02 ms | 67.76 ms | containerd `Tasks/Create` |
+| gVisor (`runsc`) | 10 | 644.29 ms | 634.78 ms | task create and start |
+| Kata Cloud Hypervisor | 10 | 1,359.59 ms | 1,350.26 ms | VM task create |
+| Kata QEMU | 10 | 2,125.58 ms | 2,110.77 ms | VM task create |
+
+For the 20 warm container samples, client-observed Create was p50 75.95 ms and
+p95 83.15 ms. The other runtime observations were small diagnostic batches;
+only their means are retained, so they must not be presented as percentile
+distributions.
+
+These rows are not a fair product or even runtime ranking. The secure-runtime
+profiles have different initialization work, and Kata is measured under nested
+virtualization. They show where the current Fast Sandbox integration spends
+time on this environment.
+
+### Warm container stage breakdown
+
+The mean 67.76 ms RuntimeDriver duration breaks down as follows:
+
+| Stage | Mean |
+|---|---:|
+| containerd `NewContainer` | 21.95 ms |
+| containerd `NewTask` | 36.87 ms |
+| task `Start` | 7.89 ms |
+
+The client-observed mean exceeds RuntimeDriver work by approximately 8.26 ms.
+That remainder includes FastPath orchestration, Fastlet RPC and admission,
+network-slot acquisition, serialization, and client/server transport.
+
+The following measurements are nested inside the stages above and are therefore
+not additive:
+
+| Nested operation | Mean |
+|---|---:|
+| snapshot option inside `NewContainer` | 10.82 ms |
+| snapshotter `Prepare` RPC | 7.82 ms |
+| lease create and delete | 5.38 ms |
+| container metadata create | 2.63 ms |
+| OCI spec generation | 3.02 ms |
+| containerd `Tasks/Create` RPC | 35.00 ms |
+| `NewTask` pre-RPC work, including shim setup | approximately 1.78 ms |
+| containerd `Tasks/Start` RPC | 7.86 ms |
+
+`strace` confirmed the expected runc lifecycle for each new Sandbox:
+
+```text
+containerd-shim-runc-v2 ... start
+  -> long-running containerd-shim-runc-v2
+  -> runc create
+  -> runc start
+```
+
+The trace was used only to establish process structure because tracing changes
+timing materially.
+
+### Interpretation
+
+On this environment, most warm-container time is below the Fast Sandbox Go
+orchestration layer. `Tasks/Create`, shim/runc setup, task start, snapshot
+preparation, and container metadata account for most of the 76 ms result.
+Caching and small orchestration changes may remove several milliseconds, but
+they do not remove the per-Sandbox shim and runc lifecycle.
+
+The secure-runtime results are even more strongly runtime-dominated. gVisor
+spends roughly 607.76 ms in task create and start. Kata Cloud Hypervisor spends
+approximately 1,321.62 ms there, and Kata QEMU approximately 2,015.47 ms.
+
+The architectural implication is that sub-50-ms startup cannot be treated only
+as a FastPath code-optimization target. It requires a runtime path that moves
+heavy work out of the request, such as prepared instances, clone/resume, or a
+runtime with a different single-machine lifecycle. The existing measurements
+remain useful as regression baselines while that path is developed.
 
 ## Latency milestones
 
