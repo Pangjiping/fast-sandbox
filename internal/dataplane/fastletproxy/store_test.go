@@ -2,6 +2,7 @@ package fastletproxy
 
 import (
 	dataplane "fast-sandbox/internal/dataplane/contract"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -48,4 +49,77 @@ func TestStoreDrainingRejectsLookup(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Lookup("uid-a")
 	require.ErrorIs(t, err, ErrRouteDraining)
+}
+
+func TestStoreSnapshotsRouteValues(t *testing.T) {
+	store := NewStore()
+	route := testRoute(1)
+	route.UpstreamHeadersByPort = map[uint32]map[string]string{
+		44772: {"X-Component-Token": "original"},
+	}
+	_, err := store.Apply(route)
+	require.NoError(t, err)
+
+	route.Access.Address = "10.42.0.99"
+	route.UpstreamHeadersByPort[44772]["X-Component-Token"] = "mutated-source"
+	stored, err := store.Lookup(route.SandboxUID)
+	require.NoError(t, err)
+	require.Equal(t, "10.42.0.2", stored.Access.Address)
+	require.Equal(t, "original", stored.UpstreamHeadersByPort[44772]["X-Component-Token"])
+
+	stored.UpstreamHeadersByPort[44772]["X-Component-Token"] = "mutated-result"
+	storedAgain, err := store.Lookup(route.SandboxUID)
+	require.NoError(t, err)
+	require.Equal(t, "original", storedAgain.UpstreamHeadersByPort[44772]["X-Component-Token"])
+}
+
+func TestStoreConcurrentLookupAndRouteTransitions(t *testing.T) {
+	store := NewStore()
+	stable := testRoute(1)
+	stable.SandboxUID = "stable"
+	_, err := store.Apply(stable)
+	require.NoError(t, err)
+
+	const iterations = 1000
+	errorsChannel := make(chan error, 1)
+	var readers sync.WaitGroup
+	for reader := 0; reader < 8; reader++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for iteration := 0; iteration < iterations; iteration++ {
+				route, lookupErr := store.Lookup("stable")
+				if lookupErr != nil {
+					select {
+					case errorsChannel <- lookupErr:
+					default:
+					}
+					return
+				}
+				if route.RouteGeneration != 1 {
+					select {
+					case errorsChannel <- ErrRouteConflict:
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+	for generation := int64(1); generation <= iterations; generation++ {
+		route := testRoute(generation)
+		route.SandboxUID = "changing"
+		_, err = store.Apply(route)
+		require.NoError(t, err)
+		_, err = store.MarkDraining(route.SandboxUID, generation)
+		require.NoError(t, err)
+		_, err = store.Delete(route.SandboxUID, generation)
+		require.NoError(t, err)
+	}
+	readers.Wait()
+	select {
+	case err := <-errorsChannel:
+		require.NoError(t, err)
+	default:
+	}
 }

@@ -35,66 +35,110 @@ type Resolver interface {
 }
 
 type Index struct {
-	mu        sync.RWMutex
-	sandboxes map[string]apiv1alpha1.Sandbox
-	pods      map[types.UID]corev1.Pod
+	// The informer callbacks publish immutable, routing-only projections.
+	// sync.Map is a deliberate fit here: entries are stable and read for every
+	// data-plane request, while writes are comparatively rare and normally
+	// affect disjoint Sandbox or Pod identities.
+	sandboxes sync.Map // Sandbox UID string -> *sandboxRouteState
+	pods      sync.Map // Fastlet Pod UID string -> *fastletPodState
+}
+
+type sandboxRouteState struct {
+	Namespace         string
+	SandboxUID        string
+	FastletName       string
+	FastletPodUID     string
+	AssignmentAttempt int64
+	RouteGeneration   int64
+	DataPlaneReady    bool
+}
+
+type fastletPodState struct {
+	Namespace string
+	Name      string
+	UID       string
+	IP        string
 }
 
 func NewIndex() *Index {
-	return &Index{sandboxes: make(map[string]apiv1alpha1.Sandbox), pods: make(map[types.UID]corev1.Pod)}
+	return &Index{}
 }
 
 func (i *Index) UpsertSandbox(sandbox *apiv1alpha1.Sandbox) {
 	if sandbox == nil || sandbox.UID == "" {
 		return
 	}
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.sandboxes[string(sandbox.UID)] = *sandbox.DeepCopy()
+	routeGeneration := sandbox.Status.RouteGeneration
+	if routeGeneration <= 0 {
+		routeGeneration = 1
+	}
+	state := &sandboxRouteState{
+		Namespace:       sandbox.Namespace,
+		SandboxUID:      string(sandbox.UID),
+		DataPlaneReady:  sandbox.Status.DataPlaneState == apiv1alpha1.ObservedStateReady,
+		RouteGeneration: routeGeneration,
+	}
+	if assignment := sandbox.Status.Assignment; assignment != nil {
+		state.FastletName = assignment.FastletName
+		state.FastletPodUID = assignment.FastletPodUID
+		state.AssignmentAttempt = assignment.Attempt
+	}
+	i.sandboxes.Store(state.SandboxUID, state)
 }
 
 func (i *Index) DeleteSandbox(sandbox *apiv1alpha1.Sandbox) {
 	if sandbox == nil || sandbox.UID == "" {
 		return
 	}
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	delete(i.sandboxes, string(sandbox.UID))
+	i.sandboxes.Delete(string(sandbox.UID))
 }
 
 func (i *Index) UpsertPod(pod *corev1.Pod) {
 	if pod == nil || pod.UID == "" {
 		return
 	}
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.pods[pod.UID] = *pod.DeepCopy()
+	state := &fastletPodState{
+		Namespace: pod.Namespace,
+		Name:      pod.Name,
+		UID:       string(pod.UID),
+		IP:        pod.Status.PodIP,
+	}
+	i.pods.Store(state.UID, state)
 }
 
 func (i *Index) DeletePod(pod *corev1.Pod) {
 	if pod == nil || pod.UID == "" {
 		return
 	}
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	delete(i.pods, pod.UID)
+	i.pods.Delete(string(pod.UID))
 }
 
 func (i *Index) Resolve(sandboxUID string) (Route, error) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	sandbox, exists := i.sandboxes[sandboxUID]
+	sandboxValue, exists := i.sandboxes.Load(sandboxUID)
 	if !exists {
 		return Route{}, ErrSandboxNotFound
 	}
-	if sandbox.Status.Assignment == nil || sandbox.Status.DataPlaneState != apiv1alpha1.ObservedStateReady {
+	sandbox, valid := sandboxValue.(*sandboxRouteState)
+	if !valid || sandbox == nil {
+		return Route{}, ErrSandboxNotFound
+	}
+	if !sandbox.DataPlaneReady || sandbox.FastletName == "" || sandbox.FastletPodUID == "" || sandbox.AssignmentAttempt <= 0 {
 		return Route{}, ErrSandboxNotReady
 	}
-	pod, exists := i.pods[types.UID(sandbox.Status.Assignment.FastletPodUID)]
-	if !exists || pod.Name != sandbox.Status.Assignment.FastletName || pod.Namespace != sandbox.Namespace || pod.Status.PodIP == "" {
+	podValue, exists := i.pods.Load(sandbox.FastletPodUID)
+	if !exists {
 		return Route{}, ErrFastletUnavailable
 	}
-	return routeFromObjects(&sandbox, &pod)
+	pod, valid := podValue.(*fastletPodState)
+	if !valid || pod == nil || pod.UID != sandbox.FastletPodUID ||
+		pod.Name != sandbox.FastletName || pod.Namespace != sandbox.Namespace || pod.IP == "" {
+		return Route{}, ErrFastletUnavailable
+	}
+	return Route{
+		Namespace: sandbox.Namespace, SandboxUID: sandbox.SandboxUID,
+		FastletName: sandbox.FastletName, FastletPodUID: sandbox.FastletPodUID, FastletPodIP: pod.IP,
+		AssignmentAttempt: sandbox.AssignmentAttempt, RouteGeneration: sandbox.RouteGeneration,
+	}, nil
 }
 
 type KubernetesResolver struct {

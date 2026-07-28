@@ -2,6 +2,9 @@ package sandboxproxy
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	apiv1alpha1 "fast-sandbox/api/v1alpha1"
@@ -40,4 +43,101 @@ func TestKubernetesResolverUsesAuthoritativeFallbackAndWarmsIndex(t *testing.T) 
 	route, err = index.Resolve("uid-a")
 	require.NoError(t, err)
 	require.Equal(t, "pod-a", route.FastletPodUID)
+}
+
+func TestIndexPublishesImmutableRouteProjection(t *testing.T) {
+	index := NewIndex()
+	sandbox := &apiv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID("uid-a")},
+		Status: apiv1alpha1.SandboxStatus{
+			DataPlaneState:  apiv1alpha1.ObservedStateReady,
+			RouteGeneration: 4,
+			Assignment: &apiv1alpha1.SandboxAssignment{
+				FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 3,
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "fastlet-a", Namespace: "tenant-a", UID: types.UID("pod-a")},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.8"},
+	}
+	index.UpsertSandbox(sandbox)
+	index.UpsertPod(pod)
+
+	sandbox.Status.Assignment.FastletPodUID = "mutated-pod"
+	sandbox.Status.RouteGeneration = 99
+	pod.Status.PodIP = "10.0.0.99"
+
+	route, err := index.Resolve("uid-a")
+	require.NoError(t, err)
+	require.Equal(t, "pod-a", route.FastletPodUID)
+	require.Equal(t, "10.0.0.8", route.FastletPodIP)
+	require.Equal(t, int64(4), route.RouteGeneration)
+}
+
+func TestIndexConcurrentUpdatesAndResolves(t *testing.T) {
+	index := NewIndex()
+	const sandboxUID = "uid-a"
+	upsert := func(suffix string, generation int64) {
+		podUID := "pod-" + suffix
+		index.UpsertPod(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "fastlet-" + suffix, Namespace: "tenant-a", UID: types.UID(podUID)},
+			Status:     corev1.PodStatus{PodIP: "10.0.0." + suffix},
+		})
+		index.UpsertSandbox(&apiv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID(sandboxUID)},
+			Status: apiv1alpha1.SandboxStatus{
+				DataPlaneState:  apiv1alpha1.ObservedStateReady,
+				RouteGeneration: generation,
+				Assignment: &apiv1alpha1.SandboxAssignment{
+					FastletName: "fastlet-" + suffix, FastletPodUID: podUID, Attempt: generation,
+				},
+			},
+		})
+	}
+	upsert("1", 1)
+
+	const iterations = 2000
+	errorsChannel := make(chan error, 1)
+	var readers sync.WaitGroup
+	for reader := 0; reader < 8; reader++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for iteration := 0; iteration < iterations; iteration++ {
+				route, err := index.Resolve(sandboxUID)
+				if err != nil {
+					if errors.Is(err, ErrFastletUnavailable) {
+						continue
+					}
+					select {
+					case errorsChannel <- err:
+					default:
+					}
+					return
+				}
+				expectedIP := "10.0.0." + route.FastletPodUID[len("pod-"):]
+				if route.FastletPodIP != expectedIP {
+					select {
+					case errorsChannel <- fmt.Errorf("route %s resolved mismatched IP %s", route.FastletPodUID, route.FastletPodIP):
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+	for iteration := 2; iteration <= iterations; iteration++ {
+		suffix := "1"
+		if iteration%2 == 0 {
+			suffix = "2"
+		}
+		upsert(suffix, int64(iteration))
+	}
+	readers.Wait()
+	select {
+	case err := <-errorsChannel:
+		require.NoError(t, err)
+	default:
+	}
 }

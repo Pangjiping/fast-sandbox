@@ -77,10 +77,12 @@ type Snapshot struct {
 
 // Store keeps generation tombstones after deletion. This prevents a delayed
 // ApplyRoute from resurrecting an old runtime even though no active route is
-// currently present.
+// currently present. Active entries are immutable *Route values in sync.Map,
+// so stable data-plane lookups do not take writeMu. The mutex only serializes
+// control-plane transitions and their revision/watcher ordering.
 type Store struct {
-	mu          sync.RWMutex
-	routes      map[string]Route
+	writeMu     sync.Mutex
+	active      sync.Map // Sandbox UID string -> immutable *Route
 	highWater   map[string]int64
 	revision    uint64
 	nextWatcher uint64
@@ -88,9 +90,10 @@ type Store struct {
 }
 
 func NewStore() *Store {
-	return &Store{
-		routes: make(map[string]Route), highWater: make(map[string]int64), watchers: make(map[uint64]chan Event),
+	store := &Store{
+		highWater: make(map[string]int64), watchers: make(map[uint64]chan Event),
 	}
+	return store
 }
 
 func (s *Store) Apply(route Route) (uint64, error) {
@@ -100,13 +103,13 @@ func (s *Store) Apply(route Route) (uint64, error) {
 	if err := route.validate(); err != nil {
 		return 0, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	high := s.highWater[route.SandboxUID]
 	if route.RouteGeneration < high {
 		return s.revision, ErrRouteStale
 	}
-	if existing, ok := s.routes[route.SandboxUID]; ok && route.RouteGeneration == existing.RouteGeneration {
+	if existing, ok := s.loadRoute(route.SandboxUID); ok && route.RouteGeneration == existing.RouteGeneration {
 		if reflect.DeepEqual(existing, route) {
 			return s.revision, nil
 		}
@@ -117,16 +120,16 @@ func (s *Store) Apply(route Route) (uint64, error) {
 		return s.revision, ErrRouteStale
 	}
 	s.highWater[route.SandboxUID] = route.RouteGeneration
-	s.routes[route.SandboxUID] = cloneRoute(route)
+	s.storeRouteLocked(route)
 	s.revision++
 	s.publishLocked(Event{Revision: s.revision, Type: EventApplied, Route: routePtr(route), SandboxUID: route.SandboxUID, RouteGeneration: route.RouteGeneration})
 	return s.revision, nil
 }
 
 func (s *Store) MarkDraining(sandboxUID string, generation int64) (uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	route, ok := s.routes[sandboxUID]
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	route, ok := s.loadRoute(sandboxUID)
 	if !ok {
 		if generation < s.highWater[sandboxUID] {
 			return s.revision, ErrRouteStale
@@ -143,7 +146,7 @@ func (s *Store) MarkDraining(sandboxUID string, generation int64) (uint64, error
 		return s.revision, nil
 	}
 	route.State = RouteDraining
-	s.routes[sandboxUID] = route
+	s.storeRouteLocked(route)
 	s.revision++
 	s.publishLocked(Event{Revision: s.revision, Type: EventDraining, Route: routePtr(route), SandboxUID: sandboxUID, RouteGeneration: generation})
 	return s.revision, nil
@@ -153,28 +156,26 @@ func (s *Store) Delete(sandboxUID string, generation int64) (uint64, error) {
 	if sandboxUID == "" || generation <= 0 {
 		return 0, ErrRouteConflict
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	high := s.highWater[sandboxUID]
 	if generation < high {
 		return s.revision, ErrRouteStale
 	}
 	if generation == high {
-		if _, exists := s.routes[sandboxUID]; !exists {
+		if _, exists := s.active.Load(sandboxUID); !exists {
 			return s.revision, nil
 		}
 	}
 	s.highWater[sandboxUID] = generation
-	delete(s.routes, sandboxUID)
+	s.active.Delete(sandboxUID)
 	s.revision++
 	s.publishLocked(Event{Revision: s.revision, Type: EventDeleted, SandboxUID: sandboxUID, RouteGeneration: generation})
 	return s.revision, nil
 }
 
 func (s *Store) Lookup(sandboxUID string) (Route, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	route, ok := s.routes[sandboxUID]
+	route, ok := s.loadRoute(sandboxUID)
 	if !ok {
 		return Route{}, ErrRouteNotFound
 	}
@@ -185,26 +186,30 @@ func (s *Store) Lookup(sandboxUID string) (Route, error) {
 }
 
 func (s *Store) Snapshot() Snapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	routes := make([]Route, 0, len(s.routes))
-	for _, route := range s.routes {
-		routes = append(routes, cloneRoute(route))
-	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	routes := make([]Route, 0)
+	s.active.Range(func(_, value any) bool {
+		route, ok := value.(*Route)
+		if ok && route != nil {
+			routes = append(routes, cloneRoute(*route))
+		}
+		return true
+	})
 	sort.Slice(routes, func(i, j int) bool { return routes[i].SandboxUID < routes[j].SandboxUID })
 	return Snapshot{Revision: s.revision, Routes: routes}
 }
 
 func (s *Store) Subscribe() (<-chan Event, func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.nextWatcher++
 	id := s.nextWatcher
 	ch := make(chan Event, 64)
 	s.watchers[id] = ch
 	return ch, func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		if current, ok := s.watchers[id]; ok {
 			delete(s.watchers, id)
 			close(current)
@@ -221,6 +226,23 @@ func (s *Store) publishLocked(event Event) {
 			close(watcher)
 		}
 	}
+}
+
+func (s *Store) loadRoute(sandboxUID string) (Route, bool) {
+	value, exists := s.active.Load(sandboxUID)
+	if !exists {
+		return Route{}, false
+	}
+	route, valid := value.(*Route)
+	if !valid || route == nil {
+		return Route{}, false
+	}
+	return *route, true
+}
+
+func (s *Store) storeRouteLocked(route Route) {
+	stored := cloneRoute(route)
+	s.active.Store(route.SandboxUID, &stored)
 }
 
 func cloneRoute(route Route) Route {
