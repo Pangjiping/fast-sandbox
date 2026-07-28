@@ -11,10 +11,16 @@ import (
 	"fast-sandbox/internal/observability"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/klog/v2"
+)
+
+const (
+	fastPathEndpointEnv     = "FAST_SANDBOX_ENDPOINT"
+	sandboxProxyEndpointEnv = "FAST_SANDBOX_PROXY_ENDPOINT"
 )
 
 var (
@@ -51,17 +57,20 @@ func init() {
 
 	//  Flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./.fastctl/config.json)")
-	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "localhost:9090", "Controller gRPC endpoint")
+	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "localhost:9090", "Fast-Path gRPC endpoint (env: "+fastPathEndpointEnv+")")
 	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace")
-	rootCmd.PersistentFlags().StringVar(&proxyEndpoint, "proxy-endpoint", "", "Override the Sandbox Proxy authority (for example, a local port-forward)")
+	rootCmd.PersistentFlags().StringVar(&proxyEndpoint, "proxy-endpoint", "", "Override the Sandbox Proxy authority (env: "+sandboxProxyEndpointEnv+")")
 
-	viper.BindPFlag("endpoint", rootCmd.PersistentFlags().Lookup("endpoint"))
-	viper.BindPFlag("namespace", rootCmd.PersistentFlags().Lookup("namespace"))
-	viper.BindPFlag("proxy-endpoint", rootCmd.PersistentFlags().Lookup("proxy-endpoint"))
+	mustBindConfigSources(viper.GetViper(), rootCmd.PersistentFlags())
 }
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
+	// Tests and embedders may reset Viper after package initialization.
+	// Rebinding here also makes the precedence explicit at command execution:
+	// changed flags, endpoint environment variables, config file, flag defaults.
+	mustBindConfigSources(viper.GetViper(), rootCmd.PersistentFlags())
+
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {
@@ -74,10 +83,36 @@ func initConfig() {
 		viper.SetConfigType("json")
 	}
 
-	viper.AutomaticEnv() // read in environment variables that match
-
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Println("Using config file:", viper.ConfigFileUsed())
+	}
+}
+
+func bindConfigSources(config *viper.Viper, flags *pflag.FlagSet) error {
+	for _, binding := range []struct {
+		key  string
+		flag string
+	}{
+		{key: "endpoint", flag: "endpoint"},
+		{key: "namespace", flag: "namespace"},
+		{key: "proxy-endpoint", flag: "proxy-endpoint"},
+	} {
+		if err := config.BindPFlag(binding.key, flags.Lookup(binding.flag)); err != nil {
+			return fmt.Errorf("bind --%s: %w", binding.flag, err)
+		}
+	}
+	if err := config.BindEnv("endpoint", fastPathEndpointEnv); err != nil {
+		return fmt.Errorf("bind %s: %w", fastPathEndpointEnv, err)
+	}
+	if err := config.BindEnv("proxy-endpoint", sandboxProxyEndpointEnv); err != nil {
+		return fmt.Errorf("bind %s: %w", sandboxProxyEndpointEnv, err)
+	}
+	return nil
+}
+
+func mustBindConfigSources(config *viper.Viper, flags *pflag.FlagSet) {
+	if err := bindConfigSources(config, flags); err != nil {
+		panic(err)
 	}
 }
 
