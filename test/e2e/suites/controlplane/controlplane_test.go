@@ -31,7 +31,7 @@ import (
 
 const (
 	controlPlaneNamespace = "default"
-	leaderLeaseName       = "fast-sandbox-controller.sandbox.fast.io"
+	leaderLeaseName       = "fast-sandbox-reconciler.sandbox.fast.io"
 )
 
 func TestMultiActiveControlPlane(t *testing.T) {

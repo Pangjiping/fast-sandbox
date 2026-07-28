@@ -259,7 +259,7 @@ func requireNoError(t *testing.T, err error, action string) {
 
 func restartControllerLeader(ctx context.Context, t *testing.T, k8sClient client.Client) {
 	t.Helper()
-	const leaseName = "fast-sandbox-controller.sandbox.fast.io"
+	const leaseName = "fast-sandbox-reconciler.sandbox.fast.io"
 	var before string
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
