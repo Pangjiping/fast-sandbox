@@ -12,14 +12,26 @@ The binary is written to `bin/fastctl`.
 
 ## Global flags
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--config` | `./.fastctl/config.json` | Explicit configuration file |
-| `--endpoint` | `localhost:9090` | Fast-Path gRPC endpoint |
-| `--namespace`, `-n` | `default` | Kubernetes namespace |
-| `--proxy-endpoint` | resolved by Fast-Path | Override Sandbox Proxy authority |
+| Flag | Environment | Default | Meaning |
+|---|---|---|---|
+| `--config` | — | `./.fastctl/config.json` | Explicit configuration file |
+| `--endpoint` | `FAST_SANDBOX_ENDPOINT` | `localhost:9090` | Fast-Path gRPC endpoint |
+| `--namespace`, `-n` | — | `default` | Kubernetes namespace |
+| `--proxy-endpoint` | `FAST_SANDBOX_PROXY_ENDPOINT` | resolved by Fast-Path | Override Sandbox Proxy authority |
 
-Configuration precedence is command-line flag, local configuration file, then built-in default.
+Configuration precedence is command-line flag, environment variable, local
+configuration file, then built-in default.
+
+For a local Quick Start, configure both endpoints once:
+
+```bash
+export FAST_SANDBOX_ENDPOINT=localhost:9090
+export FAST_SANDBOX_PROXY_ENDPOINT=http://localhost:18080
+```
+
+`make quickstart` creates `.fastctl/config.json` with these endpoints when the
+file is absent. It never modifies an existing file; use the environment
+variables above or edit the existing configuration.
 
 Example:
 
@@ -98,8 +110,7 @@ These commands use the official OpenSandbox Go SDK. They require an Execd-enable
 ### Execute
 
 ```bash
-fastctl --proxy-endpoint http://localhost:18080 \
-  opensandbox exec <sandbox-name> -- <command> [args...]
+fastctl opensandbox exec <sandbox-name> -- <command> [args...]
 ```
 
 Optional flags:
@@ -137,8 +148,9 @@ An in-cluster proxy address cannot be resolved from a development host. Keep:
 make quickstart-forward
 ```
 
-running and pass:
+running and configure:
 
-```text
---proxy-endpoint http://localhost:18080
+```bash
+export FAST_SANDBOX_ENDPOINT=localhost:9090
+export FAST_SANDBOX_PROXY_ENDPOINT=http://localhost:18080
 ```

@@ -36,21 +36,20 @@ make quickstart-forward
 终端 2：
 
 ```bash
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  run quickstart-execd-sandbox \
+bin/fastctl run quickstart-execd-sandbox \
   --image docker.io/library/alpine:latest \
   --pool quickstart-execd-pool -- /bin/sleep 3600
 
 kubectl wait --for=jsonpath='{.status.dataPlaneState}'=Ready \
   sandbox/quickstart-execd-sandbox --timeout=60s
 
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  opensandbox exec quickstart-execd-sandbox -- uname -a
+bin/fastctl opensandbox exec quickstart-execd-sandbox -- uname -a
 
-bin/fastctl --endpoint localhost:9090 delete quickstart-execd-sandbox
+bin/fastctl delete quickstart-execd-sandbox
 ```
+
+首次运行时，Quick Start 会创建本地 `.fastctl/config.json` 并写入转发地址。
+如果文件已经存在则绝不修改，命令输出会提示如何通过环境变量临时覆盖。
 
 选择其他 runtime：
 

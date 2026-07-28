@@ -36,13 +36,14 @@ type SandboxInfo struct {
 type FastctlOption func(*Fastctl)
 
 type Fastctl struct {
-	runner     Runner
-	rootDir    string
-	binaryPath string
-	endpoint   string
-	proxyURL   string
-	namespace  string
-	configDir  string
+	runner            Runner
+	rootDir           string
+	binaryPath        string
+	endpoint          string
+	proxyURL          string
+	namespace         string
+	configDir         string
+	omitEndpointFlags bool
 }
 
 func NewFastctl(opts ...FastctlOption) *Fastctl {
@@ -98,6 +99,14 @@ func WithFastctlProxyEndpoint(proxyURL string) FastctlOption {
 		if proxyURL != "" {
 			client.proxyURL = proxyURL
 		}
+	}
+}
+
+// WithoutFastctlEndpointFlags lets the child fastctl process resolve its
+// endpoints from environment variables or its configuration file.
+func WithoutFastctlEndpointFlags() FastctlOption {
+	return func(client *Fastctl) {
+		client.omitEndpointFlags = true
 	}
 }
 
@@ -197,11 +206,14 @@ func (c *Fastctl) WaitRunning(ctx context.Context, name string) (*SandboxInfo, e
 }
 
 func (c *Fastctl) run(ctx context.Context, args ...string) ([]byte, error) {
-	commandArgs := []string{
-		"--endpoint", c.endpoint,
-		"--namespace", c.namespace,
+	commandArgs := make([]string, 0, len(args)+6)
+	if !c.omitEndpointFlags {
+		commandArgs = append(commandArgs, "--endpoint", c.endpoint)
 	}
-	if c.proxyURL != "" {
+	commandArgs = append(commandArgs,
+		"--namespace", c.namespace,
+	)
+	if !c.omitEndpointFlags && c.proxyURL != "" {
 		commandArgs = append(commandArgs, "--proxy-endpoint", c.proxyURL)
 	}
 	commandArgs = append(commandArgs, args...)

@@ -30,6 +30,10 @@ echo "Quick Start endpoints are being forwarded:"
 echo "  Fast-Path:     localhost:${fastpath_port}"
 echo "  Sandbox Proxy: http://localhost:${proxy_port}"
 echo
+echo "If .fastctl/config.json points elsewhere, override it in terminal 2:"
+echo "  export FAST_SANDBOX_ENDPOINT=localhost:${fastpath_port}"
+echo "  export FAST_SANDBOX_PROXY_ENDPOINT=http://localhost:${proxy_port}"
+echo
 echo "Keep this terminal open. Press Ctrl-C to stop both forwards."
 
 while true; do

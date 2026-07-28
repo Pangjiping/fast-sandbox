@@ -36,21 +36,21 @@ make quickstart-forward
 In terminal 2:
 
 ```bash
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  run quickstart-execd-sandbox \
+bin/fastctl run quickstart-execd-sandbox \
   --image docker.io/library/alpine:latest \
   --pool quickstart-execd-pool -- /bin/sleep 3600
 
 kubectl wait --for=jsonpath='{.status.dataPlaneState}'=Ready \
   sandbox/quickstart-execd-sandbox --timeout=60s
 
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  opensandbox exec quickstart-execd-sandbox -- uname -a
+bin/fastctl opensandbox exec quickstart-execd-sandbox -- uname -a
 
-bin/fastctl --endpoint localhost:9090 delete quickstart-execd-sandbox
+bin/fastctl delete quickstart-execd-sandbox
 ```
+
+On the first run, Quick Start creates a local `.fastctl/config.json` with the
+forwarded endpoints. An existing file is never modified; the command output
+shows the environment-variable override when manual configuration is needed.
 
 Select another runtime with:
 

@@ -291,14 +291,21 @@ quickstart:
 		exit 1; \
 	fi; \
 	echo "  ready after $${ready_after}s: $$ready_pod"; \
-	echo "[quickstart 4/4] Building fastctl and preparing examples..."; \
+	echo "[quickstart 4/4] Building fastctl and preparing local configuration..."; \
 	$(MAKE) --no-print-directory build COMPONENT=fastctl || exit $$?; \
+	fastpath_port="$${QUICKSTART_FASTPATH_PORT:-9090}"; \
+	proxy_port="$${QUICKSTART_PROXY_PORT:-18080}"; \
+	config_state=$$(QUICKSTART_FASTPATH_PORT="$$fastpath_port" \
+		QUICKSTART_PROXY_PORT="$$proxy_port" \
+		bash test/e2e/hack/quickstart-config.sh .fastctl/config.json) || exit $$?; \
 	echo ""; \
 	echo "Quick Start environment is ready."; \
 	printf "Context: "; kubectl config current-context; \
 	echo "Pool:    $$pool"; \
 	echo ""; \
-	bash test/e2e/hack/quickstart-print.sh "$$pool" "$$sandbox" "$$data_plane"
+	bash test/e2e/hack/quickstart-print.sh \
+		"$$pool" "$$sandbox" "$$data_plane" "$$config_state" \
+		"$$fastpath_port" "$$proxy_port"
 
 quickstart-forward:
 	@bash test/e2e/hack/quickstart-forward.sh

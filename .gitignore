@@ -214,6 +214,7 @@ Thumbs.db
 .remote-dev-run.env
 .remote-dev-run.local.env
 .tools/
+.fastctl/
 
 # API keys and secrets
 secrets/

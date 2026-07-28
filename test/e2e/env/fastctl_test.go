@@ -142,6 +142,27 @@ func TestFastctlCommandIncludesSandboxProxyEndpoint(t *testing.T) {
 	)
 }
 
+func TestFastctlCanOmitEndpointFlags(t *testing.T) {
+	runner := &fakeRunner{outputs: map[string]string{}, errs: map[string]error{}}
+	client := NewFastctl(
+		WithFastctlRunner(runner),
+		WithFastctlBinary("/repo/bin/fastctl"),
+		WithFastctlRootDir("/repo"),
+		WithFastctlEndpoint("127.0.0.1:19090"),
+		WithFastctlProxyEndpoint("http://127.0.0.1:18080"),
+		WithFastctlNamespace("tenant-a"),
+		WithoutFastctlEndpointFlags(),
+	)
+
+	if _, err := client.Command(context.Background(), "opensandbox", "exec", "sb-cli", "--", "true"); err != nil {
+		t.Fatalf("Command returned error: %v", err)
+	}
+	assertCommand(t, runner.commands, "/repo/bin/fastctl",
+		"--namespace", "tenant-a",
+		"opensandbox", "exec", "sb-cli", "--", "true",
+	)
+}
+
 func TestFastctlGetJSONIgnoresCLIConfigPreamble(t *testing.T) {
 	runner := &fakeRunner{
 		outputs: map[string]string{

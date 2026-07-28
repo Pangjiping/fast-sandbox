@@ -31,6 +31,11 @@ development images, deploys the control plane, creates
 `quickstart-execd-pool`, waits for one ready Fastlet built from the current
 development image, builds `bin/fastctl`, and prints copy-and-paste commands.
 
+If `.fastctl/config.json` does not exist, Quick Start creates it with the local
+Fast-Path and Sandbox Proxy endpoints. The directory is Git-ignored. If the
+file already exists, Quick Start preserves it byte-for-byte and prints the
+environment-variable overrides instead.
+
 Quick Start records the local Fastlet image ID on the Pool's Pod template. When
 the `:dev` image changes, the Pool Controller performs its normal ready-surge
 replacement instead of silently retaining a Fastlet from an earlier run.
@@ -54,19 +59,17 @@ Ctrl-C stops both forwards.
 
 ## Create and inspect a Sandbox
 
+On a fresh checkout, `make quickstart` has already configured `fastctl`.
 Run the following commands in terminal 2:
 
 ```bash
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  run quickstart-execd-sandbox \
+bin/fastctl run quickstart-execd-sandbox \
   --image docker.io/library/alpine:latest \
   --pool quickstart-execd-pool -- /bin/sleep 3600
 
-bin/fastctl --endpoint localhost:9090 list
-bin/fastctl --endpoint localhost:9090 get quickstart-execd-sandbox
-bin/fastctl --endpoint localhost:9090 \
-  diagnostics sandbox quickstart-execd-sandbox
+bin/fastctl list
+bin/fastctl get quickstart-execd-sandbox
+bin/fastctl diagnostics sandbox quickstart-execd-sandbox
 ```
 
 Create returns at `RuntimeReady`. The Controller projects CRD status and prepares the data plane asynchronously. Wait before calling Execd:
@@ -79,9 +82,7 @@ kubectl wait --for=jsonpath='{.status.dataPlaneState}'=Ready \
 ## Execute a command
 
 ```bash
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  opensandbox exec quickstart-execd-sandbox -- \
+bin/fastctl opensandbox exec quickstart-execd-sandbox -- \
   sh -lc 'printf "hello from execd\n" > /tmp/execd.txt && cat /tmp/execd.txt'
 ```
 
@@ -90,30 +91,24 @@ bin/fastctl --endpoint localhost:9090 \
 ```bash
 printf 'hello from host\n' > /tmp/fast-sandbox-quickstart.txt
 
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  opensandbox cp /tmp/fast-sandbox-quickstart.txt \
+bin/fastctl opensandbox cp /tmp/fast-sandbox-quickstart.txt \
   quickstart-execd-sandbox:/tmp/from-host.txt
 
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  opensandbox files stat quickstart-execd-sandbox /tmp/from-host.txt
+bin/fastctl opensandbox files stat \
+  quickstart-execd-sandbox /tmp/from-host.txt
 
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  opensandbox files read quickstart-execd-sandbox /tmp/from-host.txt
+bin/fastctl opensandbox files read \
+  quickstart-execd-sandbox /tmp/from-host.txt
 
-bin/fastctl --endpoint localhost:9090 \
-  --proxy-endpoint http://localhost:18080 \
-  opensandbox cp quickstart-execd-sandbox:/tmp/execd.txt \
+bin/fastctl opensandbox cp quickstart-execd-sandbox:/tmp/execd.txt \
   /tmp/execd-downloaded.txt
 ```
 
 ## Delete the Sandbox
 
 ```bash
-bin/fastctl --endpoint localhost:9090 delete quickstart-execd-sandbox
-bin/fastctl --endpoint localhost:9090 list
+bin/fastctl delete quickstart-execd-sandbox
+bin/fastctl list
 ```
 
 Delete is declarative: Fast-Path submits deletion intent and the Controller completes route, runtime, network, and Infra cleanup before removing the finalizer.
@@ -161,13 +156,31 @@ kubectl get sandbox my-declarative-sandbox -w
 
 ### The host cannot resolve the proxy Service
 
-An address such as `fast-sandbox-proxy.default.svc` is an in-cluster Service. Keep `make quickstart-forward` running and pass:
+An address such as `fast-sandbox-proxy.default.svc` is an in-cluster Service.
+Keep `make quickstart-forward` running and configure its local endpoints:
 
-```text
---proxy-endpoint http://localhost:18080
+```bash
+export FAST_SANDBOX_ENDPOINT=localhost:9090
+export FAST_SANDBOX_PROXY_ENDPOINT=http://localhost:18080
 ```
 
-Lifecycle calls need only `--endpoint localhost:9090`. Execd calls need both endpoints.
+Command-line flags remain available and take precedence over these environment
+variables. Lifecycle calls use the Fast-Path endpoint; Execd calls use both.
+
+Quick Start never overwrites an existing `.fastctl/config.json`. You can
+instead edit its `endpoint` and `proxy-endpoint` fields. When the file is
+absent, custom forward ports are shared by configuration generation and the
+printed forwarding command:
+
+```bash
+QUICKSTART_FASTPATH_PORT=19090 \
+QUICKSTART_PROXY_PORT=18081 \
+make quickstart
+
+QUICKSTART_FASTPATH_PORT=19090 \
+QUICKSTART_PROXY_PORT=18081 \
+make quickstart-forward
+```
 
 ### Create succeeded but exec is not ready
 

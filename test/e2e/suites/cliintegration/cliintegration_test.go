@@ -2,6 +2,7 @@ package cliintegration
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,11 +62,26 @@ func TestQuickStartOpenSandboxExecd(t *testing.T) {
 			}
 			defer proxyForward.Cleanup()
 
+			fastctlRoot := t.TempDir()
+			fastctlConfigDir := filepath.Join(fastctlRoot, ".fastctl")
+			if err := os.MkdirAll(fastctlConfigDir, 0700); err != nil {
+				t.Fatalf("create local fastctl config directory: %v", err)
+			}
+			fastctlConfig, err := json.Marshal(map[string]string{
+				"endpoint":       controlEndpoint,
+				"proxy-endpoint": proxyEndpoint,
+			})
+			if err != nil {
+				t.Fatalf("marshal local fastctl config: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(fastctlConfigDir, "config.json"), fastctlConfig, 0600); err != nil {
+				t.Fatalf("write local fastctl config: %v", err)
+			}
 			ctl := e2eenv.NewFastctl(
 				e2eenv.WithFastctlBinary(cliBinaryPath),
-				e2eenv.WithFastctlEndpoint(controlEndpoint),
-				e2eenv.WithFastctlProxyEndpoint(proxyEndpoint),
+				e2eenv.WithFastctlRootDir(fastctlRoot),
 				e2eenv.WithFastctlNamespace(namespace),
+				e2eenv.WithoutFastctlEndpointFlags(),
 			)
 			const sandboxName = "quickstart-execd-sandbox"
 			if output, err := ctl.Run(ctx, sandboxName, e2eenv.FastctlConfig{
