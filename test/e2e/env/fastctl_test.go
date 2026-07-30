@@ -216,11 +216,11 @@ func TestFastctlWaitRunningRequiresReadyStatesUIDAndFastletPod(t *testing.T) {
 	}
 }
 
-func TestFastctlUpdateLabelsAndResetInvokeCLI(t *testing.T) {
+func TestFastctlUpdateMetadataAndResetInvokeCLI(t *testing.T) {
 	runner := &fakeRunner{
 		outputs: map[string]string{
-			commandKey("/repo/bin/fastctl", "--endpoint", "127.0.0.1:19090", "--namespace", "tenant-a", "update", "sb-cli", "--labels", "test=e2e,env=cli"): "updated\n",
-			commandKey("/repo/bin/fastctl", "--endpoint", "127.0.0.1:19090", "--namespace", "tenant-a", "reset", "sb-cli"):                                  "reset\n",
+			commandKey("/repo/bin/fastctl", "--endpoint", "127.0.0.1:19090", "--namespace", "tenant-a", "update", "sb-cli", "--metadata", "test=e2e,env=cli"): "updated\n",
+			commandKey("/repo/bin/fastctl", "--endpoint", "127.0.0.1:19090", "--namespace", "tenant-a", "reset", "sb-cli"):                                    "reset\n",
 		},
 		errs: map[string]error{},
 	}
@@ -232,13 +232,13 @@ func TestFastctlUpdateLabelsAndResetInvokeCLI(t *testing.T) {
 		WithFastctlNamespace("tenant-a"),
 	)
 
-	if _, err := client.UpdateLabels(context.Background(), "sb-cli", "test=e2e", "env=cli"); err != nil {
-		t.Fatalf("UpdateLabels returned error: %v", err)
+	if _, err := client.UpdateMetadata(context.Background(), "sb-cli", "test=e2e", "env=cli"); err != nil {
+		t.Fatalf("UpdateMetadata returned error: %v", err)
 	}
 	if _, err := client.Reset(context.Background(), "sb-cli"); err != nil {
 		t.Fatalf("Reset returned error: %v", err)
 	}
 
-	assertCommand(t, runner.commands, "/repo/bin/fastctl", "--endpoint", "127.0.0.1:19090", "--namespace", "tenant-a", "update", "sb-cli", "--labels", "test=e2e,env=cli")
+	assertCommand(t, runner.commands, "/repo/bin/fastctl", "--endpoint", "127.0.0.1:19090", "--namespace", "tenant-a", "update", "sb-cli", "--metadata", "test=e2e,env=cli")
 	assertCommand(t, runner.commands, "/repo/bin/fastctl", "--endpoint", "127.0.0.1:19090", "--namespace", "tenant-a", "reset", "sb-cli")
 }

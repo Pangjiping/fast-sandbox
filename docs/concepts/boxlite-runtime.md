@@ -20,6 +20,7 @@ defines the evidence required before BoxLite can become a supported runtime.
 | Infra delivery | Artifact volume, preinstalled artifact, and template modes |
 | Network | Compatibility `LocalForward` path through `sandbox-tunnel` |
 | Cache | Image list and pull interfaces |
+| Registry | Compiled namespace credentials applied at sidecar startup; no hot rotation in BoxLite 0.9.7 |
 | Cleanup | Sidecar deletion plus owner-fenced NodeJanitor state cleanup |
 | Positive Kubernetes E2E | Not implemented |
 | Production capability | Unsupported: `BoxLiteResourceEnforcementIncomplete` |
@@ -150,6 +151,21 @@ Three independent gates intentionally prevent positive use:
    `Ready: false`.
 
 Removing only one gate cannot enable the runtime.
+
+### Registry limitation
+
+The sidecar consumes the same compiled namespace Registry Secret as Fastlet and
+passes all unambiguous host credentials into `boxlite.NewRuntime`. The upstream
+v0.9.7 API accepts this configuration only during Runtime construction:
+
+- a projected Secret rotation is not hot-applied to an existing Runtime;
+- repository-prefix-specific credentials on one host cannot be represented;
+- Fast Sandbox rejects different credentials for prefixes on the same host
+  instead of selecting one silently.
+
+Containerd workload and OCI Infra artifact pulls do not share this limitation.
+Production BoxLite enablement requires an upstream runtime-reconfiguration or
+per-pull credential contract, or a lifecycle-safe Runtime rotation design.
 
 ### Resource contract gap
 

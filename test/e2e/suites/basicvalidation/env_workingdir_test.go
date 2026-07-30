@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/portforward"
 	"fast-sandbox/test/e2e/support/suiteenv"
@@ -49,16 +49,16 @@ func TestSandboxEnvAndWorkingDir(t *testing.T) {
 			}
 			waitForPoolReady(ctx, t, fixture, namespace, pool.Name)
 
-			envSandbox := &apiv1alpha1.Sandbox{
+			envSandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-env-test",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:   "docker.io/library/alpine:latest",
 					Command: []string{"/bin/sh", "-c", `echo "TEST_VAR=$TEST_VAR"; echo "ANOTHER_VAR=$ANOTHER_VAR"; sleep 3600`},
 					PoolRef: pool.Name,
@@ -81,16 +81,16 @@ func TestSandboxEnvAndWorkingDir(t *testing.T) {
 				t.Fatalf("unexpected env sandbox log: %q", envLog)
 			}
 
-			workdirSandbox := &apiv1alpha1.Sandbox{
+			workdirSandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-workdir-test",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:      "docker.io/library/alpine:latest",
 					Command:    []string{"/bin/sh", "-c", `echo "PWD=$(pwd)"; sleep 3600`},
 					WorkingDir: "/tmp",
@@ -172,12 +172,11 @@ func TestFastPathEnvAndWorkingDir(t *testing.T) {
 			}
 			defer conn.Close()
 
-			client := fastpathv1.NewFastPathServiceClient(conn)
+			client := fastpathv2.NewFastPathServiceClient(conn)
 			createCtx, cancelCreate := context.WithTimeout(ctx, 30*time.Second)
 			defer cancelCreate()
 			requestID := namespace + "-fastpath-env"
-			resp, err := client.CreateSandbox(createCtx, &fastpathv1.CreateRequest{
-				Name:       requestID,
+			resp, err := client.CreateSandbox(createCtx, &fastpathv2.CreateRequest{
 				Image:      "docker.io/library/alpine:latest",
 				PoolRef:    pool.Name,
 				Namespace:  namespace,
@@ -200,8 +199,8 @@ func TestFastPathEnvAndWorkingDir(t *testing.T) {
 
 			waitCtx, cancelWait := context.WithTimeout(ctx, 30*time.Second)
 			defer cancelWait()
-			if _, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: resp.SandboxName, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			if _, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: resp.SandboxName, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			}); err != nil {
 				t.Fatalf("wait for fast-path sandbox CRD: %v", err)
 			}
@@ -228,24 +227,24 @@ func createNamespace(ctx context.Context, t *testing.T, kubeClient ctrlclient.Cl
 	}
 }
 
-func createValidationPool(namespace, name string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func createValidationPool(namespace, name string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "SandboxPool",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{
 				PoolMin: 1,
 				PoolMax: 10, // Increased for parallel tests
 			},
 			MaxSandboxesPerPod: 20, // Increased capacity
-			Runtime:            apiv1alpha1.RuntimeContainer,
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{
+			Runtime:            apiv1alpha2.RuntimeContainer,
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
 				CPU: resource.MustParse("100m"), Memory: resource.MustParse("64Mi"), PIDs: 64,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{
@@ -270,13 +269,13 @@ func waitForPoolReady(ctx context.Context, t *testing.T, fixture *fixtures.Fixtu
 	}
 }
 
-func waitForAssignedSandbox(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, namespace, name string) *apiv1alpha1.Sandbox {
+func waitForAssignedSandbox(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, namespace, name string) *apiv1alpha2.Sandbox {
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second) // Increased from 60s to 90s
 	defer cancel()
 
-	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-		return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+		return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 	})
 	if err != nil {
 		t.Fatalf("wait for assigned sandbox %s/%s: %v", namespace, name, err)
@@ -284,7 +283,7 @@ func waitForAssignedSandbox(ctx context.Context, t *testing.T, fixture *fixtures
 	return sandbox
 }
 
-func sandboxIdentifier(sandbox *apiv1alpha1.Sandbox) string {
+func sandboxIdentifier(sandbox *apiv1alpha2.Sandbox) string {
 	if sandbox == nil {
 		return ""
 	}

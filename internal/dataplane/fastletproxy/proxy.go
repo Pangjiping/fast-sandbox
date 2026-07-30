@@ -37,15 +37,15 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		observability.End(span, nil)
 		observeFastletProxy(metricAccess, metricResult, started)
 	}()
-	sandboxUID, targetPort, suffix, err := dataplane.ParseRoutePath(request.URL.Path)
+	sandboxUID, targetPort, componentName, suffix, err := parseTarget(request.URL.Path)
 	if err != nil {
 		metricResult = "invalid_route"
-		http.Error(writer, err.Error(), http.StatusBadRequest)
+		writeProxyError(writer, http.StatusBadRequest, dataplane.ProxyErrorRouteUnavailable, err.Error())
 		return
 	}
 	if p.Store == nil || p.Verifier == nil {
 		metricResult = "unconfigured"
-		http.Error(writer, "Fastlet Proxy is not configured", http.StatusServiceUnavailable)
+		writeProxyError(writer, http.StatusServiceUnavailable, dataplane.ProxyErrorRouteUnavailable, "Fastlet Proxy is not configured")
 		return
 	}
 	route, err := p.Store.Lookup(sandboxUID)
@@ -55,31 +55,47 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		if errors.Is(err, ErrRouteDraining) {
 			status = http.StatusServiceUnavailable
 		}
-		http.Error(writer, err.Error(), status)
+		writeProxyError(writer, status, dataplane.ProxyErrorRouteUnavailable, err.Error())
 		return
+	}
+	if componentName != "" {
+		component, found := route.Components[componentName]
+		if !found {
+			metricResult = "component_not_found"
+			writeProxyError(writer, http.StatusNotFound, dataplane.ProxyErrorComponentNotFound, "Infra Component route not found")
+			return
+		}
+		if !strings.EqualFold(component.Protocol, "HTTP") {
+			metricResult = "unsupported_component_protocol"
+			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorComponentNotReady, "Infra Component protocol is not supported")
+			return
+		}
+		targetPort = component.Port
+	}
+	targetKind := routeauth.TargetKindPort
+	protocol := "HTTP"
+	if componentName != "" {
+		targetKind = routeauth.TargetKindComponent
+		protocol = route.Components[componentName].Protocol
 	}
 	request = request.WithContext(observability.WithIdentity(request.Context(), observability.Identity{
 		Namespace: route.Namespace, SandboxUID: route.SandboxUID, FastletPodUID: route.FastletPodUID,
 		AssignmentAttempt: route.AssignmentAttempt, RouteGeneration: route.RouteGeneration, TargetPort: targetPort,
 	}))
-	if err := validateFenceHeaders(request.Header, route); err != nil {
-		metricResult = "stale_fence"
-		http.Error(writer, err.Error(), http.StatusConflict)
-		return
-	}
-	token, err := bearerToken(request.Header.Get("Authorization"))
+	token, err := routeCredential(request.Header.Get(dataplane.HeaderRouteCredential))
 	if err != nil {
 		metricResult = "missing_credential"
-		http.Error(writer, err.Error(), http.StatusUnauthorized)
+		writeProxyError(writer, http.StatusUnauthorized, dataplane.ProxyErrorCredentialRejected, err.Error())
 		return
 	}
 	_, err = p.Verifier.VerifyExpected(token, routeauth.Claims{
 		Namespace: route.Namespace, SandboxUID: route.SandboxUID, TargetPort: targetPort,
+		TargetKind: targetKind, ComponentName: componentName, Protocol: protocol,
 		FastletPodUID: route.FastletPodUID, AssignmentAttempt: route.AssignmentAttempt, RouteGeneration: route.RouteGeneration,
 	})
 	if err != nil {
 		metricResult = "credential_rejected"
-		http.Error(writer, "route credential rejected", http.StatusForbidden)
+		writeProxyError(writer, http.StatusForbidden, dataplane.ProxyErrorCredentialRejected, "route credential rejected")
 		return
 	}
 	var upstream string
@@ -89,7 +105,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		metricAccess = string(dataplane.AccessKindDirectIP)
 		if net.ParseIP(route.Access.Address) == nil {
 			metricResult = "invalid_access"
-			http.Error(writer, "direct IP route address is invalid", http.StatusNotImplemented)
+			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, "direct IP route address is invalid")
 			return
 		}
 		upstream = net.JoinHostPort(route.Access.Address, strconv.Itoa(int(targetPort)))
@@ -104,7 +120,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		transport, err = newLocalForwardTransport(route.Access, targetPort, p.DialContext)
 		if err != nil {
 			metricResult = "invalid_access"
-			http.Error(writer, "local-forward route is invalid: "+err.Error(), http.StatusNotImplemented)
+			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, "local-forward route is invalid: "+err.Error())
 			return
 		}
 		// DialContext ignores this logical authority and connects to the
@@ -112,7 +128,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		upstream = "sandbox.local"
 	default:
 		metricResult = "unsupported_access"
-		http.Error(writer, "route access kind is not supported", http.StatusNotImplemented)
+		writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, "route access kind is not supported")
 		return
 	}
 	proxy := &httputil.ReverseProxy{
@@ -125,57 +141,48 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			proxyRequest.Out.URL.RawPath = ""
 			proxyRequest.Out.Host = proxyRequest.In.Host
 			stripRouteHeaders(proxyRequest.Out.Header)
-			stripUpstreamHeaders(proxyRequest.Out.Header, route.UpstreamHeadersByPort)
-			for name, value := range route.UpstreamHeadersByPort[targetPort] {
-				proxyRequest.Out.Header.Set(name, value)
-			}
 			observability.InjectHTTP(proxyRequest.Out.Context(), proxyRequest.Out.Header)
+		},
+		ModifyResponse: func(response *http.Response) error {
+			// A Sandbox application cannot forge a platform routing error.
+			response.Header.Del(dataplane.HeaderProxyError)
+			return nil
 		},
 		ErrorHandler: func(response http.ResponseWriter, _ *http.Request, proxyErr error) {
 			metricResult = "upstream_error"
-			http.Error(response, "sandbox upstream unavailable: "+proxyErr.Error(), http.StatusBadGateway)
+			writeProxyError(response, http.StatusBadGateway, dataplane.ProxyErrorUpstreamUnavailable, "sandbox upstream unavailable: "+proxyErr.Error())
 		},
 	}
 	proxy.ServeHTTP(writer, request)
 }
 
-func validateFenceHeaders(headers http.Header, route Route) error {
-	if headers.Get(dataplane.HeaderFastletPodUID) != route.FastletPodUID || headers.Get(dataplane.HeaderForwardedNamespace) != route.Namespace {
-		return errors.New("request targets a stale Fastlet Pod or namespace")
-	}
-	attempt, err := strconv.ParseInt(headers.Get(dataplane.HeaderAssignmentAttempt), 10, 64)
-	if err != nil || attempt != route.AssignmentAttempt {
-		return errors.New("request targets a stale assignment attempt")
-	}
-	generation, err := strconv.ParseInt(headers.Get(dataplane.HeaderRouteGeneration), 10, 64)
-	if err != nil || generation != route.RouteGeneration {
-		return errors.New("request targets a stale route generation")
-	}
-	return nil
+func writeProxyError(writer http.ResponseWriter, status int, code, message string) {
+	writer.Header().Set(dataplane.HeaderProxyError, code)
+	http.Error(writer, message, status)
 }
 
-func bearerToken(value string) (string, error) {
-	prefix := "Bearer "
-	if !strings.HasPrefix(value, prefix) || strings.TrimSpace(strings.TrimPrefix(value, prefix)) == "" {
-		return "", errors.New("Bearer route credential is required")
+func parseTarget(path string) (sandboxUID string, port uint32, component, suffix string, err error) {
+	if strings.HasPrefix(path, "/v2/sandboxes/") {
+		sandboxUID, component, suffix, err = dataplane.ParseComponentRoutePath(path)
+		return
 	}
-	return strings.TrimSpace(strings.TrimPrefix(value, prefix)), nil
+	sandboxUID, port, suffix, err = dataplane.ParseRoutePath(path)
+	return
+}
+
+func routeCredential(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", errors.New("route credential is required")
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func stripRouteHeaders(headers http.Header) {
-	headers.Del("Authorization")
+	headers.Del(dataplane.HeaderRouteCredential)
 	headers.Del(dataplane.HeaderFastletPodUID)
 	headers.Del(dataplane.HeaderAssignmentAttempt)
 	headers.Del(dataplane.HeaderRouteGeneration)
 	headers.Del(dataplane.HeaderForwardedNamespace)
-}
-
-func stripUpstreamHeaders(headers http.Header, byPort map[uint32]map[string]string) {
-	for _, scoped := range byPort {
-		for name := range scoped {
-			headers.Del(name)
-		}
-	}
 }
 
 func RouteHeaders(route Route) http.Header {

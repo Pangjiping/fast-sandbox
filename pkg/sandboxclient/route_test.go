@@ -4,28 +4,33 @@ import (
 	"context"
 	"testing"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
 
 type fakeEndpointControl struct {
-	getRequest     *fastpathv1.GetRequest
-	resolveRequest *fastpathv1.ResolveEndpointRequest
+	resolveRequest *fastpathv2.ResolveEndpointRequest
 }
 
-func (c *fakeEndpointControl) GetSandbox(_ context.Context, request *fastpathv1.GetRequest, _ ...grpc.CallOption) (*fastpathv1.SandboxInfo, error) {
-	c.getRequest = request
-	return &fastpathv1.SandboxInfo{SandboxUid: "uid-a", SandboxName: request.SandboxName}, nil
-}
-
-func (c *fakeEndpointControl) ResolveEndpoint(_ context.Context, request *fastpathv1.ResolveEndpointRequest, _ ...grpc.CallOption) (*fastpathv1.ResolveEndpointResponse, error) {
+func (c *fakeEndpointControl) ResolveEndpoint(_ context.Context, request *fastpathv2.ResolveEndpointRequest, _ ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 	c.resolveRequest = request
-	return &fastpathv1.ResolveEndpointResponse{
-		SandboxUid: request.SandboxUid, TargetPort: request.TargetPort,
-		ProxyEndpoint:   "http://sandbox-proxy.svc/v1/sandboxes/uid-a/ports/44772",
-		RequiredHeaders: map[string]string{"Authorization": "Bearer route-token"}, RouteGeneration: 3,
+	port := request.GetTarget().GetPort()
+	componentName := request.GetTarget().GetComponentName()
+	path := "/v1/sandboxes/uid-a/ports/44772"
+	if componentName != "" {
+		port = 44772
+		path = "/v2/sandboxes/uid-a/components/" + componentName
+	}
+	return &fastpathv2.ResolveEndpointResponse{
+		SandboxUid:      "uid-a",
+		Target:          request.Target,
+		ComponentName:   componentName,
+		Protocol:        "HTTP",
+		ResolvedPort:    port,
+		ProxyEndpoint:   "http://sandbox-proxy.svc" + path,
+		RequiredHeaders: map[string]string{"X-Fast-Sandbox-Route-Credential": "route-token"}, RouteGeneration: 3,
 	}, nil
 }
 
@@ -33,29 +38,41 @@ func TestEndpointResolverPreservesRoutePathWhenAuthorityIsOverridden(t *testing.
 	control := &fakeEndpointControl{}
 	resolver := &EndpointResolver{Control: control, DefaultNamespace: "tenant-a", ProxyBaseURL: "http://127.0.0.1:18080/proxy"}
 
-	route, err := resolver.Resolve(context.Background(), SandboxRef{Name: "sandbox-a"}, OpenSandboxExecdPort)
+	route, err := resolver.Resolve(context.Background(), SandboxRef{Name: "sandbox-a"}, ComponentTarget("execd"))
 	require.NoError(t, err)
-	require.Equal(t, "tenant-a", control.getRequest.Namespace)
-	require.Equal(t, "uid-a", control.resolveRequest.SandboxUid)
-	require.Equal(t, "http://127.0.0.1:18080/proxy/v1/sandboxes/uid-a/ports/44772", route.Endpoint.String())
-	require.Equal(t, "Bearer route-token", route.RequiredHeaders.Get("Authorization"))
+	require.Equal(t, "tenant-a", control.resolveRequest.GetSandbox().GetNamespacedName().GetNamespace())
+	require.Equal(t, "sandbox-a", control.resolveRequest.GetSandbox().GetNamespacedName().GetName())
+	require.Equal(t, "execd", control.resolveRequest.GetTarget().GetComponentName())
+	require.True(t, control.resolveRequest.GetWaitUntilReady())
+	require.Equal(t, int32(30_000), control.resolveRequest.GetWaitTimeoutMillis())
+	require.Equal(t, "http://127.0.0.1:18080/proxy/v2/sandboxes/uid-a/components/execd", route.Endpoint.String())
+	require.Equal(t, "route-token", route.RequiredHeaders.Get("X-Fast-Sandbox-Route-Credential"))
 
 	requestURL, err := route.RequestURL("/command", nil)
 	require.NoError(t, err)
-	require.Equal(t, "http://127.0.0.1:18080/proxy/v1/sandboxes/uid-a/ports/44772/command", requestURL.String())
+	require.Equal(t, "http://127.0.0.1:18080/proxy/v2/sandboxes/uid-a/components/execd/command", requestURL.String())
+}
+
+func TestEndpointResolverDoesNotApplyComponentWaitToRawPort(t *testing.T) {
+	control := &fakeEndpointControl{}
+	resolver := &EndpointResolver{Control: control}
+	_, err := resolver.Resolve(context.Background(), SandboxRef{Name: "sandbox-a"}, PortTarget(8080))
+	require.NoError(t, err)
+	require.False(t, control.resolveRequest.GetWaitUntilReady())
+	require.Zero(t, control.resolveRequest.GetWaitTimeoutMillis())
 }
 
 func TestEndpointResolverRejectsMismatchedRouteIdentity(t *testing.T) {
 	control := &fakeEndpointControl{}
 	resolver := &EndpointResolver{Control: mismatchedEndpointControl{control}}
-	_, err := resolver.Resolve(context.Background(), SandboxRef{Name: "sandbox-a"}, OpenSandboxExecdPort)
+	_, err := resolver.Resolve(context.Background(), SandboxRef{Name: "sandbox-a"}, ComponentTarget("execd"))
 	require.ErrorContains(t, err, "different Sandbox")
 }
 
 type mismatchedEndpointControl struct{ *fakeEndpointControl }
 
-func (c mismatchedEndpointControl) ResolveEndpoint(ctx context.Context, request *fastpathv1.ResolveEndpointRequest, options ...grpc.CallOption) (*fastpathv1.ResolveEndpointResponse, error) {
+func (c mismatchedEndpointControl) ResolveEndpoint(ctx context.Context, request *fastpathv2.ResolveEndpointRequest, options ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 	response, err := c.fakeEndpointControl.ResolveEndpoint(ctx, request, options...)
-	response.TargetPort++
+	response.ComponentName = "other"
 	return response, err
 }

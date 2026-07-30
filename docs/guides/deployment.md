@@ -27,6 +27,34 @@ kubectl apply -k config/crd
 kubectl apply -k config/default
 ```
 
+### Alpha API upgrade
+
+`v1alpha2` is an explicit breaking alpha revision and this release does not
+ship a conversion webhook for `v1alpha1` objects. Before upgrading a
+production or shared cluster:
+
+1. export any `v1alpha1` SandboxPool and Sandbox intent that must be retained;
+2. drain or delete the corresponding runtime instances;
+3. delete the two old CRDs only after verifying the export;
+4. apply the `v1alpha2` CRDs and recreate the Pools and Sandboxes in canonical
+   form.
+
+Kubernetes rejects an in-place CRD apply while `v1alpha1` remains in
+`status.storedVersions`. The project-owned Kind environments used by
+`make env` and `make quickstart` detect this exact alpha boundary and
+automatically reset incompatible CRDs. They also remove the old
+default-namespace control-plane workloads before installing the split
+namespaces, preventing a legacy host port from blocking NodeJanitor. These are
+disposable development clusters; production deployment commands never delete
+CRDs or legacy workloads automatically.
+
+The default overlay creates two project-owned namespaces:
+
+| Namespace | Resources |
+| --- | --- |
+| `fast-sandbox-system` | Controller, FastPath, Sandbox Proxy, NodeJanitor, ServiceAccounts, and RBAC |
+| `fast-sandbox` | SandboxPools, Fastlet Pods, and Sandbox CRs |
+
 The default overlay contains:
 
 - CRDs and RBAC;
@@ -68,7 +96,7 @@ Start from the canonical samples under `config/samples`. A production Pool must 
 - fixed capacity and `maxSandboxesPerPod`;
 - one immutable runtime;
 - immutable per-Sandbox CPU, memory, and PID limits;
-- one immutable InfraProfile;
+- zero or more inline immutable Infra Components;
 - a platform-controlled Fastlet Pod template;
 - optional warm images.
 
@@ -76,13 +104,15 @@ Runtime handlers, runtime paths, proxy sidecars, platform mounts, and security s
 
 ## NetworkPolicy
 
-`config/network-policy/default.yaml` demonstrates ingress isolation for a single-namespace deployment. It is intentionally not included in `config/default`.
+`config/network-policy/default.yaml` demonstrates ingress isolation across the
+default system and resource namespaces. It is intentionally not included in
+`config/default`.
 
 Before applying it:
 
 1. label authorized control-plane and data-plane client Pods;
 2. label Prometheus Pods that scrape administrative ports;
-3. copy or adapt the Fastlet policy for every namespace containing a Pool;
+3. copy or adapt the Fastlet policy for every non-default resource namespace;
 4. verify that the cluster CNI enforces NetworkPolicy;
 5. define Sandbox egress according to DNS, registry, metadata, and tenant policy.
 

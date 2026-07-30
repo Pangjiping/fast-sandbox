@@ -4,12 +4,13 @@ import (
 	"context"
 	"testing"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -17,12 +18,12 @@ func testAssignmentEnvelope() AssignmentEnvelope {
 	return AssignmentEnvelope{
 		Version: AssignmentEnvelopeVersion, FastletName: "fastlet-a", FastletPodUID: "pod-a", NodeName: "node-a",
 		Attempt: 1, InstanceGeneration: 1, RouteGeneration: 1, RuntimeInstanceID: "runtime-a",
-		RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash", InfraProfileHash: "infra-hash",
+		RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash", InfraRevision: "infra-hash",
 	}
 }
 
 func TestEffectiveAssignmentUsesAnnotationBeforeStatusProjection(t *testing.T) {
-	sandbox := &apiv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default"}}
+	sandbox := &apiv1alpha2.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default"}}
 	want := testAssignmentEnvelope()
 	require.NoError(t, SetAssignmentAnnotation(sandbox, want))
 
@@ -32,12 +33,12 @@ func TestEffectiveAssignmentUsesAnnotationBeforeStatusProjection(t *testing.T) {
 }
 
 func TestEffectiveAssignmentFailsClosedOnProjectionMismatch(t *testing.T) {
-	sandbox := &apiv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default"}}
+	sandbox := &apiv1alpha2.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default"}}
 	envelope := testAssignmentEnvelope()
 	require.NoError(t, SetAssignmentAnnotation(sandbox, envelope))
 	wrong := envelope.StatusAssignment()
 	wrong.FastletPodUID = "pod-b"
-	sandbox.Status = apiv1alpha1.SandboxStatus{
+	sandbox.Status = apiv1alpha2.SandboxStatus{
 		Assignment: &wrong, AssignmentAttempt: envelope.Attempt,
 		InstanceGeneration: envelope.InstanceGeneration, RouteGeneration: envelope.RouteGeneration,
 	}
@@ -48,14 +49,14 @@ func TestEffectiveAssignmentFailsClosedOnProjectionMismatch(t *testing.T) {
 
 func TestProjectAssignmentToStatusAndCASReassignment(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
-	sandbox := &apiv1alpha1.Sandbox{
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", UID: types.UID("uid-a")},
-		Spec:       apiv1alpha1.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
+		Spec:       apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
 	}
 	first := testAssignmentEnvelope()
 	require.NoError(t, SetAssignmentAnnotation(sandbox, first))
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&apiv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&apiv1alpha2.Sandbox{}).WithObjects(sandbox).Build()
 
 	projected, err := ProjectAssignmentToStatus(context.Background(), k8sClient, types.NamespacedName{Namespace: "default", Name: "sandbox-a"})
 	require.NoError(t, err)
@@ -80,7 +81,50 @@ func TestProjectAssignmentToStatusAndCASReassignment(t *testing.T) {
 
 func TestEffectiveAssignmentRejectsStatusOnlyPlacement(t *testing.T) {
 	assignment := testAssignmentEnvelope().StatusAssignment()
-	sandbox := &apiv1alpha1.Sandbox{Status: apiv1alpha1.SandboxStatus{Assignment: &assignment}}
+	sandbox := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Assignment: &assignment}}
 	_, err := EffectiveAssignment(sandbox)
 	require.ErrorIs(t, err, ErrAssignmentAnnotationMissing)
+}
+
+func TestCASAssignmentIgnoresUnrelatedMetadataRace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	sandbox := &apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", UID: types.UID("uid-a")},
+		Spec:       apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
+	}
+	first := testAssignmentEnvelope()
+	require.NoError(t, SetAssignmentAnnotation(sandbox, first))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&apiv1alpha2.Sandbox{}).WithObjects(sandbox).Build()
+	k8sClient := &metadataRaceClient{Client: base}
+
+	second := first
+	second.FastletName, second.FastletPodUID, second.NodeName = "fastlet-b", "pod-b", "node-b"
+	second.Attempt, second.RouteGeneration, second.RuntimeInstanceID = 2, 2, "runtime-b"
+	updated, err := CASAssignmentAnnotation(context.Background(), k8sClient, types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, first, second)
+	require.NoError(t, err)
+	require.Equal(t, []string{"sandbox.fast.io/cleanup"}, updated.Finalizers)
+	envelope, err := AssignmentFromAnnotation(updated)
+	require.NoError(t, err)
+	require.Equal(t, second, *envelope)
+}
+
+type metadataRaceClient struct {
+	client.Client
+	injected bool
+}
+
+func (c *metadataRaceClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	if !c.injected {
+		c.injected = true
+		var current apiv1alpha2.Sandbox
+		if err := c.Client.Get(ctx, client.ObjectKeyFromObject(object), &current); err != nil {
+			return err
+		}
+		current.Finalizers = append(current.Finalizers, "sandbox.fast.io/cleanup")
+		if err := c.Client.Update(ctx, &current); err != nil {
+			return err
+		}
+	}
+	return c.Client.Patch(ctx, object, patch, options...)
 }

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	boxlitedriver "fast-sandbox/internal/runtime/boxlite/driver"
 	"fast-sandbox/internal/runtime/containerd"
@@ -18,7 +18,7 @@ import (
 func TestHostCapabilityProberContainerAvailable(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "containerd.sock")
 	require.NoError(t, os.WriteFile(socketPath, nil, 0o600))
-	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha1.RuntimeContainer)
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
 
 	report := NewHostCapabilityProber().Probe(context.Background(), profile, socketPath)
@@ -29,13 +29,13 @@ func TestHostCapabilityProberContainerAvailable(t *testing.T) {
 func TestHostCapabilityProberFailsClosed(t *testing.T) {
 	catalog := runtimecatalog.Builtin()
 
-	boxlite, err := catalog.Resolve(apiv1alpha1.RuntimeBoxLite)
+	boxlite, err := catalog.Resolve(apiv1alpha2.RuntimeBoxLite)
 	require.NoError(t, err)
 	report := NewHostCapabilityProber().Probe(context.Background(), boxlite, "")
 	require.Equal(t, runtimecatalog.CapabilityUnsupported, report.State)
 	require.Equal(t, "BoxLiteResourceEnforcementIncomplete", report.Reason)
 
-	kata, err := catalog.Resolve(apiv1alpha1.RuntimeKataQemu)
+	kata, err := catalog.Resolve(apiv1alpha2.RuntimeKataQemu)
 	require.NoError(t, err)
 	prober := NewHostCapabilityProber()
 	prober.stat = func(path string) (os.FileInfo, error) { return nil, os.ErrNotExist }
@@ -47,7 +47,7 @@ func TestHostCapabilityProberFailsClosed(t *testing.T) {
 }
 
 func TestHostCapabilityProberRejectsUnvalidatedFirecrackerProfile(t *testing.T) {
-	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha1.RuntimeKataFc)
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeKataFc)
 	require.NoError(t, err)
 	report := NewHostCapabilityProber().Probe(context.Background(), profile, "/run/containerd/containerd.sock")
 	require.Equal(t, runtimecatalog.CapabilityDegraded, report.State)
@@ -55,7 +55,7 @@ func TestHostCapabilityProberRejectsUnvalidatedFirecrackerProfile(t *testing.T) 
 }
 
 func TestHostCapabilityProberRequiresFastSandboxCLHCgroupMode(t *testing.T) {
-	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha1.RuntimeKataClh)
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeKataClh)
 	require.NoError(t, err)
 
 	prober := NewHostCapabilityProber()
@@ -86,13 +86,13 @@ func (fakeFileInfo) Sys() any           { return nil }
 
 func TestBuildRuntimeDriverSelection(t *testing.T) {
 	catalog := runtimecatalog.Builtin()
-	container, err := catalog.Resolve(apiv1alpha1.RuntimeContainer)
+	container, err := catalog.Resolve(apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
 	driver, err := buildDriver(container)
 	require.NoError(t, err)
 	require.IsType(t, &containerd.Driver{}, driver)
 
-	boxlite, err := catalog.Resolve(apiv1alpha1.RuntimeBoxLite)
+	boxlite, err := catalog.Resolve(apiv1alpha2.RuntimeBoxLite)
 	require.NoError(t, err)
 	driver, err = buildDriver(boxlite)
 	require.NoError(t, err)

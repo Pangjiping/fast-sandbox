@@ -22,6 +22,7 @@ import (
 
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
 	boxliteserver "fast-sandbox/internal/runtime/boxlite/server"
 	boxlitestate "fast-sandbox/internal/runtime/boxlite/state"
@@ -115,6 +116,20 @@ func ensureOwnerRecord(homeDir, podUID string) error {
 
 func nativeRuntimeOptions(homeDir string) ([]boxlite.RuntimeOption, error) {
 	options := []boxlite.RuntimeOption{boxlite.WithHomeDir(homeDir)}
+	registryPath := strings.TrimSpace(os.Getenv("FAST_SANDBOX_REGISTRY_CONFIG_PATH"))
+	if registryPath != "" {
+		compiled, err := registryconfig.LoadCompiled(registryPath)
+		if err != nil {
+			return nil, fmt.Errorf("load compiled Registry configuration: %w", err)
+		}
+		registries, err := boxLiteRegistries(compiled)
+		if err != nil {
+			return nil, err
+		}
+		if len(registries) > 0 {
+			options = append(options, boxlite.WithImageRegistries(registries...))
+		}
+	}
 	host := strings.TrimSpace(os.Getenv("FAST_SANDBOX_BOXLITE_REGISTRY_HOST"))
 	if host == "" {
 		return options, nil
@@ -139,6 +154,34 @@ func nativeRuntimeOptions(homeDir string) ([]boxlite.RuntimeOption, error) {
 		Host: host, Transport: transport, SkipVerify: skipVerify, Search: search,
 	}))
 	return options, nil
+}
+
+func boxLiteRegistries(compiled registryconfig.Compiled) ([]boxlite.ImageRegistry, error) {
+	registries := make([]boxlite.ImageRegistry, 0, len(compiled.Credentials))
+	byHost := make(map[string]registryconfig.Credential, len(compiled.Credentials))
+	for _, credential := range compiled.Credentials {
+		if existing, found := byHost[credential.Host]; found {
+			if existing.Username != credential.Username ||
+				existing.Password != credential.Password ||
+				existing.IdentityToken != credential.IdentityToken {
+				return nil, fmt.Errorf(
+					"BoxLite runtime cannot apply different credentials to repository prefixes on Registry host %s",
+					credential.Host,
+				)
+			}
+			continue
+		}
+		byHost[credential.Host] = credential
+		registries = append(registries, boxlite.ImageRegistry{
+			Host: credential.Host,
+			Auth: boxlite.ImageRegistryAuth{
+				Username: credential.Username, Password: credential.Password,
+				BearerToken: credential.IdentityToken,
+			},
+		})
+	}
+	sort.Slice(registries, func(i, j int) bool { return registries[i].Host < registries[j].Host })
+	return registries, nil
 }
 
 func optionalBoolEnv(name string) (bool, error) {

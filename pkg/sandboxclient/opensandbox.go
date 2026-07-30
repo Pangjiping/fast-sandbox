@@ -9,27 +9,27 @@ import (
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 )
 
-const OpenSandboxExecdPort uint32 = 44772
+const DefaultOpenSandboxExecdComponent = "execd"
 
 // OpenSandboxExecd resolves a Fast Sandbox route and hands the resulting
 // endpoint plus all route headers to the official OpenSandbox Go Execd SDK.
 // Fast Sandbox owns discovery/authentication; the upstream SDK owns the Execd
 // command and file protocol.
 type OpenSandboxExecd struct {
-	Resolver   RouteResolver
-	HTTPClient *http.Client
-	Port       uint32
+	Resolver      RouteResolver
+	HTTPClient    *http.Client
+	ComponentName string
 }
 
 func (a *OpenSandboxExecd) Client(ctx context.Context, sandbox SandboxRef) (*opensandbox.ExecdClient, Route, error) {
 	if a == nil || a.Resolver == nil {
 		return nil, Route{}, errors.New("OpenSandbox Execd route resolver is not configured")
 	}
-	port := a.Port
-	if port == 0 {
-		port = OpenSandboxExecdPort
+	componentName := strings.TrimSpace(a.ComponentName)
+	if componentName == "" {
+		componentName = DefaultOpenSandboxExecdComponent
 	}
-	route, err := a.Resolver.Resolve(ctx, sandbox, port)
+	route, err := a.Resolver.Resolve(ctx, sandbox, ComponentTarget(componentName))
 	if err != nil {
 		return nil, Route{}, err
 	}

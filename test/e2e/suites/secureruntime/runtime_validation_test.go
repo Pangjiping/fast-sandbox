@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -38,22 +38,22 @@ func TestRuntimeValidationUnsupportedBoxLite(t *testing.T) {
 
 			// BoxLite has an independent pure-Go RuntimeDriver client, but remains
 			// unsupported until the Sidecar can enforce the full resource contract.
-			pool := &apiv1alpha1.SandboxPool{
+			pool := &apiv1alpha2.SandboxPool{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "SandboxPool",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "unsupported-boxlite-pool",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxPoolSpec{
-					Capacity: apiv1alpha1.PoolCapacity{
+				Spec: apiv1alpha2.SandboxPoolSpec{
+					Capacity: apiv1alpha2.PoolCapacity{
 						PoolMin: 1,
 						PoolMax: 1,
 					},
 					MaxSandboxesPerPod: 5,
-					Runtime:            apiv1alpha1.RuntimeBoxLite,
+					Runtime:            apiv1alpha2.RuntimeBoxLite,
 					SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 					FastletTemplate: corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
@@ -88,13 +88,13 @@ func TestRuntimeValidationUnsupportedBoxLite(t *testing.T) {
 
 			var runtimeReady *metav1.Condition
 			for {
-				updatedPool := &apiv1alpha1.SandboxPool{}
+				updatedPool := &apiv1alpha2.SandboxPool{}
 				if err := k8sClient.Get(conditionCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, updatedPool); err != nil {
 					t.Fatalf("get pool: %v", err)
 				}
 
 				for _, c := range updatedPool.Status.Conditions {
-					if c.Type == apiv1alpha1.PoolConditionRuntimeReady {
+					if c.Type == apiv1alpha2.PoolConditionRuntimeReady {
 						runtimeReady = &c
 						break
 					}
@@ -113,7 +113,7 @@ func TestRuntimeValidationUnsupportedBoxLite(t *testing.T) {
 			if runtimeReady.Status != metav1.ConditionFalse {
 				t.Errorf("expected RuntimeReady condition to be False, got: %v", runtimeReady.Status)
 			}
-			if runtimeReady.Reason != apiv1alpha1.ReasonRuntimeUnsupported {
+			if runtimeReady.Reason != apiv1alpha2.ReasonRuntimeUnsupported {
 				t.Errorf("expected Reason to be RuntimeUnsupported, got: %v", runtimeReady.Reason)
 			}
 			if runtimeReady.Message != "BoxLiteResourceEnforcementIncomplete" {
@@ -146,7 +146,7 @@ func TestRuntimeValidationContainerDefault(t *testing.T) {
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
 			// Create pool with container runtime (no RuntimeClass needed)
-			pool := newSecureRuntimePool(namespace, "container-pool", apiv1alpha1.RuntimeContainer, 1, 1)
+			pool := newSecureRuntimePool(namespace, "container-pool", apiv1alpha2.RuntimeContainer, 1, 1)
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create container pool: %v", err)
 			}
@@ -188,8 +188,8 @@ func TestRuntimeValidationContainerDefault(t *testing.T) {
 			// Wait for sandbox running
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			defer cancelRunWait()
-			running, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			running, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for running sandbox: %v", err)

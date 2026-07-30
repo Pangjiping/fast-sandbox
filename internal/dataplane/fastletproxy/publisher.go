@@ -62,8 +62,8 @@ func routeFromPublication(publication dataplane.RoutePublication) Route {
 	return Route{
 		Namespace: publication.Namespace, SandboxUID: publication.SandboxUID,
 		FastletPodUID: publication.FastletPodUID, AssignmentAttempt: publication.AssignmentAttempt,
-		RouteGeneration: publication.RouteGeneration, Access: publication.Access, State: RouteReady,
-		UpstreamHeadersByPort: publication.UpstreamHeadersByPort,
+		RouteGeneration: publication.RouteGeneration, Access: publication.Access,
+		State: RouteReady, Components: publication.Components,
 	}
 }
 

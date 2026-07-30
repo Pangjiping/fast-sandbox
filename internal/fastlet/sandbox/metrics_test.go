@@ -44,38 +44,38 @@ func TestAdmissionStatusMetricsReflectLatestSnapshot(t *testing.T) {
 }
 
 func TestUserProcessStartMetricsRejectUnprovenSupervisorStart(t *testing.T) {
-	observedCounter := userProcessStartObservationTotal.WithLabelValues("test-runtime", "test-profile", string(fastletapi.UserProcessStartRuntimeDirect), "observed")
-	unavailableCounter := userProcessStartObservationTotal.WithLabelValues("test-runtime", "test-profile", string(fastletapi.UserProcessStartSandboxInitUnreported), "unavailable")
-	observedHistogram := userProcessStartLatency.WithLabelValues("test-runtime", "test-profile", string(fastletapi.UserProcessStartRuntimeDirect))
+	observedCounter := userProcessStartObservationTotal.WithLabelValues("test-runtime", "test-revision", string(fastletapi.UserProcessStartRuntimeDirect), "observed")
+	unavailableCounter := userProcessStartObservationTotal.WithLabelValues("test-runtime", "test-revision", string(fastletapi.UserProcessStartSandboxInitUnreported), "unavailable")
+	observedHistogram := userProcessStartLatency.WithLabelValues("test-runtime", "test-revision", string(fastletapi.UserProcessStartRuntimeDirect))
 	_ = observedCounter
 	_ = unavailableCounter
 	_ = observedHistogram
 	observedBefore := gatheredMetricValue(t, "fast_sandbox_user_process_start_observation_total", map[string]string{
-		"runtime": "test-runtime", "infra_profile": "test-profile", "source": string(fastletapi.UserProcessStartRuntimeDirect), "result": "observed",
+		"runtime": "test-runtime", "infra_revision": "test-revision", "source": string(fastletapi.UserProcessStartRuntimeDirect), "result": "observed",
 	})
 	unavailableBefore := gatheredMetricValue(t, "fast_sandbox_user_process_start_observation_total", map[string]string{
-		"runtime": "test-runtime", "infra_profile": "test-profile", "source": string(fastletapi.UserProcessStartSandboxInitUnreported), "result": "unavailable",
+		"runtime": "test-runtime", "infra_revision": "test-revision", "source": string(fastletapi.UserProcessStartSandboxInitUnreported), "result": "unavailable",
 	})
 	histogramBefore := gatheredHistogramCount(t, "fast_sandbox_user_process_start_latency_seconds", map[string]string{
-		"runtime": "test-runtime", "infra_profile": "test-profile", "source": string(fastletapi.UserProcessStartRuntimeDirect),
+		"runtime": "test-runtime", "infra_revision": "test-revision", "source": string(fastletapi.UserProcessStartRuntimeDirect),
 	})
 
 	started := time.Unix(1700000000, 0)
-	observeUserProcessStart("test-runtime", "test-profile", started, &SandboxMetadata{
+	observeUserProcessStart("test-runtime", "test-revision", started, &SandboxMetadata{
 		UserProcessStartedAt: started.Add(40 * time.Millisecond), UserProcessStartSource: fastletapi.UserProcessStartRuntimeDirect,
 	})
-	observeUserProcessStart("test-runtime", "test-profile", started, &SandboxMetadata{
+	observeUserProcessStart("test-runtime", "test-revision", started, &SandboxMetadata{
 		UserProcessStartSource: fastletapi.UserProcessStartSandboxInitUnreported,
 	})
 
 	require.Equal(t, observedBefore+1, gatheredMetricValue(t, "fast_sandbox_user_process_start_observation_total", map[string]string{
-		"runtime": "test-runtime", "infra_profile": "test-profile", "source": string(fastletapi.UserProcessStartRuntimeDirect), "result": "observed",
+		"runtime": "test-runtime", "infra_revision": "test-revision", "source": string(fastletapi.UserProcessStartRuntimeDirect), "result": "observed",
 	}))
 	require.Equal(t, unavailableBefore+1, gatheredMetricValue(t, "fast_sandbox_user_process_start_observation_total", map[string]string{
-		"runtime": "test-runtime", "infra_profile": "test-profile", "source": string(fastletapi.UserProcessStartSandboxInitUnreported), "result": "unavailable",
+		"runtime": "test-runtime", "infra_revision": "test-revision", "source": string(fastletapi.UserProcessStartSandboxInitUnreported), "result": "unavailable",
 	}))
 	require.Equal(t, histogramBefore+1, gatheredHistogramCount(t, "fast_sandbox_user_process_start_latency_seconds", map[string]string{
-		"runtime": "test-runtime", "infra_profile": "test-profile", "source": string(fastletapi.UserProcessStartRuntimeDirect),
+		"runtime": "test-runtime", "infra_revision": "test-revision", "source": string(fastletapi.UserProcessStartRuntimeDirect),
 	}))
 }
 

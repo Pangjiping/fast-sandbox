@@ -1,61 +1,48 @@
 # Runtime support
 
-This matrix describes Fast Sandbox validation status. It is not a statement about the upstream runtime's general capabilities.
+This matrix describes validation in Fast Sandbox, not the general capability
+of each upstream runtime.
 
-| Runtime | Driver | Network | Infra delivery | Quick Start | Status |
-|---|---|---|---|---:|---|
-| `container` | containerd/runc | Linux netns | bind mount, image layer, preinstalled | Yes | Validated |
-| `gvisor` | containerd/runsc | Linux netns | bind mount, image layer | Yes | Validated |
-| `kata-qemu` | containerd/Kata | Fastlet slot to guest NIC | bind mount, template, preinstalled, guest copy | Yes | Validated |
-| `kata-clh` | containerd/Kata | Fastlet slot to guest NIC | bind mount, template, preinstalled, guest copy | Yes | Validated |
-| `kata-fc` | containerd/Kata | Fastlet slot to guest NIC | profile-defined | No | Degraded; fail closed |
-| `boxlite` | BoxLite sidecar | runtime-owned LocalForward | template, preinstalled, artifact volume | No | Unsupported; fail closed |
+| Runtime | Driver | Network access | Inline Infra Components | Quick Start | Status |
+| --- | --- | --- | --- | ---: | --- |
+| `container` | containerd/runc | private Linux netns | read-only artifact mapping | Yes | Validated |
+| `gvisor` | containerd/runsc | private Linux netns | read-only artifact mapping | Yes | Validated |
+| `kata-qemu` | containerd/Kata | slot netns to guest NIC | guest-visible artifact mapping | Yes | Validated |
+| `kata-clh` | containerd/Kata | slot netns to guest NIC | guest-visible artifact mapping | Yes | Validated |
+| `kata-fc` | containerd/Kata | slot netns to guest NIC | capability-gated | No | Degraded; fail closed |
+| `boxlite` | BoxLite sidecar | authenticated LocalForward | artifact volume | No | Unsupported; fail closed |
 
-## Meaning of validated
+## Validation meaning
 
-A validated profile has remote Linux/Kubernetes evidence for:
+A validated runtime has remote Linux/Kubernetes evidence for:
 
-- backend capability detection;
-- fixed Sandbox resources;
-- runtime creation and deletion;
-- private networking;
-- Infra injection where the selected profile requires it;
-- identity fencing and recovery;
-- cleanup and negative capability behavior.
+- runtime capability detection;
+- fixed CPU, memory, and PID enforcement;
+- create, inspect, recovery, and idempotent delete;
+- private networking and proxy routing;
+- inline artifact injection and named component readiness;
+- assignment/generation fencing and orphan cleanup.
 
-Validation does not imply snapshot, pause/resume, persistent storage, or live migration.
+Validation does not imply snapshot, pause/resume, persistent storage, or live
+migration.
 
-## Container
+## Runtime notes
 
-The default profile uses `io.containerd.runc.v2`, Fastlet-owned Linux network slots, image cache inventory, and containerd ensure-absent cleanup.
+`container` uses `io.containerd.runc.v2`. `gvisor` uses
+`io.containerd.runsc.v1`. Kata QEMU and Cloud Hypervisor use
+`containerd-shim-kata-v2` with distinct platform-owned configuration.
 
-## gVisor
+Kata Firecracker remains degraded as `KataFirecrackerNotValidated`; the
+development environment does not provide the complete kernel, block
+snapshotter, and MMIO path required by that runtime.
 
-The gVisor profile uses `io.containerd.runsc.v1`. Eligible nodes must provide runsc, its containerd shim, and configuration at the platform-owned paths.
+BoxLite is integrated through a versioned Pod-local UDS sidecar and
+runtime-owned LocalForward tunnel. The profile remains unavailable because
+host-enforced resource semantics are incomplete. BoxLite 0.9.7 accepts Registry
+credentials only when its runtime is initialized, so projected credential
+rotation is not hot-applied to an existing BoxLite runtime. Containerd workload
+pulls and OCI Infra artifact pulls do hot-reload the namespace Registry
+projection.
 
-## Kata QEMU and Cloud Hypervisor
-
-Both profiles use `containerd-shim-kata-v2` with runtime-specific configuration. Eligible nodes require KVM and the pinned Kata installation.
-
-## Kata Firecracker
-
-The profile remains degraded with reason `KataFirecrackerNotValidated`. The development environment lacks the combined MMIO-capable kernel and block snapshotter required by the path.
-
-See [Secure runtimes](../guides/secure-runtimes.md).
-
-## BoxLite
-
-The profile remains unsupported with reason `BoxLiteResourceEnforcementIncomplete`. The sidecar integration exists, but host-enforced CPU, memory, and PID semantics are incomplete.
-
-See [BoxLite runtime](../concepts/boxlite-runtime.md).
-
-## Infra profile compatibility
-
-| InfraProfile | Allowed runtimes | Status |
-|---|---|---|
-| `minimal` | all profiles subject to runtime capability | Configured |
-| `opensandbox-execd-quickstart` | container, gVisor, Kata QEMU, Kata CLH | Development only |
-| `opensandbox-execd` | container, gVisor | Unconfigured until production artifact binding |
-| `test-infra` | container | E2E only |
-
-An incompatible or unconfigured combination prevents Pool readiness.
+See [Secure runtimes](../guides/secure-runtimes.md) and
+[BoxLite runtime](../concepts/boxlite-runtime.md).

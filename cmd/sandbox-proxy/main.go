@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	routeauth "fast-sandbox/internal/dataplane/auth"
 	"fast-sandbox/internal/dataplane/sandboxproxy"
 	"fast-sandbox/internal/observability"
@@ -58,7 +58,7 @@ func main() {
 	}
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(apiv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(apiv1alpha2.AddToScheme(scheme))
 	restConfig, err := config.GetConfig()
 	if err != nil {
 		klog.ErrorS(err, "Load Kubernetes configuration")
@@ -151,18 +151,18 @@ func shutdownTracing(shutdown observability.Shutdown) {
 }
 
 func registerInformers(ctx context.Context, watchCache ctrlcache.Cache, index *sandboxproxy.Index) error {
-	sandboxInformer, err := watchCache.GetInformer(ctx, &apiv1alpha1.Sandbox{})
+	sandboxInformer, err := watchCache.GetInformer(ctx, &apiv1alpha2.Sandbox{})
 	if err != nil {
 		return err
 	}
 	_, err = sandboxInformer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(object any) {
-			if sandbox, ok := object.(*apiv1alpha1.Sandbox); ok {
+			if sandbox, ok := object.(*apiv1alpha2.Sandbox); ok {
 				index.UpsertSandbox(sandbox)
 			}
 		},
 		UpdateFunc: func(_, current any) {
-			if sandbox, ok := current.(*apiv1alpha1.Sandbox); ok {
+			if sandbox, ok := current.(*apiv1alpha2.Sandbox); ok {
 				index.UpsertSandbox(sandbox)
 			}
 		},
@@ -199,12 +199,12 @@ func registerInformers(ctx context.Context, watchCache ctrlcache.Cache, index *s
 	return err
 }
 
-func deletedSandbox(object any) *apiv1alpha1.Sandbox {
-	if sandbox, ok := object.(*apiv1alpha1.Sandbox); ok {
+func deletedSandbox(object any) *apiv1alpha2.Sandbox {
+	if sandbox, ok := object.(*apiv1alpha2.Sandbox); ok {
 		return sandbox
 	}
 	if tombstone, ok := object.(toolscache.DeletedFinalStateUnknown); ok {
-		sandbox, _ := tombstone.Obj.(*apiv1alpha1.Sandbox)
+		sandbox, _ := tombstone.Obj.(*apiv1alpha2.Sandbox)
 		return sandbox
 	}
 	return nil

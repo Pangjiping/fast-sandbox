@@ -1,6 +1,11 @@
 # NetworkPolicy sample
 
-`default.yaml` demonstrates ingress isolation when the control plane, Sandbox Proxy, and Fastlet Pools all run in the `default` namespace. It is intentionally not part of `config/default`.
+`default.yaml` demonstrates ingress isolation for the default split deployment:
+
+- platform components in `fast-sandbox-system`;
+- SandboxPools and Fastlet Pods in `fast-sandbox`.
+
+It is intentionally not part of `config/default`.
 
 Before applying it:
 

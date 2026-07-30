@@ -81,7 +81,8 @@ func TestSandboxProxyFallsBackOnStaleWatchAndForwardsToAssignedFastlet(t *testin
 		AssignmentAttempt: 1, RouteGeneration: 1,
 	}, fresh: current}
 	token, _, err := issuer.Issue(routeauth.Claims{
-		Namespace: "default", SandboxUID: "uid-a", TargetPort: uint32(backendPort), FastletPodUID: "pod-new",
+		Namespace: "default", SandboxUID: "uid-a", TargetKind: routeauth.TargetKindPort,
+		Protocol: "HTTP", TargetPort: uint32(backendPort), FastletPodUID: "pod-new",
 		AssignmentAttempt: 2, RouteGeneration: 2,
 	})
 	require.NoError(t, err)
@@ -90,7 +91,7 @@ func TestSandboxProxyFallsBackOnStaleWatchAndForwardsToAssignedFastlet(t *testin
 	defer server.Close()
 	request, err := http.NewRequest(http.MethodGet, server.URL+dataplane.RoutePath("uid-a", uint32(backendPort))+"/health", nil)
 	require.NoError(t, err)
-	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set(dataplane.HeaderRouteCredential, token)
 	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	request.Header.Set(dataplane.HeaderFastletPodUID, "attacker-value")
 	response, err := http.DefaultClient.Do(request)
@@ -109,7 +110,7 @@ func TestSandboxProxyReportsRetryableNotReady(t *testing.T) {
 	verifier, err := routeauth.NewVerifier(publicKey, time.Now)
 	require.NoError(t, err)
 	request := httptest.NewRequest(http.MethodGet, dataplane.RoutePath("uid-a", 8080), nil)
-	request.Header.Set("Authorization", "Bearer invalid")
+	request.Header.Set(dataplane.HeaderRouteCredential, "invalid")
 	response := httptest.NewRecorder()
 	(&Proxy{Resolver: &fakeResolver{err: ErrSandboxNotReady}, Verifier: verifier}).ServeHTTP(response, request)
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)

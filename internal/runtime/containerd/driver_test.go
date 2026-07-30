@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
@@ -25,18 +25,18 @@ import (
 
 func newTestContainerdRuntime() *Driver {
 	return newWithConfig(
-		apiv1alpha1.RuntimeContainer,
+		apiv1alpha2.RuntimeContainer,
 		"test-profile-hash",
 		RuntimeConfig{Handler: "io.containerd.runc.v2"},
 	)
 }
 
 func TestNewUsesCanonicalProfile(t *testing.T) {
-	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha1.RuntimeGVisor)
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeGVisor)
 	require.NoError(t, err)
 	driver, err := New(profile)
 	require.NoError(t, err)
-	require.Equal(t, apiv1alpha1.RuntimeGVisor, driver.runtimeName)
+	require.Equal(t, apiv1alpha2.RuntimeGVisor, driver.runtimeName)
 	require.Equal(t, profile.ProfileHash, driver.runtimeProfileHash)
 	require.Equal(t, "io.containerd.runsc.v1", driver.config.Handler)
 }
@@ -44,22 +44,22 @@ func TestNewUsesCanonicalProfile(t *testing.T) {
 func TestRuntimeConfig_KataVariantsUseKataV2Runtime(t *testing.T) {
 	tests := []struct {
 		name       string
-		runtime    apiv1alpha1.RuntimeName
+		runtime    apiv1alpha2.RuntimeName
 		configPath string
 	}{
 		{
 			name:       "kata qemu",
-			runtime:    apiv1alpha1.RuntimeKataQemu,
+			runtime:    apiv1alpha2.RuntimeKataQemu,
 			configPath: "/opt/kata/share/defaults/kata-containers/configuration-qemu.toml",
 		},
 		{
 			name:       "kata firecracker",
-			runtime:    apiv1alpha1.RuntimeKataFc,
+			runtime:    apiv1alpha2.RuntimeKataFc,
 			configPath: "/opt/kata/share/defaults/kata-containers/configuration-fc.toml",
 		},
 		{
 			name:       "kata cloud hypervisor",
-			runtime:    apiv1alpha1.RuntimeKataClh,
+			runtime:    apiv1alpha2.RuntimeKataClh,
 			configPath: "/opt/kata/share/defaults/kata-containers/configuration-clh.toml",
 		},
 	}
@@ -501,7 +501,7 @@ func TestContainerdRuntime_prepareLabels(t *testing.T) {
 		RequestID: "request-1", InstanceGeneration: 2, RuntimeInstanceID: "runtime-1", AssignmentAttempt: 3,
 		CPU: "500m", Memory: "256Mi", PIDs: 128,
 		RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
-		InfraProfile: "test-infra", InfraProfileHash: "infra-hash",
+		InfraRevision: "infra-hash",
 		NetworkSlotID: "slot-1", NetworkNamespacePath: "/run/fast-sandbox/netns/fsb1",
 		NetworkIP: "172.30.0.2", NetworkGateway: "172.30.0.1", NetworkDNSPath: "/run/fast-sandbox/network/pod/slot-1.resolv.conf",
 	}
@@ -519,8 +519,7 @@ func TestContainerdRuntime_prepareLabels(t *testing.T) {
 		"fast-sandbox.io/sandbox-name":          "test-claim",
 		"fast-sandbox.io/runtime-profile-hash":  "runtime-hash",
 		"fast-sandbox.io/resource-profile-hash": "resource-hash",
-		"fast-sandbox.io/infra-profile":         "test-infra",
-		"fast-sandbox.io/infra-profile-hash":    "infra-hash",
+		"fast-sandbox.io/infra-revision":        "infra-hash",
 		"fast-sandbox.io/resource-cpu":          "500m",
 		"fast-sandbox.io/resource-memory":       "256Mi",
 		"fast-sandbox.io/resource-pids":         "128",

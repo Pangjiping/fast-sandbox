@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/assignment"
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
@@ -97,10 +97,10 @@ func TestAssignDeclarativeProjectsAnnotationAndReconcilesRuntime(t *testing.T) {
 	}
 	require.NoError(t, orchestrator.ReconcileRuntime(context.Background(), assigned))
 
-	var ready apiv1alpha1.Sandbox
+	var ready apiv1alpha2.Sandbox
 	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &ready))
-	require.Equal(t, apiv1alpha1.ObservedStateReady, ready.Status.RuntimeState)
-	require.Equal(t, apiv1alpha1.ObservedStateReady, ready.Status.DataPlaneState)
+	require.Equal(t, apiv1alpha2.ObservedStateReady, ready.Status.RuntimeState)
+	require.Equal(t, apiv1alpha2.ObservedStateReady, ready.Status.DataPlaneState)
 }
 
 func TestReconcileRuntimeProjectsRuntimeAndDataPlaneIndependently(t *testing.T) {
@@ -123,23 +123,23 @@ func TestReconcileRuntimeProjectsRuntimeAndDataPlaneIndependently(t *testing.T) 
 	err = orchestrator.ReconcileRuntime(context.Background(), assigned)
 	require.ErrorIs(t, err, ErrDataPlaneInProgress)
 
-	var current apiv1alpha1.Sandbox
+	var current apiv1alpha2.Sandbox
 	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &current))
-	require.Equal(t, apiv1alpha1.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha1.ObservedStateCreating, current.Status.DataPlaneState)
+	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
+	require.Equal(t, apiv1alpha2.ObservedStateCreating, current.Status.DataPlaneState)
 
 	phase = "infra-unavailable"
 	err = orchestrator.ReconcileRuntime(context.Background(), &current)
 	require.ErrorIs(t, err, ErrDataPlaneUnavailable)
 	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &current))
-	require.Equal(t, apiv1alpha1.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha1.ObservedStateUnavailable, current.Status.DataPlaneState)
+	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
+	require.Equal(t, apiv1alpha2.ObservedStateUnavailable, current.Status.DataPlaneState)
 
 	phase = "running"
 	require.NoError(t, orchestrator.ReconcileRuntime(context.Background(), &current))
 	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &current))
-	require.Equal(t, apiv1alpha1.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha1.ObservedStateReady, current.Status.DataPlaneState)
+	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
+	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.DataPlaneState)
 }
 
 func TestLostCreateResponseDoesNotInspectOrChangeIdentity(t *testing.T) {
@@ -153,7 +153,7 @@ func TestLostCreateResponseDoesNotInspectOrChangeIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
 	statusAssignment := envelope.StatusAssignment()
-	sandbox.Status = apiv1alpha1.SandboxStatus{
+	sandbox.Status = apiv1alpha2.SandboxStatus{
 		Assignment: &statusAssignment, AssignmentAttempt: 2, InstanceGeneration: 1, RouteGeneration: 3,
 	}
 	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
@@ -185,7 +185,7 @@ func TestReassignDeclarativeAfterRejectionCASesDirectlyToAlternative(t *testing.
 	require.NoError(t, err)
 	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
 	statusAssignment := envelope.StatusAssignment()
-	sandbox.Status = apiv1alpha1.SandboxStatus{
+	sandbox.Status = apiv1alpha2.SandboxStatus{
 		Assignment: &statusAssignment, AssignmentAttempt: 3, InstanceGeneration: 2, RouteGeneration: 5,
 	}
 	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
@@ -239,7 +239,7 @@ func TestClearAssignmentRemovesAnnotationAndAdvancesFences(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
 	statusAssignment := envelope.StatusAssignment()
-	sandbox.Status = apiv1alpha1.SandboxStatus{
+	sandbox.Status = apiv1alpha2.SandboxStatus{
 		Assignment: &statusAssignment, AssignmentAttempt: 4, InstanceGeneration: 2, RouteGeneration: 5,
 	}
 	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
@@ -259,26 +259,26 @@ func candidateFor(parameters RuntimeParameters) placement.FastletInfo {
 		ID: "fastlet-a", PodName: "fastlet-a", PodUID: "pod-a", PodIP: "10.0.0.1", NodeName: "node-a",
 		RuntimeName: parameters.RuntimeName, RuntimeProfileHash: parameters.RuntimeProfileHash,
 		ResourceProfileHash: parameters.ResourceProfileHash,
-		InfraProfile:        parameters.InfraProfile, InfraProfileHash: parameters.InfraProfileHash, InfraReady: true,
+		InfraRevision:       parameters.InfraRevision, InfraReady: true,
 	}
 }
 
-func newHarness(t *testing.T) (*Orchestrator, *fakeRegistry, *fakeFastletClient, *apiv1alpha1.Sandbox) {
+func newHarness(t *testing.T) (*Orchestrator, *fakeRegistry, *fakeFastletClient, *apiv1alpha2.Sandbox) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
-	pool := &apiv1alpha1.SandboxPool{
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime: apiv1alpha1.RuntimeContainer, Capacity: apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 1},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeContainer, Capacity: apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1},
 			MaxSandboxesPerPod: 8,
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("512Mi"), PIDs: 256,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{},
 		},
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&apiv1alpha1.Sandbox{}).WithObjects(pool).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&apiv1alpha2.Sandbox{}).WithObjects(pool).Build()
 	registry := &fakeRegistry{fastlets: make(map[placement.FastletID]placement.FastletInfo)}
 	fastletClient := &fakeFastletClient{
 		create: func(string, *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
@@ -289,11 +289,11 @@ func newHarness(t *testing.T) (*Orchestrator, *fakeRegistry, *fakeFastletClient,
 		},
 	}
 	orchestrator := &Orchestrator{Client: k8sClient, Registry: registry, FastletClient: fastletClient}
-	sandbox := &apiv1alpha1.Sandbox{
+	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", Annotations: map[string]string{
 			assignment.AnnotationRequestID: "request-a", assignment.AnnotationCreateSpecHash: "spec-a",
 		}},
-		Spec: apiv1alpha1.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
+		Spec: apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
 	}
 	return orchestrator, registry, fastletClient, sandbox
 }

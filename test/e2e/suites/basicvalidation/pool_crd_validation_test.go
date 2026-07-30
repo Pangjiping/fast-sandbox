@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
 	corev1 "k8s.io/api/core/v1"
@@ -54,15 +54,15 @@ func TestSandboxPoolCRDValidation(t *testing.T) {
 				t.Fatalf("create Pool with invalid runtime error = %v, want Invalid", err)
 			}
 
-			pool := &apiv1alpha1.SandboxPool{
+			pool := &apiv1alpha2.SandboxPool{
 				ObjectMeta: metav1.ObjectMeta{Name: "valid-runtime-pool", Namespace: namespace},
-				Spec: apiv1alpha1.SandboxPoolSpec{
-					Runtime:            apiv1alpha1.RuntimeContainer,
+				Spec: apiv1alpha2.SandboxPoolSpec{
+					Runtime:            apiv1alpha2.RuntimeContainer,
 					MaxSandboxesPerPod: 1,
-					SandboxResources: apiv1alpha1.SandboxResourceProfile{
+					SandboxResources: apiv1alpha2.SandboxResourceProfile{
 						CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 256,
 					},
-					Capacity:        apiv1alpha1.PoolCapacity{},
+					Capacity:        apiv1alpha2.PoolCapacity{},
 					FastletTemplate: corev1.PodTemplateSpec{},
 				},
 			}
@@ -74,7 +74,7 @@ func TestSandboxPoolCRDValidation(t *testing.T) {
 				if err := k8sClient.Get(ctx, clientObjectKey(pool), pool); err != nil {
 					return err
 				}
-				pool.Spec.Runtime = apiv1alpha1.RuntimeGVisor
+				pool.Spec.Runtime = apiv1alpha2.RuntimeGVisor
 				return k8sClient.Update(ctx, pool)
 			})
 			if err == nil || !apierrors.IsInvalid(err) {
@@ -99,7 +99,7 @@ func TestSandboxPoolCRDValidation(t *testing.T) {
 func sandboxPoolObject(namespace, name string, spec map[string]any) *unstructured.Unstructured {
 	pool := &unstructured.Unstructured{}
 	pool.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: apiv1alpha1.GroupVersion.Group, Version: apiv1alpha1.GroupVersion.Version, Kind: "SandboxPool",
+		Group: apiv1alpha2.GroupVersion.Group, Version: apiv1alpha2.GroupVersion.Version, Kind: "SandboxPool",
 	})
 	pool.SetNamespace(namespace)
 	pool.SetName(name)

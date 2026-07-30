@@ -50,6 +50,7 @@ func (s *FastletServer) Handler() http.Handler {
 	mux.HandleFunc("/api/v2/fastlet/heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("/api/v2/fastlet/runtime-diagnostics", s.handleRuntimeDiagnostics)
 	mux.HandleFunc("/api/v2/fastlet/diagnostics/sandbox", s.handleSandboxDiagnostics)
+	mux.HandleFunc("/api/v2/fastlet/wait-data-plane", s.handleWaitSandboxReady)
 	mux.HandleFunc("/api/v2/fastlet/draining", s.handleSetDraining)
 
 	klog.InfoS("Starting fastlet HTTP server", "addr", s.addr)
@@ -169,6 +170,16 @@ func (s *FastletServer) handleSandboxDiagnostics(w http.ResponseWriter, r *http.
 	writeResponse(w, response, err)
 }
 
+func (s *FastletServer) handleWaitSandboxReady(w http.ResponseWriter, r *http.Request) {
+	var req fastletapi.WaitSandboxReadyRequest
+	if !decodePost(w, r, &req) {
+		return
+	}
+	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
+	response, err := s.sandboxManager.WaitSandboxReady(r.Context(), &req)
+	writeResponse(w, response, err)
+}
+
 func decodePost(w http.ResponseWriter, r *http.Request, target any) bool {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -218,7 +229,7 @@ func (s *FastletServer) heartbeat(r *http.Request, cursor fastletapi.CacheCursor
 	sbStatuses := s.sandboxManager.GetSandboxStatuses(r.Context())
 	nodeName := os.Getenv("NODE_NAME")
 	admission, recovering, draining := s.sandboxManager.State()
-	infraProfile, infraProfileHash, infraReady, preparedArtifacts, _ := s.sandboxManager.InfraStatus()
+	infraRevision, infraReady, preparedArtifacts, _ := s.sandboxManager.InfraStatus()
 	status := fastletapi.FastletStatus{
 		FastletID:           os.Getenv("POD_NAME"), // Use Pod Name as Fastlet ID
 		NodeName:            nodeName,
@@ -230,8 +241,10 @@ func (s *FastletServer) heartbeat(r *http.Request, cursor fastletapi.CacheCursor
 		Draining:            draining,
 		FastletPodUID:       s.sandboxManager.FastletPodUID(),
 		ResourceProfileHash: s.sandboxManager.ResourceProfileHash(),
-		InfraProfile:        infraProfile, InfraProfileHash: infraProfileHash,
-		InfraReady: infraReady, PreparedArtifacts: preparedArtifacts,
+		InfraRevision:       infraRevision,
+		InfraReady:          infraReady, PreparedArtifacts: preparedArtifacts,
+		RegistryRevision: s.sandboxManager.RegistryRevision(),
+		WarmImages:       s.sandboxManager.WarmImageStates(),
 	}
 	return fastletapi.HeartbeatResponse{
 		FastletStatus: status,

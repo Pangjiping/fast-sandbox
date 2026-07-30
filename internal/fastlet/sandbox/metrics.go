@@ -30,16 +30,16 @@ var (
 		Name:    "fast_sandbox_data_plane_ready_latency_seconds",
 		Help:    "Latency from runtime creation start until asynchronous Infra readiness and route publication complete.",
 		Buckets: prometheus.ExponentialBuckets(0.005, 2, 14),
-	}, []string{"runtime", "infra_profile", "result"})
+	}, []string{"runtime", "infra_revision", "result"})
 	userProcessStartLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "fast_sandbox_user_process_start_latency_seconds",
 		Help:    "Ensure latency until a runtime adapter can prove the user process started.",
 		Buckets: prometheus.ExponentialBuckets(0.005, 2, 14),
-	}, []string{"runtime", "infra_profile", "source"})
+	}, []string{"runtime", "infra_revision", "source"})
 	userProcessStartObservationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "fast_sandbox_user_process_start_observation_total",
 		Help: "Availability of a trustworthy user-process-start observation.",
-	}, []string{"runtime", "infra_profile", "source", "result"})
+	}, []string{"runtime", "infra_revision", "source", "result"})
 	warmImagePullTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "fast_sandbox_warm_image_pull_total",
 		Help: "Pool warm image preparation attempts by bounded result; image references are intentionally not labels.",
@@ -103,22 +103,22 @@ func startFastletCreateStage(ctx context.Context, runtimeName, stage string) (co
 	}
 }
 
-func observeDataPlaneReady(runtimeName, infraProfile string, started time.Time, err error) {
+func observeDataPlaneReady(runtimeName, infraRevision string, started time.Time, err error) {
 	if runtimeName == "" {
 		runtimeName = "unknown"
 	}
-	if infraProfile == "" {
-		infraProfile = "minimal"
+	if infraRevision == "" {
+		infraRevision = "unknown"
 	}
-	dataPlaneReadyLatency.WithLabelValues(runtimeName, infraProfile, metricResult(err)).Observe(time.Since(started).Seconds())
+	dataPlaneReadyLatency.WithLabelValues(runtimeName, infraRevision, metricResult(err)).Observe(time.Since(started).Seconds())
 }
 
-func observeUserProcessStart(runtimeName, infraProfile string, ensureStarted time.Time, metadata *SandboxMetadata) {
+func observeUserProcessStart(runtimeName, infraRevision string, ensureStarted time.Time, metadata *SandboxMetadata) {
 	if runtimeName == "" {
 		runtimeName = "unknown"
 	}
-	if infraProfile == "" {
-		infraProfile = "minimal"
+	if infraRevision == "" {
+		infraRevision = "unknown"
 	}
 	source := fastletapi.UserProcessStartUnknown
 	if metadata != nil {
@@ -136,7 +136,7 @@ func observeUserProcessStart(runtimeName, infraProfile string, ensureStarted tim
 		if latency < 0 {
 			latency = 0
 		}
-		userProcessStartLatency.WithLabelValues(runtimeName, infraProfile, string(source)).Observe(latency.Seconds())
+		userProcessStartLatency.WithLabelValues(runtimeName, infraRevision, string(source)).Observe(latency.Seconds())
 	}
-	userProcessStartObservationTotal.WithLabelValues(runtimeName, infraProfile, string(source), result).Inc()
+	userProcessStartObservationTotal.WithLabelValues(runtimeName, infraRevision, string(source), result).Inc()
 }

@@ -1,6 +1,7 @@
 # Configuration reference
 
-Fast Sandbox configuration is split between Kubernetes CRDs, deployment flags, and platform-owned Runtime and Infra catalogs.
+Fast Sandbox configuration is split between Kubernetes CRDs, deployment flags,
+and platform-owned runtime implementation details.
 
 ## Controller roles
 
@@ -43,13 +44,20 @@ The Pool Controller injects platform-owned Fastlet configuration. Important grou
 
 ### Infra
 
-- `FAST_SANDBOX_INFRA_PROFILE`;
-- `FAST_SANDBOX_INFRA_PROFILE_HASH`;
+- `FAST_SANDBOX_INFRA_REVISION`;
+- `FAST_SANDBOX_INFRA_PLAN_PATH`;
 - `FAST_SANDBOX_INFRA_STORE_ROOT`;
 - `FAST_SANDBOX_INFRA_HOST_ROOT`;
-- `FAST_SANDBOX_INFRA_STATIC_ROOTS`;
 - `FAST_SANDBOX_SANDBOX_INIT_PATH`;
 - `FAST_SANDBOX_SANDBOX_TUNNEL_PATH`.
+
+### Registry
+
+- `FAST_SANDBOX_REGISTRY_CONFIG_PATH`.
+
+The default file is the Pool Controller's read-only compiled Secret projection
+at `/etc/fast-sandbox/registry/registry.json`. See
+[Private registries](../guides/private-registries.md).
 
 ### Network
 
@@ -109,6 +117,11 @@ See [Observability](../guides/observability.md).
 
 Configuration follows this rule:
 
-- Pool users select stable runtime, resource, Infra, and capacity values.
-- Platform operators own backend binaries, handlers, paths, security settings, credentials, and artifact bindings.
+- Pool users select stable runtime, resource, inline Infra Component, and
+  capacity values.
+- Platform operators own backend binaries, handlers, paths, security settings,
+  route keys, and Registry credentials.
 - Runtime capability probes decide whether the node satisfies the selected profile.
+
+See the [Infra Components reference](infra-components.md) for the Pool-owned
+artifact, process, health, and endpoint fields.

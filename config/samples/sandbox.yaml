@@ -1,7 +1,8 @@
-apiVersion: sandbox.fast.io/v1alpha1
+apiVersion: sandbox.fast.io/v1alpha2
 kind: Sandbox
 metadata:
   name: sandbox-example
+  namespace: fast-sandbox
 spec:
   image: docker.io/library/alpine:latest
   envs:

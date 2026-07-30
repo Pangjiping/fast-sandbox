@@ -44,6 +44,11 @@ Fast-Path and direct CRD creation converge through the same Orchestrator and Fas
 - a stale identity cannot replace a newer one;
 - capacity includes creating, running, deleting, and cleanup-failed instances until absence is proven.
 
+Fast-Path writes the complete initial lifecycle intent in the first Sandbox
+CRD operation, including absolute expiry, metadata, failure policy, and
+recovery timeout. Create returns at `RuntimeReady`; component health and
+`DataPlaneReady` remain asynchronous.
+
 ## Delete
 
 Deletion uses a finalizer:

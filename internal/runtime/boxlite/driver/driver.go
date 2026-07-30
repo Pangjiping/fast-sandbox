@@ -18,6 +18,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
 )
 
@@ -28,14 +29,21 @@ var requiredBoxLiteSidecarCapabilities = boxliteprotocol.RequiredCapabilities
 // Driver is intentionally a pure-Go client. Native BoxLite code lives
 // in a dedicated Pod sidecar and is reached only through a versioned UDS API.
 type Driver struct {
-	mu         sync.RWMutex
-	profile    runtimecatalog.RuntimeProfile
-	config     runtimecatalog.BoxLiteConfig
-	namespace  string
-	client     *http.Client
-	transport  *http.Transport
-	infraMgr   *fastletinfra.Manager
-	accessByID map[string]dataplane.AccessDescriptor
+	mu               sync.RWMutex
+	profile          runtimecatalog.RuntimeProfile
+	config           runtimecatalog.BoxLiteConfig
+	namespace        string
+	client           *http.Client
+	transport        *http.Transport
+	infraMgr         *fastletinfra.Manager
+	accessByID       map[string]dataplane.AccessDescriptor
+	registryProvider registryconfig.Provider
+}
+
+func (d *Driver) SetRegistryProvider(provider registryconfig.Provider) {
+	d.mu.Lock()
+	d.registryProvider = provider
+	d.mu.Unlock()
 }
 
 type boxLiteCapabilities = boxliteprotocol.Capabilities
@@ -143,7 +151,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	if infraManager != nil {
 		instance, err := infraManager.PrepareInstance(ctx, config)
 		if err != nil {
-			return nil, fmt.Errorf("%w: prepare BoxLite InfraProfile instance: %v", ErrInfraUnavailable, err)
+			return nil, fmt.Errorf("%w: prepare BoxLite Infra Component instance: %v", ErrInfraUnavailable, err)
 		}
 		for _, mount := range instance.Mounts {
 			source := mount.GuestSource
@@ -296,11 +304,10 @@ func (d *Driver) metadataFromBox(box boxLiteBox) (*SandboxMetadata, error) {
 	}
 	return &SandboxMetadata{
 		SandboxSpec: box.Sandbox, ContainerID: box.BoxID, PID: box.PID, Phase: box.Phase, CreatedAt: box.CreatedAt,
-		UserProcessStartedAt:       box.UserProcessStartedAt,
-		UserProcessStartSource:     box.UserProcessStartSource,
-		InfraServices:              append([]fastletinfra.ServiceEndpoint(nil), box.InfraServices...),
-		InfraUpstreamHeadersByPort: dataplane.CloneHeadersByPort(box.InfraUpstreamHeadersByPort),
-		InfraDiagnostics:           append([]fastletinfra.ComponentDiagnostic(nil), box.InfraDiagnostics...),
+		UserProcessStartedAt:   box.UserProcessStartedAt,
+		UserProcessStartSource: box.UserProcessStartSource,
+		InfraServices:          append([]fastletinfra.ServiceEndpoint(nil), box.InfraServices...),
+		InfraDiagnostics:       append([]fastletinfra.ComponentDiagnostic(nil), box.InfraDiagnostics...),
 	}, nil
 }
 

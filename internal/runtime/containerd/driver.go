@@ -10,17 +10,19 @@ import (
 	"strings"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 
 	runtimeoptions "github.com/containerd/containerd/api/types/runtimeoptions/v1"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -37,10 +39,11 @@ type Driver struct {
 	fastletPodUID      string
 	fastletNamespace   string
 	infraMgr           *infra.Manager
-	runtimeName        apiv1alpha1.RuntimeName // runtime profile identifier
+	runtimeName        apiv1alpha2.RuntimeName // runtime profile identifier
 	runtimeProfileHash string
 	config             RuntimeConfig // cached runtime configuration
 	networkManager     *fastletnetwork.Manager
+	registryProvider   registryconfig.Provider
 }
 
 const (
@@ -64,7 +67,7 @@ func New(profile runtimecatalog.RuntimeProfile) (*Driver, error) {
 	return newWithConfig(profile.Name, profile.ProfileHash, config), nil
 }
 
-func newWithConfig(rt apiv1alpha1.RuntimeName, profileHash string, cfg RuntimeConfig) *Driver {
+func newWithConfig(rt apiv1alpha2.RuntimeName, profileHash string, cfg RuntimeConfig) *Driver {
 	return &Driver{
 		runtimeName:        rt,
 		runtimeProfileHash: profileHash,
@@ -249,7 +252,6 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	}
 	if infraInstance != nil {
 		metadata.InfraServices = append([]infra.ServiceEndpoint(nil), infraInstance.Services...)
-		metadata.InfraUpstreamHeadersByPort = infra.UpstreamHeadersByServicePort(infraInstance.Services, infraInstance.UpstreamHeaders)
 	}
 	created = true
 	logger.Info("Sandbox created successfully", "pid", task.Pid())
@@ -340,12 +342,39 @@ func sameRuntimeIdentity(existing *SandboxMetadata, requested *fastletapi.Sandbo
 func (r *Driver) prepareImage(ctx context.Context, imageName string) (containerd.Image, error) {
 	image, err := r.client.GetImage(ctx, imageName)
 	if err != nil {
-		image, err = r.client.Pull(ctx, imageName, containerd.WithPullUnpack)
+		image, err = r.pullImage(ctx, imageName)
 		if err != nil {
 			return nil, err
 		}
 	}
 	return image, nil
+}
+
+func (r *Driver) SetRegistryProvider(provider registryconfig.Provider) {
+	r.registryProvider = provider
+}
+
+func (r *Driver) pullImage(ctx context.Context, imageName string) (containerd.Image, error) {
+	options := []containerd.RemoteOpt{containerd.WithPullUnpack}
+	if r.registryProvider != nil {
+		credential, found, err := r.registryProvider.Credentials(imageName)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			secret := credential.Password
+			if credential.IdentityToken != "" {
+				secret = credential.IdentityToken
+			}
+			resolver := docker.NewResolver(docker.ResolverOptions{
+				Credentials: func(string) (string, string, error) {
+					return credential.Username, secret, nil
+				},
+			})
+			options = append(options, containerd.WithResolver(resolver))
+		}
+	}
+	return r.client.Pull(ctx, imageName, options...)
 }
 
 func (r *Driver) prepareSpecOpts(ctx context.Context, config *fastletapi.SandboxSpec, image containerd.Image) ([]oci.SpecOpts, *infra.PreparedInstance, error) {
@@ -356,7 +385,7 @@ func (r *Driver) prepareSpecOpts(ctx context.Context, config *fastletapi.Sandbox
 	if r.infraMgr != nil {
 		prepared, err := r.infraMgr.PrepareInstance(ctx, config)
 		if err != nil {
-			return nil, nil, fmt.Errorf("prepare InfraProfile instance: %w", err)
+			return nil, nil, fmt.Errorf("prepare Infra Component instance: %w", err)
 		}
 		infraInstance = &prepared
 		for _, mount := range prepared.Mounts {
@@ -514,8 +543,7 @@ func (r *Driver) prepareLabels(config *fastletapi.SandboxSpec) map[string]string
 		"fast-sandbox.io/sandbox-name":          config.ClaimName,
 		"fast-sandbox.io/runtime-profile-hash":  config.RuntimeProfileHash,
 		"fast-sandbox.io/resource-profile-hash": config.ResourceProfileHash,
-		"fast-sandbox.io/infra-profile":         config.InfraProfile,
-		"fast-sandbox.io/infra-profile-hash":    config.InfraProfileHash,
+		"fast-sandbox.io/infra-revision":        config.InfraRevision,
 		"fast-sandbox.io/resource-cpu":          config.CPU,
 		"fast-sandbox.io/resource-memory":       config.Memory,
 		"fast-sandbox.io/resource-pids":         strconv.FormatInt(config.PIDs, 10),
@@ -629,8 +657,7 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 			Memory:               info.Labels["fast-sandbox.io/resource-memory"],
 			RuntimeProfileHash:   info.Labels["fast-sandbox.io/runtime-profile-hash"],
 			ResourceProfileHash:  info.Labels["fast-sandbox.io/resource-profile-hash"],
-			InfraProfile:         info.Labels["fast-sandbox.io/infra-profile"],
-			InfraProfileHash:     info.Labels["fast-sandbox.io/infra-profile-hash"],
+			InfraRevision:        info.Labels["fast-sandbox.io/infra-revision"],
 			NetworkSlotID:        info.Labels["fast-sandbox.io/network-slot-id"],
 			NetworkNamespacePath: info.Labels["fast-sandbox.io/network-netns-path"],
 			NetworkIP:            info.Labels["fast-sandbox.io/network-ip"],
@@ -768,7 +795,7 @@ func (r *Driver) PullImage(ctx context.Context, image string) error {
 	if err == nil {
 		return nil
 	}
-	_, err = r.client.Pull(ctx, image, containerd.WithPullUnpack)
+	_, err = r.pullImage(ctx, image)
 	return err
 }
 

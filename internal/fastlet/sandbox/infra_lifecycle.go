@@ -17,8 +17,10 @@ type dataPlaneWorker struct {
 }
 
 const (
-	initialDataPlaneRetry = 100 * time.Millisecond
-	maxDataPlaneRetry     = 2 * time.Second
+	initialDataPlaneRetry  = 100 * time.Millisecond
+	maxDataPlaneRetry      = 2 * time.Second
+	dataPlaneHealthPeriod  = time.Second
+	dataPlaneHealthTimeout = time.Second
 )
 
 func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *SandboxMetadata) error {
@@ -60,18 +62,18 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 	} else {
 		err = errors.New("runtime did not provide an Infra access descriptor")
 	}
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInfraUnavailable, err)
-	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	current := m.sandboxes[metadata.SandboxID]
 	if current != metadata || metadata.Phase == "terminating" || metadata.Phase == "deleting" {
+		m.mu.Unlock()
 		return errors.New("Sandbox changed while Infra Components were initializing")
 	}
 	metadata.InfraServices = append(metadata.InfraServices[:0], instance.Services...)
-	metadata.InfraUpstreamHeadersByPort = fastletinfra.UpstreamHeadersByServicePort(instance.Services, instance.UpstreamHeaders)
 	metadata.InfraDiagnostics = append(metadata.InfraDiagnostics[:0], instance.Diagnostics...)
+	m.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInfraUnavailable, err)
+	}
 	return nil
 }
 
@@ -81,7 +83,8 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 // generation.
 func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, started time.Time) {
 	m.mu.Lock()
-	if m.sandboxes[metadata.SandboxID] != metadata || !dataPlaneWorkPending(metadata.Phase) {
+	if m.sandboxes[metadata.SandboxID] != metadata ||
+		(!dataPlaneWorkPending(metadata.Phase) && !(metadata.Phase == "running" && m.infraManager != nil)) {
 		m.mu.Unlock()
 		return
 	}
@@ -106,6 +109,7 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 		}()
 
 		retryDelay := initialDataPlaneRetry
+		readyObserved := false
 		for {
 			ready, err := m.reconcileDataPlaneOnce(ctx, metadata)
 			if ready {
@@ -113,7 +117,15 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 				completed := m.sandboxes[metadata.SandboxID] == metadata && metadata.Phase == "running"
 				m.mu.RUnlock()
 				if err == nil && completed {
-					observeDataPlaneReady(m.runtimeName, m.infraProfile, started, nil)
+					if !readyObserved {
+						observeDataPlaneReady(m.runtimeName, m.infraRevision, started, nil)
+						readyObserved = true
+					}
+					if m.monitorDataPlaneHealth(ctx, metadata) {
+						return
+					}
+					retryDelay = initialDataPlaneRetry
+					continue
 				}
 				return
 			}
@@ -127,6 +139,61 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 			retryDelay = min(retryDelay*2, maxDataPlaneRetry)
 		}
 	}()
+}
+
+// monitorDataPlaneHealth keeps a named component routable only while its
+// declared health probe succeeds. It runs locally in the Fastlet and therefore
+// does not add Kubernetes watch latency to the data-plane availability signal.
+// false means that the data plane was degraded and the caller must reconcile
+// Infra readiness and route publication again.
+func (m *SandboxManager) monitorDataPlaneHealth(ctx context.Context, metadata *SandboxMetadata) bool {
+	if m.infraManager == nil || len(metadata.InfraServices) == 0 {
+		return true
+	}
+	timer := time.NewTimer(dataPlaneHealthPeriod)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return true
+		case <-timer.C:
+		}
+
+		probeContext, cancel := context.WithTimeout(ctx, dataPlaneHealthTimeout)
+		err := m.initializeInfraInstance(probeContext, metadata)
+		cancel()
+		if err != nil {
+			m.markDataPlaneUnhealthy(metadata, err)
+			return false
+		}
+		timer.Reset(dataPlaneHealthPeriod)
+	}
+}
+
+func (m *SandboxManager) markDataPlaneUnhealthy(metadata *SandboxMetadata, healthErr error) {
+	m.mu.Lock()
+	if m.sandboxes[metadata.SandboxID] != metadata || metadata.Phase != "running" {
+		m.mu.Unlock()
+		return
+	}
+	metadata.Phase = "infra-unavailable"
+	m.recordDiagnosticLocked(
+		metadata.SandboxID,
+		"error",
+		"infra",
+		"infra-unavailable",
+		fmt.Sprintf("Infra Component health changed after readiness: %v", healthErr),
+	)
+	m.mu.Unlock()
+
+	// Route removal is identity fenced by the publication. Even if removal is
+	// temporarily unavailable, the Fastlet state already stops new endpoint
+	// resolution and the same worker immediately starts readiness recovery.
+	removeContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := m.removeRoute(removeContext, metadata); err != nil {
+		m.recordDiagnostic(metadata.SandboxID, "error", "route", "route-remove-failed", err.Error())
+	}
+	cancel()
 }
 
 func dataPlaneWorkPending(phase string) bool {
@@ -263,6 +330,17 @@ func (m *SandboxManager) ReconcilePendingInfra(ctx context.Context) error {
 		} else if !ready {
 			result = errors.Join(result, fmt.Errorf("Sandbox %s data plane is still initializing", metadata.SandboxID))
 		}
+	}
+	m.mu.RLock()
+	running := make([]*SandboxMetadata, 0, len(m.sandboxes))
+	for _, metadata := range m.sandboxes {
+		if metadata.Phase == "running" && m.infraManager != nil {
+			running = append(running, metadata)
+		}
+	}
+	m.mu.RUnlock()
+	for _, metadata := range running {
+		m.startDataPlaneReconcile(metadata, time.Now())
 	}
 	return result
 }

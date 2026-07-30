@@ -11,7 +11,7 @@ var infraReadyLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "fast_sandbox_infra_ready_latency_seconds",
 	Help:    "Per-service Infra initialization and readiness latency.",
 	Buckets: prometheus.ExponentialBuckets(0.005, 2, 13),
-}, []string{"profile", "component", "runtime", "result"})
+}, []string{"component", "runtime", "result"})
 
 var infraInstanceStageLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "fast_sandbox_infra_instance_stage_latency_seconds",
@@ -24,15 +24,11 @@ func (m *Manager) observeInfraReady(component string, started time.Time, err err
 	if err != nil {
 		result = "error"
 	}
-	profile := m.plan.ProfileName
-	if profile == "" {
-		profile = "minimal"
-	}
 	runtimeName := string(m.config.RuntimeProfile.Name)
 	if runtimeName == "" {
 		runtimeName = "unknown"
 	}
-	infraReadyLatency.WithLabelValues(profile, component, runtimeName, result).Observe(time.Since(started).Seconds())
+	infraReadyLatency.WithLabelValues(component, runtimeName, result).Observe(time.Since(started).Seconds())
 }
 
 func observeInstanceStage(stage string, started time.Time, err error) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-namespace="${QUICKSTART_NAMESPACE:-default}"
+namespace="${QUICKSTART_NAMESPACE:-fast-sandbox-system}"
 fastpath_port="${QUICKSTART_FASTPATH_PORT:-9090}"
 proxy_port="${QUICKSTART_PROXY_PORT:-18080}"
 pids=()

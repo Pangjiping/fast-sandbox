@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fast-sandbox-controller
-  namespace: default
+  namespace: fast-sandbox-system
   labels:
     fast-sandbox.io/control-plane-role: all
 spec:

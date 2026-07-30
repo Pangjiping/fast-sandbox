@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 	"fast-sandbox/internal/observability"
 
 	"github.com/spf13/cobra"
@@ -58,7 +58,7 @@ func init() {
 	//  Flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./.fastctl/config.json)")
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "localhost:9090", "Fast-Path gRPC endpoint (env: "+fastPathEndpointEnv+")")
-	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace")
+	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "fast-sandbox", "Kubernetes resource namespace")
 	rootCmd.PersistentFlags().StringVar(&proxyEndpoint, "proxy-endpoint", "", "Override the Sandbox Proxy authority (env: "+sandboxProxyEndpointEnv+")")
 
 	mustBindConfigSources(viper.GetViper(), rootCmd.PersistentFlags())
@@ -118,7 +118,7 @@ func mustBindConfigSources(config *viper.Viper, flags *pflag.FlagSet) {
 
 var clientFactory = defaultClientFactory
 
-func defaultClientFactory() (fastpathv1.FastPathServiceClient, *grpc.ClientConn, error) {
+func defaultClientFactory() (fastpathv2.FastPathServiceClient, *grpc.ClientConn, error) {
 	ep := viper.GetString("endpoint")
 	klog.V(4).InfoS("Creating gRPC client connection", "endpoint", ep)
 
@@ -131,10 +131,10 @@ func defaultClientFactory() (fastpathv1.FastPathServiceClient, *grpc.ClientConn,
 		return nil, nil, fmt.Errorf("failed to connect to %s: %v", ep, err)
 	}
 	klog.V(4).InfoS("Successfully connected to gRPC endpoint", "endpoint", ep)
-	return fastpathv1.NewFastPathServiceClient(conn), conn, nil
+	return fastpathv2.NewFastPathServiceClient(conn), conn, nil
 }
 
-func getClient() (fastpathv1.FastPathServiceClient, *grpc.ClientConn) {
+func getClient() (fastpathv2.FastPathServiceClient, *grpc.ClientConn) {
 	client, conn, err := clientFactory()
 	if err != nil {
 		log.Fatalf("Error: %v", err)

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 
@@ -164,11 +164,10 @@ func fastletInfoFromPod(pod *corev1.Pod) placement.FastletInfo {
 		ID: placement.FastletID(pod.Name), Namespace: pod.Namespace,
 		PodName: pod.Name, PodUID: string(pod.UID), PodIP: pod.Status.PodIP,
 		NodeName: pod.Spec.NodeName, PoolName: pod.Labels["fast-sandbox.io/pool"],
-		RuntimeName:         apiv1alpha1.RuntimeName(pod.Labels["fast-sandbox.io/runtime"]),
+		RuntimeName:         apiv1alpha2.RuntimeName(pod.Labels["fast-sandbox.io/runtime"]),
 		RuntimeProfileHash:  pod.Annotations["fast-sandbox.io/runtime-profile-hash"],
 		ResourceProfileHash: pod.Annotations["fast-sandbox.io/resource-profile-hash"],
-		InfraProfile:        pod.Labels["fast-sandbox.io/infra-profile"],
-		InfraProfileHash:    pod.Annotations["fast-sandbox.io/infra-profile-hash"],
+		InfraRevision:       pod.Annotations["fast-sandbox.io/infra-revision"],
 		DrainRequested:      placement.PodDrainRequested(pod),
 		Draining:            placement.PodDrainRequested(pod),
 		PodReady:            pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && podConditionTrue(pod.Status.Conditions, corev1.PodReady),

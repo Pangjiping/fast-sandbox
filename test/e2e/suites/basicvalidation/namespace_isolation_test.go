@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -35,22 +35,22 @@ func TestNamespaceIsolation(t *testing.T) {
 				defer suiteenv.DeleteNamespace(ctx, t, k8sClient, ns)
 			}
 
-			pool := &apiv1alpha1.SandboxPool{
+			pool := &apiv1alpha2.SandboxPool{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "SandboxPool",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-pool",
 					Namespace: namespaceA,
 				},
-				Spec: apiv1alpha1.SandboxPoolSpec{
-					Capacity: apiv1alpha1.PoolCapacity{
+				Spec: apiv1alpha2.SandboxPoolSpec{
+					Capacity: apiv1alpha2.PoolCapacity{
 						PoolMin: 1,
 						PoolMax: 2,
 					},
 					MaxSandboxesPerPod: 5,
-					Runtime:            apiv1alpha1.RuntimeContainer,
+					Runtime:            apiv1alpha2.RuntimeContainer,
 					SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 					FastletTemplate: corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
@@ -69,16 +69,16 @@ func TestNamespaceIsolation(t *testing.T) {
 				t.Fatalf("wait for ready fastlet pods: %v", err)
 			}
 
-			sameNamespaceSandbox := &apiv1alpha1.Sandbox{
+			sameNamespaceSandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-same-ns",
 					Namespace: namespaceA,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:   "docker.io/library/alpine:latest",
 					Command: []string{"/bin/sleep", "60"},
 					PoolRef: pool.Name,
@@ -87,22 +87,22 @@ func TestNamespaceIsolation(t *testing.T) {
 			if _, err := fixture.CreateSandbox(ctx, namespaceA, sameNamespaceSandbox); err != nil {
 				t.Fatalf("create same-namespace sandbox: %v", err)
 			}
-			if _, err := fixture.WaitForSandbox(ctx, types.NamespacedName{Name: sameNamespaceSandbox.Name, Namespace: namespaceA}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			if _, err := fixture.WaitForSandbox(ctx, types.NamespacedName{Name: sameNamespaceSandbox.Name, Namespace: namespaceA}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			}); err != nil {
 				t.Fatalf("wait for same-namespace sandbox assignment: %v", err)
 			}
 
-			crossNamespaceSandbox := &apiv1alpha1.Sandbox{
+			crossNamespaceSandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-cross-ns",
 					Namespace: namespaceB,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:   "docker.io/library/alpine:latest",
 					Command: []string{"/bin/sleep", "60"},
 					PoolRef: pool.Name,

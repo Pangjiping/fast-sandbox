@@ -1,7 +1,8 @@
-apiVersion: sandbox.fast.io/v1alpha1
+apiVersion: sandbox.fast.io/v1alpha2
 kind: Sandbox
 metadata:
   name: test-kata-sandbox
+  namespace: fast-sandbox
 spec:
   image: docker.io/library/alpine:latest
   command: ["/bin/sh", "-c", "uname -a && echo 'Running in Kata VM!' && sleep 3600"]

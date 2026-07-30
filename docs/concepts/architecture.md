@@ -72,7 +72,8 @@ Lifecycle:
 client -> Fast-Path or Kubernetes API -> CRD -> Reconciler/Fastlet
 
 Data:
-upstream SDK -> Sandbox Proxy -> Fastlet Proxy -> private address -> Infra Component
+upstream SDK -> Sandbox Proxy or trusted direct ingress
+             -> Fastlet Proxy -> private address -> Infra Component
 ```
 
 Create is the only synchronous imperative lifecycle operation. Delete, reset, expiry, and recovery are declarative CRD transitions.
@@ -127,7 +128,7 @@ internal/
   fastlet/               admission, lifecycle, network, Infra, cache, server
   runtime/               neutral contract, factory, containerd, BoxLite
   sandbox/               in-Sandbox supervisor and tunnel
-  catalog/               platform-owned Runtime and Infra profiles
+  catalog/               platform-owned Runtime profiles and Infra helpers
   protocol/fastlet/      Controller-to-Fastlet control protocol
   janitor/               node cleanup
   observability/         tracing and identity propagation
@@ -153,4 +154,5 @@ NodeJanitor runs on trusted nodes and cleans orphan containerd resources, networ
 - [Private networking](networking.md)
 - [Data plane](data-plane.md)
 - [Infra Components](infra-components.md)
+- [OpenSandbox integration](../guides/opensandbox-integration.md)
 - [Deployment guide](../guides/deployment.md)

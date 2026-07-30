@@ -6,9 +6,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -18,19 +19,27 @@ import (
 
 // SandboxConfig for yaml
 type SandboxConfig struct {
-	Image      string            `yaml:"image"`
-	PoolRef    string            `yaml:"pool_ref"`
-	Command    []string          `yaml:"command,omitempty"`
-	Args       []string          `yaml:"args,omitempty"`
-	Envs       map[string]string `yaml:"envs,omitempty"`
-	WorkingDir string            `yaml:"working_dir,omitempty"`
+	Image                  string            `yaml:"image"`
+	PoolRef                string            `yaml:"pool_ref"`
+	Command                []string          `yaml:"command,omitempty"`
+	Args                   []string          `yaml:"args,omitempty"`
+	Envs                   map[string]string `yaml:"envs,omitempty"`
+	WorkingDir             string            `yaml:"working_dir,omitempty"`
+	ExpiresAt              int64             `yaml:"expires_at,omitempty"`
+	Metadata               map[string]string `yaml:"metadata,omitempty"`
+	FailurePolicy          string            `yaml:"failure_policy,omitempty"`
+	RecoveryTimeoutSeconds int32             `yaml:"recovery_timeout_seconds,omitempty"`
 }
 
 var (
-	configFile string
-	pool       string
-	image      string
-	requestID  string
+	configFile         string
+	pool               string
+	image              string
+	requestID          string
+	runExpiresAt       int64
+	runMetadata        []string
+	runFailurePolicy   string
+	runRecoveryTimeout int32
 )
 
 // runCmd represents the run command
@@ -106,16 +115,48 @@ Priority: Flags > Config File > Interactive Input
 		if createRequestID != name {
 			log.Fatal("Error: --request-id must equal the Sandbox name")
 		}
-		req := &fastpathv1.CreateRequest{
-			Name:       name,
-			Image:      config.Image,
-			PoolRef:    config.PoolRef,
-			Namespace:  viper.GetString("namespace"),
-			Command:    config.Command,
-			Args:       config.Args,
-			Envs:       config.Envs,
-			WorkingDir: config.WorkingDir,
-			RequestId:  createRequestID,
+		metadata := make(map[string]string, len(config.Metadata)+len(runMetadata))
+		for key, value := range config.Metadata {
+			metadata[key] = value
+		}
+		for _, item := range runMetadata {
+			parts := strings.SplitN(item, "=", 2)
+			if len(parts) != 2 {
+				log.Fatalf("Error: invalid metadata %q; expected key=value", item)
+			}
+			metadata[parts[0]] = parts[1]
+		}
+		failurePolicy, err := parseFailurePolicy(config.FailurePolicy)
+		if config.FailurePolicy == "" {
+			failurePolicy = fastpathv2.FailurePolicy_MANUAL
+		} else if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		if runFailurePolicy != "" {
+			failurePolicy, err = parseFailurePolicy(runFailurePolicy)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+		}
+		expiresAt := config.ExpiresAt
+		if cmd.Flags().Changed("expires-at") {
+			expiresAt = runExpiresAt
+		}
+		recoveryTimeout := config.RecoveryTimeoutSeconds
+		if cmd.Flags().Changed("recovery-timeout") {
+			recoveryTimeout = runRecoveryTimeout
+		}
+		req := &fastpathv2.CreateRequest{
+			Image:                config.Image,
+			PoolRef:              config.PoolRef,
+			Namespace:            viper.GetString("namespace"),
+			Command:              config.Command,
+			Args:                 config.Args,
+			Envs:                 config.Envs,
+			WorkingDir:           config.WorkingDir,
+			RequestId:            createRequestID,
+			ExpiresAtUnixSeconds: expiresAt, Metadata: metadata,
+			FailurePolicy: failurePolicy, RecoveryTimeoutSeconds: recoveryTimeout,
 		}
 		klog.V(4).InfoS("Sending CreateSandbox request", "name", name, "image", config.Image, "pool", config.PoolRef, "namespace", req.Namespace)
 
@@ -141,6 +182,10 @@ func init() {
 	runCmd.Flags().StringVar(&image, "image", "", "Container image")
 	runCmd.Flags().StringVar(&pool, "pool", "default-pool", "Target SandboxPool")
 	runCmd.Flags().StringVar(&requestID, "request-id", "", "Idempotency key; must equal the Sandbox name")
+	runCmd.Flags().Int64Var(&runExpiresAt, "expires-at", 0, "Absolute expiration time as a Unix timestamp")
+	runCmd.Flags().StringSliceVar(&runMetadata, "metadata", nil, "Metadata to persist (key=value)")
+	runCmd.Flags().StringVar(&runFailurePolicy, "failure-policy", "", "Failure policy (Manual|AutoRecreate)")
+	runCmd.Flags().Int32Var(&runRecoveryTimeout, "recovery-timeout", 0, "Recovery delay in seconds")
 }
 
 func runInteractive(name string, config *SandboxConfig) error {

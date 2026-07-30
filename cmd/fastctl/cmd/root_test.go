@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -14,6 +15,7 @@ func TestEndpointConfigurationPrecedence(t *testing.T) {
 		flag         string
 		defaultValue string
 		environment  string
+		configValue  string
 		envValue     string
 		flagValue    string
 	}{
@@ -23,6 +25,7 @@ func TestEndpointConfigurationPrecedence(t *testing.T) {
 			flag:         "endpoint",
 			defaultValue: "localhost:9090",
 			environment:  fastPathEndpointEnv,
+			configValue:  "config-fastpath:19090",
 			envValue:     "env-fastpath:19090",
 			flagValue:    "flag-fastpath:29090",
 		},
@@ -31,6 +34,7 @@ func TestEndpointConfigurationPrecedence(t *testing.T) {
 			key:         "proxy-endpoint",
 			flag:        "proxy-endpoint",
 			environment: sandboxProxyEndpointEnv,
+			configValue: "http://config-proxy:18080",
 			envValue:    "http://env-proxy:18080",
 			flagValue:   "http://flag-proxy:28080",
 		},
@@ -42,7 +46,7 @@ func TestEndpointConfigurationPrecedence(t *testing.T) {
 
 			flags := pflag.NewFlagSet("fastctl-test", pflag.ContinueOnError)
 			flags.String("endpoint", "localhost:9090", "")
-			flags.String("namespace", "default", "")
+			flags.String("namespace", "fast-sandbox", "")
 			flags.String("proxy-endpoint", "", "")
 			config := viper.New()
 			if err := bindConfigSources(config, flags); err != nil {
@@ -51,6 +55,14 @@ func TestEndpointConfigurationPrecedence(t *testing.T) {
 
 			if got := config.GetString(test.key); got != test.defaultValue {
 				t.Fatalf("default value = %q, want %q", got, test.defaultValue)
+			}
+			config.SetConfigType("json")
+			configDocument := `{"` + test.key + `":"` + test.configValue + `"}`
+			if err := config.ReadConfig(strings.NewReader(configDocument)); err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			if got := config.GetString(test.key); got != test.configValue {
+				t.Fatalf("config file value = %q, want %q", got, test.configValue)
 			}
 			t.Setenv(test.environment, test.envValue)
 			if got := config.GetString(test.key); got != test.envValue {

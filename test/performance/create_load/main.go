@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 	"fast-sandbox/internal/observability"
 
 	"google.golang.org/grpc"
@@ -89,7 +89,7 @@ type config struct {
 	Commit                string
 	Environment           string
 	Runtime               string
-	InfraProfile          string
+	InfraRevision         string
 	ImageState            string
 	ImageAffinity         string
 	NetworkSlotState      string
@@ -101,7 +101,7 @@ type config struct {
 
 type dimensions struct {
 	Runtime            string `json:"runtime"`
-	InfraProfile       string `json:"infra_profile"`
+	InfraRevision      string `json:"infra_revision"`
 	ImageState         string `json:"image_state"`
 	ImageAffinity      string `json:"image_affinity"`
 	NetworkSlotState   string `json:"network_slot_state"`
@@ -180,15 +180,15 @@ type report struct {
 }
 
 type fastPathClient interface {
-	CreateSandbox(context.Context, *fastpathv1.CreateRequest, ...grpc.CallOption) (*fastpathv1.CreateResponse, error)
-	DeleteSandbox(context.Context, *fastpathv1.DeleteRequest, ...grpc.CallOption) (*fastpathv1.DeleteResponse, error)
-	ListSandboxes(context.Context, *fastpathv1.ListRequest, ...grpc.CallOption) (*fastpathv1.ListResponse, error)
+	CreateSandbox(context.Context, *fastpathv2.CreateRequest, ...grpc.CallOption) (*fastpathv2.SandboxInfo, error)
+	DeleteSandbox(context.Context, *fastpathv2.DeleteRequest, ...grpc.CallOption) (*fastpathv2.DeleteResponse, error)
+	ListSandboxes(context.Context, *fastpathv2.ListRequest, ...grpc.CallOption) (*fastpathv2.ListResponse, error)
 }
 
 type outcome struct {
 	latency   time.Duration
 	code      codes.Code
-	response  *fastpathv1.CreateResponse
+	response  *fastpathv2.SandboxInfo
 	success   bool
 	attempted bool
 }
@@ -231,7 +231,7 @@ func execute(ctx context.Context, arguments []string, output, errorOutput io.Wri
 	}
 	defer connection.Close()
 
-	report := runLoad(ctx, fastpathv1.NewFastPathServiceClient(connection), cfg)
+	report := runLoad(ctx, fastpathv2.NewFastPathServiceClient(connection), cfg)
 	encoder := json.NewEncoder(output)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
@@ -256,7 +256,7 @@ func parseConfig(arguments []string, errorOutput io.Writer) (config, error) {
 	var envs envList
 	var fastletMetricsURLs stringList
 	flags.StringVar(&cfg.Endpoint, "endpoint", "127.0.0.1:9090", "FastPath gRPC endpoint")
-	flags.StringVar(&cfg.Namespace, "namespace", "default", "Sandbox namespace")
+	flags.StringVar(&cfg.Namespace, "namespace", "fast-sandbox", "Sandbox namespace")
 	flags.StringVar(&cfg.Pool, "pool", "default-pool", "SandboxPool name")
 	flags.StringVar(&cfg.Image, "image", "docker.io/library/alpine:latest", "user image")
 	flags.StringVar(&cfg.Command, "command", "/bin/sh", "user command")
@@ -277,7 +277,7 @@ func parseConfig(arguments []string, errorOutput io.Writer) (config, error) {
 	flags.StringVar(&cfg.Commit, "commit", "unspecified", "tested commit SHA")
 	flags.StringVar(&cfg.Environment, "environment", "unspecified", "cluster/hardware/runtime version description")
 	flags.StringVar(&cfg.Runtime, "runtime", "unspecified", "runtime profile")
-	flags.StringVar(&cfg.InfraProfile, "infra-profile", "unspecified", "InfraProfile")
+	flags.StringVar(&cfg.InfraRevision, "infra-revision", "unspecified", "Pool Infra revision")
 	flags.StringVar(&cfg.ImageState, "image-state", "unspecified", "warm, cold, or unspecified")
 	flags.StringVar(&cfg.ImageAffinity, "image-affinity", "unspecified", "hit, miss, or unspecified")
 	flags.StringVar(&cfg.NetworkSlotState, "network-slot-state", "unspecified", "clean, recovered, or unspecified")
@@ -389,7 +389,7 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 				}
 				requestContext, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
 				requestStarted := time.Now()
-				response, err := client.CreateSandbox(requestContext, &fastpathv1.CreateRequest{
+				response, err := client.CreateSandbox(requestContext, &fastpathv2.CreateRequest{
 					Image: cfg.Image, PoolRef: cfg.Pool, Namespace: cfg.Namespace,
 					Command: []string{cfg.Command}, Args: append([]string(nil), cfg.Args...),
 					Envs: cloneMap(cfg.Envs), WorkingDir: cfg.WorkingDir,
@@ -451,7 +451,7 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 		Endpoint: cfg.Endpoint, Namespace: cfg.Namespace, Pool: cfg.Pool, Image: cfg.Image, RequestIDPrefix: cfg.RequestIDPrefix,
 		StartedAt: started.UTC(), FinishedAt: finished.UTC(), Duration: milliseconds(finished.Sub(started)),
 		Dimensions: dimensions{
-			Runtime: cfg.Runtime, InfraProfile: cfg.InfraProfile, ImageState: cfg.ImageState,
+			Runtime: cfg.Runtime, InfraRevision: cfg.InfraRevision, ImageState: cfg.ImageState,
 			ImageAffinity: cfg.ImageAffinity, NetworkSlotState: cfg.NetworkSlotState, CreatePath: cfg.CreatePath,
 			FastPathReplicas: cfg.FastPathReplicas, ControllerReplicas: cfg.ControllerReplicas, ProxyReplicas: cfg.ProxyReplicas,
 		},
@@ -485,7 +485,7 @@ func cleanup(ctx context.Context, client fastPathClient, cfg config, names []str
 	result := &cleanupReport{Attempted: len(unique), Codes: make(map[string]int)}
 	for name := range unique {
 		requestContext, requestCancel := context.WithTimeout(cleanupContext, cfg.RequestTimeout)
-		response, err := client.DeleteSandbox(requestContext, &fastpathv1.DeleteRequest{SandboxName: name, Namespace: cfg.Namespace})
+		response, err := client.DeleteSandbox(requestContext, &fastpathv2.DeleteRequest{SandboxName: name, Namespace: cfg.Namespace})
 		requestCancel()
 		code := grpcCode(err)
 		if err == nil && response != nil && response.Success {
@@ -529,7 +529,7 @@ func waitForCleanup(ctx context.Context, client fastPathClient, cfg config, name
 		httpClient = &http.Client{Timeout: min(cfg.RequestTimeout, 5*time.Second)}
 	}
 	for {
-		response, err := client.ListSandboxes(ctx, &fastpathv1.ListRequest{Namespace: cfg.Namespace})
+		response, err := client.ListSandboxes(ctx, &fastpathv2.ListRequest{Namespace: cfg.Namespace})
 		if err != nil {
 			return 0, fmt.Errorf("list Sandboxes while waiting for cleanup: %w", err)
 		}

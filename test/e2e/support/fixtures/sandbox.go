@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,7 +41,7 @@ func WithPollInterval(interval time.Duration) Option {
 	}
 }
 
-func (f *FixtureClient) CreateSandbox(ctx context.Context, namespace string, sandbox *apiv1alpha1.Sandbox) (*apiv1alpha1.Sandbox, error) {
+func (f *FixtureClient) CreateSandbox(ctx context.Context, namespace string, sandbox *apiv1alpha2.Sandbox) (*apiv1alpha2.Sandbox, error) {
 	if sandbox.Namespace == "" {
 		sandbox.Namespace = namespace
 	}
@@ -51,23 +51,23 @@ func (f *FixtureClient) CreateSandbox(ctx context.Context, namespace string, san
 	return sandbox, nil
 }
 
-func (f *FixtureClient) WaitForSandboxRuntimeState(ctx context.Context, name types.NamespacedName, states ...apiv1alpha1.ObservedState) (*apiv1alpha1.Sandbox, error) {
-	allowed := make(map[apiv1alpha1.ObservedState]struct{}, len(states))
+func (f *FixtureClient) WaitForSandboxRuntimeState(ctx context.Context, name types.NamespacedName, states ...apiv1alpha2.ObservedState) (*apiv1alpha2.Sandbox, error) {
+	allowed := make(map[apiv1alpha2.ObservedState]struct{}, len(states))
 	for _, state := range states {
 		allowed[state] = struct{}{}
 	}
-	return f.WaitForSandbox(ctx, name, func(sandbox *apiv1alpha1.Sandbox) bool {
+	return f.WaitForSandbox(ctx, name, func(sandbox *apiv1alpha2.Sandbox) bool {
 		_, ok := allowed[sandbox.Status.RuntimeState]
 		return ok
 	})
 }
 
-func (f *FixtureClient) WaitForSandbox(ctx context.Context, name types.NamespacedName, predicate func(*apiv1alpha1.Sandbox) bool) (*apiv1alpha1.Sandbox, error) {
+func (f *FixtureClient) WaitForSandbox(ctx context.Context, name types.NamespacedName, predicate func(*apiv1alpha2.Sandbox) bool) (*apiv1alpha2.Sandbox, error) {
 	ticker := time.NewTicker(f.pollInterval)
 	defer ticker.Stop()
 
 	for {
-		sandbox := &apiv1alpha1.Sandbox{}
+		sandbox := &apiv1alpha2.Sandbox{}
 		if err := f.client.Get(ctx, name, sandbox); err == nil {
 			if predicate(sandbox) {
 				return sandbox, nil
@@ -90,7 +90,7 @@ func (f *FixtureClient) EnsureSandboxRemainsUnassigned(ctx context.Context, name
 	defer ticker.Stop()
 
 	for {
-		sandbox := &apiv1alpha1.Sandbox{}
+		sandbox := &apiv1alpha2.Sandbox{}
 		if err := f.client.Get(checkCtx, name, sandbox); err != nil {
 			if checkCtx.Err() == context.DeadlineExceeded {
 				return nil
@@ -120,7 +120,7 @@ func (f *FixtureClient) WaitForSandboxDeleted(ctx context.Context, name types.Na
 	defer ticker.Stop()
 
 	for {
-		sandbox := &apiv1alpha1.Sandbox{}
+		sandbox := &apiv1alpha2.Sandbox{}
 		err := f.client.Get(ctx, name, sandbox)
 		if err != nil {
 			if errors.IsNotFound(err) {

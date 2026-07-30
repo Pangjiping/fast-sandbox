@@ -100,76 +100,77 @@
   <text x="86" y="213" class="mono node-title">fastctl / SDK</text>
   <text x="86" y="241" class="mono node-note">imperative API client</text>
 
-  <line x1="300" y1="220" x2="398" y2="220" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <line x1="300" y1="220" x2="360" y2="220" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
 
   <g transform="translate(-64 0)">
-  <rect x="472" y="168" width="382" height="104" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="494" y="202" class="mono node-title">fast-path × N / reconciler</text>
-  <text x="494" y="229" class="mono node-note">multi-active / leader-elected</text>
-  <text x="494" y="253" class="mono runtime">Top-K · image affinity / converge state</text>
+  <rect x="434" y="168" width="360" height="104" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="456" y="202" class="mono node-title">fast-path × N / reconciler</text>
+  <text x="456" y="229" class="mono node-note">multi-active / leader-elected</text>
+  <text x="456" y="253" class="mono runtime">Top-K · image affinity / converge state</text>
 
-  <rect x="916" y="154" width="460" height="142" rx="8" fill="#f8fbff" fill-opacity="0.58" stroke="#93c5fd" stroke-dasharray="4 4"/>
-  <text x="932" y="176" class="mono section" fill="#2563eb">Fastlet Pod</text>
+  <rect x="854" y="154" width="586" height="142" rx="8" fill="#f8fbff" fill-opacity="0.58" stroke="#93c5fd" stroke-dasharray="4 4"/>
+  <text x="870" y="176" class="mono section" fill="#2563eb">Fastlet Pod</text>
 
-  <line x1="854" y1="220" x2="922" y2="220" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <line x1="794" y1="220" x2="874" y2="220" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
 
-  <rect x="932" y="187" width="166" height="94" rx="5" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="1015" y="211" text-anchor="middle" class="mono sandbox-title">Fastlet</text>
-  <text x="1015" y="233" text-anchor="middle" class="mono sandbox-note">admission · runtime</text>
-  <text x="1015" y="252" text-anchor="middle" class="mono sandbox-note">network · image cache</text>
-  <text x="1015" y="271" text-anchor="middle" class="mono sandbox-note">Infra · recovery</text>
+  <rect x="884" y="187" width="166" height="94" rx="5" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="967" y="211" text-anchor="middle" class="mono sandbox-title">Fastlet</text>
+  <text x="967" y="233" text-anchor="middle" class="mono sandbox-note">admission · runtime</text>
+  <text x="967" y="252" text-anchor="middle" class="mono sandbox-note">network · image cache</text>
+  <text x="967" y="271" text-anchor="middle" class="mono sandbox-note">Infra · recovery</text>
 
-  <line x1="1098" y1="234" x2="1128" y2="234" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <line x1="1050" y1="234" x2="1134" y2="234" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
 
-  <rect x="1138" y="181" width="222" height="106" rx="5" fill="#fbfbfa" stroke="#93c5fd"/>
-  <text x="1152" y="204" class="mono sandbox-title">Sandbox</text>
-  <text x="1152" y="226" class="mono sandbox-note">user workload + Infra Component</text>
-  <text x="1152" y="249" class="mono control-detail">
+  <rect x="1144" y="181" width="276" height="106" rx="5" fill="#fbfbfa" stroke="#93c5fd"/>
+  <text x="1160" y="204" class="mono sandbox-title">Sandbox</text>
+  <text x="1160" y="226" class="mono sandbox-note">user workload + Infra Component</text>
+  <text x="1160" y="249" class="mono control-detail">
     <tspan>runc · gVisor · Kata · </tspan><tspan fill="#a1a1aa" opacity="0.72">BoxLite</tspan>
   </text>
-  <text x="1152" y="271" class="mono control-detail">network slot · private network</text>
+  <text x="1160" y="271" class="mono control-detail">network slot · private network</text>
   </g>
 
   <text x="64" y="329" class="mono section">02 / data plane</text>
   <line x1="64" y1="346" x2="1376" y2="346" stroke="#d4d4d0" stroke-dasharray="3 6"/>
 
   <rect x="64" y="386" width="236" height="96" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="86" y="426" class="mono node-title">fastctl / SDK</text>
-  <text x="86" y="454" class="mono node-note">component-aware client</text>
+  <text x="86" y="426" class="mono node-title">fastctl / SDKs</text>
+  <text x="86" y="454" class="mono node-note">native · OpenSandbox</text>
 
   <line x1="300" y1="434" x2="360" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
 
   <g transform="translate(-40 0)">
   <rect x="410" y="386" width="250" height="96" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="432" y="426" class="mono node-title">Sandbox Proxy</text>
-  <text x="432" y="454" class="mono node-note">cluster entry</text>
+  <text x="432" y="420" class="mono node-title">Data-plane entry</text>
+  <text x="432" y="447" class="mono node-note">Sandbox Proxy · central</text>
+  <text x="432" y="469" class="mono node-note">OpenSandbox · direct</text>
   </g>
 
   <g transform="translate(-64 0)">
-  <rect x="700" y="360" width="676" height="150" rx="8" fill="#faf8ff" fill-opacity="0.45" stroke="#c4b5fd" stroke-dasharray="4 5"/>
-  <text x="718" y="379" class="mono section" fill="#7c3aed">Fastlet Pod</text>
+  <rect x="724" y="360" width="716" height="142" rx="8" fill="#faf8ff" fill-opacity="0.45" stroke="#c4b5fd" stroke-dasharray="4 5"/>
+  <text x="744" y="379" class="mono section" fill="#7c3aed">Fastlet Pod</text>
 
-  <line x1="684" y1="434" x2="714" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <line x1="684" y1="434" x2="744" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
 
-  <rect x="724" y="386" width="250" height="96" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
-  <text x="746" y="426" class="mono node-title">Fastlet Proxy</text>
-  <text x="746" y="454" class="mono node-note">pod-local routing</text>
+  <rect x="754" y="394" width="230" height="80" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="776" y="426" class="mono node-title">Fastlet Proxy</text>
+  <text x="776" y="454" class="mono node-note">pod-local named routing</text>
 
-  <line x1="974" y1="434" x2="1018" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <line x1="984" y1="434" x2="1074" y2="434" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
 
-  <rect x="1028" y="374" width="332" height="100" rx="7" fill="#f8fbff" stroke="#93c5fd" stroke-dasharray="4 4"/>
-  <text x="1044" y="394" class="mono section" fill="#2563eb">Sandbox · private network</text>
+  <rect x="1084" y="374" width="336" height="100" rx="7" fill="#f8fbff" stroke="#93c5fd" stroke-dasharray="4 4"/>
+  <text x="1100" y="394" class="mono section" fill="#2563eb">Sandbox · private network</text>
 
-  <rect x="1042" y="405" width="126" height="56" rx="5" fill="#fbfbfa" stroke="#cbd5e1"/>
-  <text x="1105" y="429" text-anchor="middle" class="mono sandbox-title">user workload</text>
-  <text x="1105" y="449" text-anchor="middle" class="mono sandbox-note">OCI image</text>
+  <rect x="1098" y="405" width="130" height="56" rx="5" fill="#fbfbfa" stroke="#cbd5e1"/>
+  <text x="1163" y="429" text-anchor="middle" class="mono sandbox-title">user workload</text>
+  <text x="1163" y="449" text-anchor="middle" class="mono sandbox-note">OCI image</text>
 
-  <rect x="1178" y="405" width="170" height="56" rx="5" fill="#fbfbfa" stroke="#c4b5fd"/>
-  <text x="1263" y="429" text-anchor="middle" class="mono sandbox-title">Infra Component</text>
-  <text x="1263" y="449" text-anchor="middle" class="mono sandbox-note">execd / custom / ...</text>
+  <rect x="1242" y="405" width="164" height="56" rx="5" fill="#fbfbfa" stroke="#c4b5fd"/>
+  <text x="1324" y="429" text-anchor="middle" class="mono sandbox-title">Infra Component</text>
+  <text x="1324" y="449" text-anchor="middle" class="mono sandbox-note">execd · envd · custom</text>
 
-  <text x="849" y="498" text-anchor="middle" class="mono control-detail">ingress · transparent / no translation</text>
-  <text x="1195" y="498" text-anchor="middle" class="mono control-detail">egress · private CIDR → MASQUERADE → Pod network</text>
+  <text x="869" y="494" text-anchor="middle" class="mono control-detail">ingress · transparent / no translation</text>
+  <text x="1252" y="494" text-anchor="middle" class="mono control-detail">egress · private CIDR → MASQUERADE → Pod network</text>
   </g>
 
   <rect x="64" y="548" width="1312" height="142" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -51,8 +51,8 @@ func TestBasicLifecycleRecreateSameName(t *testing.T) {
 				}
 
 				runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
-				assignedSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-					return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+				assignedSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+					return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 				})
 				cancelRunWait()
 				if err != nil {
@@ -120,8 +120,8 @@ func TestDeleteSelfExitedWorkloadIsIdempotent(t *testing.T) {
 			}
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
-			_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			cancelRunWait()
 			if err != nil {
@@ -153,8 +153,8 @@ func TestDeleteSelfExitedWorkloadIsIdempotent(t *testing.T) {
 				t.Fatalf("create replacement sandbox: %v", err)
 			}
 			replacementCtx, cancelReplacementWait := context.WithTimeout(ctx, 60*time.Second)
-			_, err = fixture.WaitForSandbox(replacementCtx, types.NamespacedName{Name: replacement.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			_, err = fixture.WaitForSandbox(replacementCtx, types.NamespacedName{Name: replacement.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			cancelReplacementWait()
 			if err != nil {
@@ -168,23 +168,23 @@ func TestDeleteSelfExitedWorkloadIsIdempotent(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func newLifecyclePool(namespace, name string, min, max int32) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func newLifecyclePool(namespace, name string, min, max int32) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "SandboxPool",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{
 				PoolMin: min,
 				PoolMax: max,
 			},
 			MaxSandboxesPerPod: 5,
-			Runtime:            apiv1alpha1.RuntimeContainer,
+			Runtime:            apiv1alpha2.RuntimeContainer,
 			SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 			FastletTemplate: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -198,17 +198,17 @@ func newLifecyclePool(namespace, name string, min, max int32) *apiv1alpha1.Sandb
 	}
 }
 
-func newSleepSandbox(namespace, name, pool string) *apiv1alpha1.Sandbox {
-	return &apiv1alpha1.Sandbox{
+func newSleepSandbox(namespace, name, pool string) *apiv1alpha2.Sandbox {
+	return &apiv1alpha2.Sandbox{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "Sandbox",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image:   "docker.io/library/alpine:latest",
 			Command: []string{"/bin/sleep", "3600"},
 			PoolRef: pool,

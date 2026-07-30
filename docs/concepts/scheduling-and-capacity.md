@@ -8,7 +8,7 @@ One SandboxPool fixes:
 
 - runtime;
 - Sandbox CPU, memory, and PID limits;
-- InfraProfile;
+- an immutable compiled Infra Component revision;
 - `maxSandboxesPerPod`;
 - warm images;
 - Fastlet Pod template;
@@ -21,7 +21,7 @@ Runtime, resource, and Infra profiles are immutable because changing them would 
 Every Fast-Path and Controller replica maintains its own Registry from:
 
 1. Kubernetes watches for Pod membership, Pool labels, assignments, Pod UID changes, and lifecycle intent;
-2. low-frequency jittered Fastlet heartbeats for runtime capability, admission inventory, phase counts, image-cache state, and cache revision;
+2. low-frequency jittered Fastlet heartbeats for runtime capability, admission inventory, phase counts, image-cache state, Infra revision, and Registry revision;
 3. immediate feedback from local placement attempts.
 
 Watches provide topology changes without full polling. Heartbeats refresh runtime-local facts and repair missed or stale observations.
@@ -32,7 +32,7 @@ Registries are eventually convergent by design. They do not coordinate through a
 
 The Orchestrator:
 
-1. filters by namespace, Pool, readiness, runtime profile, Infra profile, and stale heartbeat;
+1. filters by namespace, Pool, readiness, runtime profile, Infra revision, Registry revision, and stale heartbeat;
 2. requires a positive locally observed available-slot count;
 3. prioritizes image-cache affinity;
 4. ranks by load and a stable tie-breaker;

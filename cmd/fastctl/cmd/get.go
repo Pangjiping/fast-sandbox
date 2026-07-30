@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -33,7 +33,7 @@ var getCmd = &cobra.Command{
 		}
 
 		klog.V(4).InfoS("Sending GetSandbox request", "sandboxName", sandboxName, "namespace", namespace)
-		resp, err := client.GetSandbox(context.Background(), &fastpathv1.GetRequest{
+		resp, err := client.GetSandbox(context.Background(), &fastpathv2.GetRequest{
 			SandboxName: sandboxName,
 			Namespace:   namespace,
 		})
@@ -51,7 +51,7 @@ var getCmd = &cobra.Command{
 			// Default YAML-like output
 			y, _ := yaml.Marshal(resp)
 			fmt.Print(string(y))
-			fmt.Printf("Age: %s\n", time.Since(time.Unix(resp.CreatedAt, 0)).Round(time.Second))
+			fmt.Printf("Age: %s\n", time.Since(time.Unix(resp.CreatedAtUnixSeconds, 0)).Round(time.Second))
 		}
 	},
 }

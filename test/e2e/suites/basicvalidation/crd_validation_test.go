@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
 	corev1 "k8s.io/api/core/v1"
@@ -104,19 +104,19 @@ func TestSandboxCRDValidation(t *testing.T) {
 				}
 			}
 
-			validSandbox := &apiv1alpha1.Sandbox{
+			validSandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-valid-sandbox",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:                  "nginx:alpine",
 					PoolRef:                "test-pool",
-					FailurePolicy:          apiv1alpha1.FailurePolicyManual,
+					FailurePolicy:          apiv1alpha2.FailurePolicyManual,
 					RecoveryTimeoutSeconds: 60,
 				},
 			}
@@ -134,8 +134,8 @@ func TestSandboxCRDValidation(t *testing.T) {
 func sandboxObject(namespace, name string, spec map[string]any) *unstructured.Unstructured {
 	sb := &unstructured.Unstructured{}
 	sb.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   apiv1alpha1.GroupVersion.Group,
-		Version: apiv1alpha1.GroupVersion.Version,
+		Group:   apiv1alpha2.GroupVersion.Group,
+		Version: apiv1alpha2.GroupVersion.Version,
 		Kind:    "Sandbox",
 	})
 	sb.SetNamespace(namespace)

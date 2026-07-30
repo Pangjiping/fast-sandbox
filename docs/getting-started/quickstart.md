@@ -72,12 +72,10 @@ bin/fastctl get quickstart-execd-sandbox
 bin/fastctl diagnostics sandbox quickstart-execd-sandbox
 ```
 
-Create returns at `RuntimeReady`. The Controller projects CRD status and prepares the data plane asynchronously. Wait before calling Execd:
-
-```bash
-kubectl wait --for=jsonpath='{.status.dataPlaneState}'=Ready \
-  sandbox/quickstart-execd-sandbox --timeout=60s
-```
+Create returns at `RuntimeReady`. The Controller projects CRD status and
+prepares the data plane asynchronously. The `fastctl opensandbox` adapter waits
+directly on the assigned Fastlet when it resolves `execd`, so it does not
+depend on status watch latency or require a separate `kubectl wait`.
 
 ## Execute a command
 
@@ -135,10 +133,11 @@ gVisor setup installs and validates runsc. Kata QEMU and Cloud Hypervisor requir
 Fast-Path is optional. The Controller can create a Sandbox directly from a CRD:
 
 ```yaml
-apiVersion: sandbox.fast.io/v1alpha1
+apiVersion: sandbox.fast.io/v1alpha2
 kind: Sandbox
 metadata:
   name: my-declarative-sandbox
+  namespace: fast-sandbox
 spec:
   image: docker.io/library/alpine:latest
   poolRef: quickstart-execd-pool
@@ -149,14 +148,15 @@ spec:
 
 ```bash
 kubectl apply -f sandbox.yaml
-kubectl get sandbox my-declarative-sandbox -w
+kubectl get sandbox my-declarative-sandbox -n fast-sandbox -w
 ```
 
 ## Troubleshooting
 
 ### The host cannot resolve the proxy Service
 
-An address such as `fast-sandbox-proxy.default.svc` is an in-cluster Service.
+An address such as
+`fast-sandbox-proxy.fast-sandbox-system.svc` is an in-cluster Service.
 Keep `make quickstart-forward` running and configure its local endpoints:
 
 ```bash
@@ -191,7 +191,9 @@ kubectl get sandbox quickstart-execd-sandbox \
   -o jsonpath='{.status.runtimeState}{" "}{.status.dataPlaneState}{"\n"}'
 ```
 
-Wait for `dataPlaneState=Ready` before exec and file operations.
+The `fastctl opensandbox` adapter waits for `execd` directly. A non-Ready
+projection indicates that component health or local route publication should
+be inspected; callers do not need to add a separate CRD wait.
 
 ### Setup takes a long time
 
@@ -199,8 +201,8 @@ Inspect the cluster before rerunning setup:
 
 ```bash
 kubectl get pods -A -o wide
-kubectl get sandboxpool,sandbox
-kubectl get deployment fast-sandbox-controller
+kubectl get sandboxpool,sandbox -n fast-sandbox
+kubectl get deployment -n fast-sandbox-system
 ```
 
 See [Testing](../guides/testing.md) for automated validation and runtime prerequisites.

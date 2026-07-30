@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -50,16 +50,16 @@ func TestAutoExpiry(t *testing.T) {
 			expiryTime := metav1.NewTime(time.Now().Add(90 * time.Second))
 
 			// Create sandbox with expiry
-			sandbox := &apiv1alpha1.Sandbox{
+			sandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-expiry-test",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:      "docker.io/library/alpine:latest",
 					Command:    []string{"/bin/sleep", "3600"},
 					PoolRef:    pool.Name,
@@ -73,8 +73,8 @@ func TestAutoExpiry(t *testing.T) {
 			// Wait for sandbox to be assigned first
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
-			assignedSandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-expiry-test", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			assignedSandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-expiry-test", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for sandbox to be assigned: %v", err)
@@ -87,12 +87,12 @@ func TestAutoExpiry(t *testing.T) {
 			expireWaitCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 			defer cancel()
 
-			expiredSandbox, err := fixture.WaitForSandbox(expireWaitCtx, types.NamespacedName{Name: "sb-expiry-test", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.HasCondition(apiv1alpha1.SandboxConditionRuntimeReady, metav1.ConditionFalse, "Expired")
+			expiredSandbox, err := fixture.WaitForSandbox(expireWaitCtx, types.NamespacedName{Name: "sb-expiry-test", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.HasCondition(apiv1alpha2.SandboxConditionRuntimeReady, metav1.ConditionFalse, "Expired")
 			})
 			if err != nil {
 				// Log current state for debugging
-				currentSandbox := &apiv1alpha1.Sandbox{}
+				currentSandbox := &apiv1alpha2.Sandbox{}
 				if getErr := k8sClient.Get(ctx, types.NamespacedName{Name: "sb-expiry-test", Namespace: namespace}, currentSandbox); getErr == nil {
 					t.Logf("Sandbox state at timeout: runtimeState=%s, assignment=%+v, uid=%s",
 						currentSandbox.Status.RuntimeState, currentSandbox.Status.Assignment, currentSandbox.UID)
@@ -101,7 +101,7 @@ func TestAutoExpiry(t *testing.T) {
 			}
 
 			// Verify CRD is preserved
-			if !expiredSandbox.Status.HasCondition(apiv1alpha1.SandboxConditionRuntimeReady, metav1.ConditionFalse, "Expired") {
+			if !expiredSandbox.Status.HasCondition(apiv1alpha2.SandboxConditionRuntimeReady, metav1.ConditionFalse, "Expired") {
 				t.Fatalf("expected Expired RuntimeReady condition, got %+v", expiredSandbox.Status.Conditions)
 			}
 			t.Log("✓ Sandbox expired, CRD preserved")
@@ -163,7 +163,7 @@ func TestMemoryLeak(t *testing.T) {
 			t.Log("Deleting 3 sandboxes...")
 			for i := 1; i <= 3; i++ {
 				name := types.NamespacedName{Name: sandboxName("sb-mem-%d", i), Namespace: namespace}
-				sandbox := &apiv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace}}
+				sandbox := &apiv1alpha2.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace}}
 				if err := k8sClient.Delete(ctx, sandbox); err != nil && !errors.IsNotFound(err) {
 					t.Logf("Warning: delete sandbox sb-mem-%d: %v", i, err)
 				}
@@ -182,7 +182,7 @@ func TestMemoryLeak(t *testing.T) {
 			// Wait for new sandbox to be assigned
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
-			if _, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-mem-new", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
+			if _, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-mem-new", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
 				return sb.Status.Assignment != nil
 			}); err != nil {
 				t.Fatalf("new sandbox not assigned, registry may have issues: %v", err)
@@ -244,8 +244,8 @@ func TestControlledRecovery(t *testing.T) {
 			// Wait for sandbox to be running
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
-			runningSandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			runningSandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for sandbox to be running: %v", err)
@@ -259,7 +259,7 @@ func TestControlledRecovery(t *testing.T) {
 			resetTime := metav1.Now()
 
 			// Get fresh copy for update
-			resetSandbox := &apiv1alpha1.Sandbox{}
+			resetSandbox := &apiv1alpha2.Sandbox{}
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, resetSandbox); err != nil {
 				t.Fatalf("get sandbox for reset: %v", err)
 			}
@@ -272,7 +272,7 @@ func TestControlledRecovery(t *testing.T) {
 			// Give controller more time to process reset request
 			resetWaitCtx, cancel := context.WithTimeout(ctx, 90*time.Second) // Increased from 60s
 			defer cancel()
-			_, err = fixture.WaitForSandbox(resetWaitCtx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
+			_, err = fixture.WaitForSandbox(resetWaitCtx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
 				if sb.Status.AcceptedResetRevision == nil {
 					return false
 				}
@@ -282,7 +282,7 @@ func TestControlledRecovery(t *testing.T) {
 			})
 			if err != nil {
 				// Log current state for debugging
-				currentSandbox := &apiv1alpha1.Sandbox{}
+				currentSandbox := &apiv1alpha2.Sandbox{}
 				if getErr := k8sClient.Get(ctx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, currentSandbox); getErr == nil {
 					t.Logf("Sandbox state at timeout: runtimeState=%s, acceptedResetRevision=%v",
 						currentSandbox.Status.RuntimeState, currentSandbox.Status.AcceptedResetRevision)
@@ -294,14 +294,14 @@ func TestControlledRecovery(t *testing.T) {
 			// Test 2: AutoRecreate
 			t.Log("Testing AutoRecreate mechanism...")
 			// Use retry logic to handle concurrent modifications
-			var autoRecreateSandbox *apiv1alpha1.Sandbox
+			var autoRecreateSandbox *apiv1alpha2.Sandbox
 			updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				autoRecreateSandbox = &apiv1alpha1.Sandbox{}
+				autoRecreateSandbox = &apiv1alpha2.Sandbox{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, autoRecreateSandbox); err != nil {
 					return err
 				}
 				// Set AutoRecreate policy
-				autoRecreateSandbox.Spec.FailurePolicy = apiv1alpha1.FailurePolicyAutoRecreate
+				autoRecreateSandbox.Spec.FailurePolicy = apiv1alpha2.FailurePolicyAutoRecreate
 				autoRecreateSandbox.Spec.RecoveryTimeoutSeconds = 15
 				return k8sClient.Update(ctx, autoRecreateSandbox)
 			})
@@ -312,7 +312,7 @@ func TestControlledRecovery(t *testing.T) {
 			time.Sleep(2 * time.Second)
 
 			// Get current assigned pod
-			currentSandbox := &apiv1alpha1.Sandbox{}
+			currentSandbox := &apiv1alpha2.Sandbox{}
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, currentSandbox); err != nil {
 				t.Fatalf("get sandbox: %v", err)
 			}
@@ -333,8 +333,8 @@ func TestControlledRecovery(t *testing.T) {
 			recreateWaitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
 
-			_, err = fixture.WaitForSandbox(recreateWaitCtx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.Assignment.FastletName != oldPod && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			_, err = fixture.WaitForSandbox(recreateWaitCtx, types.NamespacedName{Name: "sb-recovery", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.Assignment.FastletName != oldPod && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for AutoRecreate to reschedule the Sandbox: %v", err)
@@ -377,16 +377,16 @@ func TestPodExistence(t *testing.T) {
 			}
 
 			// Create sandbox
-			sandbox := &apiv1alpha1.Sandbox{
+			sandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-existence",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:   "docker.io/library/alpine:latest",
 					Command: []string{"/bin/sleep", "3600"},
 					PoolRef: pool.Name,
@@ -399,8 +399,8 @@ func TestPodExistence(t *testing.T) {
 			// Wait for sandbox to be running
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
-			runningSandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-existence", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			runningSandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: "sb-existence", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for sandbox to be running: %v", err)
@@ -422,7 +422,7 @@ func TestPodExistence(t *testing.T) {
 			time.Sleep(35 * time.Second)
 
 			// Check sandbox status
-			existingSandbox := &apiv1alpha1.Sandbox{}
+			existingSandbox := &apiv1alpha2.Sandbox{}
 			err = k8sClient.Get(ctx, types.NamespacedName{Name: "sb-existence", Namespace: namespace}, existingSandbox)
 			if err != nil {
 				if errors.IsNotFound(err) {
@@ -435,9 +435,9 @@ func TestPodExistence(t *testing.T) {
 			// Sandbox exists, check its state
 			state := existingSandbox.Status.RuntimeState
 			switch state {
-			case apiv1alpha1.ObservedStateFailed, apiv1alpha1.ObservedStateUnavailable, apiv1alpha1.ObservedStateUnknown:
+			case apiv1alpha2.ObservedStateFailed, apiv1alpha2.ObservedStateUnavailable, apiv1alpha2.ObservedStateUnknown:
 				t.Logf("✓ Sandbox in %s state, orphan was identified", state)
-			case apiv1alpha1.ObservedStateReady:
+			case apiv1alpha2.ObservedStateReady:
 				newPod := ""
 				if existingSandbox.Status.Assignment != nil {
 					newPod = existingSandbox.Status.Assignment.FastletName
@@ -458,23 +458,23 @@ func TestPodExistence(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func createFaultPool(namespace, name string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func createFaultPool(namespace, name string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "SandboxPool",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{
 				PoolMin: 1,
 				PoolMax: 2,
 			},
 			MaxSandboxesPerPod: 5,
-			Runtime:            apiv1alpha1.RuntimeContainer,
+			Runtime:            apiv1alpha2.RuntimeContainer,
 			SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 			FastletTemplate: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -488,18 +488,18 @@ func createFaultPool(namespace, name string) *apiv1alpha1.SandboxPool {
 	}
 }
 
-func createFaultSandbox(namespace, namePattern, pool string, index int) *apiv1alpha1.Sandbox {
+func createFaultSandbox(namespace, namePattern, pool string, index int) *apiv1alpha2.Sandbox {
 	name := sandboxName(namePattern, index)
-	return &apiv1alpha1.Sandbox{
+	return &apiv1alpha2.Sandbox{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "Sandbox",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image:   "docker.io/library/alpine:latest",
 			Command: []string{"/bin/sleep", "60"},
 			PoolRef: pool,

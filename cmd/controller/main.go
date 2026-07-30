@@ -11,9 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
-	infracatalog "fast-sandbox/internal/catalog/infra"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	"fast-sandbox/internal/controlplane"
 	"fast-sandbox/internal/controlplane/fastletcontrol"
@@ -40,7 +39,7 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(apiv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(apiv1alpha2.AddToScheme(scheme))
 }
 
 func main() {
@@ -74,7 +73,7 @@ func main() {
 	flag.StringVar(&routeVerifyPublicKey, "route-verify-public-key", os.Getenv("FAST_SANDBOX_ROUTE_VERIFY_PUBLIC_KEY"), "Comma-separated base64 Ed25519 public keys injected into data-plane proxies.")
 	flag.StringVar(&routeSigningPrivateKey, "route-signing-private-key", os.Getenv("FAST_SANDBOX_ROUTE_SIGNING_PRIVATE_KEY"), "Base64 Ed25519 seed/private key used only by FastPath.")
 	flag.DurationVar(&routeCredentialTTL, "route-credential-ttl", 5*time.Minute, "Lifetime of a Sandbox route credential.")
-	flag.StringVar(&sandboxProxyBaseURL, "sandbox-proxy-base-url", envOrDefault("FAST_SANDBOX_PROXY_BASE_URL", "http://fast-sandbox-proxy.default.svc:8080"), "Client-visible Sandbox Proxy base URL.")
+	flag.StringVar(&sandboxProxyBaseURL, "sandbox-proxy-base-url", envOrDefault("FAST_SANDBOX_PROXY_BASE_URL", "http://fast-sandbox-proxy.fast-sandbox-system.svc:8080"), "Client-visible Sandbox Proxy base URL.")
 	flag.Parse()
 
 	role, err := controlplane.ParseRole(roleValue)
@@ -129,7 +128,7 @@ func main() {
 		klog.ErrorS(err, "Create controller-runtime manager")
 		os.Exit(1)
 	}
-	if err := manager.GetFieldIndexer().IndexField(context.Background(), &apiv1alpha1.Sandbox{}, fastpath.SandboxUIDIndexField, func(object client.Object) []string {
+	if err := manager.GetFieldIndexer().IndexField(context.Background(), &apiv1alpha2.Sandbox{}, fastpath.SandboxUIDIndexField, func(object client.Object) []string {
 		if object.GetUID() == "" {
 			return nil
 		}
@@ -146,10 +145,9 @@ func main() {
 
 	registry := placement.NewInMemoryRegistry()
 	catalog := runtimecatalog.Builtin()
-	infraCatalog := infracatalog.Builtin()
 	fastletClient := fastletapi.NewFastletClient(fastletPort)
 	orchestrator := &orchestration.Orchestrator{
-		Client: durableClient, Registry: registry, FastletClient: fastletClient, Catalog: catalog, InfraCatalog: infraCatalog,
+		Client: durableClient, Registry: registry, FastletClient: fastletClient, Catalog: catalog,
 	}
 
 	if role.RunsControllers() {
@@ -160,7 +158,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&reconciler.SandboxPoolReconciler{
-			Client: manager.GetClient(), DurableReader: durableClient, Scheme: manager.GetScheme(), Registry: registry, Catalog: catalog, InfraCatalog: infraCatalog,
+			Client: manager.GetClient(), DurableReader: durableClient, Scheme: manager.GetScheme(), Registry: registry, Catalog: catalog,
 			FastletDrainer: fastletClient, DrainTimeout: fastletDrainTimeout,
 			FastletProxyImage: fastletProxyImage, BoxLiteRuntimeImage: boxLiteRuntimeImage, RouteVerifyPublicKey: routeVerifyPublicKey,
 		}).SetupWithManager(manager); err != nil {
@@ -203,7 +201,7 @@ func main() {
 			os.Exit(1)
 		}
 		grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor("fastpath")))
-		fastpathv1.RegisterFastPathServiceServer(grpcServer, &fastpath.Server{
+		fastpathv2.RegisterFastPathServiceServer(grpcServer, &fastpath.Server{
 			K8sClient: durableClient, RouteCache: manager.GetClient(), Orchestrator: orchestrator,
 			DiagnosticsClient: fastletClient,
 			CredentialIssuer:  credentialIssuer, SandboxProxyBaseURL: sandboxProxyBaseURL,

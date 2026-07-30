@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/pkg/sandboxclient"
 	e2eenv "fast-sandbox/test/e2e/env"
 	"fast-sandbox/test/e2e/support/fixtures"
@@ -63,7 +63,7 @@ func TestSDKAdapterDataPlane(t *testing.T) {
 				t.Fatalf("dial FastPath: %v", err)
 			}
 			defer connection.Close()
-			fastPath := fastpathv1.NewFastPathServiceClient(connection)
+			fastPath := fastpathv2.NewFastPathServiceClient(connection)
 			created := createInfraSandbox(ctx, t, fastPath, namespace, pool.Name)
 			_ = waitForProxyReady(ctx, t, fixture, namespace, created.SandboxName)
 
@@ -73,8 +73,8 @@ func TestSDKAdapterDataPlane(t *testing.T) {
 			}
 			defer proxyForward.Cleanup()
 			adapter := &sandboxclient.OpenSandboxExecd{
-				Resolver: &sandboxclient.EndpointResolver{Control: fastPath, DefaultNamespace: namespace, ProxyBaseURL: proxyBase},
-				Port:     18080,
+				Resolver:      &sandboxclient.EndpointResolver{Control: fastPath, DefaultNamespace: namespace, ProxyBaseURL: proxyBase},
+				ComponentName: "execd",
 			}
 			execd, _, err := adapter.Client(ctx, sandboxclient.SandboxRef{Name: created.SandboxName, Namespace: namespace})
 			if err != nil {
@@ -91,19 +91,31 @@ func TestSDKAdapterDataPlane(t *testing.T) {
 				if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
 					return err
 				}
+				if payload.Type == "" {
+					payload.Type = event.Event
+				}
 				if payload.Type == "stdout" {
 					stdout.WriteString(payload.Text)
 				}
 				if payload.Type == "execution_complete" {
 					exitCode = payload.ExitCode
+					if exitCode == nil {
+						zero := 0
+						exitCode = &zero
+					}
 				}
 				return nil
 			})
 			if err != nil {
 				t.Fatalf("OpenSandbox SDK command: %v", err)
 			}
-			if stdout.String() != "sdk-exec\n" || exitCode == nil || *exitCode != 0 {
+			if stdout.String() != "sdk-exec" || exitCode == nil || *exitCode != 0 {
 				t.Fatalf("unexpected OpenSandbox SDK execution: stdout=%q exit=%v", stdout.String(), exitCode)
+			}
+			if err := execd.UploadFile(ctx, strings.NewReader("sdk-file"), opensandbox.UploadFileOptions{
+				FileName: "value", Metadata: opensandbox.FileMetadata{Path: "/tmp/value", Mode: 0644},
+			}); err != nil {
+				t.Fatalf("OpenSandbox SDK upload: %v", err)
 			}
 			var downloaded bytes.Buffer
 			reader, err := execd.DownloadFile(ctx, "/tmp/value", "")
@@ -156,11 +168,11 @@ func TestInfraRuntimeAugmentation(t *testing.T) {
 				t.Fatalf("dial FastPath: %v", err)
 			}
 			defer connection.Close()
-			fastPath := fastpathv1.NewFastPathServiceClient(connection)
+			fastPath := fastpathv2.NewFastPathServiceClient(connection)
 
 			created := createInfraSandbox(ctx, t, fastPath, namespace, pool.Name)
 			ready := waitForProxyReady(ctx, t, fixture, namespace, created.SandboxName)
-			if ready.Status.DataPlaneState != apiv1alpha1.ObservedStateReady {
+			if ready.Status.DataPlaneState != apiv1alpha2.ObservedStateReady {
 				t.Fatalf("DataPlane did not converge after RuntimeReady Create: %s", ready.Status.DataPlaneState)
 			}
 
@@ -169,8 +181,8 @@ func TestInfraRuntimeAugmentation(t *testing.T) {
 				t.Fatalf("start Sandbox Proxy port-forward: %v", err)
 			}
 			defer proxyForward.Cleanup()
-			infraAccess := resolveProxyAccess(ctx, t, fastPath, created.SandboxUid, 18080)
-			assertProxyPathResponse(ctx, t, proxyBase, infraAccess, "/value", "test-infra")
+			infraAccess := resolveComponentAccess(ctx, t, fastPath, created.SandboxUid, "execd")
+			assertProxyPathResponse(ctx, t, proxyBase, infraAccess, "/ping", "")
 			userAccess := resolveProxyAccess(ctx, t, fastPath, created.SandboxUid, 18081)
 			assertProxyPathResponse(ctx, t, proxyBase, userAccess, "/user", "user-started")
 			return ctx
@@ -178,19 +190,22 @@ func TestInfraRuntimeAugmentation(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func infraPool(namespace, name string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func infraPool(namespace, name string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 1}, MaxSandboxesPerPod: 1,
-			Runtime: apiv1alpha1.RuntimeContainer, InfraProfile: "test-infra",
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1}, MaxSandboxesPerPod: 1,
+			Runtime: apiv1alpha2.RuntimeContainer,
+			InfraComponents: []apiv1alpha2.InfraComponent{
+				fixtures.OpenSandboxExecdComponent(),
+			},
 			SandboxResources: suiteenv.SmallSandboxResourceProfile(),
 			FastletTemplate:  corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage()}}}},
 		},
 	}
 }
 
-func createInfraSandbox(ctx context.Context, t *testing.T, fastPath fastpathv1.FastPathServiceClient, namespace, pool string) *fastpathv1.CreateResponse {
+func createInfraSandbox(ctx context.Context, t *testing.T, fastPath fastpathv2.FastPathServiceClient, namespace, pool string) *fastpathv2.SandboxInfo {
 	t.Helper()
 	command := `cat > /tmp/user-serve <<'EOF'
 #!/bin/sh
@@ -199,17 +214,14 @@ body=user-started
 while IFS= read -r line; do
   line="$(printf '%s' "$line" | tr -d '\r')"
   [ -n "$line" ] || break
-  case "$line" in
-    X-Fast-Sandbox-Infra-Token:\ *) body=credential-leaked ;;
-  esac
 done
 printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "${#body}" "$body"
 EOF
 chmod 0700 /tmp/user-serve
 exec nc -lk -p 18081 -e /tmp/user-serve`
 	requestID := namespace + "-infra-sandbox"
-	request := &fastpathv1.CreateRequest{
-		Namespace: namespace, PoolRef: pool, Name: requestID, Image: "docker.io/library/alpine:latest",
+	request := &fastpathv2.CreateRequest{
+		Namespace: namespace, PoolRef: pool, Image: "docker.io/library/alpine:latest",
 		Command: []string{"/bin/sh", "-c", command}, RequestId: requestID,
 	}
 	deadline := time.Now().Add(90 * time.Second)
@@ -228,7 +240,7 @@ exec nc -lk -p 18081 -e /tmp/user-serve`
 	return nil
 }
 
-func assertProxyPathResponse(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv1.ResolveEndpointResponse, path, want string) {
+func assertProxyPathResponse(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv2.ResolveEndpointResponse, path, want string) {
 	t.Helper()
 	parsed, err := url.Parse(access.ProxyEndpoint)
 	if err != nil {

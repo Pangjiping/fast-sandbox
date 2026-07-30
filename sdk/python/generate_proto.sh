@@ -6,10 +6,10 @@ output="$repo_root/sdk/python/fast_sandbox/proto"
 python_bin="${PYTHON:-python3}"
 
 "$python_bin" -m grpc_tools.protoc \
-  -I "$repo_root/api/proto/v1" \
+  -I "$repo_root/api/proto/v2" \
   --python_out="$output" \
   --grpc_python_out="$output" \
-  "$repo_root/api/proto/v1/fastpath.proto"
+  "$repo_root/api/proto/v2/fastpath.proto"
 
 "$python_bin" - "$output/fastpath_pb2_grpc.py" <<'PY'
 from pathlib import Path

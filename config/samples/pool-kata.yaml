@@ -1,11 +1,29 @@
-apiVersion: sandbox.fast.io/v1alpha1
+apiVersion: sandbox.fast.io/v1alpha2
 kind: SandboxPool
 metadata:
   name: kata-clh-execd-pool
-  namespace: default
+  namespace: fast-sandbox
 spec:
   runtime: kata-clh
-  infraProfile: opensandbox-execd-quickstart
+  infraComponents:
+  - name: execd
+    artifact:
+      source:
+        image:
+          reference: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd@sha256:1dc98c7de10b9a73450ac75aa0f200ad7972f2c40f5225f6a8998e166b45d6dd
+      mappings:
+      - sourcePath: /execd
+        targetPath: /.fast/components/execd/execd
+    process:
+      command: ["/.fast/components/execd/execd"]
+      restartPolicy: OnFailure
+      healthCheck:
+        httpGet:
+          path: /ping
+        timeoutSeconds: 10
+    endpoint:
+      protocol: HTTP
+      port: 44772
   sandboxResources:
     cpu: 250m
     memory: 256Mi

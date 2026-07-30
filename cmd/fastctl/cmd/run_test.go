@@ -5,60 +5,66 @@ import (
 	"os"
 	"testing"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 )
 
 type MockClient struct {
-	fastpathv1.UnimplementedFastPathServiceServer
-	CreateFunc      func(ctx context.Context, req *fastpathv1.CreateRequest) (*fastpathv1.CreateResponse, error)
-	DiagnosticsFunc func(ctx context.Context, req *fastpathv1.SandboxDiagnosticsRequest) (*fastpathv1.SandboxDiagnosticsResponse, error)
+	fastpathv2.UnimplementedFastPathServiceServer
+	CreateFunc      func(ctx context.Context, req *fastpathv2.CreateRequest) (*fastpathv2.SandboxInfo, error)
+	DiagnosticsFunc func(ctx context.Context, req *fastpathv2.SandboxDiagnosticsRequest) (*fastpathv2.SandboxDiagnosticsResponse, error)
 }
 
-func (m *MockClient) CreateSandbox(ctx context.Context, in *fastpathv1.CreateRequest, opts ...grpc.CallOption) (*fastpathv1.CreateResponse, error) {
+func (m *MockClient) CreateSandbox(ctx context.Context, in *fastpathv2.CreateRequest, opts ...grpc.CallOption) (*fastpathv2.SandboxInfo, error) {
 	if m.CreateFunc != nil {
 		return m.CreateFunc(ctx, in)
 	}
-	return &fastpathv1.CreateResponse{}, nil
+	return &fastpathv2.SandboxInfo{}, nil
 }
 
-func (m *MockClient) DeleteSandbox(ctx context.Context, in *fastpathv1.DeleteRequest, opts ...grpc.CallOption) (*fastpathv1.DeleteResponse, error) {
-	return &fastpathv1.DeleteResponse{Success: true}, nil
+func (m *MockClient) DeleteSandbox(ctx context.Context, in *fastpathv2.DeleteRequest, opts ...grpc.CallOption) (*fastpathv2.DeleteResponse, error) {
+	return &fastpathv2.DeleteResponse{Success: true}, nil
 }
-func (m *MockClient) ListSandboxes(ctx context.Context, in *fastpathv1.ListRequest, opts ...grpc.CallOption) (*fastpathv1.ListResponse, error) {
-	return &fastpathv1.ListResponse{}, nil
+func (m *MockClient) ListSandboxes(ctx context.Context, in *fastpathv2.ListRequest, opts ...grpc.CallOption) (*fastpathv2.ListResponse, error) {
+	return &fastpathv2.ListResponse{}, nil
 }
-func (m *MockClient) GetSandbox(ctx context.Context, in *fastpathv1.GetRequest, opts ...grpc.CallOption) (*fastpathv1.SandboxInfo, error) {
-	return &fastpathv1.SandboxInfo{}, nil
+func (m *MockClient) GetSandbox(ctx context.Context, in *fastpathv2.GetRequest, opts ...grpc.CallOption) (*fastpathv2.SandboxInfo, error) {
+	return &fastpathv2.SandboxInfo{}, nil
 }
-func (m *MockClient) GetSandboxDiagnostics(ctx context.Context, in *fastpathv1.SandboxDiagnosticsRequest, opts ...grpc.CallOption) (*fastpathv1.SandboxDiagnosticsResponse, error) {
+func (m *MockClient) GetSandboxDiagnostics(ctx context.Context, in *fastpathv2.SandboxDiagnosticsRequest, opts ...grpc.CallOption) (*fastpathv2.SandboxDiagnosticsResponse, error) {
 	if m.DiagnosticsFunc != nil {
 		return m.DiagnosticsFunc(ctx, in)
 	}
-	return &fastpathv1.SandboxDiagnosticsResponse{}, nil
+	return &fastpathv2.SandboxDiagnosticsResponse{}, nil
 }
-func (m *MockClient) UpdateSandbox(ctx context.Context, in *fastpathv1.UpdateRequest, opts ...grpc.CallOption) (*fastpathv1.UpdateResponse, error) {
-	return &fastpathv1.UpdateResponse{}, nil
+func (m *MockClient) UpdateSandbox(ctx context.Context, in *fastpathv2.UpdateRequest, opts ...grpc.CallOption) (*fastpathv2.UpdateResponse, error) {
+	return &fastpathv2.UpdateResponse{}, nil
 }
-func (m *MockClient) ResolveEndpoint(ctx context.Context, in *fastpathv1.ResolveEndpointRequest, opts ...grpc.CallOption) (*fastpathv1.ResolveEndpointResponse, error) {
-	return &fastpathv1.ResolveEndpointResponse{}, nil
+func (m *MockClient) ResolveEndpoint(ctx context.Context, in *fastpathv2.ResolveEndpointRequest, opts ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
+	return &fastpathv2.ResolveEndpointResponse{}, nil
 }
-func (m *MockClient) IssueRouteCredential(ctx context.Context, in *fastpathv1.IssueRouteCredentialRequest, opts ...grpc.CallOption) (*fastpathv1.IssueRouteCredentialResponse, error) {
-	return &fastpathv1.IssueRouteCredentialResponse{}, nil
+func (m *MockClient) WaitSandboxReady(ctx context.Context, in *fastpathv2.WaitSandboxReadyRequest, opts ...grpc.CallOption) (*fastpathv2.SandboxInfo, error) {
+	return &fastpathv2.SandboxInfo{}, nil
+}
+func (m *MockClient) GetPool(ctx context.Context, in *fastpathv2.GetPoolRequest, opts ...grpc.CallOption) (*fastpathv2.PoolInfo, error) {
+	return &fastpathv2.PoolInfo{}, nil
+}
+func (m *MockClient) ListPools(ctx context.Context, in *fastpathv2.ListPoolsRequest, opts ...grpc.CallOption) (*fastpathv2.ListPoolsResponse, error) {
+	return &fastpathv2.ListPoolsResponse{}, nil
 }
 
 func TestRunCommand(t *testing.T) {
 	mockClient := &MockClient{}
-	clientFactory = func() (fastpathv1.FastPathServiceClient, *grpc.ClientConn, error) {
+	clientFactory = func() (fastpathv2.FastPathServiceClient, *grpc.ClientConn, error) {
 		return mockClient, nil, nil
 	}
 
-	var capturedReq *fastpathv1.CreateRequest
-	mockClient.CreateFunc = func(ctx context.Context, req *fastpathv1.CreateRequest) (*fastpathv1.CreateResponse, error) {
+	var capturedReq *fastpathv2.CreateRequest
+	mockClient.CreateFunc = func(ctx context.Context, req *fastpathv2.CreateRequest) (*fastpathv2.SandboxInfo, error) {
 		capturedReq = req
-		return &fastpathv1.CreateResponse{
+		return &fastpathv2.SandboxInfo{
 			SandboxUid:  "test-sb-id",
 			SandboxName: "my-sandbox",
 			FastletPod:  "test-fastlet",
@@ -81,9 +87,6 @@ func TestRunCommand(t *testing.T) {
 	if capturedReq == nil {
 		t.Fatal("CreateSandbox was not called")
 	}
-	if capturedReq.Name != "my-sandbox" {
-		t.Errorf("expected name 'my-sandbox', got '%s'", capturedReq.Name)
-	}
 	if capturedReq.Image != "alpine" {
 		t.Errorf("expected image 'alpine', got '%s'", capturedReq.Image)
 	}
@@ -95,13 +98,13 @@ func TestRunCommand(t *testing.T) {
 
 func TestRunCommandWithFile(t *testing.T) {
 	mockClient := &MockClient{}
-	clientFactory = func() (fastpathv1.FastPathServiceClient, *grpc.ClientConn, error) {
+	clientFactory = func() (fastpathv2.FastPathServiceClient, *grpc.ClientConn, error) {
 		return mockClient, nil, nil // nil conn
 	}
-	var capturedReq *fastpathv1.CreateRequest
-	mockClient.CreateFunc = func(ctx context.Context, req *fastpathv1.CreateRequest) (*fastpathv1.CreateResponse, error) {
+	var capturedReq *fastpathv2.CreateRequest
+	mockClient.CreateFunc = func(ctx context.Context, req *fastpathv2.CreateRequest) (*fastpathv2.SandboxInfo, error) {
 		capturedReq = req
-		return &fastpathv1.CreateResponse{}, nil
+		return &fastpathv2.SandboxInfo{}, nil
 	}
 
 	tmpFile, _ := os.CreateTemp("", "config.yaml")

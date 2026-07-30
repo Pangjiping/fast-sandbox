@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const minInotifyInstances = 256
+const (
+	minInotifyInstances        = 256
+	fastSandboxSystemNamespace = "fast-sandbox-system"
+)
 
 type Runner interface {
 	Run(ctx context.Context, dir, name string, args ...string) ([]byte, error)
@@ -656,9 +659,10 @@ func (m *Manager) kubeSystemDiagnostics(ctx context.Context) string {
 
 func (m *Manager) deployFastSandbox(ctx context.Context) error {
 	steps := []struct {
-		label string
-		name  string
-		args  []string
+		label  string
+		name   string
+		args   []string
+		action func(context.Context) error
 	}{
 		{label: "Building core development images", name: "make", args: []string{"images", "COMPONENT=core"}},
 		{label: "Loading controller image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/controller:dev", "--name", m.settings.ClusterName}},
@@ -666,26 +670,115 @@ func (m *Manager) deployFastSandbox(ctx context.Context) error {
 		{label: "Loading Fastlet Proxy image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/fastlet-proxy:dev", "--name", m.settings.ClusterName}},
 		{label: "Loading Sandbox Proxy image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/sandbox-proxy:dev", "--name", m.settings.ClusterName}},
 		{label: "Loading NodeJanitor image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/janitor:dev", "--name", m.settings.ClusterName}},
+		{label: "Applying Fast Sandbox namespaces", name: "kubectl", args: []string{"apply", "-k", "config/namespaces"}},
+		{label: "Removing legacy default-namespace components", action: m.removeLegacyDefaultComponents},
+		{label: "Checking alpha CRD compatibility", action: m.resetIncompatibleAlphaCRDs},
 		{label: "Applying CRDs", name: "kubectl", args: []string{"apply", "-k", "config/crd"}},
 		{label: "Waiting for Sandbox CRD", name: "kubectl", args: []string{"wait", "--for=condition=Established", "crd/sandboxes.sandbox.fast.io", "--timeout=30s"}},
 		{label: "Waiting for SandboxPool CRD", name: "kubectl", args: []string{"wait", "--for=condition=Established", "crd/sandboxpools.sandbox.fast.io", "--timeout=30s"}},
 		{label: "Applying RBAC", name: "kubectl", args: []string{"apply", "-f", "config/rbac/base.yaml"}},
 		{label: "Applying development route keys", name: "kubectl", args: []string{"apply", "-f", "config/dev/route-keys.yaml"}},
 		{label: "Applying control-plane workloads", name: "kubectl", args: []string{"apply", "-f", "config/manager/controller.yaml"}},
-		{label: "Restarting Reconcilers", name: "kubectl", args: []string{"rollout", "restart", "deployment/fast-sandbox-controller"}},
-		{label: "Waiting for Reconcilers", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-controller", "--timeout=120s"}},
-		{label: "Restarting Fast-Path servers", name: "kubectl", args: []string{"rollout", "restart", "deployment/fast-sandbox-fastpath"}},
-		{label: "Waiting for Fast-Path servers", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-fastpath", "--timeout=120s"}},
-		{label: "Restarting Sandbox Proxy", name: "kubectl", args: []string{"rollout", "restart", "deployment/fast-sandbox-proxy"}},
-		{label: "Waiting for Sandbox Proxy", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-proxy", "--timeout=120s"}},
+		{label: "Restarting Reconcilers", action: func(ctx context.Context) error {
+			return m.rolloutRestart(ctx, "deployment/fast-sandbox-controller")
+		}},
+		{label: "Waiting for Reconcilers", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-controller", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
+		{label: "Restarting Fast-Path servers", action: func(ctx context.Context) error {
+			return m.rolloutRestart(ctx, "deployment/fast-sandbox-fastpath")
+		}},
+		{label: "Waiting for Fast-Path servers", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-fastpath", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
+		{label: "Restarting Sandbox Proxy", action: func(ctx context.Context) error {
+			return m.rolloutRestart(ctx, "deployment/fast-sandbox-proxy")
+		}},
+		{label: "Waiting for Sandbox Proxy", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-proxy", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
 		{label: "Applying NodeJanitor", name: "kubectl", args: []string{"apply", "-f", "config/janitor/janitor.yaml"}},
-		{label: "Restarting NodeJanitor", name: "kubectl", args: []string{"rollout", "restart", "ds/fast-sandbox-janitor"}},
-		{label: "Waiting for NodeJanitor", name: "kubectl", args: []string{"rollout", "status", "ds/fast-sandbox-janitor", "--timeout=60s"}},
+		{label: "Restarting NodeJanitor", action: func(ctx context.Context) error {
+			return m.rolloutRestart(ctx, "ds/fast-sandbox-janitor")
+		}},
+		{label: "Waiting for NodeJanitor", name: "kubectl", args: []string{"rollout", "status", "ds/fast-sandbox-janitor", "-n", fastSandboxSystemNamespace, "--timeout=60s"}},
 	}
 
 	for index, step := range steps {
 		m.progressf("  [%d/%d] %s\n", index+1, len(steps), step.label)
+		if step.action != nil {
+			if err := step.action(ctx); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := m.runLive(ctx, step.name, step.args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) removeLegacyDefaultComponents(ctx context.Context) error {
+	resources := []string{
+		"deployment/fast-sandbox-controller",
+		"deployment/fast-sandbox-fastpath",
+		"deployment/fast-sandbox-proxy",
+		"daemonset/fast-sandbox-janitor",
+		"service/fast-sandbox-fastpath",
+		"service/fast-sandbox-proxy",
+		"horizontalpodautoscaler/fast-sandbox-fastpath",
+		"poddisruptionbudget/fast-sandbox-controller",
+		"poddisruptionbudget/fast-sandbox-fastpath",
+		"poddisruptionbudget/fast-sandbox-proxy",
+	}
+	args := append([]string{"delete"}, resources...)
+	args = append(args, "-n", "default", "--ignore-not-found=true", "--wait=true")
+	_, err := m.runLive(ctx, "kubectl", args...)
+	return err
+}
+
+func (m *Manager) rolloutRestart(ctx context.Context, resource string) error {
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		_, err := m.runLive(
+			ctx,
+			"kubectl", "rollout", "restart", resource, "-n", fastSandboxSystemNamespace,
+		)
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(err.Error(), "restart has already been triggered within the past second") ||
+			attempt == attempts {
+			return err
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+// resetIncompatibleAlphaCRDs is intentionally limited to Manager-owned Kind
+// environments. v1alpha2 has no conversion webhook and cannot remove
+// v1alpha1 from spec.versions while Kubernetes still records v1alpha1 in
+// status.storedVersions. The disposable development cluster therefore drops
+// only incompatible alpha CRDs before applying the canonical v1alpha2 schema.
+func (m *Manager) resetIncompatibleAlphaCRDs(ctx context.Context) error {
+	for _, name := range []string{
+		"sandboxes.sandbox.fast.io",
+		"sandboxpools.sandbox.fast.io",
+	} {
+		output, err := m.run(ctx, "kubectl", "get", "crd", name, "-o", "jsonpath={.status.storedVersions}")
+		if err != nil {
+			if strings.Contains(err.Error(), "NotFound") {
+				continue
+			}
+			return err
+		}
+		if !strings.Contains(string(output), "v1alpha1") {
+			continue
+		}
+		m.progressf("    removing incompatible %s (development cluster only)\n", name)
+		if _, err := m.runLive(ctx, "kubectl", "delete", "crd", name, "--wait=true"); err != nil {
 			return err
 		}
 	}

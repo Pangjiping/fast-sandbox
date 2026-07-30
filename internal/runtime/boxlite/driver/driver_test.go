@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
@@ -93,7 +93,7 @@ func TestDriverSidecarContract(t *testing.T) {
 		SandboxID: "uid-a", ClaimUID: "uid-a", ClaimNamespace: "tenant-a", ClaimName: "sandbox-a", FastletPodUID: "pod-a",
 		InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 2, RouteGeneration: 3, Image: "alpine:latest",
 		CPU: "1", Memory: "256Mi", PIDs: 128, RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
-		InfraProfile: "minimal", InfraProfileHash: "infra-hash",
+		InfraRevision: "infra-hash",
 	}
 	metadata, err := driver.EnsureSandbox(context.Background(), spec)
 	require.NoError(t, err)
@@ -172,7 +172,7 @@ func newBoxLiteTestDriver(t *testing.T, handler http.Handler) *Driver {
 			t.Errorf("serve BoxLite test sidecar: %v", serveErr)
 		}
 	}()
-	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha1.RuntimeBoxLite)
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeBoxLite)
 	require.NoError(t, err)
 	profile.BoxLite.ControlSocket = socketPath
 	driver, err := New(profile)

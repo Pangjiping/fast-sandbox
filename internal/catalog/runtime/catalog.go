@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"sort"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -99,7 +99,7 @@ type Capabilities struct {
 }
 
 type RuntimeProfile struct {
-	Name               apiv1alpha1.RuntimeName `json:"name"`
+	Name               apiv1alpha2.RuntimeName `json:"name"`
 	Version            string                  `json:"version"`
 	ProfileHash        string                  `json:"profileHash"`
 	Driver             DriverKind              `json:"driver"`
@@ -122,7 +122,7 @@ func (p RuntimeProfile) UsesFastletNetNS() bool {
 var ErrRuntimeNotFound = errors.New("runtime profile not found")
 
 type Catalog struct {
-	profiles map[apiv1alpha1.RuntimeName]RuntimeProfile
+	profiles map[apiv1alpha2.RuntimeName]RuntimeProfile
 }
 
 func Builtin() *Catalog {
@@ -134,9 +134,9 @@ func Builtin() *Catalog {
 	return &Catalog{profiles: profiles}
 }
 
-func (c *Catalog) Resolve(name apiv1alpha1.RuntimeName) (RuntimeProfile, error) {
+func (c *Catalog) Resolve(name apiv1alpha2.RuntimeName) (RuntimeProfile, error) {
 	if name == "" {
-		name = apiv1alpha1.RuntimeContainer
+		name = apiv1alpha2.RuntimeContainer
 	}
 	profile, ok := c.profiles[name]
 	if !ok {
@@ -145,8 +145,8 @@ func (c *Catalog) Resolve(name apiv1alpha1.RuntimeName) (RuntimeProfile, error) 
 	return cloneProfile(profile), nil
 }
 
-func (c *Catalog) Names() []apiv1alpha1.RuntimeName {
-	names := make([]apiv1alpha1.RuntimeName, 0, len(c.profiles))
+func (c *Catalog) Names() []apiv1alpha2.RuntimeName {
+	names := make([]apiv1alpha2.RuntimeName, 0, len(c.profiles))
 	for name := range c.profiles {
 		names = append(names, name)
 	}

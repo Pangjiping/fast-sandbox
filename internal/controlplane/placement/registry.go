@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletcache "fast-sandbox/internal/fastlet/cache"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
@@ -34,13 +34,14 @@ type FastletInfo struct {
 	NodeName  string
 	PoolName  string
 
-	RuntimeName         apiv1alpha1.RuntimeName
+	RuntimeName         apiv1alpha2.RuntimeName
 	RuntimeProfileHash  string
 	ResourceProfileHash string
-	InfraProfile        string
-	InfraProfileHash    string
+	InfraRevision       string
 	InfraReady          bool
 	PreparedArtifacts   []string
+	RegistryRevision    string
+	WarmImages          []fastletapi.WarmImageState
 	PodReady            bool
 	RuntimeReady        bool
 	DrainRequested      bool
@@ -74,10 +75,10 @@ type FastletRegistry interface {
 type CandidateRequest struct {
 	Namespace           string
 	PoolName            string
-	RuntimeName         apiv1alpha1.RuntimeName
+	RuntimeName         apiv1alpha2.RuntimeName
 	RuntimeProfileHash  string
 	ResourceProfileHash string
-	InfraProfileHash    string
+	InfraRevision       string
 	Image               string
 	StableKey           string
 	Now                 time.Time
@@ -152,6 +153,8 @@ func preserveHeartbeat(target *FastletInfo, previous FastletInfo) {
 	target.Admission = previous.Admission
 	target.Images = append([]string(nil), previous.Images...)
 	target.PreparedArtifacts = append([]string(nil), previous.PreparedArtifacts...)
+	target.RegistryRevision = previous.RegistryRevision
+	target.WarmImages = cloneWarmImageStates(previous.WarmImages)
 	target.CacheEpoch = previous.CacheEpoch
 	target.CacheRevision = previous.CacheRevision
 	target.CacheComplete = previous.CacheComplete
@@ -181,7 +184,7 @@ func (r *InMemoryRegistry) ApplyHeartbeat(id FastletID, expectedPodUID string, h
 	}
 	if (slot.info.RuntimeProfileHash != "" && heartbeat.Diagnostics.RuntimeProfileHash != slot.info.RuntimeProfileHash) ||
 		(slot.info.ResourceProfileHash != "" && heartbeat.ResourceProfileHash != slot.info.ResourceProfileHash) ||
-		(slot.info.InfraProfileHash != "" && heartbeat.InfraProfileHash != slot.info.InfraProfileHash) {
+		(slot.info.InfraRevision != "" && heartbeat.InfraRevision != slot.info.InfraRevision) {
 		slot.info.RuntimeReady = false
 		slot.info.LastHeartbeat = observedAt
 		return ErrProfileMismatch
@@ -191,6 +194,8 @@ func (r *InMemoryRegistry) ApplyHeartbeat(id FastletID, expectedPodUID string, h
 	slot.info.InfraReady = heartbeat.InfraReady
 	slot.info.Draining = slot.info.DrainRequested || heartbeat.Draining
 	slot.info.PreparedArtifacts = append([]string(nil), heartbeat.PreparedArtifacts...)
+	slot.info.RegistryRevision = heartbeat.RegistryRevision
+	slot.info.WarmImages = cloneWarmImageStates(heartbeat.WarmImages)
 	slot.info.Capacity = heartbeat.Admission.Capacity
 	if slot.info.Capacity <= 0 {
 		slot.info.Capacity = heartbeat.Capacity
@@ -202,11 +207,8 @@ func (r *InMemoryRegistry) ApplyHeartbeat(id FastletID, expectedPodUID string, h
 	if slot.info.ResourceProfileHash == "" {
 		slot.info.ResourceProfileHash = heartbeat.ResourceProfileHash
 	}
-	if slot.info.InfraProfile == "" {
-		slot.info.InfraProfile = heartbeat.InfraProfile
-	}
-	if slot.info.InfraProfileHash == "" {
-		slot.info.InfraProfileHash = heartbeat.InfraProfileHash
+	if slot.info.InfraRevision == "" {
+		slot.info.InfraRevision = heartbeat.InfraRevision
 	}
 	slot.info.SandboxStatuses = make(map[string]fastletapi.SandboxStatus, len(heartbeat.SandboxStatuses))
 	for _, status := range heartbeat.SandboxStatuses {
@@ -341,7 +343,7 @@ func hardFilter(info FastletInfo, request CandidateRequest, staleAfter time.Dura
 	if request.ResourceProfileHash != "" && info.ResourceProfileHash != request.ResourceProfileHash {
 		return false
 	}
-	if request.InfraProfileHash != "" && info.InfraProfileHash != request.InfraProfileHash {
+	if request.InfraRevision != "" && info.InfraRevision != request.InfraRevision {
 		return false
 	}
 	return true
@@ -410,8 +412,13 @@ func (r *InMemoryRegistry) RemoveIfPodUID(id FastletID, podUID string) {
 func cloneInfo(info FastletInfo) FastletInfo {
 	info.Images = append([]string(nil), info.Images...)
 	info.PreparedArtifacts = append([]string(nil), info.PreparedArtifacts...)
+	info.WarmImages = cloneWarmImageStates(info.WarmImages)
 	info.SandboxStatuses = cloneStatuses(info.SandboxStatuses)
 	return info
+}
+
+func cloneWarmImageStates(values []fastletapi.WarmImageState) []fastletapi.WarmImageState {
+	return append([]fastletapi.WarmImageState(nil), values...)
 }
 
 func cloneStatuses(statuses map[string]fastletapi.SandboxStatus) map[string]fastletapi.SandboxStatus {

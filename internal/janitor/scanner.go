@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,8 +75,8 @@ func (j *Janitor) cleanupDecision(ctx context.Context, resource ResourceIdentity
 		return CleanupDecision{Reason: "InvalidResourceFence"}, nil
 	}
 	currentGeneration := sandbox.Status.InstanceGeneration
-	if currentGeneration < apiv1alpha1.InitialInstanceGeneration {
-		currentGeneration = apiv1alpha1.InitialInstanceGeneration
+	if currentGeneration < apiv1alpha2.InitialInstanceGeneration {
+		currentGeneration = apiv1alpha2.InitialInstanceGeneration
 	}
 	if currentGeneration > resource.InstanceGeneration || assignment.Attempt > resource.AssignmentAttempt {
 		return CleanupDecision{Eligible: true, Reason: "ResourceFenceSuperseded"}, nil
@@ -117,12 +117,12 @@ func (j *Janitor) exactFastletPodExists(ctx context.Context, resource ResourceId
 	return false, nil
 }
 
-func (j *Janitor) findSandbox(ctx context.Context, resource ResourceIdentity) (*apiv1alpha1.Sandbox, bool, error) {
+func (j *Janitor) findSandbox(ctx context.Context, resource ResourceIdentity) (*apiv1alpha2.Sandbox, bool, error) {
 	if j.K8sClient == nil {
 		return nil, false, errors.New("Sandbox client is not configured")
 	}
 	if resource.SandboxName != "" && resource.SandboxNamespace != "" {
-		var sandbox apiv1alpha1.Sandbox
+		var sandbox apiv1alpha2.Sandbox
 		err := j.K8sClient.Get(ctx, types.NamespacedName{Namespace: resource.SandboxNamespace, Name: resource.SandboxName}, &sandbox)
 		if apierrors.IsNotFound(err) {
 			return nil, false, nil
@@ -132,7 +132,7 @@ func (j *Janitor) findSandbox(ctx context.Context, resource ResourceIdentity) (*
 		}
 		return &sandbox, true, nil
 	}
-	var list apiv1alpha1.SandboxList
+	var list apiv1alpha2.SandboxList
 	if err := j.K8sClient.List(ctx, &list); err != nil {
 		return nil, false, err
 	}

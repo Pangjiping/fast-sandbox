@@ -87,13 +87,14 @@ func TestProxyForwardsThroughLocalTunnelWithSignedTargetPort(t *testing.T) {
 	_, err = store.Apply(route)
 	require.NoError(t, err)
 	token, _, err := issuer.Issue(routeauth.Claims{
-		Namespace: route.Namespace, SandboxUID: route.SandboxUID, TargetPort: targetPort,
+		Namespace: route.Namespace, SandboxUID: route.SandboxUID, TargetKind: routeauth.TargetKindPort,
+		Protocol: "HTTP", TargetPort: targetPort,
 		FastletPodUID: route.FastletPodUID, AssignmentAttempt: route.AssignmentAttempt, RouteGeneration: route.RouteGeneration,
 	})
 	require.NoError(t, err)
 
 	request := httptest.NewRequest(http.MethodGet, dataplane.RoutePath(route.SandboxUID, targetPort)+"/health", nil)
-	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set(dataplane.HeaderRouteCredential, token)
 	for name, values := range RouteHeaders(route) {
 		request.Header[name] = values
 	}

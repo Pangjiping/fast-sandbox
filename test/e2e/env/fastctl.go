@@ -53,7 +53,7 @@ func NewFastctl(opts ...FastctlOption) *Fastctl {
 		rootDir:    rootDir,
 		binaryPath: filepath.Join(rootDir, "bin", "fastctl"),
 		endpoint:   "localhost:9090",
-		namespace:  "default",
+		namespace:  "fast-sandbox",
 		configDir:  os.TempDir(),
 	}
 	for _, opt := range opts {
@@ -166,8 +166,8 @@ func (c *Fastctl) GetJSON(ctx context.Context, name string) (*SandboxInfo, error
 	return &info, nil
 }
 
-func (c *Fastctl) UpdateLabels(ctx context.Context, name string, labels ...string) ([]byte, error) {
-	return c.run(ctx, "update", name, "--labels", strings.Join(labels, ","))
+func (c *Fastctl) UpdateMetadata(ctx context.Context, name string, metadata ...string) ([]byte, error) {
+	return c.run(ctx, "update", name, "--metadata", strings.Join(metadata, ","))
 }
 
 func (c *Fastctl) Reset(ctx context.Context, name string) ([]byte, error) {

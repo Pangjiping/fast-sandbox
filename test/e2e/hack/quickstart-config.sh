@@ -33,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-printf '{\n  "endpoint": "localhost:%s",\n  "proxy-endpoint": "http://localhost:%s"\n}\n' \
+printf '{\n  "endpoint": "localhost:%s",\n  "proxy-endpoint": "http://localhost:%s",\n  "namespace": "fast-sandbox"\n}\n' \
   "${fastpath_port}" "${proxy_port}" >"${temporary_path}"
 
 # Linking a fully written temporary file creates the final path atomically and

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (f *FixtureClient) CreateSandboxPool(ctx context.Context, namespace string, pool *apiv1alpha1.SandboxPool) (*apiv1alpha1.SandboxPool, error) {
+func (f *FixtureClient) CreateSandboxPool(ctx context.Context, namespace string, pool *apiv1alpha2.SandboxPool) (*apiv1alpha2.SandboxPool, error) {
 	if pool.Namespace == "" {
 		pool.Namespace = namespace
 	}
@@ -23,12 +23,12 @@ func (f *FixtureClient) CreateSandboxPool(ctx context.Context, namespace string,
 	return pool, nil
 }
 
-func (f *FixtureClient) WaitForPoolCondition(ctx context.Context, name types.NamespacedName, conditionType string, status metav1.ConditionStatus) (*apiv1alpha1.SandboxPool, error) {
+func (f *FixtureClient) WaitForPoolCondition(ctx context.Context, name types.NamespacedName, conditionType string, status metav1.ConditionStatus) (*apiv1alpha2.SandboxPool, error) {
 	ticker := time.NewTicker(f.pollInterval)
 	defer ticker.Stop()
 	var lastCondition *metav1.Condition
 	for {
-		pool := &apiv1alpha1.SandboxPool{}
+		pool := &apiv1alpha2.SandboxPool{}
 		if err := f.client.Get(ctx, name, pool); err == nil {
 			lastCondition = apiMeta.FindStatusCondition(pool.Status.Conditions, conditionType)
 			if lastCondition != nil && lastCondition.Status == status {
@@ -44,12 +44,12 @@ func (f *FixtureClient) WaitForPoolCondition(ctx context.Context, name types.Nam
 	}
 }
 
-func (f *FixtureClient) WaitForReadyFastletPods(ctx context.Context, name types.NamespacedName, minReady int32) (*apiv1alpha1.SandboxPool, error) {
+func (f *FixtureClient) WaitForReadyFastletPods(ctx context.Context, name types.NamespacedName, minReady int32) (*apiv1alpha2.SandboxPool, error) {
 	ticker := time.NewTicker(f.pollInterval)
 	defer ticker.Stop()
 
 	for {
-		pool := &apiv1alpha1.SandboxPool{}
+		pool := &apiv1alpha2.SandboxPool{}
 		if err := f.client.Get(ctx, name, pool); err == nil {
 			if pool.Status.ReadyPods >= minReady {
 				return pool, nil

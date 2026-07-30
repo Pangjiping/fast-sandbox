@@ -11,7 +11,12 @@ import (
 	"time"
 )
 
-const tokenVersion = "v1"
+const tokenVersion = "v2"
+
+const (
+	TargetKindPort      = "port"
+	TargetKindComponent = "component"
+)
 
 var (
 	ErrInvalidCredential = errors.New("invalid route credential")
@@ -26,6 +31,9 @@ type Claims struct {
 	Tenant            string `json:"tenant,omitempty"`
 	Namespace         string `json:"namespace"`
 	SandboxUID        string `json:"sandboxUid"`
+	TargetKind        string `json:"targetKind"`
+	ComponentName     string `json:"componentName,omitempty"`
+	Protocol          string `json:"protocol"`
 	TargetPort        uint32 `json:"targetPort"`
 	FastletPodUID     string `json:"fastletPodUid"`
 	AssignmentAttempt int64  `json:"assignmentAttempt"`
@@ -35,9 +43,21 @@ type Claims struct {
 }
 
 func (c Claims) Validate() error {
-	if c.Namespace == "" || c.SandboxUID == "" || c.TargetPort == 0 || c.TargetPort > 65535 ||
+	if c.Namespace == "" || c.SandboxUID == "" || c.TargetPort == 0 || c.TargetPort > 65535 || c.Protocol == "" ||
 		c.FastletPodUID == "" || c.AssignmentAttempt <= 0 || c.RouteGeneration <= 0 || c.ExpiresAt <= 0 {
 		return fmt.Errorf("%w: required claim is missing", ErrInvalidCredential)
+	}
+	switch c.TargetKind {
+	case TargetKindPort:
+		if c.ComponentName != "" {
+			return fmt.Errorf("%w: raw port claim cannot contain a component name", ErrInvalidCredential)
+		}
+	case TargetKindComponent:
+		if c.ComponentName == "" {
+			return fmt.Errorf("%w: component claim requires a component name", ErrInvalidCredential)
+		}
+	default:
+		return fmt.Errorf("%w: target kind is invalid", ErrInvalidCredential)
 	}
 	return nil
 }
@@ -168,7 +188,8 @@ func (v *Verifier) VerifyExpected(token string, expected Claims) (Claims, error)
 		return Claims{}, err
 	}
 	if actual.Namespace != expected.Namespace || actual.SandboxUID != expected.SandboxUID ||
-		actual.TargetPort != expected.TargetPort || actual.FastletPodUID != expected.FastletPodUID ||
+		actual.TargetKind != expected.TargetKind || actual.ComponentName != expected.ComponentName ||
+		actual.Protocol != expected.Protocol || actual.TargetPort != expected.TargetPort || actual.FastletPodUID != expected.FastletPodUID ||
 		actual.AssignmentAttempt != expected.AssignmentAttempt || actual.RouteGeneration != expected.RouteGeneration ||
 		(expected.Tenant != "" && actual.Tenant != expected.Tenant) {
 		return Claims{}, ErrClaimMismatch

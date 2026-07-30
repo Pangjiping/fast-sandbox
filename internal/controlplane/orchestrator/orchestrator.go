@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	"fast-sandbox/internal/controlplane/assignment"
@@ -34,8 +34,8 @@ var (
 )
 
 const (
-	ConditionRuntimeReady   = apiv1alpha1.SandboxConditionRuntimeReady
-	ConditionDataPlaneReady = apiv1alpha1.SandboxConditionDataPlaneReady
+	ConditionRuntimeReady   = apiv1alpha2.SandboxConditionRuntimeReady
+	ConditionDataPlaneReady = apiv1alpha2.SandboxConditionDataPlaneReady
 	ReasonFastletPodLost    = "FastletPodLost"
 	ReasonExpired           = "Expired"
 )
@@ -57,7 +57,6 @@ type Orchestrator struct {
 	Registry      Registry
 	FastletClient FastletClient
 	Catalog       *runtimecatalog.Catalog
-	InfraCatalog  *infracatalog.Catalog
 	TopK          int
 	Now           func() time.Time
 }
@@ -66,18 +65,17 @@ type Orchestrator struct {
 // Pool against the watched Fastlet profile. Fastlet remains authoritative for
 // the concrete CPU/memory/PID values it injects into the runtime request.
 type RuntimeParameters struct {
-	RuntimeName         apiv1alpha1.RuntimeName
+	RuntimeName         apiv1alpha2.RuntimeName
 	RuntimeProfileHash  string
 	ResourceProfileHash string
-	InfraProfile        string
-	InfraProfileHash    string
+	InfraRevision       string
 }
 
-func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha1.Sandbox) (RuntimeParameters, error) {
+func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (RuntimeParameters, error) {
 	if sandbox == nil {
 		return RuntimeParameters{}, errors.New("Sandbox is required")
 	}
-	var pool apiv1alpha1.SandboxPool
+	var pool apiv1alpha2.SandboxPool
 	if err := o.Client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Spec.PoolRef}, &pool); err != nil {
 		return RuntimeParameters{}, fmt.Errorf("get SandboxPool %s: %w", sandbox.Spec.PoolRef, err)
 	}
@@ -92,25 +90,21 @@ func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha1.
 	if err != nil {
 		return RuntimeParameters{}, fmt.Errorf("resolve runtime profile: %w", err)
 	}
-	if err := apiv1alpha1.ValidateSandboxResourceProfile(pool.Spec.SandboxResources); err != nil {
+	if err := apiv1alpha2.ValidateSandboxResourceProfile(pool.Spec.SandboxResources); err != nil {
 		return RuntimeParameters{}, fmt.Errorf("resolve Sandbox resources: %w", err)
 	}
-	infraCatalog := o.InfraCatalog
-	if infraCatalog == nil {
-		infraCatalog = infracatalog.Builtin()
-	}
-	infraPlan, err := infraCatalog.Compile(pool.Spec.InfraProfile, profile)
+	infraPlan, err := infracatalog.Compile(pool.Spec.InfraComponents, profile)
 	if err != nil {
-		return RuntimeParameters{}, fmt.Errorf("resolve InfraProfile: %w", err)
+		return RuntimeParameters{}, fmt.Errorf("compile Infra Components: %w", err)
 	}
 	return RuntimeParameters{
 		RuntimeName: pool.Spec.Runtime, RuntimeProfileHash: profile.ProfileHash,
 		ResourceProfileHash: pool.Spec.SandboxResources.Hash(),
-		InfraProfile:        infraPlan.ProfileName, InfraProfileHash: infraPlan.ProfileHash,
+		InfraRevision:       infraPlan.Revision,
 	}, nil
 }
 
-func (o *Orchestrator) Candidates(ctx context.Context, sandbox *apiv1alpha1.Sandbox, stableKey string) ([]placement.FastletInfo, RuntimeParameters, error) {
+func (o *Orchestrator) Candidates(ctx context.Context, sandbox *apiv1alpha2.Sandbox, stableKey string) ([]placement.FastletInfo, RuntimeParameters, error) {
 	parameters, err := o.ResolveRuntime(ctx, sandbox)
 	if err != nil {
 		return nil, RuntimeParameters{}, err
@@ -118,7 +112,7 @@ func (o *Orchestrator) Candidates(ctx context.Context, sandbox *apiv1alpha1.Sand
 	candidates := o.topK(placement.CandidateRequest{
 		Namespace: sandbox.Namespace, PoolName: sandbox.Spec.PoolRef,
 		RuntimeName: parameters.RuntimeName, RuntimeProfileHash: parameters.RuntimeProfileHash,
-		ResourceProfileHash: parameters.ResourceProfileHash, InfraProfileHash: parameters.InfraProfileHash,
+		ResourceProfileHash: parameters.ResourceProfileHash, InfraRevision: parameters.InfraRevision,
 		Image: sandbox.Spec.Image, StableKey: stableKey,
 	})
 	if len(candidates) == 0 {
@@ -129,7 +123,7 @@ func (o *Orchestrator) Candidates(ctx context.Context, sandbox *apiv1alpha1.Sand
 
 // FastPathCandidates is intentionally registry-only. Calling it cannot issue
 // a Kubernetes API request, which keeps the first-create happy path at two IOs.
-func (o *Orchestrator) FastPathCandidates(sandbox *apiv1alpha1.Sandbox, stableKey string) ([]placement.FastletInfo, error) {
+func (o *Orchestrator) FastPathCandidates(sandbox *apiv1alpha2.Sandbox, stableKey string) ([]placement.FastletInfo, error) {
 	if sandbox == nil {
 		return nil, errors.New("Sandbox is required")
 	}
@@ -167,13 +161,13 @@ func AssignmentForCandidate(candidate placement.FastletInfo, attempt, instanceGe
 		Attempt: attempt, InstanceGeneration: instanceGeneration, RouteGeneration: routeGeneration,
 		RuntimeInstanceID:  runtimeInstanceID,
 		RuntimeProfileHash: candidate.RuntimeProfileHash, ResourceProfileHash: candidate.ResourceProfileHash,
-		InfraProfileHash: candidate.InfraProfileHash,
+		InfraRevision: candidate.InfraRevision,
 	}
 	if err := envelope.Validate(); err != nil {
 		return assignment.AssignmentEnvelope{}, err
 	}
-	if candidate.PodIP == "" || candidate.InfraProfile == "" {
-		return assignment.AssignmentEnvelope{}, errors.New("candidate endpoint and InfraProfile are required")
+	if candidate.PodIP == "" || candidate.InfraRevision == "" {
+		return assignment.AssignmentEnvelope{}, errors.New("candidate endpoint and Infra revision are required")
 	}
 	return envelope, nil
 }
@@ -181,7 +175,7 @@ func AssignmentForCandidate(candidate placement.FastletInfo, attempt, instanceGe
 // AssignDeclarative preserves the standalone Controller deployment mode. It
 // first honors any FastPath-written annotation, then performs Pool validation
 // and registry selection only when no durable assignment exists.
-func (o *Orchestrator) AssignDeclarative(ctx context.Context, sandbox *apiv1alpha1.Sandbox, stableKey string) (*apiv1alpha1.Sandbox, bool, error) {
+func (o *Orchestrator) AssignDeclarative(ctx context.Context, sandbox *apiv1alpha2.Sandbox, stableKey string) (*apiv1alpha2.Sandbox, bool, error) {
 	if sandbox == nil || sandbox.UID == "" {
 		return nil, false, errors.New("persisted Sandbox UID is required")
 	}
@@ -200,7 +194,7 @@ func (o *Orchestrator) AssignDeclarative(ctx context.Context, sandbox *apiv1alph
 		if !ok || candidate.PodUID != sandbox.Status.Assignment.FastletPodUID {
 			return nil, false, ErrAssignedFastletUnavailable
 		}
-		generation := max(sandbox.Status.InstanceGeneration, apiv1alpha1.InitialInstanceGeneration)
+		generation := max(sandbox.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration)
 		routeGeneration := max(sandbox.Status.RouteGeneration, int64(1))
 		legacyEnvelope, err := AssignmentForCandidate(candidate, sandbox.Status.Assignment.Attempt, generation, routeGeneration, "legacy-"+string(sandbox.UID))
 		if err != nil {
@@ -222,7 +216,7 @@ func (o *Orchestrator) AssignDeclarative(ctx context.Context, sandbox *apiv1alph
 		return nil, false, fmt.Errorf("generate runtime instance ID: %w", err)
 	}
 	attempt := sandbox.Status.AssignmentAttempt + 1
-	generation := max(sandbox.Status.InstanceGeneration, apiv1alpha1.InitialInstanceGeneration)
+	generation := max(sandbox.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration)
 	routeGeneration := max(sandbox.Status.RouteGeneration, int64(1))
 	desired, err := AssignmentForCandidate(candidates[0], attempt, generation, routeGeneration, runtimeInstanceID)
 	if err != nil {
@@ -240,7 +234,7 @@ func (o *Orchestrator) AssignDeclarative(ctx context.Context, sandbox *apiv1alph
 // a different eligible Fastlet. When no alternative exists it deliberately
 // preserves the current annotation, so CRD-first never exposes an unassigned
 // window between rejection and a later Pool scale-up or heartbeat refresh.
-func (o *Orchestrator) ReassignDeclarativeAfterRejection(ctx context.Context, sandbox *apiv1alpha1.Sandbox, stableKey string) (*apiv1alpha1.Sandbox, bool, error) {
+func (o *Orchestrator) ReassignDeclarativeAfterRejection(ctx context.Context, sandbox *apiv1alpha2.Sandbox, stableKey string) (*apiv1alpha2.Sandbox, bool, error) {
 	if sandbox == nil || sandbox.UID == "" {
 		return nil, false, errors.New("persisted Sandbox UID is required")
 	}
@@ -281,7 +275,7 @@ func (o *Orchestrator) ReassignDeclarativeAfterRejection(ctx context.Context, sa
 
 // CreateRuntime performs exactly one Fastlet call. It never reads a Pool and
 // never writes Kubernetes status, so FastPath can use it as IO 2.
-func (o *Orchestrator) CreateRuntime(ctx context.Context, sandbox *apiv1alpha1.Sandbox) (*fastletapi.CreateSandboxResponse, error) {
+func (o *Orchestrator) CreateRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (*fastletapi.CreateSandboxResponse, error) {
 	fastlet, envelope, identity, err := o.assignedTarget(sandbox)
 	if err != nil {
 		return nil, err
@@ -292,7 +286,7 @@ func (o *Orchestrator) CreateRuntime(ctx context.Context, sandbox *apiv1alpha1.S
 // CreateRuntimeOnCandidate is used immediately after FastPath wins an
 // annotation Create/CAS. The annotation is revalidated, while a concurrently
 // stale status projection is deliberately ignored.
-func (o *Orchestrator) CreateRuntimeOnCandidate(ctx context.Context, sandbox *apiv1alpha1.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope) (*fastletapi.CreateSandboxResponse, error) {
+func (o *Orchestrator) CreateRuntimeOnCandidate(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope) (*fastletapi.CreateSandboxResponse, error) {
 	current, err := assignment.AssignmentFromAnnotation(sandbox)
 	if err != nil {
 		return nil, err
@@ -302,7 +296,7 @@ func (o *Orchestrator) CreateRuntimeOnCandidate(ctx context.Context, sandbox *ap
 	}
 	if fastlet.PodName != envelope.FastletName || fastlet.PodUID != envelope.FastletPodUID || fastlet.PodIP == "" ||
 		fastlet.RuntimeProfileHash != envelope.RuntimeProfileHash || fastlet.ResourceProfileHash != envelope.ResourceProfileHash ||
-		fastlet.InfraProfileHash != envelope.InfraProfileHash {
+		fastlet.InfraRevision != envelope.InfraRevision {
 		return nil, ErrAssignedFastletUnavailable
 	}
 	identity := fastletapi.SandboxIdentity{
@@ -313,15 +307,15 @@ func (o *Orchestrator) CreateRuntimeOnCandidate(ctx context.Context, sandbox *ap
 	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity)
 }
 
-func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1alpha1.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, identity fastletapi.SandboxIdentity) (*fastletapi.CreateSandboxResponse, error) {
+func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, identity fastletapi.SandboxIdentity) (*fastletapi.CreateSandboxResponse, error) {
 	request := &fastletapi.CreateSandboxRequest{
 		Identity: identity,
 		Sandbox: fastletapi.SandboxSpec{
 			SandboxID: string(sandbox.UID), RequestID: sandbox.Annotations[assignment.AnnotationRequestID], ClaimUID: string(sandbox.UID),
 			ClaimNamespace: sandbox.Namespace, ClaimName: sandbox.Name, Image: sandbox.Spec.Image,
 			RuntimeProfileHash: envelope.RuntimeProfileHash, ResourceProfileHash: envelope.ResourceProfileHash,
-			InfraProfile: fastlet.InfraProfile, InfraProfileHash: envelope.InfraProfileHash,
-			Command: sandbox.Spec.Command, Args: sandbox.Spec.Args, Env: envMap(sandbox.Spec.Envs), WorkingDir: sandbox.Spec.WorkingDir,
+			InfraRevision: envelope.InfraRevision,
+			Command:       sandbox.Spec.Command, Args: sandbox.Spec.Args, Env: envMap(sandbox.Spec.Envs), WorkingDir: sandbox.Spec.WorkingDir,
 		},
 	}
 	response, createErr := o.FastletClient.CreateSandbox(ctx, fastlet.PodIP, request)
@@ -341,10 +335,10 @@ func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1
 // ReconcileRuntime is the declarative wrapper around CreateRuntime. A
 // successful Create proves the runtime is ready; Infra readiness and route
 // publication are projected independently as the data plane converges.
-func (o *Orchestrator) ReconcileRuntime(ctx context.Context, sandbox *apiv1alpha1.Sandbox) error {
+func (o *Orchestrator) ReconcileRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) error {
 	response, err := o.CreateRuntime(ctx, sandbox)
 	if err == nil {
-		return o.projectObservedPhase(ctx, sandbox, response.Sandbox.Phase)
+		return o.projectObservedStatus(ctx, sandbox, response.Sandbox)
 	}
 	var failure *fastletapi.FastletError
 	if errors.As(err, &failure) && failure.Code == fastletapi.ErrorInProgress {
@@ -357,7 +351,7 @@ func (o *Orchestrator) ReconcileRuntime(ctx context.Context, sandbox *apiv1alpha
 	return fmt.Errorf("%w: %v", ErrUnknownFastletOutcome, err)
 }
 
-func (o *Orchestrator) ObserveRuntime(ctx context.Context, sandbox *apiv1alpha1.Sandbox) error {
+func (o *Orchestrator) ObserveRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) error {
 	fastlet, _, identity, err := o.assignedTarget(sandbox)
 	if err != nil {
 		return err
@@ -371,35 +365,38 @@ func (o *Orchestrator) ObserveRuntime(ctx context.Context, sandbox *apiv1alpha1.
 	}
 	switch response.Sandbox.Phase {
 	case "running":
-		return o.MarkReady(ctx, sandbox)
+		return o.MarkReady(ctx, sandbox, response.Sandbox)
 	case "creating":
 		_ = o.MarkCreating(ctx, sandbox, "Fastlet is still creating the runtime")
 		return ErrRuntimeInProgress
 	default:
-		return o.projectObservedPhase(ctx, sandbox, response.Sandbox.Phase)
+		return o.projectObservedStatus(ctx, sandbox, response.Sandbox)
 	}
 }
 
-func (o *Orchestrator) projectObservedPhase(ctx context.Context, sandbox *apiv1alpha1.Sandbox, phase string) error {
-	switch phase {
+func (o *Orchestrator) projectObservedStatus(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
+	if observed == nil {
+		return ErrUnknownFastletOutcome
+	}
+	switch observed.Phase {
 	case "running":
-		return o.MarkReady(ctx, sandbox)
+		return o.MarkReady(ctx, sandbox, observed)
 	case "infra-pending", "initializing-infra", "route-pending", "publishing-route":
-		if err := o.MarkRuntimeReadyDataPlaneCreating(ctx, sandbox, phase); err != nil {
+		if err := o.MarkRuntimeReadyDataPlaneCreating(ctx, sandbox, observed); err != nil {
 			return err
 		}
 		return ErrDataPlaneInProgress
 	case "infra-unavailable", "route-unavailable":
-		if err := o.MarkRuntimeReadyDataPlaneUnavailable(ctx, sandbox, phase); err != nil {
+		if err := o.MarkRuntimeReadyDataPlaneUnavailable(ctx, sandbox, observed); err != nil {
 			return err
 		}
 		return ErrDataPlaneUnavailable
 	default:
-		return fmt.Errorf("runtime is %s", phase)
+		return fmt.Errorf("runtime is %s", observed.Phase)
 	}
 }
 
-func (o *Orchestrator) DeleteRuntime(ctx context.Context, sandbox *apiv1alpha1.Sandbox) error {
+func (o *Orchestrator) DeleteRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) error {
 	fastlet, _, identity, err := o.assignedTarget(sandbox)
 	if err != nil {
 		return err
@@ -408,7 +405,7 @@ func (o *Orchestrator) DeleteRuntime(ctx context.Context, sandbox *apiv1alpha1.S
 	return err
 }
 
-func (o *Orchestrator) RuntimeGone(ctx context.Context, sandbox *apiv1alpha1.Sandbox) (bool, error) {
+func (o *Orchestrator) RuntimeGone(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (bool, error) {
 	fastlet, _, identity, err := o.assignedTarget(sandbox)
 	if err != nil {
 		return errors.Is(err, ErrAssignedFastletUnavailable), err
@@ -424,7 +421,7 @@ func (o *Orchestrator) RuntimeGone(ctx context.Context, sandbox *apiv1alpha1.San
 	return response == nil || response.Sandbox == nil, nil
 }
 
-func (o *Orchestrator) ClearAssignment(ctx context.Context, sandbox *apiv1alpha1.Sandbox, advanceInstance bool) (*apiv1alpha1.Sandbox, error) {
+func (o *Orchestrator) ClearAssignment(ctx context.Context, sandbox *apiv1alpha2.Sandbox, advanceInstance bool) (*apiv1alpha2.Sandbox, error) {
 	if sandbox == nil {
 		return nil, errors.New("Sandbox is required")
 	}
@@ -445,11 +442,11 @@ func (o *Orchestrator) ClearAssignment(ctx context.Context, sandbox *apiv1alpha1
 	return o.clearAssignmentProjection(ctx, updated, envelope, advanceInstance)
 }
 
-func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *apiv1alpha1.Sandbox, envelope *assignment.AssignmentEnvelope, advanceInstance bool) (*apiv1alpha1.Sandbox, error) {
+func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *apiv1alpha2.Sandbox, envelope *assignment.AssignmentEnvelope, advanceInstance bool) (*apiv1alpha2.Sandbox, error) {
 	key := client.ObjectKeyFromObject(sandbox)
-	var result *apiv1alpha1.Sandbox
+	var result *apiv1alpha2.Sandbox
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		var current apiv1alpha1.Sandbox
+		var current apiv1alpha2.Sandbox
 		if err := o.Client.Get(ctx, key, &current); err != nil {
 			return err
 		}
@@ -464,21 +461,22 @@ func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *a
 			result = current.DeepCopy()
 			return nil
 		}
-		generation := max(current.Status.InstanceGeneration, apiv1alpha1.InitialInstanceGeneration)
+		generation := max(current.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration)
 		routeGeneration := max(current.Status.RouteGeneration, int64(1)) + 1
 		if envelope != nil {
 			generation = max(generation, envelope.InstanceGeneration)
 			routeGeneration = max(routeGeneration, envelope.RouteGeneration+1)
 		}
 		if advanceInstance {
-			generation = apiv1alpha1.NextInstanceGeneration(generation)
+			generation = apiv1alpha2.NextInstanceGeneration(generation)
 		}
 		before := current.DeepCopy()
 		current.Status.Assignment = nil
 		current.Status.InstanceGeneration = generation
 		current.Status.RouteGeneration = routeGeneration
-		current.Status.RuntimeState = apiv1alpha1.ObservedStatePending
-		current.Status.DataPlaneState = apiv1alpha1.ObservedStatePending
+		current.Status.RuntimeState = apiv1alpha2.ObservedStatePending
+		current.Status.DataPlaneState = apiv1alpha2.ObservedStatePending
+		current.Status.Recovery = nil
 		if err := o.Client.Status().Patch(ctx, &current, client.MergeFrom(before)); err != nil {
 			return err
 		}
@@ -488,54 +486,98 @@ func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *a
 	return result, err
 }
 
-func (o *Orchestrator) MarkPending(ctx context.Context, sandbox *apiv1alpha1.Sandbox, reason, message string) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha1.SandboxStatus) {
-		status.RuntimeState = apiv1alpha1.ObservedStatePending
-		status.DataPlaneState = apiv1alpha1.ObservedStatePending
+func (o *Orchestrator) MarkPending(ctx context.Context, sandbox *apiv1alpha2.Sandbox, reason, message string) error {
+	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		status.RuntimeState = apiv1alpha2.ObservedStatePending
+		status.DataPlaneState = apiv1alpha2.ObservedStatePending
 		setCondition(status, ConditionRuntimeReady, metav1.ConditionFalse, reason, message)
 		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, reason, message)
 	})
 }
 
-func (o *Orchestrator) MarkCreating(ctx context.Context, sandbox *apiv1alpha1.Sandbox, message string) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha1.SandboxStatus) {
-		status.RuntimeState = apiv1alpha1.ObservedStateCreating
-		status.DataPlaneState = apiv1alpha1.ObservedStatePending
+func (o *Orchestrator) MarkCreating(ctx context.Context, sandbox *apiv1alpha2.Sandbox, message string) error {
+	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		status.RuntimeState = apiv1alpha2.ObservedStateCreating
+		status.DataPlaneState = apiv1alpha2.ObservedStatePending
 		setCondition(status, ConditionRuntimeReady, metav1.ConditionFalse, "Creating", message)
 	})
 }
 
-func (o *Orchestrator) MarkRuntimeReadyDataPlaneCreating(ctx context.Context, sandbox *apiv1alpha1.Sandbox, phase string) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha1.SandboxStatus) {
-		status.RuntimeState = apiv1alpha1.ObservedStateReady
-		status.DataPlaneState = apiv1alpha1.ObservedStateCreating
+func (o *Orchestrator) MarkRuntimeReadyDataPlaneCreating(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
+	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		status.RuntimeState = apiv1alpha2.ObservedStateReady
+		status.DataPlaneState = apiv1alpha2.ObservedStateCreating
+		projectComponentStatus(status, sandbox, observed)
 		setCondition(status, ConditionRuntimeReady, metav1.ConditionTrue, "RuntimeRunning", "Fastlet reports the runtime and private network ready")
-		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, "DataPlaneInitializing", "Fastlet data plane is "+phase)
+		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, "DataPlaneInitializing", "Fastlet data plane is "+observed.Phase)
 	})
 }
 
-func (o *Orchestrator) MarkRuntimeReadyDataPlaneUnavailable(ctx context.Context, sandbox *apiv1alpha1.Sandbox, phase string) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha1.SandboxStatus) {
-		status.RuntimeState = apiv1alpha1.ObservedStateReady
-		status.DataPlaneState = apiv1alpha1.ObservedStateUnavailable
+func (o *Orchestrator) MarkRuntimeReadyDataPlaneUnavailable(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
+	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		status.RuntimeState = apiv1alpha2.ObservedStateReady
+		status.DataPlaneState = apiv1alpha2.ObservedStateUnavailable
+		projectComponentStatus(status, sandbox, observed)
 		setCondition(status, ConditionRuntimeReady, metav1.ConditionTrue, "RuntimeRunning", "Fastlet reports the runtime and private network ready")
-		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, "DataPlaneUnavailable", "Fastlet data plane is "+phase+" and will be retried")
+		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, "DataPlaneUnavailable", "Fastlet data plane is "+observed.Phase+" and will be retried")
 	})
 }
 
-func (o *Orchestrator) MarkReady(ctx context.Context, sandbox *apiv1alpha1.Sandbox) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha1.SandboxStatus) {
-		status.RuntimeState = apiv1alpha1.ObservedStateReady
-		status.DataPlaneState = apiv1alpha1.ObservedStateReady
+func (o *Orchestrator) MarkReady(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
+	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		status.RuntimeState = apiv1alpha2.ObservedStateReady
+		status.DataPlaneState = apiv1alpha2.ObservedStateReady
+		status.Recovery = nil
+		projectComponentStatus(status, sandbox, observed)
 		setCondition(status, ConditionRuntimeReady, metav1.ConditionTrue, "RuntimeRunning", "Fastlet reports the runtime running")
 		setCondition(status, ConditionDataPlaneReady, metav1.ConditionTrue, "FastletRouteReady", "Fastlet reports the instance-fenced local proxy route published")
 	})
 }
 
-func (o *Orchestrator) patchStatus(ctx context.Context, sandbox *apiv1alpha1.Sandbox, mutate func(*apiv1alpha1.SandboxStatus)) error {
+func projectComponentStatus(status *apiv1alpha2.SandboxStatus, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) {
+	if status == nil || observed == nil {
+		return
+	}
+	revision := status.InfraRevision
+	if sandbox != nil && sandbox.Status.Assignment != nil && sandbox.Status.Assignment.InfraRevision != "" {
+		revision = sandbox.Status.Assignment.InfraRevision
+	}
+	status.InfraRevision = revision
+	previous := make(map[string]apiv1alpha2.InfraComponentStatus, len(status.Components))
+	for _, component := range status.Components {
+		previous[component.Name] = component
+	}
+	components := make([]apiv1alpha2.InfraComponentStatus, 0, len(observed.InfraDiagnostics))
+	now := metav1.Now()
+	for _, diagnostic := range observed.InfraDiagnostics {
+		state := apiv1alpha2.InfraComponentStarting
+		switch diagnostic.State {
+		case "Ready":
+			state = apiv1alpha2.InfraComponentReady
+		case "Failed":
+			state = apiv1alpha2.InfraComponentFailed
+		}
+		component := apiv1alpha2.InfraComponentStatus{
+			Name: diagnostic.Component, State: state, Protocol: diagnostic.Protocol,
+			Port: int32(diagnostic.Port), ObservedRouteGeneration: diagnostic.ObservedRouteGeneration,
+			Message: diagnostic.Message,
+		}
+		if old, found := previous[component.Name]; found && old.State == component.State &&
+			old.Protocol == component.Protocol && old.Port == component.Port &&
+			old.ObservedRouteGeneration == component.ObservedRouteGeneration && old.Message == component.Message {
+			component.LastTransitionTime = old.LastTransitionTime
+		} else {
+			component.LastTransitionTime = &now
+		}
+		components = append(components, component)
+	}
+	status.Components = components
+}
+
+func (o *Orchestrator) patchStatus(ctx context.Context, sandbox *apiv1alpha2.Sandbox, mutate func(*apiv1alpha2.SandboxStatus)) error {
 	key := client.ObjectKeyFromObject(sandbox)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var current apiv1alpha1.Sandbox
+		var current apiv1alpha2.Sandbox
 		if err := o.Client.Get(ctx, key, &current); err != nil {
 			return err
 		}
@@ -551,7 +593,7 @@ func (o *Orchestrator) patchStatus(ctx context.Context, sandbox *apiv1alpha1.San
 	})
 }
 
-func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha1.Sandbox) (placement.FastletInfo, assignment.AssignmentEnvelope, fastletapi.SandboxIdentity, error) {
+func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha2.Sandbox) (placement.FastletInfo, assignment.AssignmentEnvelope, fastletapi.SandboxIdentity, error) {
 	if sandbox == nil || sandbox.UID == "" {
 		return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, ErrAssignedFastletUnavailable
 	}
@@ -568,7 +610,7 @@ func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha1.Sandbox) (placement.F
 		}
 		legacy, legacyErr := AssignmentForCandidate(
 			legacyFastlet, sandbox.Status.Assignment.Attempt,
-			max(sandbox.Status.InstanceGeneration, apiv1alpha1.InitialInstanceGeneration),
+			max(sandbox.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration),
 			max(sandbox.Status.RouteGeneration, int64(1)), "legacy-"+string(sandbox.UID),
 		)
 		if legacyErr != nil {
@@ -587,7 +629,7 @@ func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha1.Sandbox) (placement.F
 	fastlet, ok := o.Registry.GetFastletByID(placement.FastletID(envelope.FastletName))
 	if !ok || fastlet.PodUID != envelope.FastletPodUID || fastlet.PodIP == "" ||
 		fastlet.RuntimeProfileHash != envelope.RuntimeProfileHash || fastlet.ResourceProfileHash != envelope.ResourceProfileHash ||
-		fastlet.InfraProfileHash != envelope.InfraProfileHash {
+		fastlet.InfraRevision != envelope.InfraRevision {
 		return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, ErrAssignedFastletUnavailable
 	}
 	identity := fastletapi.SandboxIdentity{
@@ -635,7 +677,7 @@ func (o *Orchestrator) recordFeedback(id placement.FastletID, err error) {
 	o.Registry.RecordFeedback(id, placement.LocalFeedback{Code: failure.Code, ObservedAt: now})
 }
 
-func setCondition(status *apiv1alpha1.SandboxStatus, conditionType string, conditionStatus metav1.ConditionStatus, reason, message string) {
+func setCondition(status *apiv1alpha2.SandboxStatus, conditionType string, conditionStatus metav1.ConditionStatus, reason, message string) {
 	apiMeta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type: conditionType, Status: conditionStatus, Reason: reason, Message: message,
 		ObservedGeneration: 0, LastTransitionTime: metav1.Now(),

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	e2eenv "fast-sandbox/test/e2e/env"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
@@ -39,7 +39,7 @@ func TestKataQemuSandbox(t *testing.T) {
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
 			// Create Kata QEMU pool
-			pool := newSecureRuntimePool(namespace, "kata-qemu-pool", apiv1alpha1.RuntimeKataQemu, 1, 1)
+			pool := newSecureRuntimePool(namespace, "kata-qemu-pool", apiv1alpha2.RuntimeKataQemu, 1, 1)
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create kata pool: %v", err)
 			}
@@ -63,7 +63,7 @@ func TestKataQemuSandbox(t *testing.T) {
 			if _, err := ctl.WaitRunning(runCtx, "sb-kata-qemu"); err != nil {
 				t.Fatalf("wait for kata-qemu sandbox running via fastctl: %v", err)
 			}
-			verifyKataRuntime(ctx, t, k8sClient, fixture, namespace, "sb-kata-qemu", apiv1alpha1.RuntimeKataQemu, "kata-qemu-ok")
+			verifyKataRuntime(ctx, t, k8sClient, fixture, namespace, "sb-kata-qemu", apiv1alpha2.RuntimeKataQemu, "kata-qemu-ok")
 
 			return ctx
 		}).
@@ -88,25 +88,25 @@ func TestKataFcSandbox(t *testing.T) {
 			}
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
-			pool := newSecureRuntimePool(namespace, "kata-fc-pool", apiv1alpha1.RuntimeKataFc, 1, 1)
+			pool := newSecureRuntimePool(namespace, "kata-fc-pool", apiv1alpha2.RuntimeKataFc, 1, 1)
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create kata-fc pool: %v", err)
 			}
 
 			conditionCtx, cancelCondition := context.WithTimeout(ctx, 30*time.Second)
 			defer cancelCondition()
-			updated, err := fixture.WaitForPoolCondition(conditionCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, apiv1alpha1.PoolConditionRuntimeReady, metav1.ConditionFalse)
+			updated, err := fixture.WaitForPoolCondition(conditionCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, apiv1alpha2.PoolConditionRuntimeReady, metav1.ConditionFalse)
 			if err != nil {
 				t.Fatalf("wait for kata-fc capability gate: %v", err)
 			}
 			var runtimeCondition *metav1.Condition
 			for index := range updated.Status.Conditions {
-				if updated.Status.Conditions[index].Type == apiv1alpha1.PoolConditionRuntimeReady {
+				if updated.Status.Conditions[index].Type == apiv1alpha2.PoolConditionRuntimeReady {
 					runtimeCondition = &updated.Status.Conditions[index]
 					break
 				}
 			}
-			if runtimeCondition == nil || runtimeCondition.Reason != apiv1alpha1.ReasonRuntimeUnavailable || runtimeCondition.Message != "KataFirecrackerNotValidated" {
+			if runtimeCondition == nil || runtimeCondition.Reason != apiv1alpha2.ReasonRuntimeUnavailable || runtimeCondition.Message != "KataFirecrackerNotValidated" {
 				t.Fatalf("unexpected kata-fc capability condition: %+v", runtimeCondition)
 			}
 			var fastlets corev1.PodList
@@ -141,7 +141,7 @@ func TestKataClhSandbox(t *testing.T) {
 			}
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
-			pool := newSecureRuntimePool(namespace, "kata-clh-pool", apiv1alpha1.RuntimeKataClh, 1, 1)
+			pool := newSecureRuntimePool(namespace, "kata-clh-pool", apiv1alpha2.RuntimeKataClh, 1, 1)
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create kata-clh pool: %v", err)
 			}
@@ -164,7 +164,7 @@ func TestKataClhSandbox(t *testing.T) {
 			if _, err := ctl.WaitRunning(runCtx, "sb-kata-clh"); err != nil {
 				t.Fatalf("wait for kata-clh sandbox running via fastctl: %v", err)
 			}
-			verifyKataRuntime(ctx, t, k8sClient, fixture, namespace, "sb-kata-clh", apiv1alpha1.RuntimeKataClh, "kata-clh-ok")
+			verifyKataRuntime(ctx, t, k8sClient, fixture, namespace, "sb-kata-clh", apiv1alpha2.RuntimeKataClh, "kata-clh-ok")
 
 			return ctx
 		}).
@@ -225,17 +225,17 @@ func waitForKataRuntimeReady(ctx context.Context, t *testing.T, fixture *fixture
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if _, err := fixture.WaitForPoolCondition(waitCtx, types.NamespacedName{Name: poolName, Namespace: namespace}, apiv1alpha1.PoolConditionRuntimeReady, metav1.ConditionTrue); err != nil {
+	if _, err := fixture.WaitForPoolCondition(waitCtx, types.NamespacedName{Name: poolName, Namespace: namespace}, apiv1alpha2.PoolConditionRuntimeReady, metav1.ConditionTrue); err != nil {
 		t.Fatalf("wait for Kata RuntimeReady: %v", err)
 	}
 }
 
-func verifyKataRuntime(ctx context.Context, t *testing.T, kubeClient client.Client, fixture *fixtures.FixtureClient, namespace, sandboxName string, runtimeName apiv1alpha1.RuntimeName, marker string) {
+func verifyKataRuntime(ctx context.Context, t *testing.T, kubeClient client.Client, fixture *fixtures.FixtureClient, namespace, sandboxName string, runtimeName apiv1alpha2.RuntimeName, marker string) {
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: sandboxName, Namespace: namespace}, func(item *apiv1alpha1.Sandbox) bool {
-		return item.Status.Assignment != nil && item.Status.RuntimeState == apiv1alpha1.ObservedStateReady && item.Status.DataPlaneState == apiv1alpha1.ObservedStateReady
+	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: sandboxName, Namespace: namespace}, func(item *apiv1alpha2.Sandbox) bool {
+		return item.Status.Assignment != nil && item.Status.RuntimeState == apiv1alpha2.ObservedStateReady && item.Status.DataPlaneState == apiv1alpha2.ObservedStateReady
 	})
 	if err != nil {
 		t.Fatalf("wait for %s Sandbox readiness: %v", runtimeName, err)
@@ -267,7 +267,7 @@ func verifyKataRuntime(ctx context.Context, t *testing.T, kubeClient client.Clie
 	t.Logf("%s isolation, resource limits, private network, proxy and recovery verified: guest kernel=%s private IP=%s", runtimeName, guestKernel, state.IP)
 }
 
-func assertKataOCISpecResources(t *testing.T, runtimeName apiv1alpha1.RuntimeName, runtimeInfo string) {
+func assertKataOCISpecResources(t *testing.T, runtimeName apiv1alpha2.RuntimeName, runtimeInfo string) {
 	t.Helper()
 	var info struct {
 		Runtime struct {

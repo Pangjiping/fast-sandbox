@@ -48,7 +48,8 @@ func newProxyHarness(t *testing.T, upstream *httptest.Server) *proxyHarness {
 	require.NoError(t, err)
 	port := uint32(parsedPort)
 	token, _, err := issuer.Issue(routeauth.Claims{
-		Namespace: route.Namespace, SandboxUID: route.SandboxUID, TargetPort: port, FastletPodUID: route.FastletPodUID,
+		Namespace: route.Namespace, SandboxUID: route.SandboxUID, TargetKind: routeauth.TargetKindPort,
+		Protocol: "HTTP", TargetPort: port, FastletPodUID: route.FastletPodUID,
 		AssignmentAttempt: route.AssignmentAttempt, RouteGeneration: route.RouteGeneration,
 	})
 	require.NoError(t, err)
@@ -59,7 +60,7 @@ func (h *proxyHarness) request(t *testing.T, ctx context.Context, suffix string)
 	t.Helper()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.server.URL+dataplane.RoutePath(h.route.SandboxUID, h.port)+suffix, nil)
 	require.NoError(t, err)
-	request.Header.Set("Authorization", "Bearer "+h.token)
+	request.Header.Set(dataplane.HeaderRouteCredential, h.token)
 	for name, values := range RouteHeaders(h.route) {
 		request.Header[name] = values
 	}
@@ -138,7 +139,7 @@ func TestProxyTransparentlyUpgradesWebSocket(t *testing.T) {
 	require.NoError(t, err)
 	defer connection.Close()
 	path := dataplane.RoutePath(harness.route.SandboxUID, harness.port) + "/ws"
-	_, err = io.WriteString(connection, "GET "+path+" HTTP/1.1\r\nHost: "+proxyURL.Host+"\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nAuthorization: Bearer "+harness.token+"\r\n"+
+	_, err = io.WriteString(connection, "GET "+path+" HTTP/1.1\r\nHost: "+proxyURL.Host+"\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"+dataplane.HeaderRouteCredential+": "+harness.token+"\r\n"+
 		dataplane.HeaderFastletPodUID+": "+harness.route.FastletPodUID+"\r\n"+
 		dataplane.HeaderAssignmentAttempt+": 1\r\n"+dataplane.HeaderRouteGeneration+": 1\r\n"+
 		dataplane.HeaderForwardedNamespace+": default\r\n\r\n")

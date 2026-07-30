@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	e2eenv "fast-sandbox/test/e2e/env"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
@@ -47,7 +47,7 @@ func TestGVisorSandbox(t *testing.T) {
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
 			// Create gVisor pool
-			pool := newSecureRuntimePool(namespace, "gvisor-pool", apiv1alpha1.RuntimeGVisor, 1, 1)
+			pool := newSecureRuntimePool(namespace, "gvisor-pool", apiv1alpha2.RuntimeGVisor, 1, 1)
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create gvisor pool: %v", err)
 			}
@@ -60,7 +60,7 @@ func TestGVisorSandbox(t *testing.T) {
 			}
 			runtimeWaitCtx, cancelRuntimeWait := context.WithTimeout(ctx, 30*time.Second)
 			defer cancelRuntimeWait()
-			if _, err := fixture.WaitForPoolCondition(runtimeWaitCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, apiv1alpha1.PoolConditionRuntimeReady, metav1.ConditionTrue); err != nil {
+			if _, err := fixture.WaitForPoolCondition(runtimeWaitCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, apiv1alpha2.PoolConditionRuntimeReady, metav1.ConditionTrue); err != nil {
 				t.Fatalf("wait for gVisor RuntimeReady: %v", err)
 			}
 
@@ -73,8 +73,8 @@ func TestGVisorSandbox(t *testing.T) {
 			// Wait for sandbox running
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			defer cancelRunWait()
-			_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for running sandbox: %v", err)
@@ -108,7 +108,7 @@ func TestGVisorIsolation(t *testing.T) {
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
 			// Create gVisor pool
-			pool := newSecureRuntimePool(namespace, "gvisor-iso-pool", apiv1alpha1.RuntimeGVisor, 1, 1)
+			pool := newSecureRuntimePool(namespace, "gvisor-iso-pool", apiv1alpha2.RuntimeGVisor, 1, 1)
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create gvisor pool: %v", err)
 			}
@@ -120,22 +120,22 @@ func TestGVisorIsolation(t *testing.T) {
 			}
 			runtimeWaitCtx, cancelRuntimeWait := context.WithTimeout(ctx, 30*time.Second)
 			defer cancelRuntimeWait()
-			if _, err := fixture.WaitForPoolCondition(runtimeWaitCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, apiv1alpha1.PoolConditionRuntimeReady, metav1.ConditionTrue); err != nil {
+			if _, err := fixture.WaitForPoolCondition(runtimeWaitCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, apiv1alpha2.PoolConditionRuntimeReady, metav1.ConditionTrue); err != nil {
 				t.Fatalf("wait for gVisor RuntimeReady: %v", err)
 			}
 
 			// Keep the workload serving after emitting isolation and DNS markers so
 			// the test can validate the Fastlet-owned netns before and after recovery.
-			sandbox := &apiv1alpha1.Sandbox{
+			sandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-gvisor-iso",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:   "docker.io/library/alpine:latest",
 					Command: []string{"/bin/sh", "-c", `if nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1; then echo DNS_OK; else echo DNS_FAIL; fi; echo KERNEL=$(uname -r); printf '%s\n' '#!/bin/sh' 'printf "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\ngvisor-ok\n"' > /serve.sh; chmod +x /serve.sh; exec nc -lk -p 18080 -e /serve.sh`},
 					PoolRef: pool.Name,
@@ -147,9 +147,9 @@ func TestGVisorIsolation(t *testing.T) {
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			defer cancelRunWait()
-			createdSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady &&
-					sb.Status.DataPlaneState == apiv1alpha1.ObservedStateReady
+			createdSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady &&
+					sb.Status.DataPlaneState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for running sandbox: %v", err)
@@ -191,8 +191,9 @@ func TestGVisorIsolation(t *testing.T) {
 				t.Fatalf("dial FastPath: %v", err)
 			}
 			defer connection.Close()
-			access, err := fastpathv1.NewFastPathServiceClient(connection).ResolveEndpoint(ctx, &fastpathv1.ResolveEndpointRequest{
-				SandboxUid: string(createdSandbox.UID), TargetPort: 18080, Protocol: "http",
+			access, err := fastpathv2.NewFastPathServiceClient(connection).ResolveEndpoint(ctx, &fastpathv2.ResolveEndpointRequest{
+				Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: string(createdSandbox.UID)}},
+				Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: 18080}},
 			})
 			if err != nil {
 				t.Fatalf("resolve gVisor proxy endpoint: %v", err)
@@ -220,7 +221,7 @@ type secureRuntimeNetworkState struct {
 	} `json:"owner"`
 }
 
-func secureRuntimeSandboxIdentifier(sandbox *apiv1alpha1.Sandbox) string {
+func secureRuntimeSandboxIdentifier(sandbox *apiv1alpha2.Sandbox) string {
 	return string(sandbox.UID)
 }
 
@@ -305,7 +306,7 @@ func waitForSecureRuntimeHTTP(ctx context.Context, t *testing.T, namespace, pod,
 	}
 }
 
-func assertSecureRuntimeProxyResponse(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv1.ResolveEndpointResponse, want string) {
+func assertSecureRuntimeProxyResponse(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv2.ResolveEndpointResponse, want string) {
 	t.Helper()
 	parsed, err := url.Parse(access.ProxyEndpoint)
 	if err != nil {
@@ -356,8 +357,9 @@ func verifySecureRuntimeProxy(ctx context.Context, t *testing.T, sandboxUID stri
 		t.Fatalf("dial FastPath: %v", err)
 	}
 	defer connection.Close()
-	access, err := fastpathv1.NewFastPathServiceClient(connection).ResolveEndpoint(ctx, &fastpathv1.ResolveEndpointRequest{
-		SandboxUid: sandboxUID, TargetPort: port, Protocol: "http",
+	access, err := fastpathv2.NewFastPathServiceClient(connection).ResolveEndpoint(ctx, &fastpathv2.ResolveEndpointRequest{
+		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: sandboxUID}},
+		Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: port}},
 	})
 	if err != nil {
 		t.Fatalf("resolve secure runtime proxy endpoint: %v", err)
@@ -437,7 +439,7 @@ func TestGVisorMultipleSandboxes(t *testing.T) {
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
 			// Create pool with capacity for multiple sandboxes
-			pool := newSecureRuntimePool(namespace, "gvisor-multi-pool", apiv1alpha1.RuntimeGVisor, 1, 3)
+			pool := newSecureRuntimePool(namespace, "gvisor-multi-pool", apiv1alpha2.RuntimeGVisor, 1, 3)
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create gvisor pool: %v", err)
 			}
@@ -461,8 +463,8 @@ func TestGVisorMultipleSandboxes(t *testing.T) {
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 120*time.Second)
 			defer cancelRunWait()
 			for _, name := range sandboxNames {
-				_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-					return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+				_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+					return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 				})
 				if err != nil {
 					t.Fatalf("wait for running sandbox %s: %v", name, err)
@@ -477,24 +479,24 @@ func TestGVisorMultipleSandboxes(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func newSecureRuntimePool(namespace, name string, runtimeName apiv1alpha1.RuntimeName, min, max int32) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func newSecureRuntimePool(namespace, name string, runtimeName apiv1alpha2.RuntimeName, min, max int32) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "SandboxPool",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{
 				PoolMin: min,
 				PoolMax: max,
 			},
 			MaxSandboxesPerPod: 5,
 			Runtime:            runtimeName,
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
 				CPU: resource.MustParse("250m"), Memory: resource.MustParse("256Mi"), PIDs: 128,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{
@@ -521,17 +523,17 @@ func newSecureRuntimePool(namespace, name string, runtimeName apiv1alpha1.Runtim
 	}
 }
 
-func newSecureRuntimeSandbox(namespace, name, pool string) *apiv1alpha1.Sandbox {
-	return &apiv1alpha1.Sandbox{
+func newSecureRuntimeSandbox(namespace, name, pool string) *apiv1alpha2.Sandbox {
+	return &apiv1alpha2.Sandbox{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "Sandbox",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image:   "docker.io/library/alpine:latest",
 			Command: []string{"/bin/sleep", "60"},
 			PoolRef: pool,

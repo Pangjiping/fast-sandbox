@@ -228,6 +228,9 @@ secrets/
 docs/generated/
 apidocs/
 
+# Local development documents
+.dev/
+
 # Test results
 test-results/
 coverage/

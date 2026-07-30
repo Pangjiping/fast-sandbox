@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/placement"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
@@ -56,7 +56,7 @@ func TestPoolScaleDownUsesDurableDrain(t *testing.T) {
 			}
 
 			requireNoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				var current apiv1alpha1.SandboxPool
+				var current apiv1alpha2.SandboxPool
 				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), &current); err != nil {
 					return err
 				}
@@ -121,7 +121,7 @@ func TestPoolPlannedUpgradeUsesReadySurgeAndDurableDrain(t *testing.T) {
 
 			pool := drainPool(namespace)
 			pool.Name = "upgrade-pool"
-			pool.Spec.Capacity = apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 1}
+			pool.Spec.Capacity = apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1}
 			_, err := fixture.CreateSandboxPool(ctx, namespace, pool)
 			requireNoError(t, err, "create upgrade Pool")
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -147,7 +147,7 @@ func TestPoolPlannedUpgradeUsesReadySurgeAndDurableDrain(t *testing.T) {
 			}
 
 			requireNoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				var current apiv1alpha1.SandboxPool
+				var current apiv1alpha2.SandboxPool
 				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), &current); err != nil {
 					return err
 				}
@@ -207,32 +207,32 @@ func TestPoolPlannedUpgradeUsesReadySurgeAndDurableDrain(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func drainPool(namespace string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
-		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha1.GroupVersion.String(), Kind: "SandboxPool"},
+func drainPool(namespace string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
+		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "SandboxPool"},
 		ObjectMeta: metav1.ObjectMeta{Name: "drain-pool", Namespace: namespace},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{PoolMin: 2, PoolMax: 2}, MaxSandboxesPerPod: 5,
-			Runtime: apiv1alpha1.RuntimeContainer, SandboxResources: suiteenv.SmallSandboxResourceProfile(),
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{PoolMin: 2, PoolMax: 2}, MaxSandboxesPerPod: 5,
+			Runtime: apiv1alpha2.RuntimeContainer, SandboxResources: suiteenv.SmallSandboxResourceProfile(),
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage()}}}},
 		},
 	}
 }
 
-func drainSandbox(namespace, name, pool, image string) *apiv1alpha1.Sandbox {
-	return &apiv1alpha1.Sandbox{
-		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha1.GroupVersion.String(), Kind: "Sandbox"},
+func drainSandbox(namespace, name, pool, image string) *apiv1alpha2.Sandbox {
+	return &apiv1alpha2.Sandbox{
+		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       apiv1alpha1.SandboxSpec{Image: image, Command: []string{"/bin/sleep", "3600"}, PoolRef: pool},
+		Spec:       apiv1alpha2.SandboxSpec{Image: image, Command: []string{"/bin/sleep", "3600"}, PoolRef: pool},
 	}
 }
 
-func waitAssigned(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, sandbox *apiv1alpha1.Sandbox) *apiv1alpha1.Sandbox {
+func waitAssigned(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, sandbox *apiv1alpha2.Sandbox) *apiv1alpha2.Sandbox {
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	result, err := fixture.WaitForSandbox(waitCtx, client.ObjectKeyFromObject(sandbox), func(current *apiv1alpha1.Sandbox) bool {
-		return current.Status.Assignment != nil && current.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+	result, err := fixture.WaitForSandbox(waitCtx, client.ObjectKeyFromObject(sandbox), func(current *apiv1alpha2.Sandbox) bool {
+		return current.Status.Assignment != nil && current.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 	})
 	requireNoError(t, err, "wait for Sandbox assignment")
 	return result
@@ -260,11 +260,12 @@ func requireNoError(t *testing.T, err error, action string) {
 func restartControllerLeader(ctx context.Context, t *testing.T, k8sClient client.Client) {
 	t.Helper()
 	const leaseName = "fast-sandbox-reconciler.sandbox.fast.io"
+	controlPlaneNamespace := testSuite.ControllerNamespace()
 	var before string
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		var lease coordinationv1.Lease
-		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: leaseName}, &lease); err == nil && lease.Spec.HolderIdentity != nil {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: controlPlaneNamespace, Name: leaseName}, &lease); err == nil && lease.Spec.HolderIdentity != nil {
 			before = *lease.Spec.HolderIdentity
 			break
 		}
@@ -275,11 +276,11 @@ func restartControllerLeader(ctx context.Context, t *testing.T, k8sClient client
 		t.Fatalf("invalid Controller leader identity %q", before)
 	}
 	zero := int64(0)
-	requireNoError(t, k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: leaderPod, Namespace: "default"}}, &client.DeleteOptions{GracePeriodSeconds: &zero}), "delete Controller leader")
+	requireNoError(t, k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: leaderPod, Namespace: controlPlaneNamespace}}, &client.DeleteOptions{GracePeriodSeconds: &zero}), "delete Controller leader")
 	deadline = time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		var lease coordinationv1.Lease
-		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: leaseName}, &lease); err == nil &&
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: controlPlaneNamespace, Name: leaseName}, &lease); err == nil &&
 			lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" && *lease.Spec.HolderIdentity != before {
 			return
 		}

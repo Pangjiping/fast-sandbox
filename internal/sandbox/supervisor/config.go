@@ -29,15 +29,12 @@ type UserCredential struct {
 }
 
 type Component struct {
-	Name            string                     `json:"name"`
-	Command         string                     `json:"command"`
-	Args            []string                   `json:"args,omitempty"`
-	Env             map[string]string          `json:"env,omitempty"`
-	StartBeforeUser bool                       `json:"startBeforeUser,omitempty"`
-	RestartPolicy   infracatalog.RestartPolicy `json:"restartPolicy"`
-	Readiness       Readiness                  `json:"readiness"`
-	Required        bool                       `json:"required"`
-	DependsOn       []string                   `json:"dependsOn,omitempty"`
+	Name          string                     `json:"name"`
+	Command       string                     `json:"command"`
+	Args          []string                   `json:"args,omitempty"`
+	Env           map[string]string          `json:"env,omitempty"`
+	RestartPolicy infracatalog.RestartPolicy `json:"restartPolicy"`
+	Readiness     Readiness                  `json:"readiness"`
 }
 
 type Readiness struct {
@@ -77,16 +74,6 @@ func (c Config) Validate() error {
 			return fmt.Errorf("duplicate component %q", component.Name)
 		}
 		seen[component.Name] = struct{}{}
-	}
-	for _, component := range c.Components {
-		for _, dependency := range component.DependsOn {
-			if _, exists := seen[dependency]; !exists {
-				return fmt.Errorf("component %s depends on unknown component %s", component.Name, dependency)
-			}
-		}
-	}
-	if _, err := orderedComponents(c.Components); err != nil {
-		return err
 	}
 	return nil
 }

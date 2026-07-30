@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -28,7 +28,7 @@ var deleteCmd = &cobra.Command{
 		}
 
 		klog.V(4).InfoS("Sending DeleteSandbox request", "sandboxName", sandboxName, "namespace", namespace)
-		_, err := client.DeleteSandbox(context.Background(), &fastpathv1.DeleteRequest{
+		_, err := client.DeleteSandbox(context.Background(), &fastpathv2.DeleteRequest{
 			SandboxName: sandboxName,
 			Namespace:   namespace,
 		})

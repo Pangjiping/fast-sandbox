@@ -23,6 +23,7 @@ type FastletAdmissionClient interface {
 	Heartbeat(ctx context.Context, fastletIP string, req *HeartbeatRequest) (*HeartbeatResponse, error)
 	RuntimeDiagnostics(ctx context.Context, fastletIP string) (*RuntimeDiagnostics, error)
 	SandboxDiagnostics(ctx context.Context, fastletIP string, req *SandboxDiagnosticsRequest) (*SandboxDiagnosticsResponse, error)
+	WaitSandboxReady(ctx context.Context, fastletIP string, req *WaitSandboxReadyRequest) (*WaitSandboxReadyResponse, error)
 	SetDraining(ctx context.Context, fastletIP string, req *SetDrainingRequest) (*SetDrainingResponse, error)
 }
 
@@ -43,9 +44,7 @@ type FastletClient struct {
 // NewFastletClient creates a new fastlet client.
 func NewFastletClient(fastletPort int) *FastletClient {
 	return &FastletClient{
-		httpClient: &http.Client{
-			Timeout: defaultFastletTimeout,
-		},
+		httpClient:  &http.Client{},
 		timeout:     defaultFastletTimeout,
 		fastletPort: fastletPort,
 	}
@@ -54,7 +53,6 @@ func NewFastletClient(fastletPort int) *FastletClient {
 // SetTimeout sets the timeout for fastlet API calls.
 func (c *FastletClient) SetTimeout(timeout time.Duration) {
 	c.timeout = timeout
-	c.httpClient.Timeout = timeout
 }
 
 func (c *FastletClient) CreateSandbox(ctx context.Context, fastletIP string, req *CreateSandboxRequest) (*CreateSandboxResponse, error) {
@@ -100,6 +98,13 @@ func (c *FastletClient) SandboxDiagnostics(ctx context.Context, fastletIP string
 		ctx = withFastletIdentity(ctx, req.Identity)
 	}
 	return postFastletJSON[SandboxDiagnosticsRequest, SandboxDiagnosticsResponse](c, ctx, fastletIP, "/api/v2/fastlet/diagnostics/sandbox", req)
+}
+
+func (c *FastletClient) WaitSandboxReady(ctx context.Context, fastletIP string, req *WaitSandboxReadyRequest) (*WaitSandboxReadyResponse, error) {
+	if req != nil {
+		ctx = withFastletIdentity(ctx, req.Identity)
+	}
+	return postFastletJSON[WaitSandboxReadyRequest, WaitSandboxReadyResponse](c, ctx, fastletIP, "/api/v2/fastlet/wait-data-plane", req)
 }
 
 func (c *FastletClient) SetDraining(ctx context.Context, fastletIP string, req *SetDrainingRequest) (*SetDrainingResponse, error) {
@@ -172,6 +177,8 @@ func responseFastletError(response any) *FastletError {
 	case *DeleteSandboxV2Response:
 		return typed.Error
 	case *SandboxDiagnosticsResponse:
+		return typed.Error
+	case *WaitSandboxReadyResponse:
 		return typed.Error
 	default:
 		return nil

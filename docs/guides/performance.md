@@ -153,7 +153,7 @@ Record:
 - CPU, memory, storage, virtualization, kernel, Kubernetes, and containerd;
 - component replica counts;
 - total requests, concurrency, and request rate;
-- runtime and InfraProfile;
+- runtime and Infra Component revision;
 - image reference and warm/cold hit/miss state;
 - network-slot state;
 - Fast-Path or direct-CRD path;
@@ -178,7 +178,7 @@ go run ./test/performance/create_load \
   --commit "$(git rev-parse HEAD)" \
   --environment '8c/32GiB, Linux kernel X, kind X, containerd X' \
   --runtime container \
-  --infra-profile minimal \
+  --infra-revision sha256:<pool-infra-revision> \
   --image-state warm \
   --image-affinity hit \
   --network-slot-state clean \

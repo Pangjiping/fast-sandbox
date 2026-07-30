@@ -8,7 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -29,7 +29,7 @@ var listCmd = &cobra.Command{
 		}
 
 		klog.V(4).InfoS("Sending ListSandboxes request", "namespace", namespace)
-		resp, err := client.ListSandboxes(context.Background(), &fastpathv1.ListRequest{
+		resp, err := client.ListSandboxes(context.Background(), &fastpathv2.ListRequest{
 			Namespace: namespace,
 		})
 		if err != nil {
@@ -41,7 +41,7 @@ var listCmd = &cobra.Command{
 		w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 		fmt.Fprintln(w, "NAME\tUID\tRUNTIME\tDATA-PLANE\tIMAGE\tFASTLET\tAGE")
 		for _, item := range resp.Items {
-			age := time.Since(time.Unix(item.CreatedAt, 0)).Truncate(time.Second)
+			age := time.Since(time.Unix(item.CreatedAtUnixSeconds, 0)).Truncate(time.Second)
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", item.SandboxName, item.SandboxUid, item.RuntimeState, item.DataPlaneState, item.Image, item.FastletPod, age)
 		}
 		w.Flush()

@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.20.1
+    controller-gen.kubebuilder.io/version: (devel)
   name: sandboxpools.sandbox.fast.io
 spec:
   group: sandbox.fast.io
@@ -14,7 +14,7 @@ spec:
     singular: sandboxpool
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - name: v1alpha2
     schema:
       openAPIV3Schema:
         description: SandboxPool is the Schema for the sandboxpools API.
@@ -70,14 +70,161 @@ spec:
                   FastletTemplate is intentionally preserved as a Kubernetes-native pod
                   template. Fast Sandbox validates the platform-owned fields separately.
                 x-kubernetes-preserve-unknown-fields: true
-              infraProfile:
-                default: minimal
-                description: InfraProfile selects a platform-controlled Runtime Augmentation
-                  profile.
-                type: string
-                x-kubernetes-validations:
-                - message: infraProfile is immutable
-                  rule: self == oldSelf
+              infraComponents:
+                description: |-
+                  InfraComponents are compiled into an immutable revision. Updating this
+                  list rolls Fastlets; existing Sandboxes remain on their admitted revision.
+                items:
+                  description: |-
+                    InfraComponent injects one artifact-backed managed process with one public
+                    named endpoint.
+                  properties:
+                    artifact:
+                      description: InfraArtifact defines immutable delivery for one
+                        component.
+                      properties:
+                        mappings:
+                          items:
+                            description: |-
+                              InfraArtifactMapping maps one final file or directory from the verified
+                              artifact root to one final path in the Sandbox.
+                            properties:
+                              sourcePath:
+                                pattern: ^/
+                                type: string
+                              targetPath:
+                                pattern: ^/\.fast/components/
+                                type: string
+                            required:
+                            - sourcePath
+                            - targetPath
+                            type: object
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                        source:
+                          description: InfraArtifactSource contains exactly one immutable
+                            source.
+                          properties:
+                            archive:
+                              description: InfraArtifactArchive selects one immutable
+                                gzip-compressed tar archive.
+                              properties:
+                                sha256:
+                                  pattern: ^[a-f0-9]{64}$
+                                  type: string
+                                url:
+                                  pattern: ^https://
+                                  type: string
+                              required:
+                              - sha256
+                              - url
+                              type: object
+                            image:
+                              description: |-
+                                InfraArtifactImage selects an immutable OCI image or index as an artifact
+                                carrier. Fast Sandbox injects mapped files and never starts this image.
+                              properties:
+                                reference:
+                                  pattern: ^.+@sha256:[a-f0-9]{64}$
+                                  type: string
+                              required:
+                              - reference
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: exactly one of image or archive is required
+                            rule: has(self.image) != has(self.archive)
+                      required:
+                      - mappings
+                      - source
+                      type: object
+                    endpoint:
+                      description: InfraEndpoint is the single public endpoint of
+                        a component.
+                      properties:
+                        port:
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        protocol:
+                          enum:
+                          - HTTP
+                          type: string
+                      required:
+                      - port
+                      - protocol
+                      type: object
+                    name:
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    process:
+                      description: InfraProcess defines the process supervised inside
+                        the user Sandbox.
+                      properties:
+                        command:
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        env:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        healthCheck:
+                          description: InfraHealthCheck contains exactly one probe
+                            kind.
+                          properties:
+                            httpGet:
+                              description: InfraHTTPGet is an HTTP readiness probe
+                                on the component endpoint.
+                              properties:
+                                path:
+                                  pattern: ^/
+                                  type: string
+                              required:
+                              - path
+                              type: object
+                            tcpConnect:
+                              description: InfraTCPConnect selects a TCP connect readiness
+                                probe.
+                              type: object
+                            timeoutSeconds:
+                              default: 10
+                              format: int32
+                              maximum: 300
+                              minimum: 1
+                              type: integer
+                          type: object
+                          x-kubernetes-validations:
+                          - message: exactly one of httpGet or tcpConnect is required
+                            rule: has(self.httpGet) != has(self.tcpConnect)
+                        restartPolicy:
+                          default: OnFailure
+                          description: InfraRestartPolicy controls process restart
+                            after exit.
+                          enum:
+                          - Never
+                          - OnFailure
+                          - Always
+                          type: string
+                      required:
+                      - command
+                      - healthCheck
+                      type: object
+                  required:
+                  - artifact
+                  - endpoint
+                  - name
+                  - process
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               maxSandboxesPerPod:
                 format: int32
                 minimum: 1
@@ -208,15 +355,86 @@ spec:
               idleFastlets:
                 format: int32
                 type: integer
+              infraComponents:
+                items:
+                  description: InfraComponentSummary is safe discovery data for a
+                    compiled Pool revision.
+                  properties:
+                    healthKind:
+                      type: string
+                    name:
+                      type: string
+                    port:
+                      format: int32
+                      type: integer
+                    protocol:
+                      type: string
+                  required:
+                  - healthKind
+                  - name
+                  - port
+                  - protocol
+                  type: object
+                type: array
+              infraRevision:
+                type: string
               observedGeneration:
                 format: int64
+                type: integer
+              preparedFastlets:
+                format: int32
                 type: integer
               readyPods:
                 format: int32
                 type: integer
+              registry:
+                description: |-
+                  RegistryApplicationStatus reports configuration rollout without exposing
+                  credentials.
+                properties:
+                  appliedFastlets:
+                    format: int32
+                    type: integer
+                  lastError:
+                    type: string
+                  targetGeneration:
+                    format: int64
+                    type: integer
+                  totalFastlets:
+                    format: int32
+                    type: integer
+                type: object
               totalFastlets:
                 format: int32
                 type: integer
+              warmImages:
+                items:
+                  description: WarmImageStatus aggregates cache state for one configured
+                    warm image.
+                  properties:
+                    cachedFastlets:
+                      format: int32
+                      type: integer
+                    desiredFastlets:
+                      format: int32
+                      type: integer
+                    failedFastlets:
+                      format: int32
+                      type: integer
+                    image:
+                      type: string
+                    lastError:
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      type: integer
+                    pullingFastlets:
+                      format: int32
+                      type: integer
+                  required:
+                  - image
+                  type: object
+                type: array
             type: object
         type: object
     served: true

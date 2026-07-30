@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 )
 
@@ -58,7 +58,7 @@ func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.R
 		if profile.Containerd.ConfigPath != "" {
 			p.requirePath(&report, profile.Containerd.ConfigPath, "RuntimeConfigUnavailable")
 		}
-		if profile.Name == apiv1alpha1.RuntimeKataClh && profile.Containerd.ConfigPath != "" {
+		if profile.Name == apiv1alpha2.RuntimeKataClh && profile.Containerd.ConfigPath != "" {
 			contents, err := p.readFile(profile.Containerd.ConfigPath)
 			if err == nil && !hasActiveTOMLSetting(string(contents), "sandbox_cgroup_only", "true") {
 				p.missing(&report, profile.Containerd.ConfigPath+":sandbox_cgroup_only=true", "RuntimeConfigIncompatible")
@@ -67,7 +67,7 @@ func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.R
 		if profile.Containerd.RuntimePath != "" {
 			p.requirePath(&report, profile.Containerd.RuntimePath, "RuntimeBinaryUnavailable")
 		}
-		if profile.Name == apiv1alpha1.RuntimeGVisor {
+		if profile.Name == apiv1alpha2.RuntimeGVisor {
 			if _, err := p.lookPath("runsc"); err != nil {
 				p.missing(&report, "runsc", "RuntimeBinaryUnavailable")
 			}

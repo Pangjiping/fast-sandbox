@@ -22,6 +22,23 @@ type fakeRunner struct {
 	commands []recordedCommand
 }
 
+type retryRolloutRunner struct {
+	calls int
+}
+
+func (r *retryRolloutRunner) Run(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ ...string,
+) ([]byte, error) {
+	r.calls++
+	if r.calls == 1 {
+		return []byte("restart has already been triggered within the past second"), errors.New("exit status 1")
+	}
+	return nil, nil
+}
+
 func (r *fakeRunner) Run(_ context.Context, dir, name string, args ...string) ([]byte, error) {
 	r.commands = append(r.commands, recordedCommand{
 		dir:  dir,
@@ -60,13 +77,28 @@ func TestManagerEnsureBasicCreatesMissingClusterAndDeploys(t *testing.T) {
 	assertCommand(t, runner.commands, "kubectl", "config", "use-context", "kind-fsb-e2e-basic")
 	assertCommand(t, runner.commands, "make", "images", "COMPONENT=core")
 	assertCommand(t, runner.commands, "kind", "load", "docker-image", "fast-sandbox/controller:dev", "--name", "fsb-e2e-basic")
+	assertCommand(t, runner.commands, "kubectl", "apply", "-k", "config/namespaces")
+	assertCommand(t, runner.commands,
+		"kubectl", "delete",
+		"deployment/fast-sandbox-controller",
+		"deployment/fast-sandbox-fastpath",
+		"deployment/fast-sandbox-proxy",
+		"daemonset/fast-sandbox-janitor",
+		"service/fast-sandbox-fastpath",
+		"service/fast-sandbox-proxy",
+		"horizontalpodautoscaler/fast-sandbox-fastpath",
+		"poddisruptionbudget/fast-sandbox-controller",
+		"poddisruptionbudget/fast-sandbox-fastpath",
+		"poddisruptionbudget/fast-sandbox-proxy",
+		"-n", "default", "--ignore-not-found=true", "--wait=true",
+	)
 	assertCommand(t, runner.commands, "kubectl", "apply", "-k", "config/crd")
-	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "deployment/fast-sandbox-controller")
-	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-controller", "--timeout=120s")
-	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "deployment/fast-sandbox-fastpath")
-	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-fastpath", "--timeout=120s")
-	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-proxy", "--timeout=120s")
-	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "ds/fast-sandbox-janitor")
+	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "deployment/fast-sandbox-controller", "-n", "fast-sandbox-system")
+	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-controller", "-n", "fast-sandbox-system", "--timeout=120s")
+	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "deployment/fast-sandbox-fastpath", "-n", "fast-sandbox-system")
+	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-fastpath", "-n", "fast-sandbox-system", "--timeout=120s")
+	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-proxy", "-n", "fast-sandbox-system", "--timeout=120s")
+	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "ds/fast-sandbox-janitor", "-n", "fast-sandbox-system")
 }
 
 func TestManagerEnsureBasicReusesExistingCluster(t *testing.T) {
@@ -124,13 +156,78 @@ func TestManagerEnsureReportsProgress(t *testing.T) {
 		"[environment 2/6] Preparing kind cluster fsb-e2e-basic...",
 		"[environment 4/6] Preparing runtime container...",
 		"[environment 6/6] Building and deploying Fast Sandbox...",
-		"[1/21] Building core development images",
-		"[21/21] Waiting for NodeJanitor",
+		"[1/24] Building core development images",
+		"[8/24] Removing legacy default-namespace components",
+		"[9/24] Checking alpha CRD compatibility",
+		"[24/24] Waiting for NodeJanitor",
 		"Environment ready: context=kind-fsb-e2e-basic",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("progress output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestManagerEnsureResetsOnlyIncompatibleAlphaCRDs(t *testing.T) {
+	sandboxCRDVersionCommand := commandKey(
+		"kubectl", "get", "crd", "sandboxes.sandbox.fast.io",
+		"-o", "jsonpath={.status.storedVersions}",
+	)
+	poolCRDVersionCommand := commandKey(
+		"kubectl", "get", "crd", "sandboxpools.sandbox.fast.io",
+		"-o", "jsonpath={.status.storedVersions}",
+	)
+	runner := &fakeRunner{
+		outputs: map[string]string{
+			commandKey("kind", "get", "clusters"): "fsb-e2e-basic\n",
+			sandboxCRDVersionCommand:              "[v1alpha1]",
+			poolCRDVersionCommand:                 "[v1alpha2]",
+		},
+		errs: map[string]error{},
+	}
+	manager, err := NewManager(ProfileBasic,
+		WithRunner(runner),
+		WithRootDir("/repo"),
+		WithHostOS("linux"),
+	)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+
+	if err := manager.Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure returned error: %v", err)
+	}
+
+	assertCommand(t, runner.commands,
+		"kubectl", "delete", "crd", "sandboxes.sandbox.fast.io", "--wait=true")
+	if hasCommand(runner.commands,
+		"kubectl", "delete", "crd", "sandboxpools.sandbox.fast.io", "--wait=true") {
+		t.Fatalf("v1alpha2 Pool CRD must not be reset: %#v", runner.commands)
+	}
+	deleteIndex := commandIndex(
+		runner.commands,
+		"kubectl", "delete", "crd", "sandboxes.sandbox.fast.io", "--wait=true",
+	)
+	applyIndex := commandIndex(runner.commands, "kubectl", "apply", "-k", "config/crd")
+	if deleteIndex == -1 || applyIndex == -1 || deleteIndex > applyIndex {
+		t.Fatalf("expected incompatible CRD reset before apply: %#v", runner.commands)
+	}
+}
+
+func TestRolloutRestartRetriesKubectlTimestampCollision(t *testing.T) {
+	runner := &retryRolloutRunner{}
+	manager := &Manager{
+		rootDir: "/repo",
+		runner:  runner,
+	}
+	if err := manager.rolloutRestart(
+		context.Background(),
+		"deployment/fast-sandbox-proxy",
+	); err != nil {
+		t.Fatalf("rolloutRestart returned error: %v", err)
+	}
+	if runner.calls != 2 {
+		t.Fatalf("rollout restart calls = %d, want 2", runner.calls)
 	}
 }
 

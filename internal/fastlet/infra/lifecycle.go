@@ -1,9 +1,7 @@
 package infra
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,13 +13,6 @@ import (
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
-
-type initPayload struct {
-	SandboxUID         string            `json:"sandboxUid"`
-	InstanceGeneration int64             `json:"instanceGeneration"`
-	AssignmentAttempt  int64             `json:"assignmentAttempt"`
-	Environment        map[string]string `json:"environment,omitempty"`
-}
 
 type TargetDialer func(context.Context, uint32) (net.Conn, error)
 
@@ -59,71 +50,35 @@ func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, spec *fastle
 	instance.Diagnostics = nil
 	for _, service := range instance.Services {
 		started := time.Now()
-		serviceErr := m.initializeServiceWithDialer(ctx, spec, dial, service, instance.UpstreamHeaders)
+		serviceErr := m.initializeServiceWithDialer(ctx, dial, service)
 		m.observeInfraReady(service.Component, started, serviceErr)
 		if serviceErr == nil {
 			instance.Diagnostics = append(instance.Diagnostics, ComponentDiagnostic{
-				Component: service.Component, Service: service.Name, Required: service.Required, State: "Ready",
+				Component: service.Component, State: "Ready",
 			})
 			continue
 		}
-		wrapped := fmt.Errorf("component %s service %s: %w", service.Component, service.Name, serviceErr)
 		instance.Diagnostics = append(instance.Diagnostics, ComponentDiagnostic{
-			Component: service.Component, Service: service.Name, Required: service.Required, State: "Failed", Message: serviceErr.Error(),
+			Component: service.Component, State: "Failed", Message: serviceErr.Error(),
 		})
-		if service.Required {
-			return instance, wrapped
-		}
+		return instance, fmt.Errorf("component %s: %w", service.Component, serviceErr)
 	}
-	// Optional failures are intentionally diagnostic-only and do not gate the
-	// Sandbox. The caller can expose them without suppressing route publication.
 	return instance, nil
 }
 
-func (m *Manager) initializeService(ctx context.Context, spec *fastletapi.SandboxSpec, privateIP string, service ServiceEndpoint, headers map[string]string) error {
-	return m.initializeServiceWithDialer(ctx, spec, func(ctx context.Context, port uint32) (net.Conn, error) {
+func (m *Manager) initializeService(ctx context.Context, privateIP string, service ServiceEndpoint) error {
+	return m.initializeServiceWithDialer(ctx, func(ctx context.Context, port uint32) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(privateIP, strconv.Itoa(int(port))))
-	}, service, headers)
+	}, service)
 }
 
-func (m *Manager) initializeServiceWithDialer(ctx context.Context, spec *fastletapi.SandboxSpec, dial TargetDialer, service ServiceEndpoint, headers map[string]string) error {
+func (m *Manager) initializeServiceWithDialer(ctx context.Context, dial TargetDialer, service ServiceEndpoint) error {
 	client, transport := serviceHTTPClient(dial, service.Port)
 	defer transport.CloseIdleConnections()
-	address := net.JoinHostPort("sandbox.local", strconv.Itoa(int(service.Port)))
-	if service.Init.Mode == infracatalog.InitHTTP {
-		payload, err := json.Marshal(initPayload{
-			SandboxUID: spec.SandboxID, InstanceGeneration: spec.InstanceGeneration,
-			AssignmentAttempt: spec.AssignmentAttempt, Environment: spec.Env,
-		})
-		if err != nil {
-			return err
-		}
-		method := service.Init.Method
-		if method == "" {
-			method = http.MethodPost
-		}
-		request, err := http.NewRequestWithContext(ctx, method, "http://"+address+service.Init.Path, bytes.NewReader(payload))
-		if err != nil {
-			return err
-		}
-		request.Header.Set("Content-Type", "application/json")
-		for name, value := range headers {
-			request.Header.Set(name, value)
-		}
-		response, err := client.Do(request)
-		if err != nil {
-			return fmt.Errorf("instance init: %w", err)
-		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-		_ = response.Body.Close()
-		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			return fmt.Errorf("instance init returned HTTP %d", response.StatusCode)
-		}
-	}
-	return probeServiceWithDialer(ctx, service.Port, service.Readiness, headers, dial, client)
+	return probeServiceWithDialer(ctx, service.Port, service.Readiness, dial, client)
 }
 
-func probeService(ctx context.Context, address string, probe infracatalog.ReadinessProbe, headers map[string]string) error {
+func probeService(ctx context.Context, address string, probe infracatalog.ReadinessProbe) error {
 	_, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return err
@@ -137,22 +92,16 @@ func probeService(ctx context.Context, address string, probe infracatalog.Readin
 	}
 	client, transport := serviceHTTPClient(dial, uint32(port))
 	defer transport.CloseIdleConnections()
-	return probeServiceWithDialer(ctx, uint32(port), probe, headers, dial, client)
+	return probeServiceWithDialer(ctx, uint32(port), probe, dial, client)
 }
 
-func probeServiceWithDialer(ctx context.Context, port uint32, probe infracatalog.ReadinessProbe, headers map[string]string, dial TargetDialer, client *http.Client) error {
-	if probe.Type == "" || probe.Type == infracatalog.ProbeNone {
-		return nil
-	}
+func probeServiceWithDialer(ctx context.Context, port uint32, probe infracatalog.ReadinessProbe, dial TargetDialer, client *http.Client) error {
 	address := net.JoinHostPort("sandbox.local", strconv.Itoa(int(port)))
 	timeout := probe.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	retryCeiling := probe.Interval
-	if retryCeiling <= 0 || retryCeiling > maxReadinessRetry {
-		retryCeiling = maxReadinessRetry
-	}
+	retryCeiling := maxReadinessRetry
 	retryDelay := min(initialReadinessRetry, retryCeiling)
 	probeContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -163,9 +112,6 @@ func probeServiceWithDialer(ctx context.Context, port uint32, probe infracatalog
 			request, err := http.NewRequestWithContext(probeContext, http.MethodGet, "http://"+address+probe.Path, nil)
 			if err != nil {
 				return err
-			}
-			for name, value := range headers {
-				request.Header.Set(name, value)
 			}
 			response, err := client.Do(request)
 			lastErr = err

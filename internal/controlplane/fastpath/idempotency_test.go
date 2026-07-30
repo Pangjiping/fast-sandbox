@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/stretchr/testify/require"
 )
@@ -18,17 +18,17 @@ func TestValidateRequestID(t *testing.T) {
 }
 
 func TestCreateSpecHashIsDeterministic(t *testing.T) {
-	a := &fastpathv1.CreateRequest{
+	a := &fastpathv2.CreateRequest{
 		RequestId: "request-a",
 		Image:     "example/image:v1",
 		PoolRef:   "default",
 		Envs:      map[string]string{"B": "2", "A": "1"},
 	}
-	b := &fastpathv1.CreateRequest{
+	b := &fastpathv2.CreateRequest{
 		RequestId: "request-b",
 		Image:     "example/image:v1",
 		PoolRef:   "default",
-		Namespace: "default",
+		Namespace: "fast-sandbox",
 		Envs:      map[string]string{"A": "1", "B": "2"},
 	}
 

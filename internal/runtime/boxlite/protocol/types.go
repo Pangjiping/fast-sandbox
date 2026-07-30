@@ -59,17 +59,16 @@ type EnsureRequest struct {
 }
 
 type Box struct {
-	Sandbox                    fastletapi.SandboxSpec              `json:"sandbox"`
-	BoxID                      string                              `json:"boxId"`
-	PID                        int                                 `json:"pid,omitempty"`
-	Phase                      string                              `json:"phase"`
-	CreatedAt                  int64                               `json:"createdAt"`
-	UserProcessStartedAt       time.Time                           `json:"userProcessStartedAt,omitempty"`
-	UserProcessStartSource     fastletapi.UserProcessStartSource   `json:"userProcessStartSource,omitempty"`
-	Access                     dataplane.AccessDescriptor          `json:"access"`
-	InfraServices              []infracontract.ServiceEndpoint     `json:"infraServices,omitempty"`
-	InfraUpstreamHeadersByPort map[uint32]map[string]string        `json:"infraUpstreamHeadersByPort,omitempty"`
-	InfraDiagnostics           []infracontract.ComponentDiagnostic `json:"infraDiagnostics,omitempty"`
+	Sandbox                fastletapi.SandboxSpec              `json:"sandbox"`
+	BoxID                  string                              `json:"boxId"`
+	PID                    int                                 `json:"pid,omitempty"`
+	Phase                  string                              `json:"phase"`
+	CreatedAt              int64                               `json:"createdAt"`
+	UserProcessStartedAt   time.Time                           `json:"userProcessStartedAt,omitempty"`
+	UserProcessStartSource fastletapi.UserProcessStartSource   `json:"userProcessStartSource,omitempty"`
+	Access                 dataplane.AccessDescriptor          `json:"access"`
+	InfraServices          []infracontract.ServiceEndpoint     `json:"infraServices,omitempty"`
+	InfraDiagnostics       []infracontract.ComponentDiagnostic `json:"infraDiagnostics,omitempty"`
 }
 
 type ListResponse struct {

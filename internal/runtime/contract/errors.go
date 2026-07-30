@@ -9,7 +9,7 @@ var (
 	ErrRuntimeNotInitialized        = errors.New("runtime not initialized")
 	ErrRuntimeCapabilityUnavailable = errors.New("runtime capability unavailable")
 	ErrNetworkUnavailable           = errors.New("sandbox network unavailable")
-	ErrInfraUnavailable             = errors.New("sandbox InfraProfile unavailable")
+	ErrInfraUnavailable             = errors.New("sandbox Infra Components unavailable")
 	ErrSandboxProfileMismatch       = errors.New("sandbox profile mismatch")
 	ErrInvalidConfig                = errors.New("invalid sandbox config")
 )

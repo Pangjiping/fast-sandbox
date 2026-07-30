@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	e2eenv "fast-sandbox/test/e2e/env"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
@@ -39,8 +39,8 @@ func TestQuickStartOpenSandboxExecd(t *testing.T) {
 			defer suiteenv.DeleteNamespace(context.Background(), t, k8sClient, namespace)
 
 			pool := createCLIPool(namespace, "quickstart-execd-pool")
-			pool.Spec.InfraProfile = "opensandbox-execd-quickstart"
-			pool.Spec.Capacity = apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 1}
+			pool.Spec.InfraComponents = []apiv1alpha2.InfraComponent{fixtures.OpenSandboxExecdComponent()}
+			pool.Spec.Capacity = apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1}
 			pool.Spec.MaxSandboxesPerPod = 1
 			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
 				t.Fatalf("create quickstart Pool: %v", err)
@@ -144,7 +144,7 @@ func TestQuickStartOpenSandboxExecd(t *testing.T) {
 			}
 			deleteDeadline := time.Now().Add(60 * time.Second)
 			for {
-				var sandbox apiv1alpha1.Sandbox
+				var sandbox apiv1alpha2.Sandbox
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: sandboxName, Namespace: namespace}, &sandbox)
 				if apierrors.IsNotFound(err) {
 					break
@@ -240,13 +240,13 @@ func TestUpdateReset(t *testing.T) {
 			}
 			t.Log("✓ fastctl get command works")
 
-			// Test 2: fastctl update --labels
-			t.Log("Testing fastctl update --labels...")
-			output, err := ctl.UpdateLabels(ctx, "sb-update-test", "test=e2e", "env=cli")
+			// Test 2: fastctl update --metadata
+			t.Log("Testing fastctl update --metadata...")
+			output, err := ctl.UpdateMetadata(ctx, "sb-update-test", "test=e2e", "env=cli")
 			if err != nil || !strings.Contains(string(output), "updated successfully") {
-				t.Fatalf("fastctl update labels failed: %v\noutput: %s", err, output)
+				t.Fatalf("fastctl update metadata failed: %v\noutput: %s", err, output)
 			}
-			t.Log("✓ fastctl update --labels works")
+			t.Log("✓ fastctl update --metadata works")
 
 			// Test 3: fastctl reset command
 			t.Log("Testing fastctl reset command...")
@@ -258,7 +258,7 @@ func TestUpdateReset(t *testing.T) {
 
 			resetWaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			if _, err := fixture.WaitForSandbox(resetWaitCtx, types.NamespacedName{Name: "sb-update-test", Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
+			if _, err := fixture.WaitForSandbox(resetWaitCtx, types.NamespacedName{Name: "sb-update-test", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
 				return sb.Spec.ResetRevision != nil
 			}); err != nil {
 				t.Fatalf("wait for reset revision: %v", err)
@@ -362,23 +362,23 @@ func buildFastctl(t *testing.T, manager *e2eenv.Manager) string {
 	return cliBinaryPath
 }
 
-func createCLIPool(namespace, name string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func createCLIPool(namespace, name string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: apiv1alpha1.GroupVersion.String(),
+			APIVersion: apiv1alpha2.GroupVersion.String(),
 			Kind:       "SandboxPool",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{
 				PoolMin: 1,
 				PoolMax: 10, // Increased for CLI tests
 			},
 			MaxSandboxesPerPod: 20, // Increased capacity
-			Runtime:            apiv1alpha1.RuntimeContainer,
+			Runtime:            apiv1alpha2.RuntimeContainer,
 			SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 			FastletTemplate: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{

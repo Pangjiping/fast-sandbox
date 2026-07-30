@@ -1,0 +1,27 @@
+# Registry credentials are namespace-scoped. Create each referenced
+# kubernetes.io/dockerconfigjson Secret in this same namespace, for example:
+#
+# kubectl create secret docker-registry registry-ghcr \
+#   --namespace fast-sandbox \
+#   --docker-server=ghcr.io \
+#   --docker-username="$REGISTRY_USER" \
+#   --docker-password="$REGISTRY_PASSWORD"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fast-sandbox-registry
+  namespace: fast-sandbox
+data:
+  registries.yaml: |
+    registries:
+      - host: ghcr.io
+        secretRef:
+          name: registry-ghcr
+      - host: registry.example.com
+        repositoryPrefix: team-a
+        secretRef:
+          name: registry-team-a
+      - host: registry.example.com
+        repositoryPrefix: team-b
+        secretRef:
+          name: registry-team-b

@@ -1,4 +1,4 @@
-package v1alpha1
+package v1alpha2
 
 import (
 	corev1 "k8s.io/api/core/v1"
@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	GroupVersion  = schema.GroupVersion{Group: "sandbox.fast.io", Version: "v1alpha1"}
+	GroupVersion  = schema.GroupVersion{Group: "sandbox.fast.io", Version: "v1alpha2"}
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
 	AddToScheme   = SchemeBuilder.AddToScheme
 )
@@ -70,6 +70,9 @@ type SandboxAssignment struct {
 	FastletPodUID string `json:"fastletPodUID"`
 	NodeName      string `json:"nodeName,omitempty"`
 	Attempt       int64  `json:"attempt"`
+	// InfraRevision is the exact Pool component revision admitted by this
+	// runtime instance.
+	InfraRevision string `json:"infraRevision,omitempty"`
 }
 
 // SandboxSpec defines the desired state of Sandbox.
@@ -120,14 +123,47 @@ type SandboxStatus struct {
 	// RouteGeneration fences stale local and cluster proxy routes.
 	RouteGeneration int64 `json:"routeGeneration,omitempty"`
 
-	RuntimeState     ObservedState `json:"runtimeState,omitempty"`
-	DataPlaneState   ObservedState `json:"dataPlaneState,omitempty"`
-	UserProcessState ObservedState `json:"userProcessState,omitempty"`
+	RuntimeState     ObservedState          `json:"runtimeState,omitempty"`
+	DataPlaneState   ObservedState          `json:"dataPlaneState,omitempty"`
+	UserProcessState ObservedState          `json:"userProcessState,omitempty"`
+	InfraRevision    string                 `json:"infraRevision,omitempty"`
+	Components       []InfraComponentStatus `json:"components,omitempty"`
+	Recovery         *SandboxRecoveryStatus `json:"recovery,omitempty"`
 
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// AcceptedResetRevision reflects the latest reset revision that was processed by the controller.
 	AcceptedResetRevision *metav1.Time `json:"acceptedResetRevision,omitempty"`
+}
+
+// InfraComponentState is the lifecycle of one named local component route.
+// +kubebuilder:validation:Enum=Starting;Ready;Failed
+type InfraComponentState string
+
+const (
+	InfraComponentStarting InfraComponentState = "Starting"
+	InfraComponentReady    InfraComponentState = "Ready"
+	InfraComponentFailed   InfraComponentState = "Failed"
+)
+
+// InfraComponentStatus is the durable projection of Fastlet-local component
+// health and named route publication.
+type InfraComponentStatus struct {
+	Name                    string              `json:"name"`
+	State                   InfraComponentState `json:"state"`
+	Protocol                string              `json:"protocol,omitempty"`
+	Port                    int32               `json:"port,omitempty"`
+	ObservedRouteGeneration int64               `json:"observedRouteGeneration,omitempty"`
+	LastTransitionTime      *metav1.Time        `json:"lastTransitionTime,omitempty"`
+	Message                 string              `json:"message,omitempty"`
+}
+
+// SandboxRecoveryStatus persists the first confirmed loss and its deadline so
+// Controller restarts cannot restart the recovery timer.
+type SandboxRecoveryStatus struct {
+	FastletPodUID string      `json:"fastletPodUID"`
+	DetectedAt    metav1.Time `json:"detectedAt"`
+	Deadline      metav1.Time `json:"deadline"`
 }
 
 // HasCondition reports whether a canonical condition currently has the given

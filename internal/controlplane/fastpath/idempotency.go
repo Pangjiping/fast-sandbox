@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -25,14 +25,14 @@ func ValidateRequestID(requestID string) error {
 
 // CreateSpecHash returns a deterministic digest of the immutable Create
 // intent. The transport-only request_id is excluded from the identity.
-func CreateSpecHash(req *fastpathv1.CreateRequest) (string, error) {
+func CreateSpecHash(req *fastpathv2.CreateRequest) (string, error) {
 	if req == nil {
 		return "", errors.New("create request is required")
 	}
-	normalized := proto.Clone(req).(*fastpathv1.CreateRequest)
+	normalized := proto.Clone(req).(*fastpathv2.CreateRequest)
 	normalized.RequestId = ""
 	if normalized.Namespace == "" {
-		normalized.Namespace = "default"
+		normalized.Namespace = "fast-sandbox"
 	}
 
 	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(normalized)

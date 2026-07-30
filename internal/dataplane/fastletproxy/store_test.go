@@ -54,23 +54,23 @@ func TestStoreDrainingRejectsLookup(t *testing.T) {
 func TestStoreSnapshotsRouteValues(t *testing.T) {
 	store := NewStore()
 	route := testRoute(1)
-	route.UpstreamHeadersByPort = map[uint32]map[string]string{
-		44772: {"X-Component-Token": "original"},
+	route.Components = map[string]dataplane.ComponentRoute{
+		"execd": {Protocol: "HTTP", Port: 44772},
 	}
 	_, err := store.Apply(route)
 	require.NoError(t, err)
 
 	route.Access.Address = "10.42.0.99"
-	route.UpstreamHeadersByPort[44772]["X-Component-Token"] = "mutated-source"
+	route.Components["execd"] = dataplane.ComponentRoute{Protocol: "HTTP", Port: 8080}
 	stored, err := store.Lookup(route.SandboxUID)
 	require.NoError(t, err)
 	require.Equal(t, "10.42.0.2", stored.Access.Address)
-	require.Equal(t, "original", stored.UpstreamHeadersByPort[44772]["X-Component-Token"])
+	require.Equal(t, uint32(44772), stored.Components["execd"].Port)
 
-	stored.UpstreamHeadersByPort[44772]["X-Component-Token"] = "mutated-result"
+	stored.Components["execd"] = dataplane.ComponentRoute{Protocol: "HTTP", Port: 9090}
 	storedAgain, err := store.Lookup(route.SandboxUID)
 	require.NoError(t, err)
-	require.Equal(t, "original", storedAgain.UpstreamHeadersByPort[44772]["X-Component-Token"])
+	require.Equal(t, uint32(44772), storedAgain.Components["execd"].Port)
 }
 
 func TestStoreConcurrentLookupAndRouteTransitions(t *testing.T) {

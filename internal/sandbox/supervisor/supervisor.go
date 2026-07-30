@@ -39,9 +39,9 @@ func NewSupervisor(stdout, stderr io.Writer) *Supervisor {
 	return &Supervisor{Stdout: stdout, Stderr: stderr, processes: make(map[int]*os.Process)}
 }
 
-// Run starts Infra Components and the original image process. Infra starts in
-// parallel with the user process by default; only StartBeforeUser components
-// gate user startup. The returned code is always the user process exit code.
+// Run starts every Infra Component concurrently with the original image
+// process. Component health never gates RuntimeReady or user process startup;
+// Fastlet observes it separately to publish named routes.
 func (s *Supervisor) Run(ctx context.Context, config Config, userArgs []string) (int, error) {
 	if err := config.Validate(); err != nil {
 		return 1, err
@@ -51,42 +51,9 @@ func (s *Supervisor) Run(ctx context.Context, config Config, userArgs []string) 
 	}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
-	components, err := orderedComponents(config.Components)
-	if err != nil {
-		return 1, err
-	}
-	for _, component := range components {
-		if !component.StartBeforeUser {
-			continue
-		}
+	for _, component := range config.Components {
 		if err := s.startComponent(runContext, component); err != nil {
-			if !component.Required {
-				fmt.Fprintf(s.Stderr, "sandbox-init: optional pre-user component %s failed to start: %v\n", component.Name, err)
-				continue
-			}
-			s.stopAll(syscall.SIGTERM, defaultStopGrace)
-			return 1, fmt.Errorf("start required pre-user component %s: %w", component.Name, err)
-		}
-		if err := waitReady(runContext, component.Readiness); err != nil {
-			if !component.Required {
-				fmt.Fprintf(s.Stderr, "sandbox-init: optional pre-user component %s readiness failed: %v\n", component.Name, err)
-				continue
-			}
-			s.stopAll(syscall.SIGTERM, defaultStopGrace)
-			return 1, fmt.Errorf("pre-user component %s readiness: %w", component.Name, err)
-		}
-	}
-	for _, component := range components {
-		if component.StartBeforeUser {
-			continue
-		}
-		if err := s.startComponent(runContext, component); err != nil {
-			if !component.Required {
-				fmt.Fprintf(s.Stderr, "sandbox-init: optional component %s failed to start: %v\n", component.Name, err)
-				continue
-			}
-			s.stopAll(syscall.SIGTERM, defaultStopGrace)
-			return 1, fmt.Errorf("start component %s: %w", component.Name, err)
+			fmt.Fprintf(s.Stderr, "sandbox-init: component %s failed to start: %v\n", component.Name, err)
 		}
 	}
 	user := exec.Command(userArgs[0], userArgs[1:]...)
@@ -170,36 +137,6 @@ func (s *Supervisor) monitorComponent(ctx context.Context, component Component, 
 	}
 }
 
-func orderedComponents(components []Component) ([]Component, error) {
-	ordered := make([]Component, 0, len(components))
-	added := make(map[string]struct{}, len(components))
-	for len(ordered) < len(components) {
-		progress := false
-		for _, component := range components {
-			if _, exists := added[component.Name]; exists {
-				continue
-			}
-			ready := true
-			for _, dependency := range component.DependsOn {
-				if _, exists := added[dependency]; !exists {
-					ready = false
-					break
-				}
-			}
-			if !ready {
-				continue
-			}
-			ordered = append(ordered, component)
-			added[component.Name] = struct{}{}
-			progress = true
-		}
-		if !progress {
-			return nil, errors.New("component dependency graph contains a cycle")
-		}
-	}
-	return ordered, nil
-}
-
 func (s *Supervisor) Forward(signal os.Signal) {
 	syscallSignal, ok := signal.(syscall.Signal)
 	if !ok {
@@ -261,7 +198,7 @@ func (s *Supervisor) untrack(pid int) {
 }
 
 func waitReady(ctx context.Context, readiness Readiness) error {
-	if readiness.Type == "" || readiness.Type == infracatalog.ProbeNone {
+	if readiness.Type == "" {
 		return nil
 	}
 	timeout := readiness.Timeout

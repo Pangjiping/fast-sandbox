@@ -1,114 +1,120 @@
 package infra
 
 import (
-	"errors"
+	"encoding/json"
 	"testing"
+	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuiltinCompileAndFailClosedProfiles(t *testing.T) {
-	catalog := Builtin()
-	container, err := runtimecatalog.Builtin().Resolve(apiv1alpha1.RuntimeContainer)
-	require.NoError(t, err)
-
-	minimal, err := catalog.Compile("", container)
-	require.NoError(t, err)
-	require.Equal(t, "minimal", minimal.ProfileName)
-	require.Empty(t, minimal.Components)
-
-	testInfra, err := catalog.Compile("test-infra", container)
-	require.NoError(t, err)
-	require.Len(t, testInfra.Components, 1)
-	require.Equal(t, runtimecatalog.InfraDeliveryBindMount, testInfra.Components[0].DeliveryMode)
-
-	for _, runtimeName := range []apiv1alpha1.RuntimeName{
-		apiv1alpha1.RuntimeContainer,
-		apiv1alpha1.RuntimeGVisor,
-		apiv1alpha1.RuntimeKataQemu,
-		apiv1alpha1.RuntimeKataClh,
-	} {
-		runtimeProfile, resolveErr := runtimecatalog.Builtin().Resolve(runtimeName)
-		require.NoError(t, resolveErr)
-		quickStartExecd, compileErr := catalog.Compile("opensandbox-execd-quickstart", runtimeProfile)
-		require.NoError(t, compileErr, "runtime %s", runtimeName)
-		require.Len(t, quickStartExecd.Components, 1)
-		require.Equal(t, runtimecatalog.InfraDeliveryBindMount, quickStartExecd.Components[0].DeliveryMode)
-		require.Equal(t, OpenSandboxExecdQuickStartDigest, quickStartExecd.Components[0].Component.Artifact.Digest)
-		require.Equal(t, "EXECD_ACCESS_TOKEN", quickStartExecd.Components[0].Component.InstanceInit.Credential.EnvironmentVariable)
-		require.Equal(t, "X-EXECD-ACCESS-TOKEN", quickStartExecd.Components[0].Component.InstanceInit.Credential.UpstreamHeader)
+func TestCompileEmptyPlanPreservesCanonicalRevisionAcrossJSON(t *testing.T) {
+	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeContainer)
+	if err != nil {
+		t.Fatalf("resolve container runtime profile: %v", err)
 	}
-
-	for _, runtimeName := range []apiv1alpha1.RuntimeName{
-		apiv1alpha1.RuntimeKataFc,
-		apiv1alpha1.RuntimeBoxLite,
-	} {
-		runtimeProfile, resolveErr := runtimecatalog.Builtin().Resolve(runtimeName)
-		require.NoError(t, resolveErr)
-		_, compileErr := catalog.Compile("opensandbox-execd-quickstart", runtimeProfile)
-		require.ErrorIs(t, compileErr, ErrRuntimeUnsupported, "runtime %s", runtimeName)
+	plan, err := Compile(nil, runtimeProfile)
+	if err != nil {
+		t.Fatalf("Compile(nil) error = %v", err)
 	}
-
-	_, err = catalog.Compile("opensandbox-execd", container)
-	require.ErrorIs(t, err, ErrProfileUnconfigured)
-
-	_, err = catalog.Compile("e2b-envd", container)
-	require.ErrorIs(t, err, ErrProfileNotFound)
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var decoded Plan
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if decoded.Components == nil {
+		t.Fatalf("decoded Components = nil, want canonical empty list; JSON=%s", payload)
+	}
+	revision, err := Revision(decoded.Components)
+	if err != nil {
+		t.Fatalf("Revision() error = %v", err)
+	}
+	if revision != plan.Revision {
+		t.Fatalf("round-trip revision = %q, want %q; JSON=%s", revision, plan.Revision, payload)
+	}
 }
 
-func TestProfileValidationRejectsPartialCredentialBinding(t *testing.T) {
-	profile := Profile{Name: "bad-credential", Version: "v1", Configured: true, Components: []Component{
-		componentForTest("a", "", "svc", 8080),
-	}}
-	profile.Components[0].InstanceInit.Credential = &CredentialBinding{EnvironmentVariable: "TOKEN"}
-	err := Validate(profile)
-	require.ErrorIs(t, err, ErrProfileInvalid)
-	require.ErrorContains(t, err, "credential requires environment variable and upstream header")
+func TestCompileNormalizesInlineComponentsForEachSupportedRuntime(t *testing.T) {
+	component := componentForTest("execd", "44772")
+	for _, runtimeName := range []apiv1alpha2.RuntimeName{
+		apiv1alpha2.RuntimeContainer,
+		apiv1alpha2.RuntimeGVisor,
+		apiv1alpha2.RuntimeKataQemu,
+		apiv1alpha2.RuntimeKataClh,
+		apiv1alpha2.RuntimeKataFc,
+		apiv1alpha2.RuntimeBoxLite,
+	} {
+		runtimeProfile, err := runtimecatalog.Builtin().Resolve(runtimeName)
+		require.NoError(t, err)
+
+		plan, err := Compile([]apiv1alpha2.InfraComponent{component}, runtimeProfile)
+		require.NoError(t, err, "runtime %s", runtimeName)
+		require.NotEmpty(t, plan.Revision)
+		require.Len(t, plan.Components, 1)
+		require.Equal(t, "execd", plan.Components[0].Name)
+		require.Equal(t, SourceOCIImage, plan.Components[0].Artifact.Source.Type)
+		require.Equal(t, RestartOnFailure, plan.Components[0].Process.RestartPolicy)
+		require.Equal(t, ProbeHTTP, plan.Components[0].Process.Readiness.Type)
+		require.Equal(t, 10*time.Second, plan.Components[0].Process.Readiness.Timeout)
+		require.Equal(t, uint32(44772), plan.Components[0].Endpoint.Port)
+	}
 }
 
-func TestProfileValidationRejectsServiceConflictsAndCycles(t *testing.T) {
-	profile := Profile{
-		Name: "bad", Version: "v1", Configured: true,
-		Components: []Component{
-			componentForTest("a", "b", "service-a", 8080),
-			componentForTest("b", "a", "service-b", 8080),
+func TestCompileRejectsRuntimeWithoutDeliveryMode(t *testing.T) {
+	_, err := Compile([]apiv1alpha2.InfraComponent{componentForTest("execd", "44772")}, runtimecatalog.RuntimeProfile{
+		Name: apiv1alpha2.RuntimeContainer,
+	})
+	require.ErrorIs(t, err, ErrRuntimeUnsupported)
+}
+
+func TestCompileRejectsInvalidInlineComponent(t *testing.T) {
+	component := componentForTest("execd", "44772")
+	component.Artifact.Mappings[0].TargetPath = "/usr/local/bin/execd"
+
+	_, err := Compile([]apiv1alpha2.InfraComponent{component}, runtimecatalog.RuntimeProfile{
+		Name:               apiv1alpha2.RuntimeContainer,
+		InfraDeliveryModes: []runtimecatalog.InfraDeliveryMode{runtimecatalog.InfraDeliveryBindMount},
+	})
+	require.ErrorIs(t, err, ErrComponentsInvalid)
+}
+
+func TestRevisionIncludesImmutableArtifactAndProcessContract(t *testing.T) {
+	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeContainer)
+	require.NoError(t, err)
+	component := componentForTest("execd", "44772")
+	first, err := Compile([]apiv1alpha2.InfraComponent{component}, runtimeProfile)
+	require.NoError(t, err)
+
+	component.Process.Env = map[string]string{"MODE": "test"}
+	second, err := Compile([]apiv1alpha2.InfraComponent{component}, runtimeProfile)
+	require.NoError(t, err)
+	require.NotEqual(t, first.Revision, second.Revision)
+}
+
+func componentForTest(name, port string) apiv1alpha2.InfraComponent {
+	return apiv1alpha2.InfraComponent{
+		Name: name,
+		Artifact: apiv1alpha2.InfraArtifact{
+			Source: apiv1alpha2.InfraArtifactSource{Image: &apiv1alpha2.InfraArtifactImage{
+				Reference: "registry.example/component@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			}},
+			Mappings: []apiv1alpha2.InfraArtifactMapping{{
+				SourcePath: "/execd",
+				TargetPath: "/.fast/components/" + name + "/execd",
+			}},
 		},
+		Process: apiv1alpha2.InfraProcess{
+			Command: []string{"/.fast/components/" + name + "/execd"},
+			HealthCheck: apiv1alpha2.InfraHealthCheck{
+				HTTPGet: &apiv1alpha2.InfraHTTPGet{Path: "/ping"},
+			},
+		},
+		Endpoint: apiv1alpha2.InfraEndpoint{Protocol: "HTTP", Port: 44772},
 	}
-	err := Validate(profile)
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrProfileInvalid))
-
-	profile.Components[1].Services[0].Port = 8081
-	err = Validate(profile)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cycle")
-}
-
-func TestProfileHashIncludesImmutableArtifactDigest(t *testing.T) {
-	profile := Profile{Name: "p", Version: "v1", Configured: true, Components: []Component{componentForTest("a", "", "svc", 8080)}}
-	first, err := ProfileHash(profile)
-	require.NoError(t, err)
-	profile.Components[0].Artifact.Digest = "sha256:" + "b" + profile.Components[0].Artifact.Digest[len("sha256:")+1:]
-	second, err := ProfileHash(profile)
-	require.NoError(t, err)
-	require.NotEqual(t, first, second)
-}
-
-func componentForTest(name, dependency, service string, port uint32) Component {
-	component := Component{
-		Name:          name,
-		Artifact:      Artifact{SourceType: SourceStatic, Reference: "file:///platform/component", Digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
-		ContainerPath: "/.fast/infra/" + name,
-		DeliveryModes: []runtimecatalog.InfraDeliveryMode{runtimecatalog.InfraDeliveryBindMount},
-		Activation:    Activation{Mode: ActivationEntrypointSupervisor, Command: "/.fast/infra/" + name, RestartPolicy: RestartNever},
-		InstanceInit:  InstanceInit{Mode: InitNone}, Required: true,
-		Services: []Service{{Name: service, Transport: "http", Port: port, Readiness: ReadinessProbe{Type: ProbeHTTP, Path: "/health"}}},
-	}
-	if dependency != "" {
-		component.DependsOn = []string{dependency}
-	}
-	return component
 }

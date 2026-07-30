@@ -27,14 +27,14 @@ var (
 // are deliberately absent: one AccessDescriptor admits arbitrary validated
 // ports and the signed credential narrows each external request.
 type Route struct {
-	Namespace             string                       `json:"namespace"`
-	SandboxUID            string                       `json:"sandboxUid"`
-	FastletPodUID         string                       `json:"fastletPodUid"`
-	AssignmentAttempt     int64                        `json:"assignmentAttempt"`
-	RouteGeneration       int64                        `json:"routeGeneration"`
-	Access                dataplane.AccessDescriptor   `json:"access"`
-	State                 RouteState                   `json:"state"`
-	UpstreamHeadersByPort map[uint32]map[string]string `json:"upstreamHeadersByPort,omitempty"`
+	Namespace         string                              `json:"namespace"`
+	SandboxUID        string                              `json:"sandboxUid"`
+	FastletPodUID     string                              `json:"fastletPodUid"`
+	AssignmentAttempt int64                               `json:"assignmentAttempt"`
+	RouteGeneration   int64                               `json:"routeGeneration"`
+	Access            dataplane.AccessDescriptor          `json:"access"`
+	State             RouteState                          `json:"state"`
+	Components        map[string]dataplane.ComponentRoute `json:"components,omitempty"`
 }
 
 func (r Route) validate() error {
@@ -247,13 +247,10 @@ func (s *Store) storeRouteLocked(route Route) {
 
 func cloneRoute(route Route) Route {
 	clone := route
-	if route.UpstreamHeadersByPort != nil {
-		clone.UpstreamHeadersByPort = make(map[uint32]map[string]string, len(route.UpstreamHeadersByPort))
-		for port, headers := range route.UpstreamHeadersByPort {
-			clone.UpstreamHeadersByPort[port] = make(map[string]string, len(headers))
-			for key, value := range headers {
-				clone.UpstreamHeadersByPort[port][key] = value
-			}
+	if route.Components != nil {
+		clone.Components = make(map[string]dataplane.ComponentRoute, len(route.Components))
+		for name, component := range route.Components {
+			clone.Components[name] = component
 		}
 	}
 	return clone

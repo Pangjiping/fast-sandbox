@@ -1,12 +1,10 @@
 package infra
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
-	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	"testing"
 
 	infracatalog "fast-sandbox/internal/catalog/infra"
@@ -15,91 +13,70 @@ import (
 )
 
 type fakeOCIOpener struct {
-	opened  infracatalog.Artifact
+	opened  infracatalog.ArtifactSource
 	payload []byte
 }
 
-func (o *fakeOCIOpener) OpenOCI(_ context.Context, artifact infracatalog.Artifact) (io.ReadCloser, error) {
-	o.opened = artifact
+func (o *fakeOCIOpener) OpenOCI(_ context.Context, source infracatalog.ArtifactSource) (io.ReadCloser, error) {
+	o.opened = source
 	return io.NopCloser(bytes.NewReader(o.payload)), nil
 }
 
-type fakeSignatureVerifier struct {
-	verified infracatalog.Artifact
-	err      error
+func TestPlatformResolverStagesOCIImageRootFSAndMappings(t *testing.T) {
+	source := infracatalog.ArtifactSource{
+		Type: infracatalog.SourceOCIImage, Reference: "registry.example/execd@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+	}
+	opener := &fakeOCIOpener{payload: testTar(t, map[string]string{
+		"execd":               "binary",
+		"config/default.yaml": "enabled: true",
+	})}
+	resolver := NewPlatformResolverWithOptions(PlatformResolverOptions{OCI: opener})
+	store, err := NewArtifactStore(t.TempDir(), "/host/infra")
+	require.NoError(t, err)
+
+	prepared, err := resolver.Prepare(context.Background(), source, store)
+	require.NoError(t, err)
+	require.Equal(t, source, opener.opened)
+	execd, err := prepared.Resolve("/execd")
+	require.NoError(t, err)
+	require.FileExists(t, execd.PodPath)
+	config, err := prepared.Resolve("/config")
+	require.NoError(t, err)
+	require.DirExists(t, config.PodPath)
+
+	cached, err := resolver.Prepare(context.Background(), source, store)
+	require.NoError(t, err)
+	require.True(t, cached.CacheHit)
 }
 
-func (v *fakeSignatureVerifier) VerifyArtifact(_ context.Context, artifact infracatalog.Artifact) error {
-	v.verified = artifact
-	return v.err
-}
-
-func TestPlatformResolverStaticArtifactConfinedToPlatformRoot(t *testing.T) {
-	root := t.TempDir()
-	allowedRoot := filepath.Join(root, "platform")
-	outsideRoot := filepath.Join(root, "outside")
-	require.NoError(t, os.MkdirAll(allowedRoot, 0755))
-	require.NoError(t, os.MkdirAll(outsideRoot, 0755))
-
-	artifactPath := filepath.Join(allowedRoot, "component")
-	require.NoError(t, os.WriteFile(artifactPath, []byte("component"), 0755))
-	resolver := NewPlatformResolver([]string{allowedRoot})
-
-	reader, err := resolver.Open(context.Background(), staticArtifact(artifactPath))
+func TestPlatformResolverRejectsUnconfiguredOCIAndInsecureArchive(t *testing.T) {
+	store, err := NewArtifactStore(t.TempDir(), "/host/infra")
 	require.NoError(t, err)
-	payload, err := io.ReadAll(reader)
-	require.NoError(t, err)
-	require.NoError(t, reader.Close())
-	require.Equal(t, "component", string(payload))
+	_, err = NewPlatformResolver(nil).Prepare(context.Background(), infracatalog.ArtifactSource{
+		Type: infracatalog.SourceOCIImage, Reference: "registry.example/execd@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+	}, store)
+	require.ErrorIs(t, err, ErrArtifactSourceUnsupported)
 
-	escapedTarget := filepath.Join(outsideRoot, "escaped")
-	require.NoError(t, os.WriteFile(escapedTarget, []byte("escaped"), 0755))
-	escapedLink := filepath.Join(allowedRoot, "escaped-link")
-	require.NoError(t, os.Symlink(escapedTarget, escapedLink))
-
-	_, err = resolver.Open(context.Background(), staticArtifact(escapedLink))
+	_, err = NewPlatformResolver(nil).Prepare(context.Background(), infracatalog.ArtifactSource{
+		Type: infracatalog.SourceArchive, Reference: "http://example.test/component.tar.gz",
+		Digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+	}, store)
 	require.ErrorIs(t, err, ErrArtifactSourceUnsupported)
 }
 
-func TestPlatformResolverRejectsBrokenStaticSymlink(t *testing.T) {
-	allowedRoot := t.TempDir()
-	brokenLink := filepath.Join(allowedRoot, "broken")
-	require.NoError(t, os.Symlink(filepath.Join(allowedRoot, "missing"), brokenLink))
-
-	_, err := NewPlatformResolver([]string{allowedRoot}).Open(context.Background(), staticArtifact(brokenLink))
-	require.Error(t, err)
-}
-
-func TestPlatformResolverDelegatesOCIAndRunsSignaturePolicy(t *testing.T) {
-	opener := &fakeOCIOpener{payload: []byte("oci bundle")}
-	verifier := &fakeSignatureVerifier{}
-	resolver := NewPlatformResolverWithOptions(PlatformResolverOptions{OCI: opener, SignatureVerifier: verifier})
-	artifact := infracatalog.Artifact{
-		SourceType: infracatalog.SourceOCIArtifact, Reference: "oci://registry/execd:v1",
-		Digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-	}
-	reader, err := resolver.Open(context.Background(), artifact)
-	require.NoError(t, err)
-	require.Equal(t, "oci bundle", readAll(t, reader))
-	require.Equal(t, artifact, opener.opened)
-	require.Equal(t, artifact, verifier.verified)
-
-	verifier.err = errors.New("unsigned")
-	_, err = resolver.Open(context.Background(), artifact)
-	require.ErrorContains(t, err, "unsigned")
-}
-
-func readAll(t *testing.T, reader io.ReadCloser) string {
+func testTar(t *testing.T, files map[string]string) []byte {
 	t.Helper()
-	defer reader.Close()
-	payload, err := io.ReadAll(reader)
-	require.NoError(t, err)
-	return string(payload)
-}
-
-func staticArtifact(path string) infracatalog.Artifact {
-	return infracatalog.Artifact{
-		SourceType: infracatalog.SourceStatic,
-		Reference:  "file://" + path,
+	var buffer bytes.Buffer
+	writer := tar.NewWriter(&buffer)
+	for name, contents := range files {
+		require.NoError(t, writer.WriteHeader(&tar.Header{
+			Name: name, Mode: 0555, Size: int64(len(contents)), Typeflag: tar.TypeReg,
+		}))
+		_, err := io.WriteString(writer, contents)
+		require.NoError(t, err)
 	}
+	require.NoError(t, writer.Close())
+	return buffer.Bytes()
 }

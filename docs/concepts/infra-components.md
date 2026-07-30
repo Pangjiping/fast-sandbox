@@ -1,122 +1,153 @@
 # Infra Components
 
-Runtime Augmentation starts the user's OCI workload while adding platform-owned helpers that provide Sandbox management services.
-
-The result combines:
+An Infra Component adds a managed process to a user's Sandbox without rebuilding
+the user's image:
 
 ```text
-user image and entrypoint
-+ immutable platform artifacts
-+ per-instance configuration and credentials
-+ activation and readiness policy
-= augmented Sandbox runtime
+user image and command
++ immutable component artifact
++ supervised component process
++ health-checked named endpoint
+= augmented Sandbox
 ```
 
-Fast Sandbox does not rebuild the user's image for every Sandbox.
+Components are declared directly on a `SandboxPool`. There is no global
+`InfraProfile` catalog and no per-Sandbox component override.
 
-## InfraProfile
+## Pool contract
 
-A SandboxPool selects one immutable `infraProfile`. The platform-owned InfraCatalog resolves it into:
+```yaml
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxPool
+metadata:
+  name: opensandbox-pool
+  namespace: fast-sandbox
+spec:
+  runtime: container
+  infraComponents:
+    - name: execd
+      artifact:
+        source:
+          image:
+            reference: ghcr.io/opensandbox/execd@sha256:<digest>
+        mappings:
+          - sourcePath: /execd
+            targetPath: /.fast/components/execd/execd
+      process:
+        command:
+          - /.fast/components/execd/execd
+          - --port
+          - "44772"
+        env:
+          LOG_LEVEL: info
+        restartPolicy: OnFailure
+        healthCheck:
+          httpGet:
+            path: /ping
+          timeoutSeconds: 10
+      endpoint:
+        protocol: HTTP
+        port: 44772
+```
 
-- allowed runtimes;
-- version and deterministic profile hash;
-- component dependency graph;
-- immutable artifacts and digests;
-- delivery modes;
-- activation commands and restart policy;
-- per-instance initialization;
-- internal credential bindings;
-- published services and readiness probes;
-- required or optional readiness semantics.
+Every declared component is required. `DataPlaneReady` means that all component
+health checks pass and their named routes have been acknowledged by Fastlet
+Proxy.
 
-An unknown, invalid, unconfigured, or runtime-incompatible profile fails closed.
+## Artifact delivery
 
-## Artifact sources
+Exactly one immutable source is required:
 
-Supported source classes are:
+- an OCI image pinned by `@sha256:...`; or
+- an HTTPS gzip-compressed tar archive with the complete archive SHA-256.
 
-- embedded artifact;
-- immutable OCI artifact;
-- platform static file;
-- preinstalled runtime content.
+The OCI image is an artifact carrier, not another running container. Fastlet
+extracts only the declared mappings. A mapping may select a file or directory
+and places it under `/.fast/components/<component-name>/`.
 
-Non-preinstalled artifacts require an immutable reference, a SHA-256 digest, an executable policy, and a destination path.
+Fastlet rejects mutable OCI references, digest mismatch, absolute or traversing
+archive entries, escaping symlinks, device entries, and overlapping target
+paths. Artifacts are prepared before a Fastlet enters placement and are not
+downloaded on the Sandbox Create path.
 
-## Delivery modes
+Runtime adapters implement the same logical mapping differently:
 
-RuntimeProfiles advertise supported Infra delivery modes:
+| Runtime | Delivery |
+| --- | --- |
+| container / gVisor | read-only artifact mount |
+| Kata | artifact mount visible to the guest |
+| BoxLite | runtime artifact volume and guest mapping |
 
-- OCI bind mount;
-- image layer;
-- preinstalled content;
-- template bake;
-- guest copy;
-- artifact volume.
+## Process supervision
 
-The InfraCatalog selects the first mode supported by both the component and runtime. The component contract stays the same even when container, Kata, and BoxLite use different delivery mechanisms.
+`sandbox-init` is the small process supervisor injected into the Sandbox. It:
 
-## Activation
+- starts all Infra Components and the user process concurrently;
+- executes argv directly without shell expansion;
+- applies Pool-owned component environment variables;
+- preserves the user's original command and environment;
+- applies `Never`, `OnFailure`, or `Always` restart policy;
+- uses bounded platform-owned restart backoff.
 
-Activation modes include:
+Process exit policy and health are separate. A live but unhealthy process is
+not killed automatically; its named route becomes unavailable until health
+recovers.
 
-- entrypoint supervisor;
-- component bootstrap;
-- system service.
+## Health and readiness
 
-The platform can start a required component before the user process, restart it according to policy, and preserve the user's original command as the supervised workload.
+A component declares one HTTP or TCP health check on its endpoint port. Fastlet
+probes through the runtime's local access descriptor, never through Sandbox
+Proxy.
 
-`sandbox-init` is the small in-runtime supervisor used by the entrypoint-supervisor path. It reads generation-fenced instance configuration, starts the selected components, applies restart policy, launches the original user process, and emits readiness observations.
+The milestones are independent:
 
-## Per-instance state
+| Milestone | Meaning |
+| --- | --- |
+| `RuntimeReady` | Runtime, private network, component processes, and user process were created |
+| `ComponentReady` | One component passed health and its local named route was published |
+| `DataPlaneReady` | Every Pool component is `ComponentReady` |
 
-Fastlet prepares a generation-specific instance directory containing:
+Create returns at `RuntimeReady`. FastPath can wait directly on the assigned
+Fastlet for one component or the complete data plane without waiting for CRD
+status propagation.
 
-- compiled component plan;
-- resolved paths and environment;
-- service definitions;
-- private internal credentials;
-- diagnostic state.
+Health continues after initial readiness. When a component becomes unhealthy,
+Fastlet revokes the instance-fenced route and reports the data plane
+Unavailable. The same local worker republishes the route after the component
+recovers.
 
-State is written atomically. A stale Sandbox generation cannot reuse the directory or credentials of a newer instance.
+## Named routing
 
-## Credentials
+The component name is an immutable routing key shared by Pool validation,
+instance state, status, Fastlet Proxy, Sandbox Proxy, FastPath, and protocol
+adapters:
 
-An InfraProfile can bind a Fastlet-generated per-Sandbox credential to:
+```text
+/v2/sandboxes/<uid>/components/<component-name>/...
+```
 
-- an environment variable visible to the component;
-- an upstream HTTP header injected only by Fastlet Proxy.
+The suffix, query, body, streaming behavior, WebSocket upgrade, and application
+headers are forwarded without application-protocol translation. A component
+port is reserved and cannot be reached through the raw-port route.
 
-Callers receive a route credential, not the component's private token. This separates caller authorization from component-native authentication.
-
-## Readiness
-
-Required services use HTTP, TCP, or explicit readiness. Probes start immediately and use a bounded backoff with a 10 ms ceiling.
-
-Runtime and data-plane readiness remain separate:
-
-- `RuntimeReady` means the RuntimeDriver completed Ensure;
-- `DataPlaneReady` means every required Infra service is ready and its route is published.
-
-Create returns at RuntimeReady. Clients that need an Infra service must wait for DataPlaneReady.
+Fast Sandbox authenticates routes with
+`X-Fast-Sandbox-Route-Credential`. It preserves application `Authorization`
+and removes the platform credential before reaching the Sandbox.
 
 ## OpenSandbox Execd
 
-The development profile `opensandbox-execd-quickstart` injects a pinned Execd artifact into container, gVisor, Kata QEMU, and Kata Cloud Hypervisor profiles. It publishes HTTP service port `44772` and uses the official OpenSandbox SDK for command and file semantics.
+The sample Pool defines an `execd` component and fastctl uses the official
+OpenSandbox SDK:
 
-The production profile `opensandbox-execd` remains unconfigured until a platform release binds a trusted immutable artifact and digest.
+```bash
+fastctl opensandbox exec my-sandbox -- ls -la
+fastctl opensandbox exec my-sandbox --component custom-execd -- ls -la
+```
 
-See [OpenSandbox Execd](../guides/opensandbox-execd.md).
+`opensandbox` selects the SDK adapter; `--component` selects the Pool component
+that implements that protocol. Execd runs without its optional
+`EXECD_ACCESS_TOKEN` mechanism.
 
-## Adding another component
-
-A new component requires:
-
-1. an immutable artifact supply chain;
-2. a valid InfraProfile entry;
-3. at least one delivery mode shared with its target runtime;
-4. activation, initialization, and readiness rules;
-5. a stable service name and target port;
-6. a component-facing SDK or protocol client;
-7. lifecycle, credential, streaming, and cleanup tests.
-
-Fast Sandbox core does not add a new Exec/File API for the component.
+See the [Infra Components reference](../reference/infra-components.md) for the
+complete field and validation contract, and
+[OpenSandbox Execd](../guides/opensandbox-execd.md) for a concrete integration.

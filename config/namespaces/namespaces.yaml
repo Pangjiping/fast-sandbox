@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fast-sandbox-system
+  labels:
+    app.kubernetes.io/part-of: fast-sandbox
+    sandbox.fast.io/scope: system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fast-sandbox
+  labels:
+    app.kubernetes.io/part-of: fast-sandbox
+    sandbox.fast.io/scope: resources

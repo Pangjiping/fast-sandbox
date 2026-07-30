@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -12,13 +12,13 @@ import (
 
 func TestBuiltinCatalogProfiles(t *testing.T) {
 	catalog := Builtin()
-	require.Equal(t, []apiv1alpha1.RuntimeName{
-		apiv1alpha1.RuntimeBoxLite,
-		apiv1alpha1.RuntimeContainer,
-		apiv1alpha1.RuntimeGVisor,
-		apiv1alpha1.RuntimeKataClh,
-		apiv1alpha1.RuntimeKataFc,
-		apiv1alpha1.RuntimeKataQemu,
+	require.Equal(t, []apiv1alpha2.RuntimeName{
+		apiv1alpha2.RuntimeBoxLite,
+		apiv1alpha2.RuntimeContainer,
+		apiv1alpha2.RuntimeGVisor,
+		apiv1alpha2.RuntimeKataClh,
+		apiv1alpha2.RuntimeKataFc,
+		apiv1alpha2.RuntimeKataQemu,
 	}, catalog.Names())
 
 	for _, name := range catalog.Names() {
@@ -31,7 +31,7 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 		require.Equal(t, profile.ProfileHash, hash)
 	}
 
-	boxlite, err := catalog.Resolve(apiv1alpha1.RuntimeBoxLite)
+	boxlite, err := catalog.Resolve(apiv1alpha2.RuntimeBoxLite)
 	require.NoError(t, err)
 	require.Equal(t, DriverKindBoxLite, boxlite.Driver)
 	require.Equal(t, CapabilityUnsupported, boxlite.Capabilities.DefaultState)
@@ -43,27 +43,27 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 	require.Equal(t, "boxlite-runtime", boxlite.Deployment.ResourceOwner)
 	require.True(t, boxlite.Deployment.RequiresKVM)
 
-	kata, err := catalog.Resolve(apiv1alpha1.RuntimeKataFc)
+	kata, err := catalog.Resolve(apiv1alpha2.RuntimeKataFc)
 	require.NoError(t, err)
 	require.Equal(t, DriverKindContainerd, kata.Driver)
 	require.True(t, kata.Deployment.RequiresKVM)
 	require.Contains(t, kata.Containerd.ConfigPath, "configuration-fc.toml")
 	require.Equal(t, CapabilityDegraded, kata.Capabilities.DefaultState)
 	require.Equal(t, "KataFirecrackerNotValidated", kata.Capabilities.Reason)
-	for _, name := range []apiv1alpha1.RuntimeName{apiv1alpha1.RuntimeKataQemu, apiv1alpha1.RuntimeKataClh} {
+	for _, name := range []apiv1alpha2.RuntimeName{apiv1alpha2.RuntimeKataQemu, apiv1alpha2.RuntimeKataClh} {
 		kataProfile, resolveErr := catalog.Resolve(name)
 		require.NoError(t, resolveErr)
 		require.Contains(t, kataProfile.InfraDeliveryModes, InfraDeliveryBindMount)
 	}
 
-	gvisor, err := catalog.Resolve(apiv1alpha1.RuntimeGVisor)
+	gvisor, err := catalog.Resolve(apiv1alpha2.RuntimeGVisor)
 	require.NoError(t, err)
 	require.True(t, hasHostPath(gvisor.Deployment.HostPaths, "/usr/local/bin/runsc"))
 	require.True(t, hasHostPath(gvisor.Deployment.HostPaths, "/usr/local/bin/containerd-shim-runsc-v1"))
 	require.True(t, hasHostPath(gvisor.Deployment.HostPaths, "/etc/containerd/runsc.toml"))
 	require.True(t, hostPath(gvisor.Deployment.HostPaths, "/etc/containerd/runsc.toml").ReadOnly)
 
-	container, err := catalog.Resolve(apiv1alpha1.RuntimeContainer)
+	container, err := catalog.Resolve(apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
 	require.Equal(t, corev1.MountPropagationBidirectional, hostPath(container.Deployment.HostPaths, "/run/fast-sandbox/netns").MountPropagation)
 	require.Equal(t, "/run/netns", hostPath(container.Deployment.HostPaths, "/run/fast-sandbox/netns").MountPath)
@@ -71,12 +71,12 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 
 func TestRuntimeProfilesUsingFastletNetworkHaveRequiredMounts(t *testing.T) {
 	catalog := Builtin()
-	for _, name := range []apiv1alpha1.RuntimeName{
-		apiv1alpha1.RuntimeContainer,
-		apiv1alpha1.RuntimeGVisor,
-		apiv1alpha1.RuntimeKataQemu,
-		apiv1alpha1.RuntimeKataClh,
-		apiv1alpha1.RuntimeKataFc,
+	for _, name := range []apiv1alpha2.RuntimeName{
+		apiv1alpha2.RuntimeContainer,
+		apiv1alpha2.RuntimeGVisor,
+		apiv1alpha2.RuntimeKataQemu,
+		apiv1alpha2.RuntimeKataClh,
+		apiv1alpha2.RuntimeKataFc,
 	} {
 		profile, err := catalog.Resolve(name)
 		require.NoError(t, err)
@@ -85,7 +85,7 @@ func TestRuntimeProfilesUsingFastletNetworkHaveRequiredMounts(t *testing.T) {
 		require.True(t, hasHostPath(profile.Deployment.HostPaths, "/run/fast-sandbox/network"), "%s is missing the network-state mount", name)
 	}
 
-	boxlite, err := catalog.Resolve(apiv1alpha1.RuntimeBoxLite)
+	boxlite, err := catalog.Resolve(apiv1alpha2.RuntimeBoxLite)
 	require.NoError(t, err)
 	require.False(t, boxlite.UsesFastletNetNS())
 }
@@ -112,7 +112,7 @@ func TestResolveDefaultsAndRejectsAliases(t *testing.T) {
 	catalog := Builtin()
 	profile, err := catalog.Resolve("")
 	require.NoError(t, err)
-	require.Equal(t, apiv1alpha1.RuntimeContainer, profile.Name)
+	require.Equal(t, apiv1alpha2.RuntimeContainer, profile.Name)
 
 	_, err = catalog.Resolve("kata-firecracker")
 	require.True(t, errors.Is(err, ErrRuntimeNotFound))
@@ -120,12 +120,12 @@ func TestResolveDefaultsAndRejectsAliases(t *testing.T) {
 
 func TestResolveReturnsIndependentProfile(t *testing.T) {
 	catalog := Builtin()
-	first, err := catalog.Resolve(apiv1alpha1.RuntimeContainer)
+	first, err := catalog.Resolve(apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
 	first.Containerd.Handler = "mutated"
 	first.Deployment.HostPaths[0].HostPath = "mutated"
 
-	second, err := catalog.Resolve(apiv1alpha1.RuntimeContainer)
+	second, err := catalog.Resolve(apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
 	require.Equal(t, "io.containerd.runc.v2", second.Containerd.Handler)
 	require.Equal(t, "/run/containerd", second.Deployment.HostPaths[0].HostPath)

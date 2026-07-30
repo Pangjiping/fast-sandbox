@@ -20,7 +20,8 @@ func TestCredentialRoundTripAndFencing(t *testing.T) {
 	require.NoError(t, err)
 
 	expected := Claims{
-		Tenant: "tenant-a", Namespace: "default", SandboxUID: "uid-a", TargetPort: 8080,
+		Tenant: "tenant-a", Namespace: "default", SandboxUID: "uid-a",
+		TargetKind: TargetKindPort, Protocol: "HTTP", TargetPort: 8080,
 		FastletPodUID: "pod-a", AssignmentAttempt: 2, RouteGeneration: 3,
 	}
 	token, issued, err := issuer.Issue(expected)
@@ -52,7 +53,8 @@ func TestCredentialRejectsTamperAndExpiry(t *testing.T) {
 	verifier, err := NewVerifier(publicKey, func() time.Time { return now.Add(2 * time.Second) })
 	require.NoError(t, err)
 	token, _, err := issuer.Issue(Claims{
-		Namespace: "default", SandboxUID: "uid-a", TargetPort: 80, FastletPodUID: "pod-a",
+		Namespace: "default", SandboxUID: "uid-a", TargetKind: TargetKindPort, Protocol: "HTTP",
+		TargetPort: 80, FastletPodUID: "pod-a",
 		AssignmentAttempt: 1, RouteGeneration: 1,
 	})
 	require.NoError(t, err)
@@ -78,7 +80,8 @@ func TestVerifierSetSupportsOverlappingKeyRotation(t *testing.T) {
 	verifier, err := NewVerifierSet([]ed25519.PublicKey{oldPublicKey, newPublicKey}, func() time.Time { return now })
 	require.NoError(t, err)
 	claims := Claims{
-		Namespace: "default", SandboxUID: "uid-a", TargetPort: 8080, FastletPodUID: "pod-a",
+		Namespace: "default", SandboxUID: "uid-a", TargetKind: TargetKindPort, Protocol: "HTTP",
+		TargetPort: 8080, FastletPodUID: "pod-a",
 		AssignmentAttempt: 1, RouteGeneration: 1,
 	}
 
@@ -95,4 +98,32 @@ func TestVerifierSetSupportsOverlappingKeyRotation(t *testing.T) {
 	parsed, err := ParsePublicKeySet(encoded)
 	require.NoError(t, err)
 	require.Equal(t, []ed25519.PublicKey{oldPublicKey, newPublicKey}, parsed)
+}
+
+func TestCredentialFencesNamedComponentIdentity(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	issuer, err := NewIssuer(privateKey, time.Minute, func() time.Time { return now })
+	require.NoError(t, err)
+	verifier, err := NewVerifier(publicKey, func() time.Time { return now })
+	require.NoError(t, err)
+	claims := Claims{
+		Namespace: "default", SandboxUID: "uid-a", TargetKind: TargetKindComponent,
+		ComponentName: "execd", Protocol: "HTTP", TargetPort: 44772,
+		FastletPodUID: "pod-a", AssignmentAttempt: 1, RouteGeneration: 1,
+	}
+	token, _, err := issuer.Issue(claims)
+	require.NoError(t, err)
+
+	wrongComponent := claims
+	wrongComponent.ComponentName = "envd"
+	_, err = verifier.VerifyExpected(token, wrongComponent)
+	require.ErrorIs(t, err, ErrClaimMismatch)
+
+	rawPort := claims
+	rawPort.TargetKind = TargetKindPort
+	rawPort.ComponentName = ""
+	_, err = verifier.VerifyExpected(token, rawPort)
+	require.ErrorIs(t, err, ErrClaimMismatch)
 }

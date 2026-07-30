@@ -69,7 +69,7 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	if !m.infraReady {
 		message := m.infraMessage
 		if message == "" {
-			message = "required InfraProfile artifacts are still preparing"
+			message = "required Infra Component artifacts are still preparing"
 		}
 		response, err := createFailure(fastletErrorWithOutcome(fastletapi.ErrorInfraUnavailable, message, true, fastletapi.OutcomeRejectedBeforeSideEffects), m.admissionStatusLocked())
 		m.mu.Unlock()
@@ -122,7 +122,7 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	metadata, err := m.runtime.EnsureSandbox(runtimeContext, &spec)
 	finishRuntime(err)
 	observeRuntimeCreate(m.runtimeName, runtimeStarted, err)
-	observeUserProcessStart(m.runtimeName, m.infraProfile, started, metadata)
+	observeUserProcessStart(m.runtimeName, m.infraRevision, started, metadata)
 	if err != nil {
 		m.cacheProtection.ProtectHotUntil(spec.Image, m.clock.Now().Add(time.Hour))
 		cleanupErr := m.runtime.DeleteSandbox(ctx, spec.SandboxID)
@@ -177,7 +177,7 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	dataPlaneReady := metadata.Phase == "running"
 	m.mu.Unlock()
 	if dataPlaneReady {
-		observeDataPlaneReady(m.runtimeName, m.infraProfile, started, nil)
+		observeDataPlaneReady(m.runtimeName, m.infraRevision, started, nil)
 	} else {
 		m.recordDiagnostic(spec.SandboxID, "info", "runtime", "infra-pending", "runtime and private network are ready; Infra Component initialization continues asynchronously")
 		m.startDataPlaneReconcile(metadata, started)
@@ -312,8 +312,8 @@ func (m *SandboxManager) Recover(ctx context.Context) error {
 			metadata.Phase = "unknown"
 		}
 		if m.infraManager != nil {
-			if metadata.InfraProfile != m.infraProfile || metadata.InfraProfileHash != m.infraProfileHash {
-				return fmt.Errorf("recovered Sandbox %s InfraProfile does not match Fastlet", metadata.SandboxID)
+			if metadata.InfraRevision != m.infraRevision {
+				return fmt.Errorf("recovered Sandbox %s Infra revision does not match Fastlet", metadata.SandboxID)
 			}
 			metadata.Phase = "infra-pending"
 		}
@@ -470,7 +470,7 @@ func validateIdentityFence(expectedPodUID string, existing *SandboxMetadata, req
 func sameSandboxClaim(existing *SandboxMetadata, requested *fastletapi.SandboxSpec) bool {
 	return existing.ClaimUID == requested.ClaimUID && existing.ClaimNamespace == requested.ClaimNamespace && existing.ClaimName == requested.ClaimName &&
 		existing.RuntimeProfileHash == requested.RuntimeProfileHash && existing.ResourceProfileHash == requested.ResourceProfileHash &&
-		existing.InfraProfile == requested.InfraProfile && existing.InfraProfileHash == requested.InfraProfileHash
+		existing.InfraRevision == requested.InfraRevision
 }
 
 func identityAtOrBefore(generation, attempt int64, highWater fastletapi.SandboxIdentity) bool {
@@ -521,16 +521,31 @@ func sandboxStatus(metadata *SandboxMetadata) fastletapi.SandboxStatus {
 		SandboxID: metadata.SandboxID, ClaimUID: metadata.ClaimUID,
 		InstanceGeneration: metadata.InstanceGeneration, RuntimeInstanceID: metadata.RuntimeInstanceID, AssignmentAttempt: metadata.AssignmentAttempt,
 		RouteGeneration: metadata.RouteGeneration,
-		Phase:           metadata.Phase, CreatedAt: metadata.CreatedAt, InfraDiagnostics: apiInfraDiagnostics(metadata.InfraDiagnostics),
+		Phase:           metadata.Phase, CreatedAt: metadata.CreatedAt,
+		InfraDiagnostics: apiInfraDiagnostics(metadata.InfraDiagnostics, metadata.InfraServices, metadata.RouteGeneration, metadata.Phase == "running"),
 	}
 }
 
-func apiInfraDiagnostics(diagnostics []fastletinfra.ComponentDiagnostic) []fastletapi.InfraComponentDiagnostic {
+func apiInfraDiagnostics(
+	diagnostics []fastletinfra.ComponentDiagnostic,
+	services []fastletinfra.ServiceEndpoint,
+	routeGeneration int64,
+	routeReady bool,
+) []fastletapi.InfraComponentDiagnostic {
+	serviceByComponent := make(map[string]fastletinfra.ServiceEndpoint, len(services))
+	for _, service := range services {
+		serviceByComponent[service.Component] = service
+	}
 	result := make([]fastletapi.InfraComponentDiagnostic, 0, len(diagnostics))
 	for _, diagnostic := range diagnostics {
+		service := serviceByComponent[diagnostic.Component]
+		observedRouteGeneration := int64(0)
+		if routeReady && diagnostic.State == "Ready" {
+			observedRouteGeneration = routeGeneration
+		}
 		result = append(result, fastletapi.InfraComponentDiagnostic{
-			Component: diagnostic.Component, Service: diagnostic.Service, Required: diagnostic.Required,
-			State: diagnostic.State, Message: diagnostic.Message,
+			Component: diagnostic.Component, Protocol: service.Protocol, Port: service.Port,
+			State: diagnostic.State, ObservedRouteGeneration: observedRouteGeneration, Message: diagnostic.Message,
 		})
 	}
 	return result

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/testutil"
@@ -21,7 +21,7 @@ func readyFastlet(id string, used, capacity int, images ...string) FastletInfo {
 	return FastletInfo{
 		ID: FastletID(id), Namespace: "default", PodName: id, PodUID: "uid-" + id,
 		PodIP: "10.0.0.1", NodeName: "node-a", PoolName: "pool-a",
-		RuntimeName: apiv1alpha1.RuntimeContainer, RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
+		RuntimeName: apiv1alpha2.RuntimeContainer, RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
 		PodReady: true, RuntimeReady: true, InfraReady: true, Capacity: capacity,
 		Admission: fastletapi.AdmissionStatus{Capacity: capacity, Used: used, Running: used},
 		Images:    append([]string(nil), images...), CacheEpoch: "boot-a", CacheRevision: 1, CacheComplete: true,
@@ -35,8 +35,8 @@ func seedFastlet(tb testing.TB, registry *InMemoryRegistry, info FastletInfo) {
 		ID: info.ID, Namespace: info.Namespace, PodName: info.PodName, PodUID: info.PodUID,
 		PodIP: info.PodIP, NodeName: info.NodeName, PoolName: info.PoolName,
 		RuntimeName: info.RuntimeName, RuntimeProfileHash: info.RuntimeProfileHash,
-		ResourceProfileHash: info.ResourceProfileHash, InfraProfile: info.InfraProfile,
-		InfraProfileHash: info.InfraProfileHash, PodReady: info.PodReady, PodObservedAt: info.PodObservedAt,
+		ResourceProfileHash: info.ResourceProfileHash,
+		InfraRevision:       info.InfraRevision, PodReady: info.PodReady, PodObservedAt: info.PodObservedAt,
 	}
 	registry.UpsertPod(pod)
 	sequence := info.HeartbeatSequence
@@ -58,7 +58,7 @@ func seedFastlet(tb testing.TB, registry *InMemoryRegistry, info FastletInfo) {
 		FastletStatus: fastletapi.FastletStatus{
 			FastletPodUID: info.PodUID, RuntimeReady: info.RuntimeReady, Draining: info.Draining,
 			Capacity: info.Capacity, Admission: info.Admission, ResourceProfileHash: info.ResourceProfileHash,
-			InfraProfile: info.InfraProfile, InfraProfileHash: info.InfraProfileHash, InfraReady: info.InfraReady,
+			InfraRevision: info.InfraRevision, InfraReady: info.InfraReady,
 			PreparedArtifacts: info.PreparedArtifacts, SandboxStatuses: statuses,
 		},
 		Sequence: sequence,
@@ -76,7 +76,7 @@ func seedFastlet(tb testing.TB, registry *InMemoryRegistry, info FastletInfo) {
 
 func candidate(image, stableKey string) CandidateRequest {
 	return CandidateRequest{
-		Namespace: "default", PoolName: "pool-a", RuntimeName: apiv1alpha1.RuntimeContainer,
+		Namespace: "default", PoolName: "pool-a", RuntimeName: apiv1alpha2.RuntimeContainer,
 		RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
 		Image: image, StableKey: stableKey, Now: registryNow,
 	}
@@ -278,7 +278,7 @@ func TestGetReturnsDeepCopy(t *testing.T) {
 func TestTopKReturnsDeepCopy(t *testing.T) {
 	registry := NewInMemoryRegistry()
 	info := readyFastlet("fastlet-a", 0, 5, "alpine:latest")
-	info.PreparedArtifacts = []string{"infra-profile-a"}
+	info.PreparedArtifacts = []string{"component-artifact-a"}
 	info.SandboxStatuses["sandbox-a"] = fastletapi.SandboxStatus{
 		SandboxID: "sandbox-a",
 		InfraDiagnostics: []fastletapi.InfraComponentDiagnostic{{
@@ -300,7 +300,7 @@ func TestTopKReturnsDeepCopy(t *testing.T) {
 	stored, ok := registry.GetFastletByID("fastlet-a")
 	require.True(t, ok)
 	require.Equal(t, []string{"alpine:latest"}, stored.Images)
-	require.Equal(t, []string{"infra-profile-a"}, stored.PreparedArtifacts)
+	require.Equal(t, []string{"component-artifact-a"}, stored.PreparedArtifacts)
 	require.Equal(t, "sandbox-a", stored.SandboxStatuses["sandbox-a"].SandboxID)
 	require.Equal(t, "ready", stored.SandboxStatuses["sandbox-a"].InfraDiagnostics[0].State)
 }

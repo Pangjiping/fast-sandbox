@@ -29,7 +29,8 @@ Creating a Sandbox CRD directly is supported. Fast-Path is a latency optimizatio
 
 The successful Fast-Path path has two downstream operations:
 
-1. create the Sandbox CRD with the complete durable assignment annotation;
+1. create the Sandbox CRD with the complete initial intent and durable
+   assignment annotation;
 2. call the selected Fastlet's atomic Create operation.
 
 Fast-Path does not write status on the request path.
@@ -49,7 +50,7 @@ sequenceDiagram
   F->>L: atomic Create(fenced identity)
   alt runtime created or already present
     L-->>F: RuntimeReady
-    F-->>C: UID and placement
+    F-->>C: complete SandboxInfo
   else rejected before side effects
     F->>K: CAS assignment to another candidate
     F->>L: atomic Create(new attempt)
@@ -65,9 +66,14 @@ sequenceDiagram
 `request_id` is required and is the canonical Sandbox CRD name. Retries must reuse it with the same immutable Create spec.
 
 - A matching existing object is an idempotent replay.
-- A different spec under the same request ID is rejected.
+- A different workload, expiry, metadata, failure, or Pool intent under the
+  same request ID is rejected.
 - A failure that occurs before candidate selection creates no CRD.
 - A failure after the CRD Create leaves durable intent for retry and reconciliation.
+
+The initial CRD write includes absolute expiry and user metadata. Fast-Path
+Create does not require a follow-up lifecycle update to complete initial
+intent.
 
 Transport ambiguity never authorizes reassignment. Only an explicit Fastlet rejection before side effects permits Fast-Path to CAS the assignment to the next bounded candidate.
 

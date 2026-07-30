@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,12 +31,12 @@ func InitializeAssignmentAnnotation(
 	k8sClient client.Client,
 	key types.NamespacedName,
 	desired AssignmentEnvelope,
-) (*apiv1alpha1.Sandbox, bool, error) {
+) (*apiv1alpha2.Sandbox, bool, error) {
 	value, err := EncodeAssignment(desired)
 	if err != nil {
 		return nil, false, err
 	}
-	var current apiv1alpha1.Sandbox
+	var current apiv1alpha2.Sandbox
 	if err := k8sClient.Get(ctx, key, &current); err != nil {
 		return nil, false, err
 	}
@@ -56,7 +56,7 @@ func InitializeAssignmentAnnotation(
 	if err != nil {
 		return nil, false, err
 	}
-	target := &apiv1alpha1.Sandbox{}
+	target := &apiv1alpha2.Sandbox{}
 	target.Namespace, target.Name = key.Namespace, key.Name
 	if err := k8sClient.Patch(ctx, target, client.RawPatch(types.MergePatchType, patchBody)); err != nil {
 		return nil, false, err
@@ -81,7 +81,7 @@ type AssignmentEnvelope struct {
 	RuntimeInstanceID   string `json:"runtimeInstanceID"`
 	RuntimeProfileHash  string `json:"runtimeProfileHash"`
 	ResourceProfileHash string `json:"resourceProfileHash"`
-	InfraProfileHash    string `json:"infraProfileHash"`
+	InfraRevision       string `json:"infraRevision"`
 }
 
 func (a AssignmentEnvelope) Validate() error {
@@ -92,7 +92,7 @@ func (a AssignmentEnvelope) Validate() error {
 	if err := statusAssignment.Validate(); err != nil {
 		return err
 	}
-	if a.InstanceGeneration < apiv1alpha1.InitialInstanceGeneration {
+	if a.InstanceGeneration < apiv1alpha2.InitialInstanceGeneration {
 		return errors.New("instanceGeneration must be at least 1")
 	}
 	if a.RouteGeneration < 1 {
@@ -107,16 +107,16 @@ func (a AssignmentEnvelope) Validate() error {
 	if a.ResourceProfileHash == "" {
 		return errors.New("resourceProfileHash is required")
 	}
-	if a.InfraProfileHash == "" {
-		return errors.New("infraProfileHash is required")
+	if a.InfraRevision == "" {
+		return errors.New("infraRevision is required")
 	}
 	return nil
 }
 
-func (a AssignmentEnvelope) StatusAssignment() apiv1alpha1.SandboxAssignment {
-	return apiv1alpha1.SandboxAssignment{
+func (a AssignmentEnvelope) StatusAssignment() apiv1alpha2.SandboxAssignment {
+	return apiv1alpha2.SandboxAssignment{
 		FastletName: a.FastletName, FastletPodUID: a.FastletPodUID,
-		NodeName: a.NodeName, Attempt: a.Attempt,
+		NodeName: a.NodeName, Attempt: a.Attempt, InfraRevision: a.InfraRevision,
 	}
 }
 
@@ -145,7 +145,7 @@ func ParseAssignment(value string) (*AssignmentEnvelope, error) {
 	return &envelope, nil
 }
 
-func SetAssignmentAnnotation(sandbox *apiv1alpha1.Sandbox, envelope AssignmentEnvelope) error {
+func SetAssignmentAnnotation(sandbox *apiv1alpha2.Sandbox, envelope AssignmentEnvelope) error {
 	if sandbox == nil {
 		return errors.New("sandbox is required")
 	}
@@ -160,7 +160,7 @@ func SetAssignmentAnnotation(sandbox *apiv1alpha1.Sandbox, envelope AssignmentEn
 	return nil
 }
 
-func AssignmentFromAnnotation(sandbox *apiv1alpha1.Sandbox) (*AssignmentEnvelope, error) {
+func AssignmentFromAnnotation(sandbox *apiv1alpha2.Sandbox) (*AssignmentEnvelope, error) {
 	if sandbox == nil {
 		return nil, errors.New("sandbox is required")
 	}
@@ -174,7 +174,7 @@ func AssignmentFromAnnotation(sandbox *apiv1alpha1.Sandbox) (*AssignmentEnvelope
 // EffectiveAssignment validates that status is only a projection of the
 // durable annotation. A mismatch fails closed instead of silently selecting a
 // second Fastlet.
-func EffectiveAssignment(sandbox *apiv1alpha1.Sandbox) (*AssignmentEnvelope, error) {
+func EffectiveAssignment(sandbox *apiv1alpha2.Sandbox) (*AssignmentEnvelope, error) {
 	if sandbox == nil {
 		return nil, errors.New("sandbox is required")
 	}
@@ -205,16 +205,17 @@ func assignmentEnvelopeEqual(left, right AssignmentEnvelope) bool {
 	return left == right
 }
 
-// CASAssignmentAnnotation replaces exactly the expected assignment. It uses
-// JSON Patch tests for both resourceVersion and annotation value so competing
-// FastPath/Controller reassignments have one winner.
+// CASAssignmentAnnotation replaces exactly the expected assignment. The
+// annotation value is the placement CAS field. Unrelated metadata/status
+// writes (for example the Controller adding its finalizer) must not make a
+// FastPath Top-K retry fail.
 func CASAssignmentAnnotation(
 	ctx context.Context,
 	k8sClient client.Client,
 	key types.NamespacedName,
 	expected AssignmentEnvelope,
 	next AssignmentEnvelope,
-) (*apiv1alpha1.Sandbox, error) {
+) (*apiv1alpha2.Sandbox, error) {
 	if err := expected.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid expected assignment: %w", err)
 	}
@@ -222,7 +223,7 @@ func CASAssignmentAnnotation(
 	if err != nil {
 		return nil, err
 	}
-	var current apiv1alpha1.Sandbox
+	var current apiv1alpha2.Sandbox
 	if err := k8sClient.Get(ctx, key, &current); err != nil {
 		return nil, err
 	}
@@ -235,14 +236,13 @@ func CASAssignmentAnnotation(
 	}
 	currentValue := current.Annotations[AnnotationAssignment]
 	patch, err := json.Marshal([]map[string]any{
-		{"op": "test", "path": "/metadata/resourceVersion", "value": current.ResourceVersion},
 		{"op": "test", "path": "/metadata/annotations/sandbox.fast.io~1assignment", "value": currentValue},
 		{"op": "replace", "path": "/metadata/annotations/sandbox.fast.io~1assignment", "value": nextValue},
 	})
 	if err != nil {
 		return nil, err
 	}
-	target := &apiv1alpha1.Sandbox{}
+	target := &apiv1alpha2.Sandbox{}
 	target.Namespace, target.Name = key.Namespace, key.Name
 	if err := k8sClient.Patch(ctx, target, client.RawPatch(types.JSONPatchType, patch)); err != nil {
 		return nil, err
@@ -261,11 +261,11 @@ func RemoveAssignmentAnnotation(
 	k8sClient client.Client,
 	key types.NamespacedName,
 	expected AssignmentEnvelope,
-) (*apiv1alpha1.Sandbox, bool, error) {
+) (*apiv1alpha2.Sandbox, bool, error) {
 	if err := expected.Validate(); err != nil {
 		return nil, false, fmt.Errorf("invalid expected assignment: %w", err)
 	}
-	var current apiv1alpha1.Sandbox
+	var current apiv1alpha2.Sandbox
 	if err := k8sClient.Get(ctx, key, &current); err != nil {
 		return nil, false, err
 	}
@@ -288,7 +288,7 @@ func RemoveAssignmentAnnotation(
 	if err != nil {
 		return nil, false, err
 	}
-	target := &apiv1alpha1.Sandbox{}
+	target := &apiv1alpha2.Sandbox{}
 	target.Namespace, target.Name = key.Namespace, key.Name
 	if err := k8sClient.Patch(ctx, target, client.RawPatch(types.JSONPatchType, patch)); err != nil {
 		return nil, false, err

@@ -1,11 +1,10 @@
-apiVersion: sandbox.fast.io/v1alpha1
+apiVersion: sandbox.fast.io/v1alpha2
 kind: SandboxPool
 metadata:
   name: quickstart-pool
-  namespace: default
+  namespace: fast-sandbox
 spec:
   runtime: container
-  infraProfile: minimal
   sandboxResources:
     cpu: 250m
     memory: 256Mi

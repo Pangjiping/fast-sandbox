@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	e2eenv "fast-sandbox/test/e2e/env"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
@@ -63,7 +63,7 @@ func TestSandboxProxyDataPlane(t *testing.T) {
 				t.Fatalf("dial FastPath: %v", err)
 			}
 			defer connection.Close()
-			fastPath := fastpathv1.NewFastPathServiceClient(connection)
+			fastPath := fastpathv2.NewFastPathServiceClient(connection)
 
 			first := createProxySandbox(ctx, t, fastPath, namespace, pool.Name, "proxy-a", 8080)
 			second := createProxySandbox(ctx, t, fastPath, namespace, pool.Name, "proxy-b", 18080)
@@ -113,26 +113,26 @@ func TestSandboxProxyDataPlane(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func proxyPool(namespace, name string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func proxyPool(namespace, name string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{PoolMin: 2, PoolMax: 2}, MaxSandboxesPerPod: 1,
-			Runtime:          apiv1alpha1.RuntimeContainer,
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{PoolMin: 2, PoolMax: 2}, MaxSandboxesPerPod: 1,
+			Runtime:          apiv1alpha2.RuntimeContainer,
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64},
 			FastletTemplate:  corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage()}}}},
 		},
 	}
 }
 
-func createProxySandbox(ctx context.Context, t *testing.T, fastPath fastpathv1.FastPathServiceClient, namespace, pool, name string, port int) *fastpathv1.CreateResponse {
+func createProxySandbox(ctx context.Context, t *testing.T, fastPath fastpathv2.FastPathServiceClient, namespace, pool, name string, port int) *fastpathv2.SandboxInfo {
 	t.Helper()
 	command := fmt.Sprintf(`printf '%%s\n' '#!/bin/sh' 'printf "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n%s\n"' > /serve.sh; chmod +x /serve.sh; exec nc -lk -p %d -e /serve.sh`, name, port)
 	requestID := namespace + "-" + name
 	requestContext, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	response, err := fastPath.CreateSandbox(requestContext, &fastpathv1.CreateRequest{
-		Namespace: namespace, PoolRef: pool, Name: requestID, Image: "docker.io/library/alpine:latest",
+	response, err := fastPath.CreateSandbox(requestContext, &fastpathv2.CreateRequest{
+		Namespace: namespace, PoolRef: pool, Image: "docker.io/library/alpine:latest",
 		Command: []string{"/bin/sh", "-c", command}, RequestId: requestID,
 	})
 	if err != nil {
@@ -141,13 +141,13 @@ func createProxySandbox(ctx context.Context, t *testing.T, fastPath fastpathv1.F
 	return response
 }
 
-func waitForProxyReady(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, namespace, name string) *apiv1alpha1.Sandbox {
+func waitForProxyReady(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, namespace, name string) *apiv1alpha2.Sandbox {
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Namespace: namespace, Name: name}, func(item *apiv1alpha1.Sandbox) bool {
+	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Namespace: namespace, Name: name}, func(item *apiv1alpha2.Sandbox) bool {
 		return item.Status.Assignment != nil && item.Status.RouteGeneration > 0 &&
-			item.Status.RuntimeState == apiv1alpha1.ObservedStateReady && item.Status.DataPlaneState == apiv1alpha1.ObservedStateReady
+			item.Status.RuntimeState == apiv1alpha2.ObservedStateReady && item.Status.DataPlaneState == apiv1alpha2.ObservedStateReady
 	})
 	if err != nil {
 		t.Fatalf("wait for proxy-ready Sandbox %s: %v", name, err)
@@ -155,12 +155,12 @@ func waitForProxyReady(ctx context.Context, t *testing.T, fixture *fixtures.Fixt
 	return sandbox
 }
 
-func waitForProxyGeneration(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, namespace, name string, previous int64) *apiv1alpha1.Sandbox {
+func waitForProxyGeneration(ctx context.Context, t *testing.T, fixture *fixtures.FixtureClient, namespace, name string, previous int64) *apiv1alpha2.Sandbox {
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Namespace: namespace, Name: name}, func(item *apiv1alpha1.Sandbox) bool {
-		return item.Status.RouteGeneration > previous && item.Status.DataPlaneState == apiv1alpha1.ObservedStateReady
+	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Namespace: namespace, Name: name}, func(item *apiv1alpha2.Sandbox) bool {
+		return item.Status.RouteGeneration > previous && item.Status.DataPlaneState == apiv1alpha2.ObservedStateReady
 	})
 	if err != nil {
 		t.Fatalf("wait for new route generation: %v", err)
@@ -168,16 +168,31 @@ func waitForProxyGeneration(ctx context.Context, t *testing.T, fixture *fixtures
 	return sandbox
 }
 
-func resolveProxyAccess(ctx context.Context, t *testing.T, fastPath fastpathv1.FastPathServiceClient, sandboxUID string, port uint32) *fastpathv1.ResolveEndpointResponse {
+func resolveProxyAccess(ctx context.Context, t *testing.T, fastPath fastpathv2.FastPathServiceClient, sandboxUID string, port uint32) *fastpathv2.ResolveEndpointResponse {
 	t.Helper()
-	response, err := fastPath.ResolveEndpoint(ctx, &fastpathv1.ResolveEndpointRequest{SandboxUid: sandboxUID, TargetPort: port, Protocol: "http"})
+	response, err := fastPath.ResolveEndpoint(ctx, &fastpathv2.ResolveEndpointRequest{
+		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: sandboxUID}},
+		Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: port}},
+	})
 	if err != nil {
 		t.Fatalf("ResolveEndpoint %s:%d: %v", sandboxUID, port, err)
 	}
 	return response
 }
 
-func assertProxyResponse(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv1.ResolveEndpointResponse, want string) {
+func resolveComponentAccess(ctx context.Context, t *testing.T, fastPath fastpathv2.FastPathServiceClient, sandboxUID, component string) *fastpathv2.ResolveEndpointResponse {
+	t.Helper()
+	response, err := fastPath.ResolveEndpoint(ctx, &fastpathv2.ResolveEndpointRequest{
+		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: sandboxUID}},
+		Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_ComponentName{ComponentName: component}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveEndpoint %s component %s: %v", sandboxUID, component, err)
+	}
+	return response
+}
+
+func assertProxyResponse(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv2.ResolveEndpointResponse, want string) {
 	t.Helper()
 	parsed, err := url.Parse(access.ProxyEndpoint)
 	if err != nil {
@@ -205,7 +220,7 @@ func assertProxyResponse(ctx context.Context, t *testing.T, proxyBase string, ac
 	t.Fatalf("proxy response never became ready: status=%d body=%q want=%q", lastStatus, lastBody, want)
 }
 
-func assertProxyRejected(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv1.ResolveEndpointResponse) {
+func assertProxyRejected(ctx context.Context, t *testing.T, proxyBase string, access *fastpathv2.ResolveEndpointResponse) {
 	t.Helper()
 	parsed, _ := url.Parse(access.ProxyEndpoint)
 	deadline := time.Now().Add(15 * time.Second)
@@ -247,7 +262,7 @@ func assertFastletProxySidecars(ctx context.Context, t *testing.T, k8sClient cli
 	}
 }
 
-func assertEverySandboxProxyReplica(ctx context.Context, t *testing.T, k8sClient client.Client, access *fastpathv1.ResolveEndpointResponse, want string) {
+func assertEverySandboxProxyReplica(ctx context.Context, t *testing.T, k8sClient client.Client, access *fastpathv2.ResolveEndpointResponse, want string) {
 	t.Helper()
 	var pods corev1.PodList
 	if err := k8sClient.List(ctx, &pods, client.InNamespace(testSuite.ControllerNamespace()), client.MatchingLabels{"app": "fast-sandbox-proxy"}); err != nil {
@@ -268,7 +283,7 @@ func assertEverySandboxProxyReplica(ctx context.Context, t *testing.T, k8sClient
 	}
 }
 
-func assertSandboxProxyServiceSurvivesReplicaLoss(ctx context.Context, t *testing.T, k8sClient client.Client, access *fastpathv1.ResolveEndpointResponse, want string) {
+func assertSandboxProxyServiceSurvivesReplicaLoss(ctx context.Context, t *testing.T, k8sClient client.Client, access *fastpathv2.ResolveEndpointResponse, want string) {
 	t.Helper()
 	var pods corev1.PodList
 	if err := k8sClient.List(ctx, &pods, client.InNamespace(testSuite.ControllerNamespace()), client.MatchingLabels{"app": "fast-sandbox-proxy"}); err != nil {

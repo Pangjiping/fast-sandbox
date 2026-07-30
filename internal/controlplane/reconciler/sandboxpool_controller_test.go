@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +23,54 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestRegistryConfigCompilesSameNamespaceSecretsAndPreservesLastValidRevision(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "tenant-a", UID: types.UID("pool-a-uid")},
+	}
+	source := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: registryconfig.ConfigMapName, Namespace: "tenant-a"},
+		Data: map[string]string{registryconfig.ConfigMapKey: `
+registries:
+  - host: registry.example.com
+    repositoryPrefix: team-a
+    secretRef:
+      name: registry-team-a
+`},
+	}
+	credential := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "registry-team-a", Namespace: "tenant-a"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{corev1.DockerConfigJsonKey: []byte(
+			`{"auths":{"registry.example.com":{"username":"alice","password":"secret"}}}`,
+		)},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, source, credential).Build()
+	reconciler := &SandboxPoolReconciler{Client: k8sClient, Scheme: scheme}
+
+	compiled, err := reconciler.ensureRegistrySecret(context.Background(), pool)
+	require.NoError(t, err)
+	selected, found := compiled.Match("registry.example.com/team-a/runner:v1")
+	require.True(t, found)
+	require.Equal(t, "alice", selected.Username)
+	var projected corev1.Secret
+	require.NoError(t, k8sClient.Get(context.Background(), client.ObjectKey{
+		Namespace: "tenant-a", Name: registrySecretName("pool-a"),
+	}, &projected))
+	previous := append([]byte(nil), projected.Data[registryconfig.SecretKey]...)
+
+	source.Data[registryconfig.ConfigMapKey] = "registries:\n  - unexpected: value\n"
+	require.NoError(t, k8sClient.Update(context.Background(), source))
+	_, err = reconciler.ensureRegistrySecret(context.Background(), pool)
+	require.ErrorContains(t, err, "unexpected")
+	require.NoError(t, k8sClient.Get(context.Background(), client.ObjectKey{
+		Namespace: "tenant-a", Name: registrySecretName("pool-a"),
+	}, &projected))
+	require.Equal(t, previous, projected.Data[registryconfig.SecretKey], "an invalid update must retain the last compiled Secret")
+}
 
 type recordingDrainer struct {
 	mu       sync.Mutex
@@ -37,12 +86,12 @@ func (d *recordingDrainer) SetDraining(_ context.Context, _ string, request *fas
 
 func TestResolveRuntimeProfileUsesCanonicalRuntime(t *testing.T) {
 	reconciler := &SandboxPoolReconciler{Catalog: runtimecatalog.Builtin()}
-	canonical, err := reconciler.resolveRuntimeProfile(&apiv1alpha1.SandboxPool{
-		Spec: apiv1alpha1.SandboxPoolSpec{Runtime: apiv1alpha1.RuntimeKataFc},
+	canonical, err := reconciler.resolveRuntimeProfile(&apiv1alpha2.SandboxPool{
+		Spec: apiv1alpha2.SandboxPoolSpec{Runtime: apiv1alpha2.RuntimeKataFc},
 	})
 	require.NoError(t, err)
-	require.Equal(t, apiv1alpha1.RuntimeKataFc, canonical.Name)
-	_, err = reconciler.resolveRuntimeProfile(&apiv1alpha1.SandboxPool{})
+	require.Equal(t, apiv1alpha2.RuntimeKataFc, canonical.Name)
+	_, err = reconciler.resolveRuntimeProfile(&apiv1alpha2.SandboxPool{})
 	require.Error(t, err)
 }
 
@@ -57,6 +106,8 @@ func seedControllerRegistry(t *testing.T, registry *placement.InMemoryRegistry, 
 		FastletStatus: fastletapi.FastletStatus{
 			FastletPodUID: info.PodUID, RuntimeReady: info.RuntimeReady, InfraReady: info.InfraReady,
 			Capacity: info.Capacity, Admission: info.Admission, SandboxStatuses: statuses,
+			InfraRevision: info.InfraRevision, RegistryRevision: info.RegistryRevision,
+			PreparedArtifacts: info.PreparedArtifacts, WarmImages: info.WarmImages,
 		},
 		Sequence: 1, Cache: fastletapi.CacheSnapshot{Epoch: "test", Revision: 1, Full: true, Complete: true},
 	}, info.LastHeartbeat))
@@ -78,7 +129,7 @@ func TestRuntimeCapabilityConditionAggregatesExactChildHeartbeat(t *testing.T) {
 		PodName: "fastlet-ready", PodUID: "old-uid", PodReady: true, RuntimeReady: true, LastHeartbeat: now,
 	})
 	reconciler := &SandboxPoolReconciler{Registry: registry}
-	pool := &apiv1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", Generation: 7}}
+	pool := &apiv1alpha2.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", Generation: 7}}
 	pods := []corev1.Pod{
 		{ObjectMeta: metav1.ObjectMeta{Name: "fastlet-ready", Namespace: "default", UID: types.UID("uid-ready")}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "fastlet-unready", Namespace: "default", UID: types.UID("uid-unready")}},
@@ -87,14 +138,14 @@ func TestRuntimeCapabilityConditionAggregatesExactChildHeartbeat(t *testing.T) {
 	condition, ready := reconciler.runtimeCapabilityCondition(pool, pods)
 	require.Equal(t, int32(1), ready)
 	require.Equal(t, metav1.ConditionTrue, condition.Status)
-	require.Equal(t, apiv1alpha1.ReasonRuntimeAvailable, condition.Reason)
+	require.Equal(t, apiv1alpha2.ReasonRuntimeAvailable, condition.Reason)
 	require.Equal(t, int64(7), condition.ObservedGeneration)
 
 	registry.RemoveIfPodUID("default/fastlet-ready", "uid-ready")
 	condition, ready = reconciler.runtimeCapabilityCondition(pool, pods)
 	require.Zero(t, ready)
 	require.Equal(t, metav1.ConditionFalse, condition.Status)
-	require.Equal(t, apiv1alpha1.ReasonRuntimeUnavailable, condition.Reason)
+	require.Equal(t, apiv1alpha2.ReasonRuntimeUnavailable, condition.Reason)
 }
 
 func TestRuntimeCapabilityConditionWaitsForHeartbeat(t *testing.T) {
@@ -104,32 +155,32 @@ func TestRuntimeCapabilityConditionWaitsForHeartbeat(t *testing.T) {
 		PodName: "fastlet-a", PodUID: "uid-a", PodReady: true,
 	})
 	reconciler := &SandboxPoolReconciler{Registry: registry}
-	pool := &apiv1alpha1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"}}
+	pool := &apiv1alpha2.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"}}
 	pods := []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "fastlet-a", Namespace: "default", UID: types.UID("uid-a")}}}
 
 	condition, ready := reconciler.runtimeCapabilityCondition(pool, pods)
 	require.Zero(t, ready)
 	require.Equal(t, metav1.ConditionFalse, condition.Status)
-	require.Equal(t, apiv1alpha1.ReasonRuntimeCapabilityPending, condition.Reason)
+	require.Equal(t, apiv1alpha2.ReasonRuntimeCapabilityPending, condition.Reason)
 }
 
 func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	reconciler := &SandboxPoolReconciler{
 		Scheme: scheme, Catalog: runtimecatalog.Builtin(),
 		FastletProxyImage: "fastlet-proxy:test", RouteVerifyPublicKey: "test-public-key",
 	}
 	runtimeClass := "must-not-leak"
-	pool := &apiv1alpha1.SandboxPool{
-		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha1.GroupVersion.String(), Kind: "SandboxPool"},
+	pool := &apiv1alpha2.SandboxPool{
+		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "SandboxPool"},
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: types.UID("pool-uid")},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime:            apiv1alpha1.RuntimeContainer,
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime:            apiv1alpha2.RuntimeContainer,
 			MaxSandboxesPerPod: 5,
-			InfraProfile:       "test-infra",
+			InfraComponents:    []apiv1alpha2.InfraComponent{testInlineComponent()},
 			WarmImages:         []string{"alpine:latest", "ubuntu:24.04"},
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 256,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -159,12 +210,11 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	require.Equal(t, "5", envValue(pod.Spec.Containers[0].Env, "FASTLET_CAPACITY"))
 	require.Equal(t, "1", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_RESOURCE_CPU"))
 	require.Equal(t, "1Gi", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_RESOURCE_MEMORY"))
-	require.Equal(t, "test-infra", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_PROFILE"))
-	require.NotEmpty(t, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_PROFILE_HASH"))
-	require.Empty(t, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_STATIC_ROOTS"))
-	require.Equal(t, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_PROFILE_HASH"), pod.Annotations["fast-sandbox.io/infra-profile-hash"])
+	require.NotEmpty(t, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_REVISION"))
+	require.Equal(t, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_REVISION"), pod.Annotations["fast-sandbox.io/infra-revision"])
+	require.Equal(t, "/etc/fast-sandbox/infra/plan.json", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_PLAN_PATH"))
 	require.NotEmpty(t, pod.Annotations[placement.AnnotationPodTemplateHash])
-	require.Equal(t, "test-infra", pod.Labels["fast-sandbox.io/infra-profile"])
+	require.Equal(t, shortRevision(pod.Annotations["fast-sandbox.io/infra-revision"]), pod.Labels["fast-sandbox.io/infra-revision"])
 	require.Equal(t, ":5758", envValue(pod.Spec.Containers[0].Env, "FASTLET_CONTROL_PORT"))
 	require.JSONEq(t, `["alpine:latest","ubuntu:24.04"]`, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_WARM_IMAGES"))
 	require.NotNil(t, pod.Spec.Containers[0].ReadinessProbe)
@@ -180,12 +230,6 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	require.Equal(t, "/run/fast-sandbox/proxy/control.sock", envValue(pod.Spec.Containers[0].Env, "FASTLET_PROXY_CONTROL_SOCKET"))
 	require.NotNil(t, volumeMountForContainer(pod, 0, "proxy-control"))
 	require.NotNil(t, volumeMountForContainer(pod, 1, "proxy-control"))
-
-	execdPool := pool.DeepCopy()
-	execdPool.Spec.InfraProfile = "opensandbox-execd-quickstart"
-	execdPod, err := reconciler.constructPod(execdPool, profile)
-	require.NoError(t, err)
-	require.Equal(t, "/opt/fast-sandbox/components", envValue(execdPod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_STATIC_ROOTS"))
 
 	cpu := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 	memory := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]
@@ -207,8 +251,29 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	require.NotEqual(t, pod.Annotations[placement.AnnotationPodTemplateHash], changedPod.Annotations[placement.AnnotationPodTemplateHash])
 }
 
+func testInlineComponent() apiv1alpha2.InfraComponent {
+	return apiv1alpha2.InfraComponent{
+		Name: "execd",
+		Artifact: apiv1alpha2.InfraArtifact{
+			Source: apiv1alpha2.InfraArtifactSource{Image: &apiv1alpha2.InfraArtifactImage{
+				Reference: "registry.example/execd@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+			}},
+			Mappings: []apiv1alpha2.InfraArtifactMapping{{
+				SourcePath: "/execd", TargetPath: "/.fast/components/execd/execd",
+			}},
+		},
+		Process: apiv1alpha2.InfraProcess{
+			Command: []string{"/.fast/components/execd/execd", "--port", "44772"},
+			HealthCheck: apiv1alpha2.InfraHealthCheck{
+				HTTPGet: &apiv1alpha2.InfraHTTPGet{Path: "/ping"},
+			},
+		},
+		Endpoint: apiv1alpha2.InfraEndpoint{Protocol: "HTTP", Port: 44772},
+	}
+}
+
 func TestScaleDownDrainsEmptyFastletBeforeDeletion(t *testing.T) {
-	reconciler, k8sClient, drainer, pool := newDrainHarness(t, []apiv1alpha1.Sandbox{
+	reconciler, k8sClient, drainer, pool := newDrainHarness(t, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
 	})
 
@@ -234,7 +299,7 @@ func TestScaleDownDrainsEmptyFastletBeforeDeletion(t *testing.T) {
 
 func TestLoadedFastletWaitsUntilDrainTimeout(t *testing.T) {
 	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
-	reconciler, k8sClient, _, pool := newDrainHarness(t, []apiv1alpha1.Sandbox{
+	reconciler, k8sClient, _, pool := newDrainHarness(t, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
 		assignedSandbox("sandbox-b", "fastlet-b", "pod-b"),
 	})
@@ -258,7 +323,7 @@ func TestLoadedFastletWaitsUntilDrainTimeout(t *testing.T) {
 }
 
 func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
-	reconciler, k8sClient, _, pool := newDrainHarness(t, []apiv1alpha1.Sandbox{
+	reconciler, k8sClient, _, pool := newDrainHarness(t, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
 	})
 	const desiredHash = "desired-template"
@@ -275,7 +340,7 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 
 	oldPod = getFastletPod(t, k8sClient, "fastlet-a")
 	newPod = getFastletPod(t, k8sClient, "fastlet-b")
-	result, handled, err := reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha1.Sandbox{
+	result, handled, err := reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
 	}, 1, desiredHash)
 	require.NoError(t, err)
@@ -289,7 +354,7 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 		PodReady: true, RuntimeReady: true, InfraReady: true, LastHeartbeat: time.Now(), Capacity: 1,
 		Admission: fastletapi.AdmissionStatus{Capacity: 1},
 	})
-	_, handled, err = reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha1.Sandbox{
+	_, handled, err = reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
 	}, 1, desiredHash)
 	require.NoError(t, err)
@@ -304,31 +369,31 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 }
 
 func TestSandboxNeedsPlacementExcludesTerminalAndAssignedStates(t *testing.T) {
-	require.True(t, sandboxNeedsPlacement(&apiv1alpha1.Sandbox{}))
-	expired := &apiv1alpha1.Sandbox{Status: apiv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{
+	require.True(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{}))
+	expired := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
 		Type: orchestration.ConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonExpired,
 	}}}}
 	require.False(t, sandboxNeedsPlacement(expired))
-	lost := &apiv1alpha1.Sandbox{Status: apiv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{
+	lost := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
 		Type: orchestration.ConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonFastletPodLost,
 	}}}}
 	require.False(t, sandboxNeedsPlacement(lost))
-	require.False(t, sandboxNeedsPlacement(&apiv1alpha1.Sandbox{Status: apiv1alpha1.SandboxStatus{RuntimeState: apiv1alpha1.ObservedStateDraining}}))
-	assignment := apiv1alpha1.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
-	require.False(t, sandboxNeedsPlacement(&apiv1alpha1.Sandbox{Status: apiv1alpha1.SandboxStatus{Assignment: &assignment}}))
+	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{RuntimeState: apiv1alpha2.ObservedStateDraining}}))
+	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Assignment: &assignment}}))
 }
 
-func newDrainHarness(t *testing.T, sandboxes []apiv1alpha1.Sandbox) (*SandboxPoolReconciler, client.Client, *recordingDrainer, *apiv1alpha1.SandboxPool) {
+func newDrainHarness(t *testing.T, sandboxes []apiv1alpha2.Sandbox) (*SandboxPoolReconciler, client.Client, *recordingDrainer, *apiv1alpha2.SandboxPool) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
-	pool := &apiv1alpha1.SandboxPool{
-		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha1.GroupVersion.String(), Kind: "SandboxPool"},
+	pool := &apiv1alpha2.SandboxPool{
+		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "SandboxPool"},
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: types.UID("pool-a-uid")},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime: apiv1alpha1.RuntimeContainer, MaxSandboxesPerPod: 5,
-			Capacity:         apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 10},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeContainer, MaxSandboxesPerPod: 5,
+			Capacity:         apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 10},
 			SandboxResources: testSandboxResources(),
 			FastletTemplate:  corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}}}},
 		},
@@ -338,7 +403,7 @@ func newDrainHarness(t *testing.T, sandboxes []apiv1alpha1.Sandbox) (*SandboxPoo
 		objects = append(objects, &sandboxes[index])
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&apiv1alpha1.SandboxPool{}, &apiv1alpha1.Sandbox{}).
+		WithStatusSubresource(&apiv1alpha2.SandboxPool{}, &apiv1alpha2.Sandbox{}).
 		WithObjects(objects...).Build()
 	drainer := &recordingDrainer{}
 	reconciler := &SandboxPoolReconciler{
@@ -357,12 +422,12 @@ func fastletPod(name, uid, ip string) *corev1.Pod {
 	}
 }
 
-func assignedSandbox(name, fastletName, podUID string) apiv1alpha1.Sandbox {
-	assignment := apiv1alpha1.SandboxAssignment{FastletName: fastletName, FastletPodUID: podUID, Attempt: 1}
-	return apiv1alpha1.Sandbox{
+func assignedSandbox(name, fastletName, podUID string) apiv1alpha2.Sandbox {
+	assignment := apiv1alpha2.SandboxAssignment{FastletName: fastletName, FastletPodUID: podUID, Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	return apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")},
-		Spec:       apiv1alpha1.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
-		Status:     apiv1alpha1.SandboxStatus{Assignment: &assignment, AssignmentAttempt: 1, InstanceGeneration: 1},
+		Spec:       apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
+		Status:     apiv1alpha2.SandboxStatus{Assignment: &assignment, AssignmentAttempt: 1, InstanceGeneration: 1},
 	}
 }
 
@@ -373,18 +438,18 @@ func getFastletPod(t *testing.T, k8sClient client.Client, name string) *corev1.P
 	return &pod
 }
 
-func poolRequest(pool *apiv1alpha1.SandboxPool) ctrl.Request {
+func poolRequest(pool *apiv1alpha2.SandboxPool) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}}
 }
 
 func TestConstructPodAddsKVMWithoutRuntimeClass(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
-	pool := &apiv1alpha1.SandboxPool{
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "kata-pool", Namespace: "default", UID: types.UID("pool-uid")},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime: apiv1alpha1.RuntimeKataClh, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeKataClh, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}},
 			}},
@@ -401,16 +466,16 @@ func TestConstructPodAddsKVMWithoutRuntimeClass(t *testing.T) {
 
 func TestConstructPodInjectsBoxLiteRuntimeSidecarAsResourceOwner(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	reconciler := &SandboxPoolReconciler{
 		Scheme: scheme, Catalog: runtimecatalog.Builtin(),
 		FastletProxyImage: "fastlet-proxy:test", BoxLiteRuntimeImage: "boxlite-runtime:test",
 	}
-	pool := &apiv1alpha1.SandboxPool{
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "boxlite-pool", Namespace: "default", UID: types.UID("pool-uid")},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime: apiv1alpha1.RuntimeBoxLite, MaxSandboxesPerPod: 3,
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeBoxLite, MaxSandboxesPerPod: 3,
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 128,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -444,6 +509,8 @@ func TestConstructPodInjectsBoxLiteRuntimeSidecarAsResourceOwner(t *testing.T) {
 	require.NotNil(t, volumeMountForNamedContainer(t, pod, "fastlet", "boxlite-control"))
 	require.NotNil(t, volumeMountForNamedContainer(t, pod, "boxlite-runtime", "boxlite-control"))
 	require.True(t, volumeMountForNamedContainer(t, pod, "boxlite-runtime", "infra-tools").ReadOnly)
+	require.True(t, volumeMountForNamedContainer(t, pod, "boxlite-runtime", "registry-config").ReadOnly)
+	require.Equal(t, registryconfig.MountPath, envValue(boxLite.Env, "FAST_SANDBOX_REGISTRY_CONFIG_PATH"))
 	require.NotNil(t, volumeMountForNamedContainer(t, pod, "boxlite-runtime", "dev-kvm"))
 	require.NotNil(t, volumeMountForNamedContainer(t, pod, "boxlite-runtime", "boxlite-state"))
 	require.Nil(t, volumeMountForNamedContainer(t, pod, "fastlet", "dev-kvm"))
@@ -451,12 +518,12 @@ func TestConstructPodInjectsBoxLiteRuntimeSidecarAsResourceOwner(t *testing.T) {
 
 func TestConstructPodRejectsPlatformBoxLiteSidecarOverride(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
-	pool := &apiv1alpha1.SandboxPool{
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: types.UID("pool-uid")},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime: apiv1alpha1.RuntimeContainer, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeContainer, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
 				{Name: "fastlet", Image: "fastlet:test"},
 				{Name: "boxlite-runtime", Image: "user-controlled:test"},
@@ -471,12 +538,12 @@ func TestConstructPodRejectsPlatformBoxLiteSidecarOverride(t *testing.T) {
 
 func TestConstructPodRejectsReservedControlMountFromUserSidecarOrInitContainer(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
-	base := &apiv1alpha1.SandboxPool{
+	base := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: types.UID("pool-uid")},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime: apiv1alpha1.RuntimeContainer, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeContainer, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
 				{Name: "fastlet", Image: "fastlet:test"},
 				{Name: "user-sidecar", Image: "user:test", VolumeMounts: []corev1.VolumeMount{{Name: "proxy-control", MountPath: "/user"}}},
@@ -498,12 +565,12 @@ func TestConstructPodRejectsReservedControlMountFromUserSidecarOrInitContainer(t
 
 func TestConstructPodRejectsInfraArtifactStorageOverride(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
-	pool := &apiv1alpha1.SandboxPool{
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: types.UID("pool-uid")},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Runtime: apiv1alpha1.RuntimeContainer, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeContainer, MaxSandboxesPerPod: 3, SandboxResources: testSandboxResources(),
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
 					Name: "fastlet", Image: "fastlet:test",
@@ -524,8 +591,141 @@ func TestUniqueWarmImagesPreservesFirstOccurrence(t *testing.T) {
 	}))
 }
 
-func testSandboxResources() apiv1alpha1.SandboxResourceProfile {
-	return apiv1alpha1.SandboxResourceProfile{
+func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
+	registry := placement.NewInMemoryRegistry()
+	compiled, err := registryconfig.NewCompiled([]registryconfig.Credential{{
+		Host: "registry.example.com", Username: "reader", Password: "secret",
+	}})
+	require.NoError(t, err)
+	now := time.Now()
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "tenant-a", Generation: 9},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			WarmImages: []string{"alpine:latest", "ubuntu:24.04"},
+		},
+	}
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "fastlet-a", Namespace: "tenant-a", UID: types.UID("uid-a")}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "fastlet-b", Namespace: "tenant-a", UID: types.UID("uid-b")}},
+	}
+	seedControllerRegistry(t, registry, placement.FastletInfo{
+		ID: "tenant-a/fastlet-a", Namespace: "tenant-a", PoolName: "pool-a",
+		PodName: "fastlet-a", PodUID: "uid-a", PodReady: true, RuntimeReady: true, InfraReady: true,
+		Capacity: 4, Admission: fastletapi.AdmissionStatus{Capacity: 4},
+		RegistryRevision: compiled.Revision, LastHeartbeat: now,
+		WarmImages: []fastletapi.WarmImageState{
+			{Image: "alpine:latest", State: "Cached"},
+			{Image: "ubuntu:24.04", State: "Pulling"},
+		},
+	})
+	seedControllerRegistry(t, registry, placement.FastletInfo{
+		ID: "tenant-a/fastlet-b", Namespace: "tenant-a", PoolName: "pool-a",
+		PodName: "fastlet-b", PodUID: "uid-b", PodReady: true, RuntimeReady: true, InfraReady: true,
+		Capacity: 4, Admission: fastletapi.AdmissionStatus{Capacity: 4, Used: 1, Running: 1},
+		RegistryRevision: "stale-revision", LastHeartbeat: now,
+		WarmImages: []fastletapi.WarmImageState{{
+			Image: "alpine:latest", State: "Failed", Message: "pull denied",
+		}},
+	})
+	seedControllerRegistry(t, registry, placement.FastletInfo{
+		ID: "tenant-a/stale-fastlet-a", Namespace: "tenant-a", PoolName: "pool-a",
+		PodName: "fastlet-a", PodUID: "old-uid", PodReady: true, RuntimeReady: true, InfraReady: true,
+		RegistryRevision: compiled.Revision, LastHeartbeat: now,
+		WarmImages: []fastletapi.WarmImageState{{Image: "alpine:latest", State: "Cached"}},
+	})
+
+	reconciler := &SandboxPoolReconciler{Registry: registry}
+	warm := reconciler.aggregateWarmImageStatus(pool, pods)
+	require.Equal(t, []apiv1alpha2.WarmImageStatus{
+		{
+			Image: "alpine:latest", DesiredFastlets: 2, CachedFastlets: 1, FailedFastlets: 1,
+			ObservedGeneration: 9, LastError: "pull denied",
+		},
+		{
+			Image: "ubuntu:24.04", DesiredFastlets: 2, PullingFastlets: 1,
+			ObservedGeneration: 9,
+		},
+	}, warm)
+	registryStatus := reconciler.aggregateRegistryStatus(pool, compiled, pods)
+	require.Equal(t, int32(2), registryStatus.TotalFastlets)
+	require.Equal(t, int32(1), registryStatus.AppliedFastlets)
+	require.Equal(t, registryGeneration(compiled.Revision), registryStatus.TargetGeneration)
+	idle, busy := reconciler.fastletUtilizationCounts(pool, pods)
+	require.Equal(t, int32(1), idle)
+	require.Equal(t, int32(1), busy)
+}
+
+func TestRegistryCredentialRotationDoesNotChangeFastletTemplate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	pool := &apiv1alpha2.SandboxPool{
+		TypeMeta: metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "SandboxPool"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pool-a", Namespace: "tenant-a", UID: types.UID("pool-a-uid"),
+		},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeContainer, MaxSandboxesPerPod: 2,
+			SandboxResources: testSandboxResources(),
+			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "fastlet", Image: "fastlet:test",
+			}}}},
+		},
+	}
+	source := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: registryconfig.ConfigMapName, Namespace: "tenant-a"},
+		Data: map[string]string{registryconfig.ConfigMapKey: `
+registries:
+  - host: registry.example.com
+    secretRef:
+      name: registry-reader
+`},
+	}
+	credential := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "registry-reader", Namespace: "tenant-a"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{corev1.DockerConfigJsonKey: []byte(
+			`{"auths":{"registry.example.com":{"username":"reader","password":"first"}}}`,
+		)},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, source, credential).Build()
+	reconciler := &SandboxPoolReconciler{
+		Client: k8sClient, Scheme: scheme, Catalog: runtimecatalog.Builtin(),
+		FastletProxyImage: "fastlet-proxy:test",
+	}
+	first, err := reconciler.ensureRegistrySecret(context.Background(), pool)
+	require.NoError(t, err)
+	profile, err := reconciler.resolveRuntimeProfile(pool)
+	require.NoError(t, err)
+	firstPod, err := reconciler.constructPod(pool, profile)
+	require.NoError(t, err)
+
+	credential.Data[corev1.DockerConfigJsonKey] = []byte(
+		`{"auths":{"registry.example.com":{"username":"reader","password":"rotated"}}}`,
+	)
+	require.NoError(t, k8sClient.Update(context.Background(), credential))
+	second, err := reconciler.ensureRegistrySecret(context.Background(), pool)
+	require.NoError(t, err)
+	secondPod, err := reconciler.constructPod(pool, profile)
+	require.NoError(t, err)
+
+	require.NotEqual(t, first.Revision, second.Revision)
+	require.Equal(t,
+		firstPod.Annotations[placement.AnnotationPodTemplateHash],
+		secondPod.Annotations[placement.AnnotationPodTemplateHash],
+		"projected registry Secret rotation must not roll Fastlet Pods",
+	)
+	var projected corev1.Secret
+	require.NoError(t, k8sClient.Get(context.Background(), client.ObjectKey{
+		Namespace: "tenant-a", Name: registrySecretName(pool.Name),
+	}, &projected))
+	compiled, err := registryconfig.ParseCompiled(projected.Data[registryconfig.SecretKey])
+	require.NoError(t, err)
+	require.Equal(t, second.Revision, compiled.Revision)
+}
+
+func testSandboxResources() apiv1alpha2.SandboxResourceProfile {
+	return apiv1alpha2.SandboxResourceProfile{
 		CPU: resource.MustParse("1"), Memory: resource.MustParse("512Mi"), PIDs: 256,
 	}
 }

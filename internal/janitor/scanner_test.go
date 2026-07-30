@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -26,18 +26,18 @@ func TestCleanupDecisionRequiresPodAndAssignmentFences(t *testing.T) {
 		SandboxUID: "sandbox-a-uid", SandboxName: "sandbox-a", SandboxNamespace: "default",
 		InstanceGeneration: 1, AssignmentAttempt: 1,
 	}
-	assignment := apiv1alpha1.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
-	running := &apiv1alpha1.Sandbox{
+	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+	running := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", UID: types.UID("sandbox-a-uid")},
-		Status: apiv1alpha1.SandboxStatus{
+		Status: apiv1alpha2.SandboxStatus{
 			Assignment: &assignment, InstanceGeneration: 1, AssignmentAttempt: 1,
-			RuntimeState: apiv1alpha1.ObservedStateReady,
+			RuntimeState: apiv1alpha2.ObservedStateReady,
 		},
 	}
 	exactPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "fastlet-a", Namespace: "default", UID: types.UID("pod-a")}}
 
 	t.Run("exact Pod still exists", func(t *testing.T) {
-		janitor := newAuthorityJanitor(t, now, []*corev1.Pod{exactPod}, []*apiv1alpha1.Sandbox{running})
+		janitor := newAuthorityJanitor(t, now, []*corev1.Pod{exactPod}, []*apiv1alpha2.Sandbox{running})
 		decision, err := janitor.cleanupDecision(context.Background(), resource)
 		require.NoError(t, err)
 		require.False(t, decision.Eligible)
@@ -45,7 +45,7 @@ func TestCleanupDecisionRequiresPodAndAssignmentFences(t *testing.T) {
 	})
 
 	t.Run("control plane has not observed loss", func(t *testing.T) {
-		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha1.Sandbox{running})
+		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha2.Sandbox{running})
 		decision, err := janitor.cleanupDecision(context.Background(), resource)
 		require.NoError(t, err)
 		require.False(t, decision.Eligible)
@@ -54,11 +54,11 @@ func TestCleanupDecisionRequiresPodAndAssignmentFences(t *testing.T) {
 
 	t.Run("Manual policy Sandbox is durably Lost", func(t *testing.T) {
 		lost := running.DeepCopy()
-		lost.Status.RuntimeState = apiv1alpha1.ObservedStateUnavailable
+		lost.Status.RuntimeState = apiv1alpha2.ObservedStateUnavailable
 		lost.Status.Conditions = []metav1.Condition{{
-			Type: apiv1alpha1.SandboxConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: "FastletPodLost",
+			Type: apiv1alpha2.SandboxConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: "FastletPodLost",
 		}}
-		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha1.Sandbox{lost})
+		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha2.Sandbox{lost})
 		decision, err := janitor.cleanupDecision(context.Background(), resource)
 		require.NoError(t, err)
 		require.True(t, decision.Eligible)
@@ -70,7 +70,7 @@ func TestCleanupDecisionRequiresPodAndAssignmentFences(t *testing.T) {
 		advanced.Status.Assignment.Attempt = 2
 		advanced.Status.AssignmentAttempt = 2
 		advanced.Status.InstanceGeneration = 2
-		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha1.Sandbox{advanced})
+		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha2.Sandbox{advanced})
 		decision, err := janitor.cleanupDecision(context.Background(), resource)
 		require.NoError(t, err)
 		require.True(t, decision.Eligible)
@@ -129,14 +129,14 @@ func TestCleanupDecisionFailsClosedOnPodAPIError(t *testing.T) {
 	require.False(t, decision.Eligible)
 }
 
-func newAuthorityJanitor(t *testing.T, now time.Time, pods []*corev1.Pod, sandboxes []*apiv1alpha1.Sandbox) *Janitor {
+func newAuthorityJanitor(t *testing.T, now time.Time, pods []*corev1.Pod, sandboxes []*apiv1alpha2.Sandbox) *Janitor {
 	t.Helper()
 	podObjects := make([]runtime.Object, 0, len(pods))
 	for _, pod := range pods {
 		podObjects = append(podObjects, pod)
 	}
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	objects := make([]runtime.Object, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		objects = append(objects, sandbox)

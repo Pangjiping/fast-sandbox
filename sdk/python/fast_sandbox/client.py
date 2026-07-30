@@ -14,7 +14,7 @@ class Client:
     def __init__(
         self,
         endpoint: str = "localhost:9090",
-        namespace: str = "default",
+        namespace: str = "fast-sandbox",
         *,
         proxy_endpoint: str = "",
         channel: Optional[grpc.Channel] = None,
@@ -42,6 +42,10 @@ class Client:
         working_dir: str = "",
         namespace: Optional[str] = None,
         request_id: Optional[str] = None,
+        expires_at_unix_seconds: int = 0,
+        metadata: Optional[Mapping[str, str]] = None,
+        failure_policy: str = "Manual",
+        recovery_timeout_seconds: int = 60,
     ) -> Sandbox:
         selected_namespace = namespace or self.namespace
         selected_request_id = request_id or name
@@ -49,11 +53,16 @@ class Client:
             raise ValueError("request_id must equal the sandbox name")
         response = self._stub.CreateSandbox(
             fastpath_pb2.CreateRequest(
-                name=name, image=image, pool_ref=pool,
+                request_id=selected_request_id,
+                namespace=selected_namespace,
+                image=image,
+                pool_ref=pool,
                 command=list(command or []), args=list(args or []),
                 envs=dict(envs or {}), working_dir=working_dir,
-                namespace=selected_namespace,
-                request_id=selected_request_id,
+                expires_at_unix_seconds=expires_at_unix_seconds,
+                metadata=dict(metadata or {}),
+                failure_policy=_failure_policy(failure_policy),
+                recovery_timeout_seconds=recovery_timeout_seconds,
             ),
             metadata=grpc_metadata(),
         )
@@ -87,11 +96,27 @@ class Client:
         target_port: int,
         namespace: Optional[str] = None,
     ) -> ResolvedRoute:
-        """Return a transparent route for an upstream Infra Component SDK.
+        """Return a transparent raw user-port route.
 
-        Fast Sandbox does not interpret the protocol spoken on target_port.
+        Ports reserved by Pool Infra Components must be resolved by name.
         """
-        return self._resolver.resolve(name, target_port, namespace or self.namespace)
+        return self._resolver.resolve_port(name, target_port, namespace or self.namespace)
+
+    def resolve_component(
+        self,
+        name: str,
+        component_name: str,
+        namespace: Optional[str] = None,
+        *,
+        wait_timeout_seconds: float = 30,
+    ) -> ResolvedRoute:
+        """Wait for and resolve one named Pool Infra Component."""
+        return self._resolver.resolve_component(
+            name,
+            component_name,
+            namespace or self.namespace,
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
 
     def close(self) -> None:
         if self._owns_channel and self._channel is not None:
@@ -102,3 +127,12 @@ class Client:
 
     def __exit__(self, *_args) -> None:
         self.close()
+
+
+def _failure_policy(value: str) -> int:
+    normalized = value.replace("-", "").replace("_", "").lower()
+    if normalized == "manual":
+        return fastpath_pb2.MANUAL
+    if normalized in {"auto", "autorecreate"}:
+        return fastpath_pb2.AUTO_RECREATE
+    raise ValueError("failure_policy must be Manual or AutoRecreate")

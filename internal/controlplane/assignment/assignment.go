@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -19,10 +19,10 @@ func ProjectAssignmentToStatus(
 	ctx context.Context,
 	k8sClient client.Client,
 	key types.NamespacedName,
-) (*apiv1alpha1.Sandbox, error) {
-	var result *apiv1alpha1.Sandbox
+) (*apiv1alpha2.Sandbox, error) {
+	var result *apiv1alpha2.Sandbox
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		var current apiv1alpha1.Sandbox
+		var current apiv1alpha2.Sandbox
 		if err := k8sClient.Get(ctx, key, &current); err != nil {
 			return err
 		}
@@ -53,7 +53,7 @@ func ProjectAssignmentToStatus(
 		if err != nil {
 			return err
 		}
-		patchTarget := &apiv1alpha1.Sandbox{}
+		patchTarget := &apiv1alpha2.Sandbox{}
 		patchTarget.Namespace, patchTarget.Name = key.Namespace, key.Name
 		if err := k8sClient.Status().Patch(ctx, patchTarget, client.RawPatch(types.MergePatchType, patchBody)); err != nil {
 			return err
@@ -70,9 +70,10 @@ func ProjectAssignmentToStatus(
 	return result, err
 }
 
-func assignmentsEqual(a, b apiv1alpha1.SandboxAssignment) bool {
+func assignmentsEqual(a, b apiv1alpha2.SandboxAssignment) bool {
 	return a.FastletName == b.FastletName &&
 		a.FastletPodUID == b.FastletPodUID &&
 		a.NodeName == b.NodeName &&
-		a.Attempt == b.Attempt
+		a.Attempt == b.Attempt &&
+		a.InfraRevision == b.InfraRevision
 }

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 
@@ -336,7 +336,7 @@ func TestNewSandboxManager_InvalidCapacity(t *testing.T) {
 }
 
 func TestSandboxManagerRejectsProfileOverrides(t *testing.T) {
-	profile := apiv1alpha1.SandboxResourceProfile{
+	profile := apiv1alpha2.SandboxResourceProfile{
 		CPU: resource.MustParse("500m"), Memory: resource.MustParse("256Mi"), PIDs: 128,
 	}
 	manager, err := NewSandboxManagerWithConfig(NewMockRuntime(), SandboxManagerConfig{

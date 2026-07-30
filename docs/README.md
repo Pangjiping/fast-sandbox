@@ -26,7 +26,9 @@ Fast Sandbox documentation is organized by reader intent:
 ## Guides
 
 - [Deployment](guides/deployment.md)
+- [OpenSandbox integration](guides/opensandbox-integration.md)
 - [OpenSandbox Execd](guides/opensandbox-execd.md)
+- [Private registries](guides/private-registries.md)
 - [Secure runtimes](guides/secure-runtimes.md)
 - [Observability](guides/observability.md)
 - [Performance](guides/performance.md)
@@ -35,8 +37,29 @@ Fast Sandbox documentation is organized by reader intent:
 ## Reference
 
 - [API](reference/api.md)
+- [Infra Components](reference/infra-components.md)
 - [fastctl](reference/fastctl.md)
 - [Configuration](reference/configuration.md)
 - [Runtime support](reference/runtime-support.md)
 
-All documentation except the root `README_ZH.md` is maintained in U.S. English. Documents describe the current code contract; branch-specific plans, implementation logs, and superseded designs are not part of the published documentation set.
+## Documentation policy
+
+Published documentation describes the current product contract:
+
+- concepts explain why the system works this way;
+- guides explain how to deploy, operate, or integrate it;
+- reference pages define exact fields, APIs, commands, and defaults.
+
+Working design notes, implementation plans, review notes, and branch-specific
+investigations belong under the repository-local `.dev/` directory. The
+directory is ignored by Git and is never a source of truth. When a design is
+implemented, its stable behavior must be incorporated into the relevant
+concept, guide, and reference pages in the same change.
+
+Designs that require review across contributors belong in a GitHub Issue,
+Pull Request, or the owning project's formal proposal process. They must not
+depend on ignored local files.
+
+All documentation except the root `README_ZH.md` is maintained in U.S. English.
+Branch-specific plans, implementation logs, and superseded designs are not
+part of the published documentation set.

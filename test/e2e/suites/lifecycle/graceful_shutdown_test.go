@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -32,22 +32,22 @@ func TestGracefulShutdown(t *testing.T) {
 			}
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
-			pool := &apiv1alpha1.SandboxPool{
+			pool := &apiv1alpha2.SandboxPool{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "SandboxPool",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "shutdown-pool",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxPoolSpec{
-					Capacity: apiv1alpha1.PoolCapacity{
+				Spec: apiv1alpha2.SandboxPoolSpec{
+					Capacity: apiv1alpha2.PoolCapacity{
 						PoolMin: 1,
 						PoolMax: 2,
 					},
 					MaxSandboxesPerPod: 5,
-					Runtime:            apiv1alpha1.RuntimeContainer,
+					Runtime:            apiv1alpha2.RuntimeContainer,
 					SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 					FastletTemplate: corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
@@ -69,16 +69,16 @@ func TestGracefulShutdown(t *testing.T) {
 				t.Fatalf("wait for ready fastlet pods: %v", err)
 			}
 
-			sandbox := &apiv1alpha1.Sandbox{
+			sandbox := &apiv1alpha2.Sandbox{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "Sandbox",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sb-graceful",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxSpec{
+				Spec: apiv1alpha2.SandboxSpec{
 					Image:   "docker.io/library/alpine:latest",
 					Command: []string{"/bin/sh", "-c"},
 					Args: []string{`
@@ -97,8 +97,8 @@ done
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			defer cancelRunWait()
-			assignedSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+			assignedSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 			})
 			if err != nil {
 				t.Fatalf("wait for running sandbox: %v", err)
@@ -118,12 +118,12 @@ done
 			// Give controller more time to process deletion and call Fastlet
 			termCtx, cancelTermWait := context.WithTimeout(ctx, 90*time.Second) // Increased from 45s
 			defer cancelTermWait()
-			terminatingSandbox, err := fixture.WaitForSandbox(termCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha1.Sandbox) bool {
-				return sb.DeletionTimestamp != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateDraining
+			terminatingSandbox, err := fixture.WaitForSandbox(termCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
+				return sb.DeletionTimestamp != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateDraining
 			})
 			if err != nil {
 				// Log current state for debugging
-				currentSandbox := &apiv1alpha1.Sandbox{}
+				currentSandbox := &apiv1alpha2.Sandbox{}
 				if getErr := k8sClient.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, currentSandbox); getErr == nil {
 					assignedFastlet := ""
 					if currentSandbox.Status.Assignment != nil {

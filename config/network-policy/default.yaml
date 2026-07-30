@@ -2,7 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: fast-sandbox-fastpath-ingress
-  namespace: default
+  namespace: fast-sandbox-system
 spec:
   podSelector:
     matchLabels:
@@ -27,7 +27,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: fast-sandbox-proxy-ingress
-  namespace: default
+  namespace: fast-sandbox-system
 spec:
   podSelector:
     matchLabels:
@@ -51,7 +51,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: fast-sandbox-controller-ingress
-  namespace: default
+  namespace: fast-sandbox-system
 spec:
   podSelector:
     matchLabels:
@@ -70,7 +70,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: sandbox-fastlet-ingress
-  namespace: default
+  namespace: fast-sandbox
 spec:
   podSelector:
     matchLabels:
@@ -78,7 +78,10 @@ spec:
   policyTypes: [Ingress]
   ingress:
   - from:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          sandbox.fast.io/scope: system
+      podSelector:
         matchExpressions:
         - key: fast-sandbox.io/control-plane-role
           operator: In
@@ -86,13 +89,19 @@ spec:
     ports:
     - {protocol: TCP, port: 5758}
   - from:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          sandbox.fast.io/scope: system
+      podSelector:
         matchLabels:
           app: fast-sandbox-proxy
     ports:
     - {protocol: TCP, port: 5780}
   - from:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          sandbox.fast.io/scope: system
+      podSelector:
         matchLabels:
           fast-sandbox.io/metrics-client: "true"
     ports:

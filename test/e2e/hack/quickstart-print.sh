@@ -19,7 +19,7 @@ echo
 case "${config_state}" in
   created)
     echo "fastctl config: created .fastctl/config.json"
-    echo "The commands below will use the Quick Start endpoints automatically."
+    echo "The commands below read the Quick Start endpoints from that file."
     ;;
   existing)
     echo "fastctl config: existing .fastctl/config.json was preserved"
@@ -32,13 +32,12 @@ case "${config_state}" in
     exit 2
     ;;
 esac
+echo "Endpoint precedence: explicit flags > environment > config file > defaults."
+echo "The example commands intentionally omit --endpoint and --proxy-endpoint."
 echo
 echo "Terminal 2 (copy/paste in order):"
 echo "  bin/fastctl run ${sandbox_name} --image docker.io/library/alpine:latest \\"
 echo "    --pool ${pool_name} -- /bin/sleep 3600"
-echo
-echo "  kubectl wait --for=jsonpath='{.status.dataPlaneState}'=Ready \\"
-echo "    sandbox/${sandbox_name} --timeout=60s"
 echo
 echo "  bin/fastctl get ${sandbox_name}"
 echo
@@ -46,6 +45,7 @@ echo "  bin/fastctl diagnostics sandbox ${sandbox_name}"
 
 if [[ "${data_plane}" == "execd" ]]; then
   echo
+  echo "  # The named-route resolver waits directly on the assigned Fastlet for execd."
   echo "  bin/fastctl opensandbox exec ${sandbox_name} -- \\"
   echo "    sh -lc 'printf \"hello from execd\\n\" > /tmp/execd.txt && cat /tmp/execd.txt'"
   echo
@@ -58,7 +58,7 @@ if [[ "${data_plane}" == "execd" ]]; then
   echo "    ${sandbox_name}:/tmp/execd.txt /tmp/execd-downloaded.txt"
 else
   echo
-  echo "This Pool uses infraProfile=minimal; OpenSandbox exec/file commands are intentionally unavailable."
+  echo "This Pool declares no Infra Components; OpenSandbox exec/file commands are intentionally unavailable."
 fi
 
 echo

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	boxlitedriver "fast-sandbox/internal/runtime/boxlite/driver"
 	"fast-sandbox/internal/runtime/containerd"
@@ -25,7 +25,7 @@ func New(catalog *runtimecatalog.Catalog, prober CapabilityProber) *Factory {
 	return &Factory{catalog: catalog, prober: prober}
 }
 
-func (f *Factory) Create(ctx context.Context, runtimeName apiv1alpha1.RuntimeName, socketPath string) (RuntimeDriver, CapabilityReport, error) {
+func (f *Factory) Create(ctx context.Context, runtimeName apiv1alpha2.RuntimeName, socketPath string) (RuntimeDriver, CapabilityReport, error) {
 	profile, err := f.catalog.Resolve(runtimeName)
 	if err != nil {
 		return nil, CapabilityReport{}, err

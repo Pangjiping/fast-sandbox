@@ -2,9 +2,7 @@ package infra
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	infracatalog "fast-sandbox/internal/catalog/infra"
 	infracontract "fast-sandbox/internal/infra/contract"
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
@@ -35,6 +32,7 @@ type Mount struct {
 }
 
 type ServiceEndpoint = infracontract.ServiceEndpoint
+type ComponentDiagnostic = infracontract.ComponentDiagnostic
 
 type PreparedInstance struct {
 	SandboxUID      string                `json:"sandboxUid"`
@@ -43,11 +41,8 @@ type PreparedInstance struct {
 	Mounts          []Mount               `json:"mounts"`
 	WrapperRequired bool                  `json:"wrapperRequired"`
 	Services        []ServiceEndpoint     `json:"services,omitempty"`
-	UpstreamHeaders map[string]string     `json:"upstreamHeaders,omitempty"`
 	Diagnostics     []ComponentDiagnostic `json:"diagnostics,omitempty"`
 }
-
-type ComponentDiagnostic = infracontract.ComponentDiagnostic
 
 type persistedInstance struct {
 	Version  int               `json:"version"`
@@ -76,84 +71,73 @@ func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxS
 	if err != nil {
 		return PreparedInstance{}, err
 	}
-	if plan.ProfileName != spec.InfraProfile || plan.ProfileHash != spec.InfraProfileHash {
-		return PreparedInstance{}, fmt.Errorf("Sandbox InfraProfile identity does not match prepared plan")
+	if plan.Revision != spec.InfraRevision {
+		return PreparedInstance{}, errors.New("Sandbox Infra revision does not match prepared plan")
 	}
 	if len(plan.Components) == 0 && plan.Tunnel == nil {
 		return PreparedInstance{SandboxUID: spec.SandboxID}, nil
 	}
+
 	result := PreparedInstance{SandboxUID: spec.SandboxID}
 	if plan.Tunnel != nil {
 		result.Mounts = append(result.Mounts, Mount{
-			Source: plan.Tunnel.HostPath, GuestSource: plan.Tunnel.PodPath, Destination: SandboxTunnelContainerPath,
-			Options: []string{"ro", "nosuid", "nodev"},
+			Source: plan.Tunnel.HostPath, GuestSource: plan.Tunnel.PodPath,
+			Destination: SandboxTunnelContainerPath, Options: []string{"ro", "nosuid", "nodev"},
 		})
 	}
 	if len(plan.Components) == 0 {
 		return result, nil
 	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return PreparedInstance{}, fmt.Errorf("generate Infra instance token: %w", err)
+	if plan.Supervisor == nil {
+		return PreparedInstance{}, errors.New("sandbox-init is not prepared")
 	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	result.WrapperRequired = true
+	result.Mounts = append(result.Mounts, Mount{
+		Source: plan.Supervisor.HostPath, GuestSource: plan.Supervisor.PodPath,
+		Destination: SandboxInitContainerPath, Options: []string{"ro", "rbind", "nosuid", "nodev"},
+	})
+
 	initConfig := supervisor.Config{Version: supervisor.ConfigVersion, SandboxUID: spec.SandboxID}
-	if plan.Supervisor != nil {
-		result.WrapperRequired = true
-		result.Mounts = append(result.Mounts, Mount{
-			Source: plan.Supervisor.HostPath, GuestSource: plan.Supervisor.PodPath, Destination: SandboxInitContainerPath,
-			Options: []string{"ro", "rbind", "nosuid", "nodev"},
-		})
-	}
-	for _, preparedComponent := range plan.Components {
-		component := preparedComponent.Plan.Component
-		componentEnv := map[string]string{
-			"FAST_SANDBOX_UID": spec.SandboxID, "FAST_SANDBOX_INSTANCE_GENERATION": strconv.FormatInt(spec.InstanceGeneration, 10),
-			"FAST_SANDBOX_ASSIGNMENT_ATTEMPT": strconv.FormatInt(spec.AssignmentAttempt, 10),
-		}
-		if credential := component.InstanceInit.Credential; credential != nil {
-			componentEnv[credential.EnvironmentVariable] = token
-			if result.UpstreamHeaders == nil {
-				result.UpstreamHeaders = make(map[string]string)
-			}
-			if existing, found := result.UpstreamHeaders[credential.UpstreamHeader]; found && existing != token {
-				return PreparedInstance{}, fmt.Errorf("Infra credential header %s has conflicting bindings", credential.UpstreamHeader)
-			}
-			result.UpstreamHeaders[credential.UpstreamHeader] = token
-		}
-		if preparedComponent.Artifact != nil {
+	for _, prepared := range plan.Components {
+		component := prepared.Plan
+		for _, mapping := range prepared.Mappings {
 			result.Mounts = append(result.Mounts, Mount{
-				Source: preparedComponent.Artifact.HostPath, GuestSource: preparedComponent.Artifact.PodPath, Destination: component.ContainerPath,
-				Options: []string{"ro", "rbind", "nosuid", "nodev"},
+				Source: mapping.HostPath, GuestSource: mapping.PodPath,
+				Destination: mapping.TargetPath, Options: []string{"ro", "rbind", "nosuid", "nodev"},
 			})
 		}
-		if component.Activation.Mode != infracatalog.ActivationSystemService {
-			readiness := supervisor.Readiness{Type: infracatalog.ProbeNone}
-			if len(component.Services) > 0 {
-				service := component.Services[0]
-				readiness = supervisor.Readiness{
-					Type: service.Readiness.Type, Address: "127.0.0.1:" + strconv.Itoa(int(service.Port)),
-					Path: service.Readiness.Path, Timeout: service.Readiness.Timeout, Interval: service.Readiness.Interval,
-				}
-			}
-			initConfig.Components = append(initConfig.Components, supervisor.Component{
-				Name: component.Name, Command: component.Activation.Command, Args: append([]string(nil), component.Activation.Args...),
-				Env:             componentEnv,
-				StartBeforeUser: component.Activation.StartBeforeUser, RestartPolicy: component.Activation.RestartPolicy, Readiness: readiness,
-				Required: component.Required, DependsOn: append([]string(nil), component.DependsOn...),
-			})
+		environment := map[string]string{
+			"FAST_SANDBOX_UID":                 spec.SandboxID,
+			"FAST_SANDBOX_INSTANCE_GENERATION": strconv.FormatInt(spec.InstanceGeneration, 10),
+			"FAST_SANDBOX_ASSIGNMENT_ATTEMPT":  strconv.FormatInt(spec.AssignmentAttempt, 10),
 		}
-		for _, service := range component.Services {
-			result.Services = append(result.Services, ServiceEndpoint{
-				Component: component.Name, Name: service.Name, Port: service.Port, Readiness: service.Readiness,
-				Required: component.Required, Init: component.InstanceInit,
-			})
+		for name, value := range component.Process.Env {
+			environment[name] = value
 		}
+		initConfig.Components = append(initConfig.Components, supervisor.Component{
+			Name: component.Name, Command: component.Process.Command[0],
+			Args: append([]string(nil), component.Process.Command[1:]...),
+			Env:  environment, RestartPolicy: component.Process.RestartPolicy,
+			Readiness: supervisor.Readiness{
+				Type:    component.Process.Readiness.Type,
+				Address: "127.0.0.1:" + strconv.Itoa(int(component.Endpoint.Port)),
+				Path:    component.Process.Readiness.Path, Timeout: component.Process.Readiness.Timeout,
+			},
+		})
+		result.Services = append(result.Services, ServiceEndpoint{
+			Component: component.Name, Protocol: component.Endpoint.Protocol,
+			Port: component.Endpoint.Port, Readiness: component.Process.Readiness,
+		})
+		result.Diagnostics = append(result.Diagnostics, ComponentDiagnostic{Component: component.Name, State: "Starting"})
 	}
+
 	persisted := persistedInstance{
-		Version:  1,
-		Identity: instanceIdentity{SandboxUID: spec.SandboxID, InstanceGeneration: spec.InstanceGeneration, AssignmentAttempt: spec.AssignmentAttempt},
-		Init:     initConfig, Prepared: result,
+		Version: 1,
+		Identity: instanceIdentity{
+			SandboxUID: spec.SandboxID, InstanceGeneration: spec.InstanceGeneration,
+			AssignmentAttempt: spec.AssignmentAttempt,
+		},
+		Init: initConfig, Prepared: result,
 	}
 	podPath, hostPath := m.instancePaths(spec.SandboxID, spec.InstanceGeneration, spec.AssignmentAttempt)
 	result.ConfigPodPath = podPath
@@ -162,10 +146,6 @@ func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxS
 		Source: hostPath, GuestSource: podPath, Destination: InstanceConfigPath,
 		Options: []string{"ro", "rbind", "nosuid", "nodev", "noexec"},
 	})
-	// Paths are deterministic, so compile the final recovery state before the
-	// first write. infra.json and state.json remain separate trust domains, but
-	// each is now fsynced exactly once instead of rewriting both files after the
-	// config mount is discovered.
 	persisted.Prepared = result
 	if _, _, err := m.writeInstance(ctx, persisted); err != nil {
 		return PreparedInstance{}, err
@@ -177,8 +157,7 @@ func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.SandboxS
 	if spec == nil {
 		return PreparedInstance{}, errors.New("Sandbox spec is required")
 	}
-	statePath := m.instanceStatePath(spec.SandboxID, spec.InstanceGeneration, spec.AssignmentAttempt)
-	file, err := os.Open(statePath)
+	file, err := os.Open(m.instanceStatePath(spec.SandboxID, spec.InstanceGeneration, spec.AssignmentAttempt))
 	if err != nil {
 		return PreparedInstance{}, err
 	}
@@ -190,9 +169,11 @@ func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.SandboxS
 	if err := ctx.Err(); err != nil {
 		return PreparedInstance{}, err
 	}
-	if persisted.Version != 1 || persisted.Identity != (instanceIdentity{
-		SandboxUID: spec.SandboxID, InstanceGeneration: spec.InstanceGeneration, AssignmentAttempt: spec.AssignmentAttempt,
-	}) {
+	expected := instanceIdentity{
+		SandboxUID: spec.SandboxID, InstanceGeneration: spec.InstanceGeneration,
+		AssignmentAttempt: spec.AssignmentAttempt,
+	}
+	if persisted.Version != 1 || persisted.Identity != expected {
 		return PreparedInstance{}, errors.New("persisted Infra instance identity does not match runtime")
 	}
 	return persisted.Prepared, nil
@@ -217,7 +198,11 @@ func (m *Manager) writeInstance(ctx context.Context, persisted persistedInstance
 	if err := ctx.Err(); err != nil {
 		return "", "", err
 	}
-	podPath, hostPath := m.instancePaths(persisted.Identity.SandboxUID, persisted.Identity.InstanceGeneration, persisted.Identity.AssignmentAttempt)
+	podPath, hostPath := m.instancePaths(
+		persisted.Identity.SandboxUID,
+		persisted.Identity.InstanceGeneration,
+		persisted.Identity.AssignmentAttempt,
+	)
 	configStarted := time.Now()
 	_, configSpan := observability.Start(ctx, "fastlet.infra.persist_config")
 	err := atomicWriteJSON(podPath, persisted.Init, 0400)
@@ -228,7 +213,15 @@ func (m *Manager) writeInstance(ctx context.Context, persisted persistedInstance
 	}
 	stateStarted := time.Now()
 	_, stateSpan := observability.Start(ctx, "fastlet.infra.persist_state")
-	err = atomicWriteJSON(m.instanceStatePath(persisted.Identity.SandboxUID, persisted.Identity.InstanceGeneration, persisted.Identity.AssignmentAttempt), persisted, 0400)
+	err = atomicWriteJSON(
+		m.instanceStatePath(
+			persisted.Identity.SandboxUID,
+			persisted.Identity.InstanceGeneration,
+			persisted.Identity.AssignmentAttempt,
+		),
+		persisted,
+		0400,
+	)
 	observeInstanceStage("state_persist", stateStarted, err)
 	observability.End(stateSpan, err)
 	if err != nil {
@@ -238,8 +231,9 @@ func (m *Manager) writeInstance(ctx context.Context, persisted persistedInstance
 }
 
 func (m *Manager) instancePaths(sandboxUID string, generation, attempt int64) (string, string) {
-	segment := safeSegment(sandboxUID)
-	relative := filepath.Join("instances", segment, fmt.Sprintf("%d-%d", generation, attempt), "infra.json")
+	relative := filepath.Join(
+		"instances", safeSegment(sandboxUID), fmt.Sprintf("%d-%d", generation, attempt), "infra.json",
+	)
 	return filepath.Join(m.config.Store.podRoot, relative), filepath.Join(m.config.Store.hostRoot, relative)
 }
 
@@ -276,7 +270,7 @@ func atomicWriteJSON(path string, value any, mode os.FileMode) error {
 }
 
 func safeSegment(value string) string {
-	if value != "" && !strings.ContainsAny(value, `/\\`) && value != "." && value != ".." {
+	if value != "" && !strings.ContainsAny(value, `/\`) && value != "." && value != ".." {
 		return value
 	}
 	digest := sha256.Sum256([]byte(value))

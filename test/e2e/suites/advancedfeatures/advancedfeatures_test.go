@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -17,13 +17,13 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/features"
 )
 
-func TestInfraProfileWiring(t *testing.T) {
+func TestInlineInfraComponentWiring(t *testing.T) {
 	suiteenv.RequireBasic(t)
 
-	feature := features.New("infra-profile-wiring").
+	feature := features.New("inline-infra-component-wiring").
 		WithLabel("suite", "advancedfeatures").
 		WithLabel("tier", "smoke").
-		Assess("platform-owned InfraProfile is wired into the fastlet pod", func(ctx context.Context, t *testing.T, _ *envconf.Config) context.Context {
+		Assess("Pool Infra Components compile to an immutable Fastlet revision", func(ctx context.Context, t *testing.T, _ *envconf.Config) context.Context {
 			k8sClient := testSuite.MustKubeClient(t)
 			fixture := fixtures.New(k8sClient, fixtures.WithPollInterval(250*time.Millisecond))
 
@@ -33,24 +33,24 @@ func TestInfraProfileWiring(t *testing.T) {
 			}
 			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
 
-			pool := &apiv1alpha1.SandboxPool{
+			pool := &apiv1alpha2.SandboxPool{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiv1alpha1.GroupVersion.String(),
+					APIVersion: apiv1alpha2.GroupVersion.String(),
 					Kind:       "SandboxPool",
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "injection-pool",
 					Namespace: namespace,
 				},
-				Spec: apiv1alpha1.SandboxPoolSpec{
-					Capacity: apiv1alpha1.PoolCapacity{
+				Spec: apiv1alpha2.SandboxPoolSpec{
+					Capacity: apiv1alpha2.PoolCapacity{
 						PoolMin: 1,
 						PoolMax: 1,
 					},
 					MaxSandboxesPerPod: 5,
-					Runtime:            apiv1alpha1.RuntimeContainer,
+					Runtime:            apiv1alpha2.RuntimeContainer,
 					SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
-					InfraProfile:       "test-infra",
+					InfraComponents:    []apiv1alpha2.InfraComponent{fixtures.OpenSandboxExecdComponent()},
 					FastletTemplate: corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{
@@ -89,25 +89,25 @@ func TestInfraProfileWiring(t *testing.T) {
 				t.Fatalf("fastlet pod not found")
 			}
 
-			if got := fastletPod.Labels["fast-sandbox.io/infra-profile"]; got != "test-infra" {
-				t.Fatalf("infra profile label = %q, want test-infra", got)
+			if got := fastletPod.Labels["fast-sandbox.io/infra-revision"]; got == "" {
+				t.Fatalf("infra revision label is empty")
 			}
-			if fastletPod.Annotations["fast-sandbox.io/infra-profile-hash"] == "" {
-				t.Fatalf("infra profile hash annotation is empty")
+			if fastletPod.Annotations["fast-sandbox.io/infra-revision"] == "" {
+				t.Fatalf("infra revision annotation is empty")
 			}
-			var foundProfileEnv, foundInfraMount, foundInfraVolume bool
+			var foundRevisionEnv, foundPlanMount, foundInfraVolume bool
 			for _, container := range fastletPod.Spec.Containers {
 				if container.Name != "fastlet" {
 					continue
 				}
 				for _, env := range container.Env {
-					if env.Name == "FAST_SANDBOX_INFRA_PROFILE" && env.Value == "test-infra" {
-						foundProfileEnv = true
+					if env.Name == "FAST_SANDBOX_INFRA_REVISION" && env.Value == fastletPod.Annotations["fast-sandbox.io/infra-revision"] {
+						foundRevisionEnv = true
 					}
 				}
 				for _, mount := range container.VolumeMounts {
-					if mount.Name == "infra-tools" && mount.MountPath == "/opt/fast-sandbox/infra" {
-						foundInfraMount = true
+					if mount.Name == "infra-plan" && mount.MountPath == "/etc/fast-sandbox/infra" {
+						foundPlanMount = true
 					}
 				}
 			}
@@ -116,8 +116,8 @@ func TestInfraProfileWiring(t *testing.T) {
 					foundInfraVolume = true
 				}
 			}
-			if !foundProfileEnv || !foundInfraMount || !foundInfraVolume {
-				t.Fatalf("InfraProfile wiring incomplete: env=%t mount=%t volume=%t", foundProfileEnv, foundInfraMount, foundInfraVolume)
+			if !foundRevisionEnv || !foundPlanMount || !foundInfraVolume {
+				t.Fatalf("inline Infra wiring incomplete: revisionEnv=%t planMount=%t artifactVolume=%t", foundRevisionEnv, foundPlanMount, foundInfraVolume)
 			}
 
 			return ctx

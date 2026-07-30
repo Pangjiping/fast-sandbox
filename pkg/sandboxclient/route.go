@@ -11,8 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"google.golang.org/grpc"
 )
@@ -20,8 +21,7 @@ import (
 // EndpointControl is the small FastPath surface needed by data-plane
 // adapters. The generated FastPathServiceClient satisfies this interface.
 type EndpointControl interface {
-	GetSandbox(context.Context, *fastpathv1.GetRequest, ...grpc.CallOption) (*fastpathv1.SandboxInfo, error)
-	ResolveEndpoint(context.Context, *fastpathv1.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv1.ResolveEndpointResponse, error)
+	ResolveEndpoint(context.Context, *fastpathv2.ResolveEndpointRequest, ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error)
 }
 
 type SandboxRef struct {
@@ -29,12 +29,27 @@ type SandboxRef struct {
 	Namespace string
 }
 
+type RouteTarget struct {
+	ComponentName string
+	Port          uint32
+}
+
+func ComponentTarget(name string) RouteTarget {
+	return RouteTarget{ComponentName: name}
+}
+
+func PortTarget(port uint32) RouteTarget {
+	return RouteTarget{Port: port}
+}
+
 type RouteResolver interface {
-	Resolve(context.Context, SandboxRef, uint32) (Route, error)
+	Resolve(context.Context, SandboxRef, RouteTarget) (Route, error)
 }
 
 type Route struct {
 	SandboxUID       string
+	ComponentName    string
+	Protocol         string
 	TargetPort       uint32
 	Endpoint         *url.URL
 	RequiredHeaders  http.Header
@@ -45,42 +60,69 @@ type Route struct {
 // EndpointResolver converts a user-visible Sandbox name into a short-lived,
 // instance-fenced Sandbox Proxy route.
 type EndpointResolver struct {
-	Control          EndpointControl
-	ProxyBaseURL     string
-	DefaultNamespace string
+	Control              EndpointControl
+	ProxyBaseURL         string
+	DefaultNamespace     string
+	ComponentWaitTimeout time.Duration
 }
 
-func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, targetPort uint32) (Route, error) {
+func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, target RouteTarget) (Route, error) {
 	if r == nil || r.Control == nil {
 		return Route{}, errors.New("FastPath endpoint resolver is not configured")
 	}
 	if sandbox.Name == "" {
 		return Route{}, errors.New("Sandbox name is required")
 	}
-	if targetPort == 0 {
-		return Route{}, errors.New("target port is required")
+	componentName := strings.TrimSpace(target.ComponentName)
+	switch {
+	case componentName != "" && target.Port != 0:
+		return Route{}, errors.New("component name and target port may not both be set")
+	case componentName == "" && target.Port == 0:
+		return Route{}, errors.New("component name or target port is required")
 	}
 	namespace := sandbox.Namespace
 	if namespace == "" {
 		namespace = r.DefaultNamespace
 	}
 	if namespace == "" {
-		namespace = "default"
+		namespace = "fast-sandbox"
 	}
-	info, err := r.Control.GetSandbox(ctx, &fastpathv1.GetRequest{SandboxName: sandbox.Name, Namespace: namespace})
+	requestTarget := &fastpathv2.EndpointTarget{}
+	targetDescription := ""
+	if componentName != "" {
+		requestTarget.Target = &fastpathv2.EndpointTarget_ComponentName{ComponentName: componentName}
+		targetDescription = "component " + componentName
+	} else {
+		requestTarget.Target = &fastpathv2.EndpointTarget_Port{Port: target.Port}
+		targetDescription = fmt.Sprintf("port %d", target.Port)
+	}
+	request := &fastpathv2.ResolveEndpointRequest{
+		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_NamespacedName{
+			NamespacedName: &fastpathv2.NamespacedName{Namespace: namespace, Name: sandbox.Name},
+		}},
+		Target:     requestTarget,
+		AccessMode: fastpathv2.EndpointAccessMode_CENTRAL_PROXY,
+	}
+	if componentName != "" {
+		waitTimeout := r.ComponentWaitTimeout
+		if waitTimeout <= 0 {
+			waitTimeout = 30 * time.Second
+		}
+		request.WaitUntilReady = true
+		request.WaitTimeoutMillis = int32(waitTimeout.Milliseconds())
+	}
+	resolved, err := r.Control.ResolveEndpoint(ctx, request)
 	if err != nil {
-		return Route{}, fmt.Errorf("get Sandbox %s/%s: %w", namespace, sandbox.Name, err)
+		return Route{}, fmt.Errorf("resolve Sandbox %s/%s %s: %w", namespace, sandbox.Name, targetDescription, err)
 	}
-	if info.GetSandboxUid() == "" {
-		return Route{}, fmt.Errorf("Sandbox %s/%s has no CRD UID", namespace, sandbox.Name)
+	if resolved.GetSandboxUid() == "" {
+		return Route{}, errors.New("FastPath returned a route without a Sandbox UID")
 	}
-	resolved, err := r.Control.ResolveEndpoint(ctx, &fastpathv1.ResolveEndpointRequest{
-		SandboxUid: info.GetSandboxUid(), TargetPort: targetPort, Protocol: "http",
-	})
-	if err != nil {
-		return Route{}, fmt.Errorf("resolve Sandbox %s/%s port %d: %w", namespace, sandbox.Name, targetPort, err)
-	}
-	if resolved.GetSandboxUid() != info.GetSandboxUid() || resolved.GetTargetPort() != targetPort {
+	if componentName != "" {
+		if resolved.GetComponentName() != componentName || resolved.GetResolvedPort() == 0 {
+			return Route{}, errors.New("FastPath returned a route for a different Sandbox or Infra Component")
+		}
+	} else if resolved.GetResolvedPort() != target.Port {
 		return Route{}, errors.New("FastPath returned a route for a different Sandbox or target port")
 	}
 	endpoint, err := url.Parse(resolved.GetProxyEndpoint())
@@ -101,7 +143,8 @@ func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, targ
 		headers.Set(name, value)
 	}
 	return Route{
-		SandboxUID: resolved.GetSandboxUid(), TargetPort: resolved.GetTargetPort(), Endpoint: endpoint,
+		SandboxUID: resolved.GetSandboxUid(), ComponentName: resolved.GetComponentName(),
+		Protocol: resolved.GetProtocol(), TargetPort: resolved.GetResolvedPort(), Endpoint: endpoint,
 		RequiredHeaders: headers, RouteGeneration: resolved.GetRouteGeneration(), ExpiresAtUnixSec: resolved.GetExpiresAtUnixSeconds(),
 	}, nil
 }

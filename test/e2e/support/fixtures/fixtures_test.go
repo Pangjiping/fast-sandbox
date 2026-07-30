@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,7 +17,7 @@ import (
 
 func TestCreateSandboxPoolSetsNamespace(t *testing.T) {
 	fixture := newFixtureHarness(t)
-	pool := &apiv1alpha1.SandboxPool{
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a"},
 	}
 
@@ -29,7 +29,7 @@ func TestCreateSandboxPoolSetsNamespace(t *testing.T) {
 		t.Fatalf("expected namespace to be set, got %q", created.Namespace)
 	}
 
-	stored := &apiv1alpha1.SandboxPool{}
+	stored := &apiv1alpha2.SandboxPool{}
 	if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "pool-a", Namespace: "tenant-a"}, stored); err != nil {
 		t.Fatalf("expected created pool to be persisted, got error: %v", err)
 	}
@@ -37,9 +37,9 @@ func TestCreateSandboxPoolSetsNamespace(t *testing.T) {
 
 func TestCreateSandboxSetsNamespace(t *testing.T) {
 	fixture := newFixtureHarness(t)
-	sb := &apiv1alpha1.Sandbox{
+	sb := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sb-a"},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image:   "busybox:latest",
 			PoolRef: "pool-a",
 		},
@@ -56,14 +56,14 @@ func TestCreateSandboxSetsNamespace(t *testing.T) {
 
 func TestWaitForSandboxRuntimeStateReturnsUpdatedSandbox(t *testing.T) {
 	fixture := newFixtureHarness(t)
-	sb := &apiv1alpha1.Sandbox{
+	sb := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sb-running", Namespace: "tenant-a"},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image:   "busybox:latest",
 			PoolRef: "pool-a",
 		},
-		Status: apiv1alpha1.SandboxStatus{
-			RuntimeState: apiv1alpha1.ObservedStatePending,
+		Status: apiv1alpha2.SandboxStatus{
+			RuntimeState: apiv1alpha2.ObservedStatePending,
 		},
 	}
 	if err := fixture.client.Create(context.Background(), sb); err != nil {
@@ -72,36 +72,36 @@ func TestWaitForSandboxRuntimeStateReturnsUpdatedSandbox(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		current := &apiv1alpha1.Sandbox{}
+		current := &apiv1alpha2.Sandbox{}
 		if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "sb-running", Namespace: "tenant-a"}, current); err != nil {
 			return
 		}
-		current.Status.RuntimeState = apiv1alpha1.ObservedStateReady
+		current.Status.RuntimeState = apiv1alpha2.ObservedStateReady
 		_ = fixture.client.Update(context.Background(), current)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	got, err := fixture.WaitForSandboxRuntimeState(ctx, types.NamespacedName{Name: "sb-running", Namespace: "tenant-a"}, apiv1alpha1.ObservedStateReady)
+	got, err := fixture.WaitForSandboxRuntimeState(ctx, types.NamespacedName{Name: "sb-running", Namespace: "tenant-a"}, apiv1alpha2.ObservedStateReady)
 	if err != nil {
 		t.Fatalf("expected wait to succeed, got error: %v", err)
 	}
-	if got.Status.RuntimeState != apiv1alpha1.ObservedStateReady {
+	if got.Status.RuntimeState != apiv1alpha2.ObservedStateReady {
 		t.Fatalf("expected ready runtime state, got %q", got.Status.RuntimeState)
 	}
 }
 
 func TestWaitForSandboxUsesPredicate(t *testing.T) {
 	fixture := newFixtureHarness(t)
-	sb := &apiv1alpha1.Sandbox{
+	sb := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sb-predicate", Namespace: "tenant-a"},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image:   "busybox:latest",
 			PoolRef: "pool-a",
 		},
-		Status: apiv1alpha1.SandboxStatus{
-			RuntimeState: apiv1alpha1.ObservedStatePending,
+		Status: apiv1alpha2.SandboxStatus{
+			RuntimeState: apiv1alpha2.ObservedStatePending,
 		},
 	}
 	if err := fixture.client.Create(context.Background(), sb); err != nil {
@@ -110,20 +110,20 @@ func TestWaitForSandboxUsesPredicate(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		current := &apiv1alpha1.Sandbox{}
+		current := &apiv1alpha2.Sandbox{}
 		if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "sb-predicate", Namespace: "tenant-a"}, current); err != nil {
 			return
 		}
-		current.Status.RuntimeState = apiv1alpha1.ObservedStateReady
-		current.Status.Assignment = &apiv1alpha1.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+		current.Status.RuntimeState = apiv1alpha2.ObservedStateReady
+		current.Status.Assignment = &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 		_ = fixture.client.Update(context.Background(), current)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	got, err := fixture.WaitForSandbox(ctx, types.NamespacedName{Name: "sb-predicate", Namespace: "tenant-a"}, func(sb *apiv1alpha1.Sandbox) bool {
-		return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+	got, err := fixture.WaitForSandbox(ctx, types.NamespacedName{Name: "sb-predicate", Namespace: "tenant-a"}, func(sb *apiv1alpha2.Sandbox) bool {
+		return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 	})
 	if err != nil {
 		t.Fatalf("expected predicate wait to succeed, got error: %v", err)
@@ -135,9 +135,9 @@ func TestWaitForSandboxUsesPredicate(t *testing.T) {
 
 func TestEnsureSandboxRemainsUnassignedFailsOnAssignment(t *testing.T) {
 	fixture := newFixtureHarness(t)
-	sb := &apiv1alpha1.Sandbox{
+	sb := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sb-assigned", Namespace: "tenant-a"},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image:   "busybox:latest",
 			PoolRef: "pool-a",
 		},
@@ -148,11 +148,11 @@ func TestEnsureSandboxRemainsUnassignedFailsOnAssignment(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		current := &apiv1alpha1.Sandbox{}
+		current := &apiv1alpha2.Sandbox{}
 		if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "sb-assigned", Namespace: "tenant-a"}, current); err != nil {
 			return
 		}
-		current.Status.Assignment = &apiv1alpha1.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+		current.Status.Assignment = &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 		_ = fixture.client.Update(context.Background(), current)
 	}()
 
@@ -166,9 +166,9 @@ func TestEnsureSandboxRemainsUnassignedFailsOnAssignment(t *testing.T) {
 
 func TestWaitForReadyFastletPodsReturnsReadyPods(t *testing.T) {
 	fixture := newFixtureHarness(t)
-	pool := &apiv1alpha1.SandboxPool{
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-ready", Namespace: "tenant-a"},
-		Status: apiv1alpha1.SandboxPoolStatus{
+		Status: apiv1alpha2.SandboxPoolStatus{
 			ReadyPods: 0,
 		},
 	}
@@ -178,7 +178,7 @@ func TestWaitForReadyFastletPodsReturnsReadyPods(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		current := &apiv1alpha1.SandboxPool{}
+		current := &apiv1alpha2.SandboxPool{}
 		if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "pool-ready", Namespace: "tenant-a"}, current); err != nil {
 			return
 		}
@@ -200,9 +200,9 @@ func TestWaitForReadyFastletPodsReturnsReadyPods(t *testing.T) {
 
 func TestWaitForReadyFastletPodsFallsBackToReadyFastletPods(t *testing.T) {
 	fixture := newFixtureHarness(t)
-	pool := &apiv1alpha1.SandboxPool{
+	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-fallback", Namespace: "tenant-a"},
-		Status: apiv1alpha1.SandboxPoolStatus{
+		Status: apiv1alpha2.SandboxPoolStatus{
 			ReadyPods: 0,
 		},
 	}
@@ -247,7 +247,7 @@ func newFixtureHarness(t *testing.T) *FixtureClient {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("failed to add client-go scheme: %v", err)
 	}
-	if err := apiv1alpha1.AddToScheme(scheme); err != nil {
+	if err := apiv1alpha2.AddToScheme(scheme); err != nil {
 		t.Fatalf("failed to add fast-sandbox scheme: %v", err)
 	}
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -64,7 +64,7 @@ func NewIndex() *Index {
 	return &Index{}
 }
 
-func (i *Index) UpsertSandbox(sandbox *apiv1alpha1.Sandbox) {
+func (i *Index) UpsertSandbox(sandbox *apiv1alpha2.Sandbox) {
 	if sandbox == nil || sandbox.UID == "" {
 		return
 	}
@@ -75,7 +75,7 @@ func (i *Index) UpsertSandbox(sandbox *apiv1alpha1.Sandbox) {
 	state := &sandboxRouteState{
 		Namespace:       sandbox.Namespace,
 		SandboxUID:      string(sandbox.UID),
-		DataPlaneReady:  sandbox.Status.DataPlaneState == apiv1alpha1.ObservedStateReady,
+		DataPlaneReady:  sandbox.Status.DataPlaneState == apiv1alpha2.ObservedStateReady,
 		RouteGeneration: routeGeneration,
 	}
 	if assignment := sandbox.Status.Assignment; assignment != nil {
@@ -86,7 +86,7 @@ func (i *Index) UpsertSandbox(sandbox *apiv1alpha1.Sandbox) {
 	i.sandboxes.Store(state.SandboxUID, state)
 }
 
-func (i *Index) DeleteSandbox(sandbox *apiv1alpha1.Sandbox) {
+func (i *Index) DeleteSandbox(sandbox *apiv1alpha2.Sandbox) {
 	if sandbox == nil || sandbox.UID == "" {
 		return
 	}
@@ -122,7 +122,7 @@ func (i *Index) Resolve(sandboxUID string) (Route, error) {
 	if !valid || sandbox == nil {
 		return Route{}, ErrSandboxNotFound
 	}
-	if !sandbox.DataPlaneReady || sandbox.FastletName == "" || sandbox.FastletPodUID == "" || sandbox.AssignmentAttempt <= 0 {
+	if sandbox.FastletName == "" || sandbox.FastletPodUID == "" || sandbox.AssignmentAttempt <= 0 {
 		return Route{}, ErrSandboxNotReady
 	}
 	podValue, exists := i.pods.Load(sandbox.FastletPodUID)
@@ -162,11 +162,11 @@ func (r *KubernetesResolver) ResolveFresh(ctx context.Context, sandboxUID string
 	if r.Client == nil || sandboxUID == "" {
 		return Route{}, ErrSandboxNotFound
 	}
-	var sandboxes apiv1alpha1.SandboxList
+	var sandboxes apiv1alpha2.SandboxList
 	if err := r.Client.List(ctx, &sandboxes); err != nil {
 		return Route{}, fmt.Errorf("list Sandboxes for UID fallback: %w", err)
 	}
-	var sandbox *apiv1alpha1.Sandbox
+	var sandbox *apiv1alpha2.Sandbox
 	for index := range sandboxes.Items {
 		if string(sandboxes.Items[index].UID) == sandboxUID {
 			sandbox = sandboxes.Items[index].DeepCopy()
@@ -176,7 +176,7 @@ func (r *KubernetesResolver) ResolveFresh(ctx context.Context, sandboxUID string
 	if sandbox == nil {
 		return Route{}, ErrSandboxNotFound
 	}
-	if sandbox.Status.Assignment == nil || sandbox.Status.DataPlaneState != apiv1alpha1.ObservedStateReady {
+	if sandbox.Status.Assignment == nil {
 		return Route{}, ErrSandboxNotReady
 	}
 	var pod corev1.Pod
@@ -193,7 +193,7 @@ func (r *KubernetesResolver) ResolveFresh(ctx context.Context, sandboxUID string
 	return routeFromObjects(sandbox, &pod)
 }
 
-func routeFromObjects(sandbox *apiv1alpha1.Sandbox, pod *corev1.Pod) (Route, error) {
+func routeFromObjects(sandbox *apiv1alpha2.Sandbox, pod *corev1.Pod) (Route, error) {
 	if sandbox.Status.Assignment == nil {
 		return Route{}, ErrSandboxNotReady
 	}

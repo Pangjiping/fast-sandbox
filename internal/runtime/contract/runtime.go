@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	dataplane "fast-sandbox/internal/dataplane/contract"
 	infracontract "fast-sandbox/internal/infra/contract"
@@ -17,15 +17,14 @@ import (
 
 type Metadata struct {
 	fastletapi.SandboxSpec
-	ContainerID                string
-	PID                        int
-	Phase                      string
-	CreatedAt                  int64
-	UserProcessStartedAt       time.Time
-	UserProcessStartSource     fastletapi.UserProcessStartSource
-	InfraServices              []infracontract.ServiceEndpoint
-	InfraUpstreamHeadersByPort map[uint32]map[string]string
-	InfraDiagnostics           []infracontract.ComponentDiagnostic
+	ContainerID            string
+	PID                    int
+	Phase                  string
+	CreatedAt              int64
+	UserProcessStartedAt   time.Time
+	UserProcessStartSource fastletapi.UserProcessStartSource
+	InfraServices          []infracontract.ServiceEndpoint
+	InfraDiagnostics       []infracontract.ComponentDiagnostic
 }
 
 type Driver interface {
@@ -65,7 +64,7 @@ type Config struct {
 }
 
 type CapabilityReport struct {
-	Runtime     apiv1alpha1.RuntimeName        `json:"runtime"`
+	Runtime     apiv1alpha2.RuntimeName        `json:"runtime"`
 	ProfileHash string                         `json:"profileHash"`
 	State       runtimecatalog.CapabilityState `json:"state"`
 	Reason      string                         `json:"reason,omitempty"`
@@ -87,7 +86,7 @@ func ValidateProfile(existing *Metadata, requested *fastletapi.SandboxSpec) erro
 	}
 	if existing.RuntimeProfileHash != requested.RuntimeProfileHash ||
 		existing.ResourceProfileHash != requested.ResourceProfileHash ||
-		existing.InfraProfile != requested.InfraProfile || existing.InfraProfileHash != requested.InfraProfileHash ||
+		existing.InfraRevision != requested.InfraRevision ||
 		existing.CPU != requested.CPU || existing.Memory != requested.Memory || existing.PIDs != requested.PIDs {
 		return fmt.Errorf("%w: existing runtime identity %q has different runtime/resource profile", ErrSandboxProfileMismatch, requested.SandboxID)
 	}

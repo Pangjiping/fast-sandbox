@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -116,14 +116,14 @@ func TestSandboxPrivateNetwork(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func privateNetworkPool(namespace, name string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
-		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha1.GroupVersion.String(), Kind: "SandboxPool"},
+func privateNetworkPool(namespace, name string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
+		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "SandboxPool"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity: apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 1}, MaxSandboxesPerPod: 2,
-			Runtime: apiv1alpha1.RuntimeContainer,
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity: apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1}, MaxSandboxesPerPod: 2,
+			Runtime: apiv1alpha2.RuntimeContainer,
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
 				CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
@@ -133,15 +133,15 @@ func privateNetworkPool(namespace, name string) *apiv1alpha1.SandboxPool {
 	}
 }
 
-func privateNetworkSandbox(namespace, name, pool string) *apiv1alpha1.Sandbox {
+func privateNetworkSandbox(namespace, name, pool string) *apiv1alpha2.Sandbox {
 	command := fmt.Sprintf(
 		`if nslookup kubernetes.default.svc.cluster.local; then echo DNS_OK; else echo DNS_FAIL; fi; printf '%%s\n' '#!/bin/sh' 'printf "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n%s\n"' > /serve.sh; chmod +x /serve.sh; exec nc -lk -p 8080 -e /serve.sh`,
 		name,
 	)
-	return &apiv1alpha1.Sandbox{
-		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha1.GroupVersion.String(), Kind: "Sandbox"},
+	return &apiv1alpha2.Sandbox{
+		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: apiv1alpha1.SandboxSpec{
+		Spec: apiv1alpha2.SandboxSpec{
 			Image: "docker.io/library/alpine:latest", PoolRef: pool,
 			Command: []string{"/bin/sh", "-c", command},
 		},

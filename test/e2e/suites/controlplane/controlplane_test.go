@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	e2eenv "fast-sandbox/test/e2e/env"
 	"fast-sandbox/test/e2e/support/suiteenv"
 
@@ -29,10 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	controlPlaneNamespace = "default"
-	leaderLeaseName       = "fast-sandbox-reconciler.sandbox.fast.io"
-)
+const leaderLeaseName = "fast-sandbox-reconciler.sandbox.fast.io"
+
+var controlPlaneNamespace = testSuite.ControllerNamespace()
 
 func TestMultiActiveControlPlane(t *testing.T) {
 	suiteenv.RequireBasic(t)
@@ -57,9 +56,9 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		defer restoreFastPath()
 		waitForFastPathPodCount(ctx, t, k8sClient, 0)
 
-		sandbox := &apiv1alpha1.Sandbox{
+		sandbox := &apiv1alpha2.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: "declarative", Namespace: namespace},
-			Spec: apiv1alpha1.SandboxSpec{
+			Spec: apiv1alpha2.SandboxSpec{
 				Image: "docker.io/library/alpine:latest", PoolRef: pool.Name,
 				Command: []string{"/bin/sh", "-c", "sleep 3600"},
 			},
@@ -67,8 +66,8 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		if err := k8sClient.Create(ctx, sandbox); err != nil {
 			t.Fatalf("create declarative Sandbox without FastPath: %v", err)
 		}
-		ready := waitForSandbox(ctx, t, k8sClient, types.NamespacedName{Namespace: namespace, Name: sandbox.Name}, func(item *apiv1alpha1.Sandbox) bool {
-			return item.Status.Assignment != nil && item.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+		ready := waitForSandbox(ctx, t, k8sClient, types.NamespacedName{Namespace: namespace, Name: sandbox.Name}, func(item *apiv1alpha2.Sandbox) bool {
+			return item.Status.Assignment != nil && item.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 		})
 		if ready.UID == "" {
 			t.Fatal("declarative Sandbox has no durable Kubernetes UID")
@@ -95,9 +94,9 @@ func TestMultiActiveControlPlane(t *testing.T) {
 			t.Fatalf("dial all-in-one FastPath: %v", err)
 		}
 		defer connection.Close()
-		allInOne := fastpathv1.NewFastPathServiceClient(connection)
+		allInOne := fastpathv2.NewFastPathServiceClient(connection)
 
-		var response *fastpathv1.CreateResponse
+		var response *fastpathv2.SandboxInfo
 		waitUntil(ctx, t, "all-in-one Registry heartbeat and Create", func() (bool, error) {
 			requestCtx, requestCancel := context.WithTimeout(ctx, 10*time.Second)
 			defer requestCancel()
@@ -113,8 +112,8 @@ func TestMultiActiveControlPlane(t *testing.T) {
 				return false, createErr
 			}
 		})
-		ready := waitForSandbox(ctx, t, k8sClient, types.NamespacedName{Namespace: namespace, Name: response.SandboxName}, func(item *apiv1alpha1.Sandbox) bool {
-			return item.Status.RuntimeState == apiv1alpha1.ObservedStateReady
+		ready := waitForSandbox(ctx, t, k8sClient, types.NamespacedName{Namespace: namespace, Name: response.SandboxName}, func(item *apiv1alpha2.Sandbox) bool {
+			return item.Status.RuntimeState == apiv1alpha2.ObservedStateReady
 		})
 		if response.SandboxUid != string(ready.UID) {
 			t.Fatalf("all-in-one returned UID %q, want CRD UID %q", response.SandboxUid, ready.UID)
@@ -135,7 +134,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		t.Fatalf("dial FastPath: %v", err)
 	}
 	defer conn.Close()
-	fastPath := fastpathv1.NewFastPathServiceClient(conn)
+	fastPath := fastpathv2.NewFastPathServiceClient(conn)
 	replicas, closeReplicas := dialFastPathReplicas(ctx, t, k8sClient)
 	defer closeReplicas()
 
@@ -154,7 +153,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 			t.Fatalf("idempotent response mismatch: first=%+v second=%+v", first, second)
 		}
 		waitUntil(ctx, t, "Fastlet platform diagnostics", func() (bool, error) {
-			diagnostics, diagnosticsErr := fastPath.GetSandboxDiagnostics(ctx, &fastpathv1.SandboxDiagnosticsRequest{
+			diagnostics, diagnosticsErr := fastPath.GetSandboxDiagnostics(ctx, &fastpathv2.SandboxDiagnosticsRequest{
 				SandboxName: first.SandboxName, Namespace: namespace, Limit: 10,
 			})
 			if diagnosticsErr != nil {
@@ -228,7 +227,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		var group sync.WaitGroup
 		var lock sync.Mutex
 		successes := 0
-		successfulResponses := make([]*fastpathv1.CreateResponse, 0, capacityPool.Spec.MaxSandboxesPerPod)
+		successfulResponses := make([]*fastpathv2.SandboxInfo, 0, capacityPool.Spec.MaxSandboxesPerPod)
 		failures := make([]error, 0, requests)
 		for index := 0; index < requests; index++ {
 			group.Add(1)
@@ -262,7 +261,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 			assertUniqueCreateIdentity(t, seenUIDs, seenNames, fmt.Sprintf("response-%d", index), response)
 		}
 		waitUntil(ctx, t, "capacity-bounded ready runtimes and durable CRD-first intents", func() (bool, error) {
-			var list apiv1alpha1.SandboxList
+			var list apiv1alpha2.SandboxList
 			if err := k8sClient.List(ctx, &list, client.InNamespace(namespace)); err != nil {
 				return false, err
 			}
@@ -274,7 +273,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 					if list.Items[index].Annotations["sandbox.fast.io/assignment"] == "" {
 						return false, fmt.Errorf("CRD-first Sandbox %s/%s has no durable assignment annotation", list.Items[index].Namespace, list.Items[index].Name)
 					}
-					if list.Items[index].Status.RuntimeState == apiv1alpha1.ObservedStateReady {
+					if list.Items[index].Status.RuntimeState == apiv1alpha2.ObservedStateReady {
 						if owner, exists := seenUIDs[string(list.Items[index].UID)]; !exists || owner == "" {
 							return false, fmt.Errorf("ready Sandbox %s/%s has unreported RPC identity %q", list.Items[index].Namespace, list.Items[index].Name, list.Items[index].UID)
 						}
@@ -292,7 +291,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 
 type fastPathReplica struct {
 	name       string
-	client     fastpathv1.FastPathServiceClient
+	client     fastpathv2.FastPathServiceClient
 	connection *grpc.ClientConn
 	forward    interface{ Cleanup() error }
 }
@@ -338,7 +337,7 @@ func dialFastPathReplicas(ctx context.Context, t *testing.T, k8sClient client.Cl
 			t.Fatalf("dial FastPath replica %s: %v", pod.Name, err)
 		}
 		replicas = append(replicas, fastPathReplica{
-			name: pod.Name, client: fastpathv1.NewFastPathServiceClient(connection), connection: connection, forward: forward,
+			name: pod.Name, client: fastpathv2.NewFastPathServiceClient(connection), connection: connection, forward: forward,
 		})
 	}
 	return replicas, cleanup
@@ -353,7 +352,7 @@ func podReady(pod *corev1.Pod) bool {
 	return false
 }
 
-func assertUniqueCreateIdentity(t *testing.T, seenUIDs, seenNames map[string]string, owner string, response *fastpathv1.CreateResponse) {
+func assertUniqueCreateIdentity(t *testing.T, seenUIDs, seenNames map[string]string, owner string, response *fastpathv2.SandboxInfo) {
 	t.Helper()
 	if response == nil || response.SandboxUid == "" || response.SandboxName == "" {
 		t.Fatalf("%s returned incomplete Create identity: %+v", owner, response)
@@ -417,14 +416,14 @@ func assertProductionTopology(ctx context.Context, t *testing.T, k8sClient clien
 	}
 }
 
-func controlPlanePool(namespace, name string, capacity int32) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
+func controlPlanePool(namespace, name string, capacity int32) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity:           apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 1},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity:           apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1},
 			MaxSandboxesPerPod: capacity,
-			Runtime:            apiv1alpha1.RuntimeContainer,
-			SandboxResources: apiv1alpha1.SandboxResourceProfile{
+			Runtime:            apiv1alpha2.RuntimeContainer,
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
 				CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
@@ -434,8 +433,8 @@ func controlPlanePool(namespace, name string, capacity int32) *apiv1alpha1.Sandb
 	}
 }
 
-func createRequest(namespace, pool, requestID string) *fastpathv1.CreateRequest {
-	return &fastpathv1.CreateRequest{
+func createRequest(namespace, pool, requestID string) *fastpathv2.CreateRequest {
+	return &fastpathv2.CreateRequest{
 		Namespace: namespace, PoolRef: pool, RequestId: requestID,
 		Image: "docker.io/library/alpine:latest", Command: []string{"/bin/sh", "-c", "sleep 3600"},
 	}
@@ -485,9 +484,9 @@ func waitForReadyFastlets(ctx context.Context, t *testing.T, k8sClient client.Cl
 	})
 }
 
-func waitForSandbox(ctx context.Context, t *testing.T, k8sClient client.Client, key types.NamespacedName, predicate func(*apiv1alpha1.Sandbox) bool) *apiv1alpha1.Sandbox {
+func waitForSandbox(ctx context.Context, t *testing.T, k8sClient client.Client, key types.NamespacedName, predicate func(*apiv1alpha2.Sandbox) bool) *apiv1alpha2.Sandbox {
 	t.Helper()
-	var result apiv1alpha1.Sandbox
+	var result apiv1alpha2.Sandbox
 	waitUntil(ctx, t, "Sandbox "+key.String(), func() (bool, error) {
 		if err := k8sClient.Get(ctx, key, &result); err != nil {
 			return false, err

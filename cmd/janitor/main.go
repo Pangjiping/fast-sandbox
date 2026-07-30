@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	"fast-sandbox/internal/janitor"
 
@@ -71,7 +71,7 @@ func main() {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := apiv1alpha1.AddToScheme(scheme); err != nil {
+	if err := apiv1alpha2.AddToScheme(scheme); err != nil {
 		klog.ErrorS(err, "Failed to register Sandbox API")
 		os.Exit(1)
 	}

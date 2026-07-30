@@ -1,134 +1,136 @@
 # OpenSandbox Execd
 
-OpenSandbox Execd is an Infra Component integration. Fast Sandbox delivers, starts, discovers, authenticates, and transparently proxies Execd; the OpenSandbox SDK and Execd API continue to own command, file, PTY, and process semantics.
+Fast Sandbox integrates OpenSandbox Execd as a Pool-defined Infra Component.
+Fast Sandbox owns artifact delivery, process supervision, health, discovery,
+and transparent routing. Execd and the official OpenSandbox SDK continue to own
+command, file, PTY, SSE, and WebSocket semantics.
+
+For the complete backend, readiness, Pool discovery, and direct-ingress model,
+see [OpenSandbox integration](opensandbox-integration.md).
+
+## Declare Execd
+
+Use the complete sample:
+
+```bash
+kubectl apply -f config/samples/pool-container-execd.yaml
+```
+
+Its essential component definition is:
+
+```yaml
+infraComponents:
+  - name: execd
+    artifact:
+      source:
+        image:
+          reference: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd@sha256:1dc98c7de10b9a73450ac75aa0f200ad7972f2c40f5225f6a8998e166b45d6dd
+      mappings:
+        - sourcePath: /execd
+          targetPath: /.fast/components/execd/execd
+    process:
+      command:
+        - /.fast/components/execd/execd
+        - --port
+        - "44772"
+      restartPolicy: OnFailure
+      healthCheck:
+        httpGet:
+          path: /ping
+        timeoutSeconds: 10
+    endpoint:
+      protocol: HTTP
+      port: 44772
+```
+
+The OCI reference is immutable. Fastlet pulls it through the namespace Registry
+configuration, verifies the digest, maps the selected file, and never starts
+the artifact image as a separate container.
+
+## Startup and readiness
+
+```text
+Fastlet prepares the Pool artifact revision
+-> Runtime creates the Sandbox
+-> sandbox-init starts Execd and the user process concurrently
+-> Create returns at RuntimeReady
+-> Fastlet probes GET /ping locally
+-> Fastlet Proxy acknowledges the named execd route
+-> ComponentReady and DataPlaneReady
+```
+
+The FastPath wait operation observes the assigned Fastlet directly. An
+OpenSandbox adapter does not need to wait for the CRD status watch to catch up.
+If Execd later exits or becomes unhealthy, Fastlet revokes its route and
+republishes it after restart and health recovery.
 
 ## Request path
 
+The default central path is:
+
 ```text
 OpenSandbox SDK
-  -> Fast Sandbox ResolveEndpoint
-  -> Sandbox Proxy
-  -> Fastlet Proxy
-  -> Sandbox private address:44772
-  -> OpenSandbox Execd
+-> Sandbox Proxy
+-> Fastlet Proxy
+-> component execd
 ```
 
-The proxies preserve HTTP, SSE, WebSocket, and file streaming behavior. They do not interpret `/command`, `/files`, `/pty`, or another Execd endpoint.
-
-## Responsibility boundary
-
-Fast Sandbox owns:
-
-- InfraProfile selection;
-- immutable artifact and digest verification;
-- delivery before runtime start;
-- `sandbox-init` activation and supervision;
-- per-generation token and instance configuration;
-- `GET /ping` readiness;
-- service registration on port `44772`;
-- fenced route publication and revocation;
-- endpoint and required-header hand-off.
-
-OpenSandbox Execd owns:
-
-- command and background command behavior;
-- sessions and PTY;
-- file and directory APIs;
-- SSE and WebSocket protocol semantics;
-- process and service metrics;
-- validation of `X-EXECD-ACCESS-TOKEN`;
-- OpenAPI and official SDK compatibility.
-
-## Development profile
-
-`opensandbox-execd-quickstart` is a runnable development profile:
-
-- it pins the Execd v1.0.21 amd64 image in the Fastlet build;
-- it verifies the extracted `/execd` file SHA-256;
-- it mounts the artifact read-only at `/.fast/infra/opensandbox-execd`;
-- it supports `container`, `gvisor`, `kata-qemu`, and `kata-clh`;
-- it starts Execd and the user entrypoint through `sandbox-init`;
-- it generates a random `EXECD_ACCESS_TOKEN` for each Sandbox generation;
-- Fastlet Proxy injects `X-EXECD-ACCESS-TOKEN` only on the upstream hop;
-- it publishes the route after `GET /ping` succeeds.
-
-Use [Quick Start](../getting-started/quickstart.md) to exercise it.
-
-The development profile includes public test signing material and does not provide a production supply-chain contract.
-
-## Production profile
-
-The built-in `opensandbox-execd` profile is intentionally unconfigured. A production release must bind:
-
-- an immutable OCI reference and digest;
-- an artifact manifest and file modes;
-- signature and verification policy;
-- architecture selection;
-- private/offline registry policy;
-- Execd API and Adapter compatibility;
-- upgrade and rollback rules.
-
-An unbound or invalid artifact keeps the Pool unavailable. Fast Sandbox must not create a Sandbox without Execd and report `DataPlaneReady`.
-
-## Startup semantics
+A trusted OpenSandbox ingress can request a direct route:
 
 ```text
-prepare and verify artifact
-  -> compile per-instance plan
-  -> inject bundle and configuration
-  -> start sandbox-init
-       +-> Execd
-       +-> user entrypoint
-  -> GET /ping
-  -> publish route
-  -> DataPlaneReady
+OpenSandbox SDK
+-> OpenSandbox ingress
+-> Fastlet Proxy
+-> component execd
 ```
 
-When no dependency requires ordering, Execd and the user entrypoint start in parallel. `CreateSandbox` returns at RuntimeReady; Execd readiness and route publication complete asynchronously.
+Both routes use the logical name `execd`; clients do not need to know port
+44772 for Fast Sandbox route selection. Proxies preserve the complete Execd
+request and response protocol and perform no translation.
 
 ## Authentication
 
-The component token:
+Execd is deliberately started without:
 
-- is unique to one Sandbox generation;
-- is not stored in the Sandbox CRD;
-- is not returned to callers;
-- is available only in protected instance state and the Execd process;
-- is injected into upstream requests by Fastlet Proxy.
-
-The caller receives a separate short-lived Fast Sandbox route credential. Reset, reassignment, deletion, and Pod replacement invalidate both route and component identity.
-
-## Runtime delivery
-
-| Runtime | Development delivery | Production direction |
-|---|---|---|
-| container | Read-only bind mount | Immutable bundle or image layer |
-| gVisor | Read-only bind mount | Immutable bundle or image layer |
-| Kata QEMU/CLH | OCI bind mount carried through the shared filesystem | Template-baked or preinstalled artifact |
-| Kata Firecracker | Not supported | Requires the runtime capability gate first |
-| BoxLite | Not supported by the Quick Start profile | Artifact volume or template bake after BoxLite gates |
-
-Runtime-specific delivery does not change the logical service name, port, or OpenSandbox SDK.
-
-## Validation
-
-The acceptance path must cover:
-
-- create and DataPlaneReady;
-- command SSE;
-- upload, stat, read, and download;
-- PTY/WebSocket when enabled by the Adapter;
-- non-root user image semantics;
-- token isolation from the user environment;
-- old-token and old-route rejection after reset or reassignment;
-- Fastlet route recovery;
-- independent runtime and data-plane failure reporting.
-
-Run:
-
-```bash
-make e2e SUITE=quickstart
-make e2e SUITE=infra
+```text
+EXECD_ACCESS_TOKEN
+--access-token
+X-EXECD-ACCESS-TOKEN
 ```
 
-Fast Sandbox does not ship an E2B envd integration. A future component must enter through the same InfraProfile, supply-chain, SDK hand-off, and capability-gate process.
+Fast Sandbox protects its internal route with the short-lived,
+instance-fenced `X-Fast-Sandbox-Route-Credential`. OpenSandbox ingress may
+independently enforce OpenSandbox secure access. Each gateway removes its own
+credential before forwarding, so Execd receives neither platform credential
+and user `Authorization` remains intact.
+
+## fastctl
+
+The adapter defaults to component `execd` and waits for that component directly
+through FastPath:
+
+```bash
+bin/fastctl opensandbox exec my-sandbox -- uname -a
+bin/fastctl opensandbox cp ./input.txt my-sandbox:/tmp/input.txt
+bin/fastctl opensandbox files stat my-sandbox /tmp/input.txt
+```
+
+For another component implementing the same Execd protocol:
+
+```bash
+bin/fastctl opensandbox exec my-sandbox \
+  --component custom-execd -- uname -a
+```
+
+`--component` must appear before `--`; arguments after `--` belong to the
+remote command.
+
+## Runtime support
+
+The inline component contract is runtime-neutral. Container, gVisor, Kata QEMU,
+and Kata Cloud Hypervisor Quick Starts inject the same Execd definition.
+BoxLite uses its artifact-volume path but remains capability-gated by incomplete
+resource enforcement.
+
+Fast Sandbox does not ship envd or Rocklet. They can be added later as other
+Pool components without changing the core routing protocol.

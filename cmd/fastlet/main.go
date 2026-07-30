@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	"fast-sandbox/internal/dataplane/fastletproxy"
@@ -18,6 +19,7 @@ import (
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
 	"fast-sandbox/internal/fastlet/server"
 	"fast-sandbox/internal/observability"
+	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	runtimefactory "fast-sandbox/internal/runtime/factory"
 
@@ -43,7 +45,7 @@ func main() {
 	fastletPort := getEnv("FASTLET_CONTROL_PORT", ":5758")
 	runtimeName := getEnv("FAST_SANDBOX_RUNTIME", "container")
 	runtimeSocket := getEnv("RUNTIME_SOCKET", "")
-	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha1.RuntimeName(runtimeName))
+	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeName(runtimeName))
 	if err != nil {
 		klog.ErrorS(err, "Failed to resolve runtime profile")
 		os.Exit(1)
@@ -79,6 +81,16 @@ func main() {
 	defer rt.Close()
 
 	rt.SetNamespace(namespace)
+	registryProvider := registryconfig.NewFileProvider(getEnv("FAST_SANDBOX_REGISTRY_CONFIG_PATH", registryconfig.MountPath))
+	if revision, err := registryProvider.Refresh(); err != nil {
+		klog.ErrorS(err, "Failed to load Registry configuration")
+		os.Exit(1)
+	} else {
+		klog.InfoS("Registry configuration loaded", "revision", revision)
+	}
+	if configurable, ok := rt.(registryConfigurable); ok {
+		configurable.SetRegistryProvider(registryProvider)
+	}
 	if runtimeProfile.UsesFastletNetNS() {
 		networkManager, err := newNetworkManager(capacityFromEnvironment(), podUID)
 		if err != nil {
@@ -97,16 +109,22 @@ func main() {
 		configurable.SetNetworkManager(networkManager)
 		klog.InfoS("Fastlet-owned network initialized", "capacity", networkManager.Snapshot().Capacity, "cleanSlots", networkManager.Snapshot().Clean)
 	}
-	infraProfileName := getEnv("FAST_SANDBOX_INFRA_PROFILE", "minimal")
-	infraProfileHash := getEnv("FAST_SANDBOX_INFRA_PROFILE_HASH", "")
-	infraManager, err := newInfraManager(podUID, runtimeProfile, infraProfileName, infraProfileHash)
+	infraRevision := getEnv("FAST_SANDBOX_INFRA_REVISION", "")
+	infraManager, err := newInfraManager(
+		podUID,
+		runtimeProfile,
+		getEnv("FAST_SANDBOX_INFRA_PLAN_PATH", "/etc/fast-sandbox/infra/plan.json"),
+		infraRevision,
+		runtimeSocket,
+		registryProvider,
+	)
 	if err != nil {
-		klog.ErrorS(err, "Failed to configure InfraProfile")
+		klog.ErrorS(err, "Failed to configure Infra Components")
 		os.Exit(1)
 	}
 	infraConfigurable, ok := rt.(infraConfigurable)
 	if !ok {
-		klog.ErrorS(runtimecontract.ErrUnsupportedRuntime, "Runtime driver cannot accept an InfraProfile augmentation plan")
+		klog.ErrorS(runtimecontract.ErrUnsupportedRuntime, "Runtime driver cannot accept an Infra Component plan")
 		os.Exit(1)
 	}
 	infraConfigurable.SetInfraManager(infraManager)
@@ -119,7 +137,8 @@ func main() {
 		FastletPodUID: podUID, RecoverOnStart: true,
 		WarmImages:     warmImages,
 		RoutePublisher: fastletproxy.NewRoutePublisher(proxyControlClient),
-		InfraProfile:   infraProfileName, InfraProfileHash: infraManager.ProfileHash(), InfraManager: infraManager,
+		InfraRevision:  infraManager.Revision(), InfraManager: infraManager,
+		RegistryProvider: registryProvider,
 	})
 	if err != nil {
 		klog.ErrorS(err, "Failed to initialize Sandbox manager")
@@ -164,15 +183,15 @@ type infraConfigurable interface {
 	SetInfraManager(*fastletinfra.Manager)
 }
 
+type registryConfigurable interface {
+	SetRegistryProvider(registryconfig.Provider)
+}
+
 func recoverUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager, proxyClient *fastletproxy.ControlClient) {
 	for {
 		if err := manager.Recover(ctx); err == nil {
 			klog.Info("Fastlet runtime recovery completed")
-			go func() {
-				if err := manager.WarmCache(ctx); err != nil {
-					klog.ErrorS(err, "Asynchronous warmImages preparation failed")
-				}
-			}()
+			go warmCacheUntilReady(ctx, manager)
 			go prepareInfraUntilReady(ctx, manager)
 			go watchProxyRoutes(ctx, manager, proxyClient)
 			return
@@ -187,13 +206,29 @@ func recoverUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManag
 	}
 }
 
+func warmCacheUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager) {
+	for ctx.Err() == nil {
+		if err := manager.WarmCache(ctx); err == nil {
+			klog.Info("Asynchronous warmImages preparation completed")
+			return
+		} else {
+			klog.ErrorS(err, "Asynchronous warmImages preparation failed; retrying")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+	}
+}
+
 func prepareInfraUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager) {
 	for ctx.Err() == nil {
 		if err := manager.PrepareInfra(ctx); err == nil {
-			klog.Info("Fastlet InfraProfile preparation completed")
+			klog.Info("Fastlet Infra Component preparation completed")
 			return
 		} else {
-			klog.ErrorS(err, "Fastlet InfraProfile preparation failed; profile admission remains disabled")
+			klog.ErrorS(err, "Fastlet Infra Component preparation failed; revision admission remains disabled")
 		}
 		select {
 		case <-ctx.Done():
@@ -203,7 +238,14 @@ func prepareInfraUntilReady(ctx context.Context, manager *fastletsandbox.Sandbox
 	}
 }
 
-func newInfraManager(podUID string, runtimeProfile runtimecatalog.RuntimeProfile, profileName, expectedHash string) (*fastletinfra.Manager, error) {
+func newInfraManager(
+	podUID string,
+	runtimeProfile runtimecatalog.RuntimeProfile,
+	planPath string,
+	expectedRevision string,
+	runtimeSocket string,
+	registryProvider registryconfig.Provider,
+) (*fastletinfra.Manager, error) {
 	podRoot, hostRoot, err := fastletinfra.DefaultStorePaths(podUID)
 	if err != nil {
 		return nil, err
@@ -214,13 +256,28 @@ func newInfraManager(podUID string, runtimeProfile runtimecatalog.RuntimeProfile
 	if err != nil {
 		return nil, err
 	}
-	staticRoots := []string(nil)
-	if value := getEnv("FAST_SANDBOX_INFRA_STATIC_ROOTS", ""); value != "" {
-		staticRoots = filepath.SplitList(value)
+	file, err := os.Open(planPath)
+	if err != nil {
+		return nil, err
 	}
+	defer file.Close()
+	var plan infracatalog.Plan
+	if err := json.NewDecoder(file).Decode(&plan); err != nil {
+		return nil, err
+	}
+	if expectedRevision != "" && plan.Revision != expectedRevision {
+		return nil, fmt.Errorf("Infra plan revision %s does not match expected %s", plan.Revision, expectedRevision)
+	}
+	ociOpener := fastletinfra.NewContainerdOCIArtifactOpener(
+		runtimeSocket,
+		getEnv("FAST_SANDBOX_SNAPSHOTTER", "overlayfs"),
+		registryProvider,
+	)
 	return fastletinfra.NewManagerWithConfig(fastletinfra.ManagerConfig{
-		Catalog: infracatalog.Builtin(), RuntimeProfile: runtimeProfile, ProfileName: profileName,
-		ExpectedProfileHash: expectedHash, Store: store, Resolver: fastletinfra.NewPlatformResolver(staticRoots),
+		Plan: plan, RuntimeProfile: runtimeProfile, Store: store,
+		Resolver: fastletinfra.NewPlatformResolverWithOptions(fastletinfra.PlatformResolverOptions{
+			OCI: ociOpener,
+		}),
 		SandboxInitPath:   getEnv("FAST_SANDBOX_SANDBOX_INIT_PATH", "/opt/fast-sandbox/bin/sandbox-init"),
 		SandboxTunnelPath: getEnv("FAST_SANDBOX_SANDBOX_TUNNEL_PATH", "/opt/fast-sandbox/bin/sandbox-tunnel"),
 	})
@@ -253,22 +310,22 @@ func warmImagesFromEnvironment() ([]string, error) {
 	return images, nil
 }
 
-func resourceProfileFromEnvironment() (apiv1alpha1.SandboxResourceProfile, error) {
+func resourceProfileFromEnvironment() (apiv1alpha2.SandboxResourceProfile, error) {
 	cpu, err := resource.ParseQuantity(getEnv("FAST_SANDBOX_RESOURCE_CPU", "1"))
 	if err != nil {
-		return apiv1alpha1.SandboxResourceProfile{}, err
+		return apiv1alpha2.SandboxResourceProfile{}, err
 	}
 	memory, err := resource.ParseQuantity(getEnv("FAST_SANDBOX_RESOURCE_MEMORY", "512Mi"))
 	if err != nil {
-		return apiv1alpha1.SandboxResourceProfile{}, err
+		return apiv1alpha2.SandboxResourceProfile{}, err
 	}
 	pids, err := strconv.ParseInt(getEnv("FAST_SANDBOX_RESOURCE_PIDS", "256"), 10, 64)
 	if err != nil {
-		return apiv1alpha1.SandboxResourceProfile{}, err
+		return apiv1alpha2.SandboxResourceProfile{}, err
 	}
-	profile := apiv1alpha1.SandboxResourceProfile{CPU: cpu, Memory: memory, PIDs: pids}
-	if err := apiv1alpha1.ValidateSandboxResourceProfile(profile); err != nil {
-		return apiv1alpha1.SandboxResourceProfile{}, err
+	profile := apiv1alpha2.SandboxResourceProfile{CPU: cpu, Memory: memory, PIDs: pids}
+	if err := apiv1alpha2.ValidateSandboxResourceProfile(profile); err != nil {
+		return apiv1alpha2.SandboxResourceProfile{}, err
 	}
 	return profile, nil
 }

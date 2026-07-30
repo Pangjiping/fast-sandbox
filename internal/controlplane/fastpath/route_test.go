@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
 	routeauth "fast-sandbox/internal/dataplane/auth"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -28,32 +30,47 @@ func TestResolveEndpointIssuesInstanceFencedCredential(t *testing.T) {
 	verifier, err := routeauth.NewVerifier(publicKey, func() time.Time { return now })
 	require.NoError(t, err)
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
-	sandbox := &apiv1alpha1.Sandbox{
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	envelope := assignment.AssignmentEnvelope{
+		Version: assignment.AssignmentEnvelopeVersion, FastletName: "fastlet-a", FastletPodUID: "pod-a",
+		NodeName: "node-a", Attempt: 3, InstanceGeneration: 1, RouteGeneration: 5,
+		RuntimeInstanceID: "runtime-a", RuntimeProfileHash: "runtime-hash",
+		ResourceProfileHash: "resource-hash", InfraRevision: "infra-hash",
+	}
+	projected := envelope.StatusAssignment()
+	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID("uid-a")},
-		Status: apiv1alpha1.SandboxStatus{
-			RuntimeState: apiv1alpha1.ObservedStateReady, DataPlaneState: apiv1alpha1.ObservedStateReady, RouteGeneration: 5,
-			Assignment: &apiv1alpha1.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 3, NodeName: "node-a"},
+		Spec:       apiv1alpha2.SandboxSpec{PoolRef: "pool-a"},
+		Status: apiv1alpha2.SandboxStatus{
+			RuntimeState: apiv1alpha2.ObservedStateReady, DataPlaneState: apiv1alpha2.ObservedStateReady, RouteGeneration: 5,
+			Assignment: &projected, AssignmentAttempt: 3, InstanceGeneration: 1,
 		},
 	}
+	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
+	pool := &apiv1alpha2.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "tenant-a"}}
 	server := &Server{
-		K8sClient: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build(), CredentialIssuer: issuer,
+		K8sClient: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox, pool).Build(), CredentialIssuer: issuer,
 		SandboxProxyBaseURL: "https://proxy.example.test",
 	}
-	response, err := server.ResolveEndpoint(context.Background(), &fastpathv1.ResolveEndpointRequest{SandboxUid: "uid-a", TargetPort: 8080, Protocol: "http"})
+	response, err := server.ResolveEndpoint(context.Background(), &fastpathv2.ResolveEndpointRequest{
+		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: "uid-a"}},
+		Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: 8080}},
+	})
 	require.NoError(t, err)
 	require.Equal(t, "https://proxy.example.test/v1/sandboxes/uid-a/ports/8080", response.ProxyEndpoint)
 	require.Equal(t, int64(5), response.RouteGeneration)
-	token := response.RequiredHeaders["Authorization"][len("Bearer "):]
+	token := response.RequiredHeaders[dataplane.HeaderRouteCredential]
 	claims, err := verifier.VerifyExpected(token, routeauth.Claims{
-		Namespace: "tenant-a", SandboxUID: "uid-a", TargetPort: 8080, FastletPodUID: "pod-a",
+		Namespace: "tenant-a", SandboxUID: "uid-a", TargetKind: routeauth.TargetKindPort,
+		Protocol: "HTTP", TargetPort: 8080, FastletPodUID: "pod-a",
 		AssignmentAttempt: 3, RouteGeneration: 5,
 	})
 	require.NoError(t, err)
 	require.Equal(t, now.Add(time.Minute).Unix(), claims.ExpiresAt)
 
 	_, err = verifier.VerifyExpected(token, routeauth.Claims{
-		Namespace: "tenant-a", SandboxUID: "uid-a", TargetPort: 8080, FastletPodUID: "pod-a",
+		Namespace: "tenant-a", SandboxUID: "uid-a", TargetKind: routeauth.TargetKindPort,
+		Protocol: "HTTP", TargetPort: 8080, FastletPodUID: "pod-a",
 		AssignmentAttempt: 4, RouteGeneration: 6,
 	})
 	require.ErrorIs(t, err, routeauth.ErrClaimMismatch)
@@ -65,12 +82,17 @@ func TestResolveEndpointRequiresDataPlaneReady(t *testing.T) {
 	issuer, err := routeauth.NewIssuer(privateKey, time.Minute, time.Now)
 	require.NoError(t, err)
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
-	sandbox := &apiv1alpha1.Sandbox{
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", UID: types.UID("uid-a")},
-		Status:     apiv1alpha1.SandboxStatus{Assignment: &apiv1alpha1.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, NodeName: "node-a"}},
+		Spec:       apiv1alpha2.SandboxSpec{PoolRef: "pool-a"},
+		Status:     apiv1alpha2.SandboxStatus{Assignment: &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, NodeName: "node-a"}},
 	}
-	server := &Server{K8sClient: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build(), CredentialIssuer: issuer, SandboxProxyBaseURL: "http://proxy"}
-	_, err = server.ResolveEndpoint(context.Background(), &fastpathv1.ResolveEndpointRequest{SandboxUid: "uid-a", TargetPort: 80})
+	pool := &apiv1alpha2.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"}}
+	server := &Server{K8sClient: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox, pool).Build(), CredentialIssuer: issuer, SandboxProxyBaseURL: "http://proxy"}
+	_, err = server.ResolveEndpoint(context.Background(), &fastpathv2.ResolveEndpointRequest{
+		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: "uid-a"}},
+		Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: 80}},
+	})
 	require.Equal(t, codes.Unavailable, status.Code(err))
 }

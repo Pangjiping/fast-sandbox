@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -22,7 +22,7 @@ import (
 
 type fakeFastPath struct {
 	mu         sync.Mutex
-	requests   []*fastpathv1.CreateRequest
+	requests   []*fastpathv2.CreateRequest
 	deleted    []string
 	deletedSet map[string]bool
 	failAt     map[string]bool
@@ -34,17 +34,17 @@ func (function roundTripperFunc) RoundTrip(request *http.Request) (*http.Respons
 	return function(request)
 }
 
-func (f *fakeFastPath) CreateSandbox(_ context.Context, request *fastpathv1.CreateRequest, _ ...grpc.CallOption) (*fastpathv1.CreateResponse, error) {
+func (f *fakeFastPath) CreateSandbox(_ context.Context, request *fastpathv2.CreateRequest, _ ...grpc.CallOption) (*fastpathv2.SandboxInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, request)
 	if f.failAt[request.RequestId] {
 		return nil, status.Error(codes.ResourceExhausted, "full")
 	}
-	return &fastpathv1.CreateResponse{SandboxUid: "uid-" + request.RequestId, SandboxName: request.RequestId}, nil
+	return &fastpathv2.SandboxInfo{SandboxUid: "uid-" + request.RequestId, SandboxName: request.RequestId}, nil
 }
 
-func (f *fakeFastPath) DeleteSandbox(_ context.Context, request *fastpathv1.DeleteRequest, _ ...grpc.CallOption) (*fastpathv1.DeleteResponse, error) {
+func (f *fakeFastPath) DeleteSandbox(_ context.Context, request *fastpathv2.DeleteRequest, _ ...grpc.CallOption) (*fastpathv2.DeleteResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, request.SandboxName)
@@ -52,16 +52,16 @@ func (f *fakeFastPath) DeleteSandbox(_ context.Context, request *fastpathv1.Dele
 		f.deletedSet = make(map[string]bool)
 	}
 	f.deletedSet[request.SandboxName] = true
-	return &fastpathv1.DeleteResponse{Success: true}, nil
+	return &fastpathv2.DeleteResponse{Success: true}, nil
 }
 
-func (f *fakeFastPath) ListSandboxes(_ context.Context, request *fastpathv1.ListRequest, _ ...grpc.CallOption) (*fastpathv1.ListResponse, error) {
+func (f *fakeFastPath) ListSandboxes(_ context.Context, request *fastpathv2.ListRequest, _ ...grpc.CallOption) (*fastpathv2.ListResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	response := &fastpathv1.ListResponse{}
+	response := &fastpathv2.ListResponse{}
 	for _, create := range f.requests {
 		if create.Namespace == request.Namespace && !f.failAt[create.RequestId] && !f.deletedSet[create.RequestId] {
-			response.Items = append(response.Items, &fastpathv1.SandboxInfo{SandboxName: create.RequestId})
+			response.Items = append(response.Items, &fastpathv2.SandboxInfo{SandboxName: create.RequestId})
 		}
 	}
 	return response, nil
@@ -73,7 +73,7 @@ func TestRunLoadReportsBoundedResultsAndCleanup(t *testing.T) {
 		Endpoint: "fastpath:9090", Namespace: "load", Pool: "pool-a", Image: "alpine:latest",
 		Command: "/bin/sh", Args: []string{"-c", "sleep 1"}, Requests: 5, Concurrency: 3,
 		RequestTimeout: time.Second, RequestIDPrefix: "load", Cleanup: true, CleanupTimeout: time.Second, CleanupPollInterval: time.Millisecond,
-		Runtime: "container", InfraProfile: "minimal", ImageState: "warm", ImageAffinity: "hit",
+		Runtime: "container", InfraRevision: "sha256:test", ImageState: "warm", ImageAffinity: "hit",
 		NetworkSlotState: "clean", CreatePath: "fastpath", FastPathReplicas: 3, ControllerReplicas: 2, ProxyReplicas: 2,
 	}
 	report := runLoad(context.Background(), client, cfg)

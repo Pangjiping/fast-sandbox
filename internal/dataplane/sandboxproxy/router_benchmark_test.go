@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,12 +21,12 @@ func BenchmarkIndexResolveParallel(b *testing.B) {
 		suffix := strconv.Itoa(routeIndex)
 		sandboxUID := "sandbox-" + suffix
 		podUID := "pod-" + suffix
-		index.UpsertSandbox(&apiv1alpha1.Sandbox{
+		index.UpsertSandbox(&apiv1alpha2.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: sandboxUID, Namespace: "default", UID: types.UID(sandboxUID)},
-			Status: apiv1alpha1.SandboxStatus{
-				DataPlaneState:  apiv1alpha1.ObservedStateReady,
+			Status: apiv1alpha2.SandboxStatus{
+				DataPlaneState:  apiv1alpha2.ObservedStateReady,
 				RouteGeneration: int64(routeIndex + 1),
-				Assignment: &apiv1alpha1.SandboxAssignment{
+				Assignment: &apiv1alpha2.SandboxAssignment{
 					FastletName: podUID, FastletPodUID: podUID, Attempt: int64(routeIndex + 1),
 				},
 			},

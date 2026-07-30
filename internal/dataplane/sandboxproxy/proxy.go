@@ -7,6 +7,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	routeauth "fast-sandbox/internal/dataplane/auth"
@@ -34,22 +35,32 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		observability.End(span, nil)
 		observeSandboxProxy(metricResult, started)
 	}()
-	sandboxUID, targetPort, _, err := dataplane.ParseRoutePath(request.URL.Path)
+	sandboxUID, targetPort, componentName, err := parseSandboxTarget(request.URL.Path)
 	if err != nil {
 		metricResult = "invalid_route"
-		http.Error(writer, err.Error(), http.StatusBadRequest)
+		writeProxyError(writer, http.StatusBadRequest, dataplane.ProxyErrorRouteUnavailable, err.Error())
 		return
 	}
 	if p.Resolver == nil || p.Verifier == nil {
 		metricResult = "unconfigured"
-		http.Error(writer, "Sandbox Proxy is not configured", http.StatusServiceUnavailable)
+		writeProxyError(writer, http.StatusServiceUnavailable, dataplane.ProxyErrorRouteUnavailable, "Sandbox Proxy is not configured")
 		return
 	}
-	token, err := routeBearerToken(request.Header.Get("Authorization"))
+	token, err := routeCredential(request.Header.Get(dataplane.HeaderRouteCredential))
 	if err != nil {
 		metricResult = "missing_credential"
-		http.Error(writer, err.Error(), http.StatusUnauthorized)
+		writeProxyError(writer, http.StatusUnauthorized, dataplane.ProxyErrorCredentialRejected, err.Error())
 		return
+	}
+	if componentName != "" {
+		claims, verifyErr := p.Verifier.Verify(token)
+		if verifyErr != nil || claims.SandboxUID != sandboxUID ||
+			claims.TargetKind != routeauth.TargetKindComponent || claims.ComponentName != componentName {
+			metricResult = "credential_rejected"
+			writeProxyError(writer, http.StatusForbidden, dataplane.ProxyErrorCredentialRejected, "route credential rejected")
+			return
+		}
+		targetPort = claims.TargetPort
 	}
 	route, err := p.Resolver.Resolve(request.Context(), sandboxUID)
 	if err != nil {
@@ -61,7 +72,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		Namespace: route.Namespace, SandboxUID: route.SandboxUID, FastletPodUID: route.FastletPodUID,
 		AssignmentAttempt: route.AssignmentAttempt, RouteGeneration: route.RouteGeneration, TargetPort: targetPort,
 	}))
-	if _, err = p.verify(token, targetPort, route); err != nil {
+	if _, err = p.verify(token, targetPort, componentName, route); err != nil {
 		// Watch delivery may lag behind a freshly issued credential. One direct
 		// API-server read distinguishes temporary cache lag from a stale token.
 		route, err = p.Resolver.ResolveFresh(request.Context(), sandboxUID)
@@ -74,9 +85,9 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			Namespace: route.Namespace, SandboxUID: route.SandboxUID, FastletPodUID: route.FastletPodUID,
 			AssignmentAttempt: route.AssignmentAttempt, RouteGeneration: route.RouteGeneration, TargetPort: targetPort,
 		}))
-		if _, err = p.verify(token, targetPort, route); err != nil {
+		if _, err = p.verify(token, targetPort, componentName, route); err != nil {
 			metricResult = "credential_rejected"
-			http.Error(writer, "route credential rejected", http.StatusForbidden)
+			writeProxyError(writer, http.StatusForbidden, dataplane.ProxyErrorCredentialRejected, "route credential rejected")
 			return
 		}
 	}
@@ -98,38 +109,52 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			proxyRequest.SetURL(mustParseURL(upstream))
 			proxyRequest.Out.Host = proxyRequest.In.Host
 			stripForwardingAuthority(proxyRequest.Out.Header)
-			proxyRequest.Out.Header.Set("Authorization", "Bearer "+token)
-			proxyRequest.Out.Header.Set(dataplane.HeaderForwardedNamespace, route.Namespace)
-			proxyRequest.Out.Header.Set(dataplane.HeaderFastletPodUID, route.FastletPodUID)
-			proxyRequest.Out.Header.Set(dataplane.HeaderAssignmentAttempt, strconv.FormatInt(route.AssignmentAttempt, 10))
-			proxyRequest.Out.Header.Set(dataplane.HeaderRouteGeneration, strconv.FormatInt(route.RouteGeneration, 10))
+			proxyRequest.Out.Header.Set(dataplane.HeaderRouteCredential, token)
 			observability.InjectHTTP(proxyRequest.Out.Context(), proxyRequest.Out.Header)
 		},
 		ErrorHandler: func(response http.ResponseWriter, _ *http.Request, proxyErr error) {
 			metricResult = "upstream_error"
-			http.Error(response, "assigned Fastlet Proxy unavailable: "+proxyErr.Error(), http.StatusBadGateway)
+			writeProxyError(response, http.StatusBadGateway, dataplane.ProxyErrorUpstreamUnavailable, "assigned Fastlet Proxy unavailable: "+proxyErr.Error())
 		},
 	}
 	proxy.ServeHTTP(writer, request)
 }
 
-func (p *Proxy) verify(token string, targetPort uint32, route Route) (routeauth.Claims, error) {
+func parseSandboxTarget(path string) (sandboxUID string, port uint32, component string, err error) {
+	if strings.HasPrefix(path, "/v2/sandboxes/") {
+		sandboxUID, component, _, err = dataplane.ParseComponentRoutePath(path)
+		return
+	}
+	sandboxUID, port, _, err = dataplane.ParseRoutePath(path)
+	return
+}
+
+func (p *Proxy) verify(token string, targetPort uint32, componentName string, route Route) (routeauth.Claims, error) {
+	targetKind := routeauth.TargetKindPort
+	if componentName != "" {
+		targetKind = routeauth.TargetKindComponent
+	}
+	claims, err := p.Verifier.Verify(token)
+	if err != nil {
+		return routeauth.Claims{}, err
+	}
 	return p.Verifier.VerifyExpected(token, routeauth.Claims{
 		Namespace: route.Namespace, SandboxUID: route.SandboxUID, TargetPort: targetPort,
+		TargetKind: targetKind, ComponentName: componentName, Protocol: claims.Protocol,
 		FastletPodUID: route.FastletPodUID, AssignmentAttempt: route.AssignmentAttempt, RouteGeneration: route.RouteGeneration,
 	})
 }
 
-func routeBearerToken(value string) (string, error) {
-	const prefix = "Bearer "
-	if len(value) <= len(prefix) || value[:len(prefix)] != prefix {
-		return "", errors.New("Bearer route credential is required")
+func routeCredential(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", errors.New("route credential is required")
 	}
-	return value[len(prefix):], nil
+	return strings.TrimSpace(value), nil
 }
 
 func stripForwardingAuthority(headers http.Header) {
 	headers.Del(dataplane.HeaderForwardedNamespace)
+	headers.Del(dataplane.HeaderRouteCredential)
 	headers.Del(dataplane.HeaderFastletPodUID)
 	headers.Del(dataplane.HeaderAssignmentAttempt)
 	headers.Del(dataplane.HeaderRouteGeneration)
@@ -138,13 +163,18 @@ func stripForwardingAuthority(headers http.Header) {
 func writeResolveError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrSandboxNotFound):
-		http.Error(writer, err.Error(), http.StatusNotFound)
+		writeProxyError(writer, http.StatusNotFound, dataplane.ProxyErrorRouteUnavailable, err.Error())
 	case errors.Is(err, ErrSandboxNotReady), errors.Is(err, ErrFastletUnavailable):
 		writer.Header().Set("Retry-After", "1")
-		http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+		writeProxyError(writer, http.StatusServiceUnavailable, dataplane.ProxyErrorRouteUnavailable, err.Error())
 	default:
-		http.Error(writer, err.Error(), http.StatusBadGateway)
+		writeProxyError(writer, http.StatusBadGateway, dataplane.ProxyErrorRouteUnavailable, err.Error())
 	}
+}
+
+func writeProxyError(writer http.ResponseWriter, status int, code, message string) {
+	writer.Header().Set(dataplane.HeaderProxyError, code)
+	http.Error(writer, message, status)
 }
 
 func mustParseURL(value string) *url.URL {

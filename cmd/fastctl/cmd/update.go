@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -18,14 +18,15 @@ var (
 	updateExpireTime      string
 	updateFailurePolicy   string
 	updateRecoveryTimeout int32
-	updateLabels          []string
+	updateMetadata        []string
+	deleteMetadata        []string
 )
 
 // updateCmd represents the update command
 var updateCmd = &cobra.Command{
 	Use:   "update <sandbox-name>",
 	Short: "Update sandbox configuration",
-	Long: `Update sandbox properties such as expire time, failure policy, or labels.
+	Long: `Update sandbox properties such as expiration, failure policy, or metadata.
 
 Examples:
   # Extend expiration to 1 hour from now
@@ -37,8 +38,8 @@ Examples:
   # Set failure policy to auto-recreate
   fastctl update my-sandbox --failure-policy AutoRecreate
 
-  # Add labels
-  fastctl update my-sandbox --labels env=prod,tier=backend
+  # Set user metadata
+  fastctl update my-sandbox --metadata env=prod,tier=backend
 
   # Update recovery timeout
   fastctl update my-sandbox --recovery-timeout 120`,
@@ -53,10 +54,10 @@ Examples:
 			defer conn.Close()
 		}
 
-		req := &fastpathv1.UpdateRequest{
-			SandboxName: sandboxName,
-			Namespace:   namespace,
-			Labels:      make(map[string]string),
+		req := &fastpathv2.UpdateRequest{
+			SandboxName:    sandboxName,
+			Namespace:      namespace,
+			MetadataUpsert: make(map[string]string),
 		}
 
 		if cmd.Flags().Changed("expire-time") {
@@ -66,8 +67,8 @@ Examples:
 				log.Fatalf("Error: invalid expire-time: %v", err)
 			}
 			klog.V(4).InfoS("Updating expire-time", "sandboxName", sandboxName, "expireTime", seconds)
-			req.Update = &fastpathv1.UpdateRequest_ExpireTimeSeconds{
-				ExpireTimeSeconds: seconds,
+			req.Update = &fastpathv2.UpdateRequest_ExpiresAtUnixSeconds{
+				ExpiresAtUnixSeconds: seconds,
 			}
 		}
 
@@ -78,33 +79,33 @@ Examples:
 				log.Fatalf("Error: invalid failure-policy: %v", err)
 			}
 			klog.V(4).InfoS("Updating failure-policy", "sandboxName", sandboxName, "failurePolicy", policy)
-			req.Update = &fastpathv1.UpdateRequest_FailurePolicy{
+			req.Update = &fastpathv2.UpdateRequest_FailurePolicy{
 				FailurePolicy: policy,
 			}
 		}
 
 		if cmd.Flags().Changed("recovery-timeout") {
 			klog.V(4).InfoS("Updating recovery-timeout", "sandboxName", sandboxName, "recoveryTimeout", updateRecoveryTimeout)
-			req.Update = &fastpathv1.UpdateRequest_RecoveryTimeoutSeconds{
+			req.Update = &fastpathv2.UpdateRequest_RecoveryTimeoutSeconds{
 				RecoveryTimeoutSeconds: updateRecoveryTimeout,
 			}
 		}
 
-		if len(updateLabels) > 0 {
-			klog.V(4).InfoS("Updating labels", "sandboxName", sandboxName, "labels", updateLabels)
-			for _, label := range updateLabels {
-				parts := strings.SplitN(label, "=", 2)
+		if len(updateMetadata) > 0 {
+			klog.V(4).InfoS("Updating metadata", "sandboxName", sandboxName, "metadata", updateMetadata)
+			for _, item := range updateMetadata {
+				parts := strings.SplitN(item, "=", 2)
 				if len(parts) != 2 {
-					klog.ErrorS(nil, "Invalid label format", "label", label)
-					log.Fatalf("Error: invalid label format '%s', expected key=value", label)
+					log.Fatalf("Error: invalid metadata format '%s', expected key=value", item)
 				}
-				req.Labels[parts[0]] = parts[1]
+				req.MetadataUpsert[parts[0]] = parts[1]
 			}
 		}
+		req.MetadataDeleteKeys = append(req.MetadataDeleteKeys, deleteMetadata...)
 
-		if req.Update == nil && len(req.Labels) == 0 {
+		if req.Update == nil && len(req.MetadataUpsert) == 0 && len(req.MetadataDeleteKeys) == 0 {
 			klog.ErrorS(nil, "No update field specified")
-			log.Fatal("Error: at least one update field must be specified (--expire-time, --failure-policy, --recovery-timeout, or --labels)")
+			log.Fatal("Error: at least one update field must be specified (--expire-time, --failure-policy, --recovery-timeout, --metadata, or --delete-metadata)")
 		}
 
 		klog.V(4).InfoS("Sending UpdateSandbox request", "sandboxName", sandboxName)
@@ -135,7 +136,8 @@ func init() {
 	updateCmd.Flags().StringVar(&updateExpireTime, "expire-time", "", "Expiration time (Unix timestamp or '0' to remove)")
 	updateCmd.Flags().StringVar(&updateFailurePolicy, "failure-policy", "", "Failure policy (Manual|AutoRecreate)")
 	updateCmd.Flags().Int32Var(&updateRecoveryTimeout, "recovery-timeout", 0, "Recovery timeout in seconds")
-	updateCmd.Flags().StringSliceVar(&updateLabels, "labels", []string{}, "Labels to set (key=value format)")
+	updateCmd.Flags().StringSliceVar(&updateMetadata, "metadata", nil, "Metadata to set (key=value)")
+	updateCmd.Flags().StringSliceVar(&deleteMetadata, "delete-metadata", nil, "Metadata keys to delete")
 }
 
 func parseExpireTime(input string) (int64, error) {
@@ -151,13 +153,13 @@ func parseExpireTime(input string) (int64, error) {
 	return seconds, nil
 }
 
-func parseFailurePolicy(input string) (fastpathv1.FailurePolicy, error) {
+func parseFailurePolicy(input string) (fastpathv2.FailurePolicy, error) {
 	switch strings.ToLower(input) {
 	case "manual":
-		return fastpathv1.FailurePolicy_MANUAL, nil
+		return fastpathv2.FailurePolicy_MANUAL, nil
 	case "auto-recreate", "autorecreate", "auto":
-		return fastpathv1.FailurePolicy_AUTO_RECREATE, nil
+		return fastpathv2.FailurePolicy_AUTO_RECREATE, nil
 	default:
-		return fastpathv1.FailurePolicy_MANUAL, fmt.Errorf("unknown failure policy: %s (valid: Manual, AutoRecreate)", input)
+		return fastpathv2.FailurePolicy_MANUAL, fmt.Errorf("unknown failure policy: %s (valid: Manual, AutoRecreate)", input)
 	}
 }

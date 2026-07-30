@@ -5,7 +5,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: fast-sandbox-route-keys
-  namespace: default
+  namespace: fast-sandbox-system
   labels:
     fast-sandbox.io/development-only: "true"
 type: Opaque

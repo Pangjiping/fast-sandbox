@@ -35,6 +35,9 @@ func TestQuickStartConfigCreatesMissingFileAndPreservesExistingFile(t *testing.T
 	if got := config["proxy-endpoint"]; got != "http://localhost:18081" {
 		t.Fatalf("proxy endpoint = %q, want http://localhost:18081", got)
 	}
+	if got := config["namespace"]; got != "fast-sandbox" {
+		t.Fatalf("namespace = %q, want fast-sandbox", got)
+	}
 	info, err := os.Stat(configPath)
 	if err != nil {
 		t.Fatalf("stat generated config: %v", err)
@@ -73,6 +76,7 @@ func TestQuickStartPrintExplainsConfigState(t *testing.T) {
 	if strings.Contains(created, "export FAST_SANDBOX_") {
 		t.Fatalf("created output should not require endpoint exports:\n%s", created)
 	}
+	assertQuickStartExamplesUseConfiguredEndpoints(t, created)
 
 	existing := runScript(t, scriptPath,
 		"pool-a", "sandbox-a", "execd", "existing", "19090", "18081",
@@ -85,6 +89,32 @@ func TestQuickStartPrintExplainsConfigState(t *testing.T) {
 	} {
 		if !strings.Contains(existing, want) {
 			t.Fatalf("existing output missing %q:\n%s", want, existing)
+		}
+	}
+	assertQuickStartExamplesUseConfiguredEndpoints(t, existing)
+}
+
+func assertQuickStartExamplesUseConfiguredEndpoints(t *testing.T, output string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"bin/fastctl --endpoint",
+		"bin/fastctl --proxy-endpoint",
+		"--proxy-endpoint http://localhost:",
+		"kubectl wait --for=jsonpath='{.status.dataPlaneState}'=Ready",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("Quick Start output contains obsolete endpoint/readiness instruction %q:\n%s", forbidden, output)
+		}
+	}
+	for _, want := range []string{
+		"Endpoint precedence: explicit flags > environment > config file > defaults.",
+		"example commands intentionally omit --endpoint and --proxy-endpoint",
+		"bin/fastctl run sandbox-a",
+		"bin/fastctl opensandbox exec sandbox-a",
+		"bin/fastctl delete sandbox-a",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Quick Start output missing %q:\n%s", want, output)
 		}
 	}
 }

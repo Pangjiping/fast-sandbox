@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	e2eenv "fast-sandbox/test/e2e/env"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	DefaultControllerNamespace = "default"
+	DefaultControllerNamespace = "fast-sandbox-system"
 	defaultNamespacePrefix     = "fsb-e2e"
 	maxNamespaceLength         = 63
 	defaultFastletImage        = "fast-sandbox/fastlet:dev"
@@ -181,7 +181,7 @@ func (e *SuiteEnv) MustKubeClient(t *testing.T) client.Client {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
 	}
-	if err := apiv1alpha1.AddToScheme(scheme); err != nil {
+	if err := apiv1alpha2.AddToScheme(scheme); err != nil {
 		t.Fatalf("add fast-sandbox scheme: %v", err)
 	}
 
@@ -217,8 +217,8 @@ func FastletImage() string {
 
 // SmallSandboxResourceProfile keeps e2e Pool capacity arithmetic realistic
 // while fitting several isolated Fastlet Pods on a single-node kind cluster.
-func SmallSandboxResourceProfile() apiv1alpha1.SandboxResourceProfile {
-	return apiv1alpha1.SandboxResourceProfile{
+func SmallSandboxResourceProfile() apiv1alpha2.SandboxResourceProfile {
+	return apiv1alpha2.SandboxResourceProfile{
 		CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64,
 	}
 }

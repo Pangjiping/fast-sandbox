@@ -10,10 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletcache "fast-sandbox/internal/fastlet/cache"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
 	"fast-sandbox/pkg/util/idgen"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -22,18 +23,18 @@ import (
 
 type SandboxManagerConfig struct {
 	Capacity           int
-	RuntimeName        apiv1alpha1.RuntimeName
+	RuntimeName        apiv1alpha2.RuntimeName
 	RuntimeProfileHash string
-	ResourceProfile    *apiv1alpha1.SandboxResourceProfile
+	ResourceProfile    *apiv1alpha2.SandboxResourceProfile
 	FastletPodUID      string
 	Clock              Clock
 	RecoverOnStart     bool
 	CacheEpoch         string
 	WarmImages         []string
 	RoutePublisher     RoutePublisher
-	InfraProfile       string
-	InfraProfileHash   string
+	InfraRevision      string
 	InfraManager       *fastletinfra.Manager
+	RegistryProvider   registryconfig.Provider
 }
 
 type SandboxManager struct {
@@ -42,10 +43,9 @@ type SandboxManager struct {
 	runtimeName         string
 	capacity            int
 	runtimeProfileHash  string
-	resourceProfile     *apiv1alpha1.SandboxResourceProfile
+	resourceProfile     *apiv1alpha2.SandboxResourceProfile
 	resourceProfileHash string
-	infraProfile        string
-	infraProfileHash    string
+	infraRevision       string
 	infraManager        *fastletinfra.Manager
 	infraReady          bool
 	infraMessage        string
@@ -62,8 +62,11 @@ type SandboxManager struct {
 	cacheTracker        *fastletcache.Tracker
 	cacheProtection     *fastletcache.ProtectionIndex
 	warmImages          []string
+	warmImageStates     map[string]fastletapi.WarmImageState
+	registryProvider    registryconfig.Provider
 	routePublisher      RoutePublisher
 	dataPlaneWorkers    map[string]dataPlaneWorker
+	readinessChanged    chan struct{}
 	heartbeatSequence   atomic.Uint64
 	// sandboxes  sandboxID -> metadata
 	sandboxes map[string]*SandboxMetadata
@@ -91,10 +94,10 @@ func NewSandboxManagerWithConfig(runtime RuntimeDriver, config SandboxManagerCon
 			return nil, fmt.Errorf("generate cache epoch: %w", err)
 		}
 	}
-	var profile *apiv1alpha1.SandboxResourceProfile
+	var profile *apiv1alpha2.SandboxResourceProfile
 	resourceHash := ""
 	if config.ResourceProfile != nil {
-		if err := apiv1alpha1.ValidateSandboxResourceProfile(*config.ResourceProfile); err != nil {
+		if err := apiv1alpha2.ValidateSandboxResourceProfile(*config.ResourceProfile); err != nil {
 			return nil, err
 		}
 		copy := *config.ResourceProfile
@@ -106,23 +109,22 @@ func NewSandboxManagerWithConfig(runtime RuntimeDriver, config SandboxManagerCon
 		cacheSource = source
 	}
 	protection := fastletcache.NewProtectionIndex(config.Clock.Now)
+	warmImageStates := make(map[string]fastletapi.WarmImageState, len(config.WarmImages))
 	for _, image := range config.WarmImages {
 		protection.Protect(image, fastletcache.ProtectWarm)
+		warmImageStates[image] = fastletapi.WarmImageState{Image: image, State: "Pulling"}
 	}
 	if config.InfraManager != nil {
-		if config.InfraProfile != "" && config.InfraManager.ProfileName() != config.InfraProfile {
-			return nil, fmt.Errorf("InfraProfile %s does not match manager profile %s", config.InfraProfile, config.InfraManager.ProfileName())
-		}
-		if config.InfraProfileHash != "" && config.InfraManager.ProfileHash() != config.InfraProfileHash {
-			return nil, fmt.Errorf("InfraProfile hash %s does not match manager hash %s", config.InfraProfileHash, config.InfraManager.ProfileHash())
+		if config.InfraRevision != "" && config.InfraManager.Revision() != config.InfraRevision {
+			return nil, fmt.Errorf("Infra revision %s does not match manager revision %s", config.InfraRevision, config.InfraManager.Revision())
 		}
 	}
 	return &SandboxManager{
 		runtime: runtime, runtimeName: string(config.RuntimeName), capacity: config.Capacity,
 		runtimeProfileHash: config.RuntimeProfileHash,
 		resourceProfile:    profile, resourceProfileHash: resourceHash,
-		infraProfile: config.InfraProfile, infraProfileHash: config.InfraProfileHash,
-		infraManager: config.InfraManager, infraReady: config.InfraManager == nil,
+		infraRevision: config.InfraRevision,
+		infraManager:  config.InfraManager, infraReady: config.InfraManager == nil,
 		fastletPodUID: config.FastletPodUID,
 		clock:         config.Clock,
 		recovering:    config.RecoverOnStart, runtimeReady: !config.RecoverOnStart,
@@ -131,10 +133,20 @@ func NewSandboxManagerWithConfig(runtime RuntimeDriver, config SandboxManagerCon
 		diagnostics:     make(map[string][]fastletapi.SandboxDiagnosticEvent),
 		cacheTracker:    fastletcache.NewTracker(cacheSource, config.CacheEpoch, fastletcache.DefaultMaxInventory),
 		cacheProtection: protection, warmImages: append([]string(nil), config.WarmImages...),
+		warmImageStates:  warmImageStates,
+		registryProvider: config.RegistryProvider,
+		readinessChanged: make(chan struct{}),
 		routePublisher:   config.RoutePublisher,
 		dataPlaneWorkers: make(map[string]dataPlaneWorker),
 		sandboxes:        make(map[string]*SandboxMetadata),
 	}, nil
+}
+
+func (m *SandboxManager) RegistryRevision() string {
+	if m.registryProvider == nil {
+		return ""
+	}
+	return m.registryProvider.Revision()
 }
 
 func (m *SandboxManager) WarmCache(ctx context.Context) error {
@@ -165,15 +177,40 @@ func (m *SandboxManager) WarmCache(ctx context.Context) error {
 			}
 			if err := cache.PullImage(ctx, image); err != nil {
 				recordWarmImagePull(err)
+				m.setWarmImageState(image, "Failed", err.Error())
 				mu.Lock()
 				result = errors.Join(result, fmt.Errorf("warm image %s: %w", image, err))
 				mu.Unlock()
 			} else {
 				recordWarmImagePull(nil)
+				m.setWarmImageState(image, "Cached", "")
 			}
 		}()
 	}
 	group.Wait()
+	return result
+}
+
+func (m *SandboxManager) setWarmImageState(image, state, message string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	m.warmImageStates[image] = fastletapi.WarmImageState{Image: image, State: state, Message: message}
+}
+
+func (m *SandboxManager) WarmImageStates() []fastletapi.WarmImageState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]fastletapi.WarmImageState, 0, len(m.warmImages))
+	for _, image := range m.warmImages {
+		state, found := m.warmImageStates[image]
+		if !found {
+			state = fastletapi.WarmImageState{Image: image, State: "Pulling"}
+		}
+		result = append(result, state)
+	}
 	return result
 }
 
@@ -219,14 +256,14 @@ func (m *SandboxManager) PrepareInfra(ctx context.Context) error {
 	return nil
 }
 
-func (m *SandboxManager) InfraStatus() (string, string, bool, []string, string) {
+func (m *SandboxManager) InfraStatus() (string, bool, []string, string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	artifacts := []string(nil)
 	if m.infraManager != nil && m.infraReady {
 		artifacts = m.infraManager.ArtifactReferences()
 	}
-	return m.infraProfile, m.infraProfileHash, m.infraReady, artifacts, m.infraMessage
+	return m.infraRevision, m.infraReady, artifacts, m.infraMessage
 }
 
 func (m *SandboxManager) PlanCacheEviction(candidates []string) []string {
@@ -260,7 +297,7 @@ func (m *SandboxManager) validateProfiles(spec *fastletapi.SandboxSpec) error {
 		return fmt.Errorf("%w: runtime profile hash %q does not match Fastlet profile %q", ErrSandboxProfileMismatch, spec.RuntimeProfileHash, m.runtimeProfileHash)
 	}
 	if m.resourceProfile == nil {
-		return m.validateInfraProfile(spec)
+		return m.validateInfraRevision(spec)
 	}
 	if spec.ResourceProfileHash != m.resourceProfileHash {
 		return fmt.Errorf("%w: resource profile hash %q does not match Fastlet profile %q", ErrSandboxProfileMismatch, spec.ResourceProfileHash, m.resourceProfileHash)
@@ -285,15 +322,12 @@ func (m *SandboxManager) validateProfiles(spec *fastletapi.SandboxSpec) error {
 	spec.CPU = m.resourceProfile.CPU.String()
 	spec.Memory = m.resourceProfile.Memory.String()
 	spec.PIDs = m.resourceProfile.PIDs
-	return m.validateInfraProfile(spec)
+	return m.validateInfraRevision(spec)
 }
 
-func (m *SandboxManager) validateInfraProfile(spec *fastletapi.SandboxSpec) error {
-	if m.infraProfile != "" && spec.InfraProfile != m.infraProfile {
-		return fmt.Errorf("%w: InfraProfile %q does not match Fastlet profile %q", ErrSandboxProfileMismatch, spec.InfraProfile, m.infraProfile)
-	}
-	if m.infraProfileHash != "" && spec.InfraProfileHash != m.infraProfileHash {
-		return fmt.Errorf("%w: InfraProfile hash %q does not match Fastlet profile %q", ErrSandboxProfileMismatch, spec.InfraProfileHash, m.infraProfileHash)
+func (m *SandboxManager) validateInfraRevision(spec *fastletapi.SandboxSpec) error {
+	if m.infraRevision != "" && spec.InfraRevision != m.infraRevision {
+		return fmt.Errorf("%w: Infra revision %q does not match Fastlet revision %q", ErrSandboxProfileMismatch, spec.InfraRevision, m.infraRevision)
 	}
 	return nil
 }
@@ -399,7 +433,7 @@ func (m *SandboxManager) GetSandboxStatuses(ctx context.Context) []fastletapi.Sa
 			AssignmentAttempt:  meta.AssignmentAttempt,
 			Phase:              meta.Phase,
 			Message:            runtimeStatus,
-			InfraDiagnostics:   apiInfraDiagnostics(meta.InfraDiagnostics),
+			InfraDiagnostics:   apiInfraDiagnostics(meta.InfraDiagnostics, meta.InfraServices, meta.RouteGeneration, meta.Phase == "running"),
 			CreatedAt:          meta.CreatedAt,
 		})
 	}
@@ -409,14 +443,14 @@ func (m *SandboxManager) GetSandboxStatuses(ctx context.Context) []fastletapi.Sa
 
 func (m *SandboxManager) RuntimeDiagnostics(ctx context.Context) fastletapi.RuntimeDiagnostics {
 	report := m.runtime.ProbeCapabilities(ctx)
-	infraProfile, infraHash, infraReady, _, infraMessage := m.InfraStatus()
+	infraRevision, infraReady, _, infraMessage := m.InfraStatus()
 	infraState := "Preparing"
 	if infraReady {
 		infraState = "Ready"
 	}
 	return fastletapi.RuntimeDiagnostics{
 		RuntimeProfileHash: m.runtimeProfileHash,
-		InfraProfile:       infraProfile, InfraProfileHash: infraHash, InfraState: infraState, InfraMessage: infraMessage,
+		InfraRevision:      infraRevision, InfraState: infraState, InfraMessage: infraMessage,
 		State:   string(report.State),
 		Reason:  report.Reason,
 		Message: report.Message,

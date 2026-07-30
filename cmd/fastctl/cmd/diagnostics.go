@@ -10,7 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -43,13 +43,13 @@ var diagnosticsSandboxCmd = &cobra.Command{
 	},
 }
 
-func fetchSandboxDiagnostics(ctx context.Context, client fastpathv1.FastPathServiceClient, name, namespace string, limit int32) (*fastpathv1.SandboxDiagnosticsResponse, error) {
-	return client.GetSandboxDiagnostics(ctx, &fastpathv1.SandboxDiagnosticsRequest{
+func fetchSandboxDiagnostics(ctx context.Context, client fastpathv2.FastPathServiceClient, name, namespace string, limit int32) (*fastpathv2.SandboxDiagnosticsResponse, error) {
+	return client.GetSandboxDiagnostics(ctx, &fastpathv2.SandboxDiagnosticsRequest{
 		SandboxName: name, Namespace: namespace, Limit: limit,
 	})
 }
 
-func printSandboxDiagnostics(writer io.Writer, response *fastpathv1.SandboxDiagnosticsResponse, output string) error {
+func printSandboxDiagnostics(writer io.Writer, response *fastpathv2.SandboxDiagnosticsResponse, output string) error {
 	if response == nil {
 		return fmt.Errorf("diagnostics response is empty")
 	}

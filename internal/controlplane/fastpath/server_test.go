@@ -5,15 +5,17 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/assignment"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -97,6 +99,26 @@ func (f *fastpathFastlet) SandboxDiagnostics(context.Context, string, *fastletap
 	return &fastletapi.SandboxDiagnosticsResponse{}, nil
 }
 
+func (f *fastpathFastlet) WaitSandboxReady(_ context.Context, _ string, request *fastletapi.WaitSandboxReadyRequest) (*fastletapi.WaitSandboxReadyResponse, error) {
+	if f.diagnosticsErr != nil {
+		return nil, f.diagnosticsErr
+	}
+	if f.diagnostics != nil && f.diagnostics.Sandbox != nil {
+		return &fastletapi.WaitSandboxReadyResponse{
+			Sandbox: f.diagnostics.Sandbox,
+			Ready:   f.diagnostics.Sandbox.Phase == "running",
+		}, nil
+	}
+	status := &fastletapi.SandboxStatus{SandboxID: request.Identity.SandboxUID, Phase: "running"}
+	if request.ComponentName != "" {
+		status.InfraDiagnostics = []fastletapi.InfraComponentDiagnostic{{
+			Component: request.ComponentName, State: "Ready", Protocol: "HTTP", Port: 44772,
+			ObservedRouteGeneration: request.Identity.RouteGeneration,
+		}}
+	}
+	return &fastletapi.WaitSandboxReadyResponse{Sandbox: status, Ready: true}, nil
+}
+
 type countingUIDClient struct {
 	client.Client
 	mu      sync.Mutex
@@ -109,7 +131,7 @@ type countingUIDClient struct {
 func (c *countingUIDClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
 	c.mu.Lock()
 	c.creates++
-	if sandbox, ok := object.(*apiv1alpha1.Sandbox); ok && sandbox.UID == "" {
+	if sandbox, ok := object.(*apiv1alpha2.Sandbox); ok && sandbox.UID == "" {
 		sandbox.UID = types.UID("uid-" + sandbox.Name)
 	}
 	c.mu.Unlock()
@@ -161,12 +183,80 @@ func TestCreateHappyPathUsesExactlyTwoDownstreamIO(t *testing.T) {
 	require.NotEmpty(t, fastlet.createRequests[0].Identity.RuntimeInstanceID)
 	fastlet.mu.Unlock()
 
-	var persisted apiv1alpha1.Sandbox
+	var persisted apiv1alpha2.Sandbox
 	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "request-a"}, &persisted))
 	require.Nil(t, persisted.Status.Assignment, "Controller projection is asynchronous")
 	envelope, err := assignment.AssignmentFromAnnotation(&persisted)
 	require.NoError(t, err)
 	require.Equal(t, "fastlet-a", envelope.FastletName)
+}
+
+func TestGetAndListPoolsExposeSafeDiscoveryState(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	poolB := discoveryPool("pool-b", "fast-sandbox")
+	poolA := discoveryPool("pool-a", "fast-sandbox")
+	other := discoveryPool("pool-other", "other")
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(poolB, poolA, other).Build()
+	server := &Server{K8sClient: k8sClient, DefaultNamespace: "fast-sandbox"}
+
+	info, err := server.GetPool(context.Background(), &fastpathv2.GetPoolRequest{PoolName: "pool-a"})
+	require.NoError(t, err)
+	require.Equal(t, "fast-sandbox", info.Namespace)
+	require.Equal(t, "pool-a", info.Name)
+	require.Equal(t, "container", info.Runtime)
+	require.Equal(t, "500m", info.SandboxCpu)
+	require.Equal(t, "512Mi", info.SandboxMemory)
+	require.Equal(t, int64(128), info.SandboxPids)
+	require.Equal(t, int32(8), info.MaxSandboxesPerPod)
+	require.Equal(t, int32(3), info.TotalFastlets)
+	require.Equal(t, int32(2), info.ReadyFastlets)
+	require.Equal(t, int32(1), info.IdleFastlets)
+	require.Equal(t, "sha256:infra", info.InfraRevision)
+	require.Equal(t, int32(2), info.PreparedFastlets)
+	require.Equal(t, "execd", info.Components[0].Name)
+	require.Equal(t, "HTTP", info.Components[0].Protocol)
+	require.Equal(t, uint32(44772), info.Components[0].Port)
+	require.Equal(t, int64(17), info.Registry.TargetGeneration)
+	require.Equal(t, int32(2), info.Registry.AppliedFastlets)
+	require.Equal(t, "alpine:latest", info.WarmImages[0].Image)
+	require.Equal(t, int32(2), info.WarmImages[0].CachedFastlets)
+
+	listed, err := server.ListPools(context.Background(), &fastpathv2.ListPoolsRequest{})
+	require.NoError(t, err)
+	require.Len(t, listed.Items, 2)
+	require.Equal(t, "pool-a", listed.Items[0].Name)
+	require.Equal(t, "pool-b", listed.Items[1].Name)
+
+	_, err = server.GetPool(context.Background(), &fastpathv2.GetPoolRequest{})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func discoveryPool(name, namespace string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime:            apiv1alpha2.RuntimeContainer,
+			MaxSandboxesPerPod: 8,
+			SandboxResources: apiv1alpha2.SandboxResourceProfile{
+				CPU: resource.MustParse("500m"), Memory: resource.MustParse("512Mi"), PIDs: 128,
+			},
+		},
+		Status: apiv1alpha2.SandboxPoolStatus{
+			TotalFastlets: 3, ReadyPods: 2, IdleFastlets: 1,
+			InfraRevision: "sha256:infra", PreparedFastlets: 2,
+			InfraComponents: []apiv1alpha2.InfraComponentSummary{{
+				Name: "execd", Protocol: "HTTP", Port: 44772, HealthKind: "httpGet",
+			}},
+			Registry: apiv1alpha2.RegistryApplicationStatus{
+				TargetGeneration: 17, AppliedFastlets: 2, TotalFastlets: 3,
+			},
+			WarmImages: []apiv1alpha2.WarmImageStatus{{
+				Image: "alpine:latest", DesiredFastlets: 3, CachedFastlets: 2, PullingFastlets: 1,
+				ObservedGeneration: 4,
+			}},
+		},
+	}
 }
 
 func TestCreateReturnsWhenRuntimeIsReadyAndDataPlaneIsPending(t *testing.T) {
@@ -204,7 +294,7 @@ func TestFastletRejectionKeepsPersistedIntent(t *testing.T) {
 	}
 	_, err := server.CreateSandbox(context.Background(), createRequest("request-a"))
 	require.Equal(t, codes.ResourceExhausted, status.Code(err))
-	var persisted apiv1alpha1.Sandbox
+	var persisted apiv1alpha2.Sandbox
 	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "request-a"}, &persisted))
 	require.NotEmpty(t, persisted.Annotations[assignment.AnnotationAssignment])
 }
@@ -244,7 +334,7 @@ func TestExplicitRejectionCASesToSecondCandidate(t *testing.T) {
 	response, err := server.CreateSandbox(context.Background(), createRequest("request-a"))
 	require.NoError(t, err)
 	require.Equal(t, "fastlet-b", response.FastletPod)
-	var persisted apiv1alpha1.Sandbox
+	var persisted apiv1alpha2.Sandbox
 	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "request-a"}, &persisted))
 	envelope, err := assignment.AssignmentFromAnnotation(&persisted)
 	require.NoError(t, err)
@@ -265,7 +355,7 @@ func TestAmbiguousFailureNeverReassigns(t *testing.T) {
 
 	_, err := server.CreateSandbox(context.Background(), createRequest("request-a"))
 	require.Equal(t, codes.Unavailable, status.Code(err))
-	var persisted apiv1alpha1.Sandbox
+	var persisted apiv1alpha2.Sandbox
 	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "request-a"}, &persisted))
 	envelope, parseErr := assignment.AssignmentFromAnnotation(&persisted)
 	require.NoError(t, parseErr)
@@ -278,7 +368,7 @@ func TestAmbiguousFailureNeverReassigns(t *testing.T) {
 func TestConcurrentSameRequestConvergesToOneCRDAndIdentity(t *testing.T) {
 	server, k8sClient, _, fastlet := newV2Server(t)
 	const workers = 20
-	responses := make(chan *fastpathv1.CreateResponse, workers)
+	responses := make(chan *fastpathv2.SandboxInfo, workers)
 	errorsFound := make(chan error, workers)
 	var group sync.WaitGroup
 	for range workers {
@@ -306,7 +396,7 @@ func TestConcurrentSameRequestConvergesToOneCRDAndIdentity(t *testing.T) {
 		}
 		require.Equal(t, uid, response.SandboxUid)
 	}
-	var list apiv1alpha1.SandboxList
+	var list apiv1alpha2.SandboxList
 	require.NoError(t, k8sClient.Client.List(context.Background(), &list))
 	require.Len(t, list.Items, 1)
 	fastlet.mu.Lock()
@@ -320,10 +410,10 @@ func TestConcurrentSameRequestConvergesToOneCRDAndIdentity(t *testing.T) {
 	fastlet.mu.Unlock()
 }
 
-func TestCreateRejectsSplitNameAndRequestID(t *testing.T) {
+func TestCreateRejectsExpiredDeadlineBeforeCRDWrite(t *testing.T) {
 	server, k8sClient, _, _ := newV2Server(t)
 	request := createRequest("request-a")
-	request.Name = "different"
+	request.ExpiresAtUnixSeconds = time.Now().Add(-time.Minute).Unix()
 	_, err := server.CreateSandbox(context.Background(), request)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 	creates, _, _, _ := k8sClient.counts()
@@ -332,21 +422,21 @@ func TestCreateRejectsSplitNameAndRequestID(t *testing.T) {
 
 func TestDeleteAndUpdateOnlyCommitDesiredState(t *testing.T) {
 	server, k8sClient, _, _ := newV2Server(t)
-	sandbox := &apiv1alpha1.Sandbox{
+	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", Finalizers: []string{"sandbox.fast.io/cleanup"}},
-		Spec:       apiv1alpha1.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
+		Spec:       apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
 	}
 	require.NoError(t, k8sClient.Client.Create(context.Background(), sandbox))
-	update, err := server.UpdateSandbox(context.Background(), &fastpathv1.UpdateRequest{
+	update, err := server.UpdateSandbox(context.Background(), &fastpathv2.UpdateRequest{
 		SandboxName: "sandbox-a", Namespace: "default",
-		Update: &fastpathv1.UpdateRequest_ExpireTimeSeconds{ExpireTimeSeconds: 1234},
+		Update: &fastpathv2.UpdateRequest_ExpiresAtUnixSeconds{ExpiresAtUnixSeconds: time.Now().Add(time.Hour).Unix()},
 	})
 	require.NoError(t, err)
 	require.True(t, update.Success)
-	deleted, err := server.DeleteSandbox(context.Background(), &fastpathv1.DeleteRequest{SandboxName: "sandbox-a", Namespace: "default"})
+	deleted, err := server.DeleteSandbox(context.Background(), &fastpathv2.DeleteRequest{SandboxName: "sandbox-a", Namespace: "default"})
 	require.NoError(t, err)
 	require.True(t, deleted.Success)
-	var terminating apiv1alpha1.Sandbox
+	var terminating apiv1alpha2.Sandbox
 	require.NoError(t, k8sClient.Client.Get(context.Background(), client.ObjectKeyFromObject(sandbox), &terminating))
 	require.NotNil(t, terminating.DeletionTimestamp)
 }
@@ -354,8 +444,8 @@ func TestDeleteAndUpdateOnlyCommitDesiredState(t *testing.T) {
 func newV2Server(t *testing.T) (*Server, *countingUIDClient, *fastpathRegistry, *fastpathFastlet) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
-	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&apiv1alpha1.Sandbox{}).Build()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&apiv1alpha2.Sandbox{}).Build()
 	k8sClient := &countingUIDClient{Client: baseClient}
 	candidate := testCandidate("fastlet-a", "pod-a", "10.0.0.1")
 	registry := &fastpathRegistry{
@@ -375,7 +465,7 @@ func TestGetSandboxDiagnosticsUsesAnnotationAndDegradesWhenFastletFails(t *testi
 		Timestamp: metav1.Now().Time, Level: "info", Source: "runtime", Phase: "running", Message: "ready",
 	}}}
 
-	diagnostics, err := server.GetSandboxDiagnostics(context.Background(), &fastpathv1.SandboxDiagnosticsRequest{SandboxName: created.SandboxName, Namespace: "default"})
+	diagnostics, err := server.GetSandboxDiagnostics(context.Background(), &fastpathv2.SandboxDiagnosticsRequest{SandboxName: created.SandboxName, Namespace: "default"})
 	require.NoError(t, err)
 	require.True(t, diagnostics.FastletReachable)
 	require.Equal(t, "status-projection-pending", diagnostics.AssignmentState)
@@ -384,7 +474,7 @@ func TestGetSandboxDiagnosticsUsesAnnotationAndDegradesWhenFastletFails(t *testi
 
 	fastlet.diagnostics = nil
 	fastlet.diagnosticsErr = errors.New("connection refused")
-	diagnostics, err = server.GetSandboxDiagnostics(context.Background(), &fastpathv1.SandboxDiagnosticsRequest{SandboxName: created.SandboxName, Namespace: "default"})
+	diagnostics, err = server.GetSandboxDiagnostics(context.Background(), &fastpathv2.SandboxDiagnosticsRequest{SandboxName: created.SandboxName, Namespace: "default"})
 	require.NoError(t, err)
 	require.False(t, diagnostics.FastletReachable)
 	require.Contains(t, diagnostics.FastletError, "connection refused")
@@ -393,13 +483,13 @@ func TestGetSandboxDiagnosticsUsesAnnotationAndDegradesWhenFastletFails(t *testi
 func testCandidate(name, uid, ip string) placement.FastletInfo {
 	return placement.FastletInfo{
 		ID: placement.FastletID(name), PodName: name, PodUID: uid, PodIP: ip, NodeName: "node-a",
-		RuntimeName: apiv1alpha1.RuntimeContainer, RuntimeProfileHash: "runtime-hash",
-		ResourceProfileHash: "resource-hash", InfraProfile: "minimal", InfraProfileHash: "infra-hash", InfraReady: true,
+		RuntimeName: apiv1alpha2.RuntimeContainer, RuntimeProfileHash: "runtime-hash",
+		ResourceProfileHash: "resource-hash", InfraRevision: "infra-hash", InfraReady: true,
 	}
 }
 
-func createRequest(requestID string) *fastpathv1.CreateRequest {
-	return &fastpathv1.CreateRequest{
+func createRequest(requestID string) *fastpathv2.CreateRequest {
+	return &fastpathv2.CreateRequest{
 		Image: "alpine:latest", PoolRef: "pool-a", Namespace: "default", RequestId: requestID,
 		Envs: map[string]string{"A": "B"}, WorkingDir: "/workspace",
 	}

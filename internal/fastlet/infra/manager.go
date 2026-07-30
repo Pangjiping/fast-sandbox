@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,9 +12,16 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 )
 
+type PreparedMapping struct {
+	SourcePath string `json:"sourcePath"`
+	TargetPath string `json:"targetPath"`
+	PodPath    string `json:"podPath"`
+	HostPath   string `json:"hostPath"`
+}
+
 type PreparedComponent struct {
-	Plan     infracatalog.ComponentPlan `json:"plan"`
-	Artifact *PreparedArtifact          `json:"artifact,omitempty"`
+	Plan     infracatalog.Component `json:"plan"`
+	Mappings []PreparedMapping      `json:"mappings"`
 }
 
 type PreparedPlan struct {
@@ -26,18 +32,17 @@ type PreparedPlan struct {
 }
 
 type ManagerConfig struct {
-	Catalog             *infracatalog.Catalog
-	RuntimeProfile      runtimecatalog.RuntimeProfile
-	ProfileName         string
-	ExpectedProfileHash string
-	Store               *ArtifactStore
-	Resolver            ArtifactResolver
-	SandboxInitPath     string
-	SandboxTunnelPath   string
+	Plan              infracatalog.Plan
+	RuntimeProfile    runtimecatalog.RuntimeProfile
+	Store             *ArtifactStore
+	Resolver          ArtifactResolver
+	SandboxInitPath   string
+	SandboxTunnelPath string
 }
 
-// Manager prepares immutable profile artifacts outside the Sandbox create
-// path and exposes a runtime-neutral augmentation plan to RuntimeDriver.
+// Manager prepares an immutable Pool revision outside the Sandbox create
+// path. Sandbox admission only consumes a plan after every source and mapping
+// has been verified and staged.
 type Manager struct {
 	mu       sync.RWMutex
 	config   ManagerConfig
@@ -47,18 +52,20 @@ type Manager struct {
 }
 
 func NewManagerWithConfig(config ManagerConfig) (*Manager, error) {
-	if config.Catalog == nil || config.Store == nil || config.Resolver == nil {
-		return nil, errors.New("Infra catalog, artifact store, and resolver are required")
+	if config.Store == nil || config.Resolver == nil {
+		return nil, errors.New("Infra artifact store and resolver are required")
 	}
-	plan, err := config.Catalog.Compile(config.ProfileName, config.RuntimeProfile)
+	revision, err := infracatalog.Revision(config.Plan.Components)
 	if err != nil {
 		return nil, err
 	}
-	if config.ExpectedProfileHash != "" && plan.ProfileHash != config.ExpectedProfileHash {
-		return nil, fmt.Errorf("InfraProfile hash %s does not match expected %s", plan.ProfileHash, config.ExpectedProfileHash)
+	if config.Plan.Revision == "" {
+		config.Plan.Revision = revision
 	}
-	config.ProfileName = plan.ProfileName
-	return &Manager{config: config, plan: PreparedPlan{Plan: plan}}, nil
+	if config.Plan.Revision != revision {
+		return nil, fmt.Errorf("Infra revision %s does not match compiled plan %s", config.Plan.Revision, revision)
+	}
+	return &Manager{config: config, plan: PreparedPlan{Plan: config.Plan}}, nil
 }
 
 func (m *Manager) Prepare(ctx context.Context) error {
@@ -67,81 +74,73 @@ func (m *Manager) Prepare(ctx context.Context) error {
 	if m.prepared {
 		return m.err
 	}
-	// A previous failure may have been a transient registry or filesystem
-	// error. Keep profile admission disabled, but let the asynchronous prepare
-	// loop retry the same immutable plan.
 	m.err = nil
 	prepared := PreparedPlan{Plan: m.plan.Plan}
-	needsSupervisor := false
-	for _, componentPlan := range m.plan.Plan.Components {
-		component := PreparedComponent{Plan: componentPlan}
-		switch componentPlan.DeliveryMode {
-		case runtimecatalog.InfraDeliveryBindMount, runtimecatalog.InfraDeliveryGuestCopy, runtimecatalog.InfraDeliveryArtifactVolume:
-			artifact := componentPlan.Component.Artifact
-			staged, err := m.config.Store.Stage(ctx, artifact.Digest, artifact.Executable, func() (io.ReadCloser, error) {
-				return m.config.Resolver.Open(ctx, artifact)
-			})
+	for _, component := range m.plan.Plan.Components {
+		source, err := m.config.Resolver.Prepare(ctx, component.Artifact.Source, m.config.Store)
+		if err != nil {
+			m.err = fmt.Errorf("prepare component %s: %w", component.Name, err)
+			return m.err
+		}
+		preparedComponent := PreparedComponent{Plan: component}
+		for _, mapping := range component.Artifact.Mappings {
+			resolved, err := source.Resolve(mapping.SourcePath)
 			if err != nil {
-				m.err = fmt.Errorf("prepare component %s: %w", componentPlan.Component.Name, err)
+				m.err = fmt.Errorf("prepare component %s mapping %s: %w", component.Name, mapping.SourcePath, err)
 				return m.err
 			}
-			component.Artifact = &staged
-		case runtimecatalog.InfraDeliveryPreinstalled, runtimecatalog.InfraDeliveryTemplateBake:
-		default:
-			m.err = fmt.Errorf("delivery mode %s is not implemented by the Fastlet manager", componentPlan.DeliveryMode)
-			return m.err
+			preparedComponent.Mappings = append(preparedComponent.Mappings, PreparedMapping{
+				SourcePath: mapping.SourcePath,
+				TargetPath: mapping.TargetPath,
+				PodPath:    resolved.PodPath,
+				HostPath:   resolved.HostPath,
+			})
 		}
-		if componentPlan.Component.Activation.Mode != infracatalog.ActivationSystemService {
-			needsSupervisor = true
-		}
-		prepared.Components = append(prepared.Components, component)
+		prepared.Components = append(prepared.Components, preparedComponent)
 	}
-	if needsSupervisor {
+	if len(prepared.Components) > 0 {
 		if m.config.SandboxInitPath == "" {
-			m.err = errors.New("sandbox-init path is required by the InfraProfile")
+			m.err = errors.New("sandbox-init path is required when Infra Components are configured")
 			return m.err
 		}
-		file, err := os.Open(m.config.SandboxInitPath)
+		supervisor, err := importTrustedFile(ctx, m.config.Store, m.config.SandboxInitPath)
 		if err != nil {
-			m.err = fmt.Errorf("open sandbox-init: %w", err)
+			m.err = fmt.Errorf("prepare sandbox-init: %w", err)
 			return m.err
 		}
-		staged, stageErr := m.config.Store.ImportTrusted(ctx, file, true)
-		closeErr := file.Close()
-		if stageErr != nil || closeErr != nil {
-			m.err = errors.Join(stageErr, closeErr)
-			return m.err
-		}
-		prepared.Supervisor = &staged
+		prepared.Supervisor = &supervisor
 	}
 	if m.config.RuntimeProfile.NetworkMode == runtimecatalog.NetworkModeBoxLite {
 		if m.config.SandboxTunnelPath == "" {
-			m.err = errors.New("sandbox-tunnel path is required by the BoxLite runtime profile")
+			m.err = errors.New("sandbox-tunnel path is required by the BoxLite runtime")
 			return m.err
 		}
-		file, err := os.Open(m.config.SandboxTunnelPath)
+		tunnel, err := importTrustedFile(ctx, m.config.Store, m.config.SandboxTunnelPath)
 		if err != nil {
-			m.err = fmt.Errorf("open sandbox-tunnel: %w", err)
+			m.err = fmt.Errorf("prepare sandbox-tunnel: %w", err)
 			return m.err
 		}
-		staged, stageErr := m.config.Store.ImportTrusted(ctx, file, true)
-		closeErr := file.Close()
-		if stageErr != nil || closeErr != nil {
-			m.err = errors.Join(stageErr, closeErr)
-			return m.err
-		}
-		prepared.Tunnel = &staged
+		prepared.Tunnel = &tunnel
 	}
 	m.plan = prepared
 	m.prepared = true
 	return nil
 }
 
+func importTrustedFile(ctx context.Context, store *ArtifactStore, path string) (PreparedArtifact, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return PreparedArtifact{}, err
+	}
+	defer file.Close()
+	return store.ImportTrusted(ctx, file, true)
+}
+
 func (m *Manager) Plan() (PreparedPlan, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.prepared {
-		return PreparedPlan{}, errors.New("InfraProfile artifacts are not prepared")
+		return PreparedPlan{}, errors.New("Infra Components are not prepared")
 	}
 	if m.err != nil {
 		return PreparedPlan{}, m.err
@@ -149,8 +148,7 @@ func (m *Manager) Plan() (PreparedPlan, error) {
 	return clonePreparedPlan(m.plan), nil
 }
 
-func (m *Manager) ProfileName() string { return m.plan.ProfileName }
-func (m *Manager) ProfileHash() string { return m.plan.ProfileHash }
+func (m *Manager) Revision() string { return m.plan.Revision }
 
 func (m *Manager) ArtifactReferences() []string {
 	plan, err := m.Plan()
@@ -165,16 +163,18 @@ func (m *Manager) ArtifactReferences() []string {
 		references = append(references, plan.Tunnel.Digest)
 	}
 	for _, component := range plan.Components {
-		if component.Artifact != nil {
-			references = append(references, component.Artifact.Digest)
-		}
+		references = append(references, component.Plan.Artifact.Source.Digest)
 	}
 	return references
 }
 
 func clonePreparedPlan(plan PreparedPlan) PreparedPlan {
 	clone := plan
-	clone.Components = append([]PreparedComponent(nil), plan.Components...)
+	clone.Components = make([]PreparedComponent, len(plan.Components))
+	for index := range plan.Components {
+		clone.Components[index] = plan.Components[index]
+		clone.Components[index].Mappings = append([]PreparedMapping(nil), plan.Components[index].Mappings...)
+	}
 	if plan.Supervisor != nil {
 		value := *plan.Supervisor
 		clone.Supervisor = &value
@@ -182,12 +182,6 @@ func clonePreparedPlan(plan PreparedPlan) PreparedPlan {
 	if plan.Tunnel != nil {
 		value := *plan.Tunnel
 		clone.Tunnel = &value
-	}
-	for index := range clone.Components {
-		if clone.Components[index].Artifact != nil {
-			value := *clone.Components[index].Artifact
-			clone.Components[index].Artifact = &value
-		}
 	}
 	return clone
 }

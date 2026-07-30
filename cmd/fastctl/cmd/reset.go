@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	fastpathv1 "fast-sandbox/api/proto/v1"
+	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -37,10 +37,10 @@ preserving the sandbox configuration.`,
 		resetRevision := time.Now().Format(time.RFC3339Nano)
 		klog.V(4).InfoS("Triggering sandbox reset", "sandboxName", sandboxName, "resetRevision", resetRevision)
 
-		req := &fastpathv1.UpdateRequest{
+		req := &fastpathv2.UpdateRequest{
 			SandboxName: sandboxName,
 			Namespace:   namespace,
-			Update: &fastpathv1.UpdateRequest_ResetRevision{
+			Update: &fastpathv2.UpdateRequest_ResetRevision{
 				ResetRevision: resetRevision,
 			},
 		}

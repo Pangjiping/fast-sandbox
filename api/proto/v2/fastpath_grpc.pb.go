@@ -2,9 +2,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.0
 // - protoc             v5.29.3
-// source: api/proto/v1/fastpath.proto
+// source: api/proto/v2/fastpath.proto
 
-package fastpathv1
+package fastpathv2
 
 import (
 	context "context"
@@ -19,38 +19,35 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	FastPathService_CreateSandbox_FullMethodName         = "/fastpath.v1.FastPathService/CreateSandbox"
-	FastPathService_DeleteSandbox_FullMethodName         = "/fastpath.v1.FastPathService/DeleteSandbox"
-	FastPathService_UpdateSandbox_FullMethodName         = "/fastpath.v1.FastPathService/UpdateSandbox"
-	FastPathService_ListSandboxes_FullMethodName         = "/fastpath.v1.FastPathService/ListSandboxes"
-	FastPathService_GetSandbox_FullMethodName            = "/fastpath.v1.FastPathService/GetSandbox"
-	FastPathService_GetSandboxDiagnostics_FullMethodName = "/fastpath.v1.FastPathService/GetSandboxDiagnostics"
-	FastPathService_ResolveEndpoint_FullMethodName       = "/fastpath.v1.FastPathService/ResolveEndpoint"
-	FastPathService_IssueRouteCredential_FullMethodName  = "/fastpath.v1.FastPathService/IssueRouteCredential"
+	FastPathService_CreateSandbox_FullMethodName         = "/fastpath.v2.FastPathService/CreateSandbox"
+	FastPathService_DeleteSandbox_FullMethodName         = "/fastpath.v2.FastPathService/DeleteSandbox"
+	FastPathService_UpdateSandbox_FullMethodName         = "/fastpath.v2.FastPathService/UpdateSandbox"
+	FastPathService_ListSandboxes_FullMethodName         = "/fastpath.v2.FastPathService/ListSandboxes"
+	FastPathService_GetSandbox_FullMethodName            = "/fastpath.v2.FastPathService/GetSandbox"
+	FastPathService_GetSandboxDiagnostics_FullMethodName = "/fastpath.v2.FastPathService/GetSandboxDiagnostics"
+	FastPathService_WaitSandboxReady_FullMethodName      = "/fastpath.v2.FastPathService/WaitSandboxReady"
+	FastPathService_ResolveEndpoint_FullMethodName       = "/fastpath.v2.FastPathService/ResolveEndpoint"
+	FastPathService_GetPool_FullMethodName               = "/fastpath.v2.FastPathService/GetPool"
+	FastPathService_ListPools_FullMethodName             = "/fastpath.v2.FastPathService/ListPools"
 )
 
 // FastPathServiceClient is the client API for FastPathService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type FastPathServiceClient interface {
-	// CreateSandbox performs the imperative CRD-first low-latency path: one CRD
-	// Create followed by one atomic Fastlet Create on the happy path.
-	CreateSandbox(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error)
-	// DeleteSandbox commits declarative deletion; Controller reconciliation owns cleanup.
+	CreateSandbox(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*SandboxInfo, error)
 	DeleteSandbox(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
-	// UpdateSandbox commits declarative expiry, reset, or failure-policy intent.
 	UpdateSandbox(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateResponse, error)
-	// ListSandboxes 获取沙箱列表
 	ListSandboxes(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
-	// GetSandbox 获取沙箱详情
 	GetSandbox(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*SandboxInfo, error)
-	// GetSandboxDiagnostics returns platform lifecycle diagnostics. It never
-	// depends on an injected user-space Infra Component such as execd.
 	GetSandboxDiagnostics(ctx context.Context, in *SandboxDiagnosticsRequest, opts ...grpc.CallOption) (*SandboxDiagnosticsResponse, error)
-	// ResolveEndpoint resolves an authenticated proxy route for a target port.
+	// WaitSandboxReady waits on the assigned Fastlet, never on CRD status
+	// propagation.
+	WaitSandboxReady(ctx context.Context, in *WaitSandboxReadyRequest, opts ...grpc.CallOption) (*SandboxInfo, error)
+	// ResolveEndpoint resolves one named component or raw user port.
 	ResolveEndpoint(ctx context.Context, in *ResolveEndpointRequest, opts ...grpc.CallOption) (*ResolveEndpointResponse, error)
-	// IssueRouteCredential refreshes a short-lived credential for an existing route.
-	IssueRouteCredential(ctx context.Context, in *IssueRouteCredentialRequest, opts ...grpc.CallOption) (*IssueRouteCredentialResponse, error)
+	GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*PoolInfo, error)
+	ListPools(ctx context.Context, in *ListPoolsRequest, opts ...grpc.CallOption) (*ListPoolsResponse, error)
 }
 
 type fastPathServiceClient struct {
@@ -61,9 +58,9 @@ func NewFastPathServiceClient(cc grpc.ClientConnInterface) FastPathServiceClient
 	return &fastPathServiceClient{cc}
 }
 
-func (c *fastPathServiceClient) CreateSandbox(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error) {
+func (c *fastPathServiceClient) CreateSandbox(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*SandboxInfo, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CreateResponse)
+	out := new(SandboxInfo)
 	err := c.cc.Invoke(ctx, FastPathService_CreateSandbox_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -121,6 +118,16 @@ func (c *fastPathServiceClient) GetSandboxDiagnostics(ctx context.Context, in *S
 	return out, nil
 }
 
+func (c *fastPathServiceClient) WaitSandboxReady(ctx context.Context, in *WaitSandboxReadyRequest, opts ...grpc.CallOption) (*SandboxInfo, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SandboxInfo)
+	err := c.cc.Invoke(ctx, FastPathService_WaitSandboxReady_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *fastPathServiceClient) ResolveEndpoint(ctx context.Context, in *ResolveEndpointRequest, opts ...grpc.CallOption) (*ResolveEndpointResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResolveEndpointResponse)
@@ -131,10 +138,20 @@ func (c *fastPathServiceClient) ResolveEndpoint(ctx context.Context, in *Resolve
 	return out, nil
 }
 
-func (c *fastPathServiceClient) IssueRouteCredential(ctx context.Context, in *IssueRouteCredentialRequest, opts ...grpc.CallOption) (*IssueRouteCredentialResponse, error) {
+func (c *fastPathServiceClient) GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*PoolInfo, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(IssueRouteCredentialResponse)
-	err := c.cc.Invoke(ctx, FastPathService_IssueRouteCredential_FullMethodName, in, out, cOpts...)
+	out := new(PoolInfo)
+	err := c.cc.Invoke(ctx, FastPathService_GetPool_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *fastPathServiceClient) ListPools(ctx context.Context, in *ListPoolsRequest, opts ...grpc.CallOption) (*ListPoolsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPoolsResponse)
+	err := c.cc.Invoke(ctx, FastPathService_ListPools_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -145,24 +162,19 @@ func (c *fastPathServiceClient) IssueRouteCredential(ctx context.Context, in *Is
 // All implementations must embed UnimplementedFastPathServiceServer
 // for forward compatibility.
 type FastPathServiceServer interface {
-	// CreateSandbox performs the imperative CRD-first low-latency path: one CRD
-	// Create followed by one atomic Fastlet Create on the happy path.
-	CreateSandbox(context.Context, *CreateRequest) (*CreateResponse, error)
-	// DeleteSandbox commits declarative deletion; Controller reconciliation owns cleanup.
+	CreateSandbox(context.Context, *CreateRequest) (*SandboxInfo, error)
 	DeleteSandbox(context.Context, *DeleteRequest) (*DeleteResponse, error)
-	// UpdateSandbox commits declarative expiry, reset, or failure-policy intent.
 	UpdateSandbox(context.Context, *UpdateRequest) (*UpdateResponse, error)
-	// ListSandboxes 获取沙箱列表
 	ListSandboxes(context.Context, *ListRequest) (*ListResponse, error)
-	// GetSandbox 获取沙箱详情
 	GetSandbox(context.Context, *GetRequest) (*SandboxInfo, error)
-	// GetSandboxDiagnostics returns platform lifecycle diagnostics. It never
-	// depends on an injected user-space Infra Component such as execd.
 	GetSandboxDiagnostics(context.Context, *SandboxDiagnosticsRequest) (*SandboxDiagnosticsResponse, error)
-	// ResolveEndpoint resolves an authenticated proxy route for a target port.
+	// WaitSandboxReady waits on the assigned Fastlet, never on CRD status
+	// propagation.
+	WaitSandboxReady(context.Context, *WaitSandboxReadyRequest) (*SandboxInfo, error)
+	// ResolveEndpoint resolves one named component or raw user port.
 	ResolveEndpoint(context.Context, *ResolveEndpointRequest) (*ResolveEndpointResponse, error)
-	// IssueRouteCredential refreshes a short-lived credential for an existing route.
-	IssueRouteCredential(context.Context, *IssueRouteCredentialRequest) (*IssueRouteCredentialResponse, error)
+	GetPool(context.Context, *GetPoolRequest) (*PoolInfo, error)
+	ListPools(context.Context, *ListPoolsRequest) (*ListPoolsResponse, error)
 	mustEmbedUnimplementedFastPathServiceServer()
 }
 
@@ -173,7 +185,7 @@ type FastPathServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedFastPathServiceServer struct{}
 
-func (UnimplementedFastPathServiceServer) CreateSandbox(context.Context, *CreateRequest) (*CreateResponse, error) {
+func (UnimplementedFastPathServiceServer) CreateSandbox(context.Context, *CreateRequest) (*SandboxInfo, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateSandbox not implemented")
 }
 func (UnimplementedFastPathServiceServer) DeleteSandbox(context.Context, *DeleteRequest) (*DeleteResponse, error) {
@@ -191,11 +203,17 @@ func (UnimplementedFastPathServiceServer) GetSandbox(context.Context, *GetReques
 func (UnimplementedFastPathServiceServer) GetSandboxDiagnostics(context.Context, *SandboxDiagnosticsRequest) (*SandboxDiagnosticsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSandboxDiagnostics not implemented")
 }
+func (UnimplementedFastPathServiceServer) WaitSandboxReady(context.Context, *WaitSandboxReadyRequest) (*SandboxInfo, error) {
+	return nil, status.Error(codes.Unimplemented, "method WaitSandboxReady not implemented")
+}
 func (UnimplementedFastPathServiceServer) ResolveEndpoint(context.Context, *ResolveEndpointRequest) (*ResolveEndpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveEndpoint not implemented")
 }
-func (UnimplementedFastPathServiceServer) IssueRouteCredential(context.Context, *IssueRouteCredentialRequest) (*IssueRouteCredentialResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method IssueRouteCredential not implemented")
+func (UnimplementedFastPathServiceServer) GetPool(context.Context, *GetPoolRequest) (*PoolInfo, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPool not implemented")
+}
+func (UnimplementedFastPathServiceServer) ListPools(context.Context, *ListPoolsRequest) (*ListPoolsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPools not implemented")
 }
 func (UnimplementedFastPathServiceServer) mustEmbedUnimplementedFastPathServiceServer() {}
 func (UnimplementedFastPathServiceServer) testEmbeddedByValue()                         {}
@@ -326,6 +344,24 @@ func _FastPathService_GetSandboxDiagnostics_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FastPathService_WaitSandboxReady_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WaitSandboxReadyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FastPathServiceServer).WaitSandboxReady(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FastPathService_WaitSandboxReady_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FastPathServiceServer).WaitSandboxReady(ctx, req.(*WaitSandboxReadyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _FastPathService_ResolveEndpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ResolveEndpointRequest)
 	if err := dec(in); err != nil {
@@ -344,20 +380,38 @@ func _FastPathService_ResolveEndpoint_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FastPathService_IssueRouteCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(IssueRouteCredentialRequest)
+func _FastPathService_GetPool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPoolRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FastPathServiceServer).IssueRouteCredential(ctx, in)
+		return srv.(FastPathServiceServer).GetPool(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FastPathService_IssueRouteCredential_FullMethodName,
+		FullMethod: FastPathService_GetPool_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FastPathServiceServer).IssueRouteCredential(ctx, req.(*IssueRouteCredentialRequest))
+		return srv.(FastPathServiceServer).GetPool(ctx, req.(*GetPoolRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FastPathService_ListPools_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPoolsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FastPathServiceServer).ListPools(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FastPathService_ListPools_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FastPathServiceServer).ListPools(ctx, req.(*ListPoolsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -366,7 +420,7 @@ func _FastPathService_IssueRouteCredential_Handler(srv interface{}, ctx context.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var FastPathService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "fastpath.v1.FastPathService",
+	ServiceName: "fastpath.v2.FastPathService",
 	HandlerType: (*FastPathServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -394,14 +448,22 @@ var FastPathService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _FastPathService_GetSandboxDiagnostics_Handler,
 		},
 		{
+			MethodName: "WaitSandboxReady",
+			Handler:    _FastPathService_WaitSandboxReady_Handler,
+		},
+		{
 			MethodName: "ResolveEndpoint",
 			Handler:    _FastPathService_ResolveEndpoint_Handler,
 		},
 		{
-			MethodName: "IssueRouteCredential",
-			Handler:    _FastPathService_IssueRouteCredential_Handler,
+			MethodName: "GetPool",
+			Handler:    _FastPathService_GetPool_Handler,
+		},
+		{
+			MethodName: "ListPools",
+			Handler:    _FastPathService_ListPools_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "api/proto/v1/fastpath.proto",
+	Metadata: "api/proto/v2/fastpath.proto",
 }

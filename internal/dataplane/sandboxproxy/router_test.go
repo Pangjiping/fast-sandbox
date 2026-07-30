@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -19,13 +19,13 @@ import (
 
 func TestKubernetesResolverUsesAuthoritativeFallbackAndWarmsIndex(t *testing.T) {
 	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha1.AddToScheme(scheme))
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
-	sandbox := &apiv1alpha1.Sandbox{
+	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID("uid-a")},
-		Status: apiv1alpha1.SandboxStatus{
-			DataPlaneState: apiv1alpha1.ObservedStateReady, RouteGeneration: 4,
-			Assignment: &apiv1alpha1.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 3, NodeName: "node-a"},
+		Status: apiv1alpha2.SandboxStatus{
+			DataPlaneState: apiv1alpha2.ObservedStateReady, RouteGeneration: 4,
+			Assignment: &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 3, NodeName: "node-a"},
 		},
 	}
 	pod := &corev1.Pod{
@@ -47,12 +47,12 @@ func TestKubernetesResolverUsesAuthoritativeFallbackAndWarmsIndex(t *testing.T) 
 
 func TestIndexPublishesImmutableRouteProjection(t *testing.T) {
 	index := NewIndex()
-	sandbox := &apiv1alpha1.Sandbox{
+	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID("uid-a")},
-		Status: apiv1alpha1.SandboxStatus{
-			DataPlaneState:  apiv1alpha1.ObservedStateReady,
+		Status: apiv1alpha2.SandboxStatus{
+			DataPlaneState:  apiv1alpha2.ObservedStateReady,
 			RouteGeneration: 4,
-			Assignment: &apiv1alpha1.SandboxAssignment{
+			Assignment: &apiv1alpha2.SandboxAssignment{
 				FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 3,
 			},
 		},
@@ -84,12 +84,12 @@ func TestIndexConcurrentUpdatesAndResolves(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "fastlet-" + suffix, Namespace: "tenant-a", UID: types.UID(podUID)},
 			Status:     corev1.PodStatus{PodIP: "10.0.0." + suffix},
 		})
-		index.UpsertSandbox(&apiv1alpha1.Sandbox{
+		index.UpsertSandbox(&apiv1alpha2.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID(sandboxUID)},
-			Status: apiv1alpha1.SandboxStatus{
-				DataPlaneState:  apiv1alpha1.ObservedStateReady,
+			Status: apiv1alpha2.SandboxStatus{
+				DataPlaneState:  apiv1alpha2.ObservedStateReady,
 				RouteGeneration: generation,
-				Assignment: &apiv1alpha1.SandboxAssignment{
+				Assignment: &apiv1alpha2.SandboxAssignment{
 					FastletName: "fastlet-" + suffix, FastletPodUID: podUID, Attempt: generation,
 				},
 			},

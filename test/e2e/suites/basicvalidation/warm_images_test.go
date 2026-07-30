@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/fastlet/cache"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	e2eenv "fast-sandbox/test/e2e/env"
@@ -77,7 +77,15 @@ func TestPoolWarmImagesReachRuntimeCacheInventory(t *testing.T) {
 			for {
 				ready, checkErr := warmImagePrepared(waitCtx, baseURL, target)
 				if ready {
-					return ctx
+					statusReady, statusErr := warmImagePoolStatusReady(
+						waitCtx, k8sClient, types.NamespacedName{Namespace: namespace, Name: pool.Name}, warmImage,
+					)
+					if statusReady {
+						return ctx
+					}
+					if statusErr != nil {
+						lastErr = statusErr
+					}
 				}
 				if checkErr != nil {
 					lastErr = checkErr
@@ -92,14 +100,38 @@ func TestPoolWarmImagesReachRuntimeCacheInventory(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
-func warmImagePool(namespace, image string) *apiv1alpha1.SandboxPool {
-	return &apiv1alpha1.SandboxPool{
-		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha1.GroupVersion.String(), Kind: "SandboxPool"},
+func warmImagePoolStatusReady(
+	ctx context.Context,
+	k8sClient client.Client,
+	key types.NamespacedName,
+	image string,
+) (bool, error) {
+	var pool apiv1alpha2.SandboxPool
+	if err := k8sClient.Get(ctx, key, &pool); err != nil {
+		return false, err
+	}
+	for _, status := range pool.Status.WarmImages {
+		if status.Image != image {
+			continue
+		}
+		if status.LastError != "" {
+			return false, fmt.Errorf("Pool warm image status failed: %s", status.LastError)
+		}
+		return status.DesiredFastlets == 1 && status.CachedFastlets == 1 &&
+			status.PullingFastlets == 0 && status.FailedFastlets == 0 &&
+			status.ObservedGeneration == pool.Generation, nil
+	}
+	return false, nil
+}
+
+func warmImagePool(namespace, image string) *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
+		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "SandboxPool"},
 		ObjectMeta: metav1.ObjectMeta{Name: "warm-image-pool", Namespace: namespace},
-		Spec: apiv1alpha1.SandboxPoolSpec{
-			Capacity:           apiv1alpha1.PoolCapacity{PoolMin: 1, PoolMax: 1},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Capacity:           apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1},
 			MaxSandboxesPerPod: 1,
-			Runtime:            apiv1alpha1.RuntimeContainer,
+			Runtime:            apiv1alpha2.RuntimeContainer,
 			SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 			WarmImages:         []string{image},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{

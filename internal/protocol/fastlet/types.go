@@ -29,8 +29,7 @@ type SandboxSpec struct {
 	PIDs                int64             `json:"pids,omitempty"`
 	RuntimeProfileHash  string            `json:"runtimeProfileHash,omitempty"`
 	ResourceProfileHash string            `json:"resourceProfileHash,omitempty"`
-	InfraProfile        string            `json:"infraProfile,omitempty"`
-	InfraProfileHash    string            `json:"infraProfileHash,omitempty"`
+	InfraRevision       string            `json:"infraRevision,omitempty"`
 	Command             []string          `json:"command,omitempty"`
 	Args                []string          `json:"args,omitempty"`
 	Env                 map[string]string `json:"env,omitempty"`
@@ -59,30 +58,38 @@ type SandboxStatus struct {
 }
 
 type InfraComponentDiagnostic struct {
-	Component string `json:"component"`
-	Service   string `json:"service"`
-	Required  bool   `json:"required"`
-	State     string `json:"state"`
-	Message   string `json:"message,omitempty"`
+	Component               string `json:"component"`
+	Protocol                string `json:"protocol,omitempty"`
+	Port                    uint32 `json:"port,omitempty"`
+	State                   string `json:"state"`
+	ObservedRouteGeneration int64  `json:"observedRouteGeneration,omitempty"`
+	Message                 string `json:"message,omitempty"`
 }
 
 // FastletStatus represents the current status of a fastlet (internal use).
 type FastletStatus struct {
-	FastletID           string          `json:"fastletId"`
-	NodeName            string          `json:"nodeName"`
-	Capacity            int             `json:"capacity"`
-	Images              []string        `json:"images,omitempty"`
-	SandboxStatuses     []SandboxStatus `json:"sandboxStatuses"`
-	Admission           AdmissionStatus `json:"admission"`
-	RuntimeReady        bool            `json:"runtimeReady"`
-	Recovering          bool            `json:"recovering"`
-	Draining            bool            `json:"draining"`
-	FastletPodUID       string          `json:"fastletPodUid,omitempty"`
-	ResourceProfileHash string          `json:"resourceProfileHash,omitempty"`
-	InfraProfile        string          `json:"infraProfile,omitempty"`
-	InfraProfileHash    string          `json:"infraProfileHash,omitempty"`
-	InfraReady          bool            `json:"infraReady"`
-	PreparedArtifacts   []string        `json:"preparedArtifacts,omitempty"`
+	FastletID           string           `json:"fastletId"`
+	NodeName            string           `json:"nodeName"`
+	Capacity            int              `json:"capacity"`
+	Images              []string         `json:"images,omitempty"`
+	SandboxStatuses     []SandboxStatus  `json:"sandboxStatuses"`
+	Admission           AdmissionStatus  `json:"admission"`
+	RuntimeReady        bool             `json:"runtimeReady"`
+	Recovering          bool             `json:"recovering"`
+	Draining            bool             `json:"draining"`
+	FastletPodUID       string           `json:"fastletPodUid,omitempty"`
+	ResourceProfileHash string           `json:"resourceProfileHash,omitempty"`
+	InfraRevision       string           `json:"infraRevision,omitempty"`
+	InfraReady          bool             `json:"infraReady"`
+	PreparedArtifacts   []string         `json:"preparedArtifacts,omitempty"`
+	RegistryRevision    string           `json:"registryRevision,omitempty"`
+	WarmImages          []WarmImageState `json:"warmImages,omitempty"`
+}
+
+type WarmImageState struct {
+	Image   string `json:"image"`
+	State   string `json:"state"`
+	Message string `json:"message,omitempty"`
 }
 
 type FastletErrorCode string
@@ -197,8 +204,7 @@ type SetDrainingResponse struct {
 
 type RuntimeDiagnostics struct {
 	RuntimeProfileHash string `json:"runtimeProfileHash"`
-	InfraProfile       string `json:"infraProfile,omitempty"`
-	InfraProfileHash   string `json:"infraProfileHash,omitempty"`
+	InfraRevision      string `json:"infraRevision,omitempty"`
 	InfraState         string `json:"infraState,omitempty"`
 	InfraMessage       string `json:"infraMessage,omitempty"`
 	State              string `json:"state"`
@@ -225,6 +231,22 @@ type SandboxDiagnosticsResponse struct {
 	Sandbox *SandboxStatus           `json:"sandbox,omitempty"`
 	Events  []SandboxDiagnosticEvent `json:"events,omitempty"`
 	Error   *FastletError            `json:"error,omitempty"`
+}
+
+// WaitSandboxReadyRequest blocks on Fastlet-owned state transitions. It is
+// deliberately separate from diagnostics so callers do not poll the Fastlet
+// to discover Infra Component or route readiness.
+type WaitSandboxReadyRequest struct {
+	Identity      SandboxIdentity `json:"identity"`
+	ComponentName string          `json:"componentName,omitempty"`
+	DataPlane     bool            `json:"dataPlane,omitempty"`
+	NoWait        bool            `json:"noWait,omitempty"`
+}
+
+type WaitSandboxReadyResponse struct {
+	Sandbox *SandboxStatus `json:"sandbox,omitempty"`
+	Ready   bool           `json:"ready"`
+	Error   *FastletError  `json:"error,omitempty"`
 }
 
 type CacheCursor struct {

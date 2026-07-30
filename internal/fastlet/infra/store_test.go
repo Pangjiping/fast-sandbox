@@ -1,7 +1,9 @@
 package infra
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -98,4 +100,129 @@ func TestArtifactStoreEnforcesBoundAndCancellation(t *testing.T) {
 		return io.NopCloser(bytes.NewBufferString("12345")), nil
 	})
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestArtifactStoreStagesVerifiedGzipTreeAndMappings(t *testing.T) {
+	archive := gzipTar(t, []tarEntry{
+		{name: "bin/execd", mode: 0o555, body: "binary"},
+		{name: "assets/config.yaml", mode: 0o444, body: "enabled: true"},
+	})
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(archive))
+	store, err := NewArtifactStore(t.TempDir(), "/host/infra")
+	require.NoError(t, err)
+
+	source, err := store.StageTree(context.Background(), digest, true, true, func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(archive)), nil
+	})
+	require.NoError(t, err)
+	require.False(t, source.CacheHit)
+	execd, err := source.Resolve("/bin/execd")
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o555), fileMode(t, execd.PodPath))
+	require.Equal(t, filepath.Join(source.HostRoot, "bin", "execd"), execd.HostPath)
+	assets, err := source.Resolve("/assets")
+	require.NoError(t, err)
+	require.DirExists(t, assets.PodPath)
+
+	cached, err := store.StageTree(context.Background(), digest, true, true, func() (io.ReadCloser, error) {
+		t.Fatal("cache hit reopened archive source")
+		return nil, nil
+	})
+	require.NoError(t, err)
+	require.True(t, cached.CacheHit)
+
+	wrongDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("wrong")))
+	_, err = store.StageTree(context.Background(), wrongDigest, true, true, func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(archive)), nil
+	})
+	require.ErrorIs(t, err, ErrDigestMismatch)
+}
+
+func TestArtifactStoreRejectsUnsafeArchiveEntries(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry tarEntry
+	}{
+		{name: "path traversal", entry: tarEntry{name: "../../escape", body: "bad"}},
+		{name: "absolute path", entry: tarEntry{name: "/escape", body: "bad"}},
+		{name: "escaping symlink", entry: tarEntry{name: "bin/link", typeflag: tar.TypeSymlink, linkname: "../../escape"}},
+		{name: "escaping hardlink", entry: tarEntry{name: "bin/link", typeflag: tar.TypeLink, linkname: "../../escape"}},
+		{name: "device", entry: tarEntry{name: "dev/evil", typeflag: tar.TypeChar}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archive := gzipTar(t, []tarEntry{test.entry})
+			digest := fmt.Sprintf("sha256:%x", sha256.Sum256(archive))
+			store, err := NewArtifactStore(t.TempDir(), "/host/infra")
+			require.NoError(t, err)
+			_, err = store.StageTree(context.Background(), digest, true, true, func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(archive)), nil
+			})
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestArtifactStoreRewritesRootfsAbsoluteSymlinks(t *testing.T) {
+	archive := gzipTar(t, []tarEntry{
+		{name: "usr/bin/tool", mode: 0o555, body: "binary"},
+		{name: "bin/tool", typeflag: tar.TypeSymlink, linkname: "/usr/bin/tool"},
+		// Real OCI root filesystems may contain unrelated absolute symlinks.
+		{name: "bin/arch", typeflag: tar.TypeSymlink, linkname: "/usr/bin/arch"},
+	})
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(archive))
+	store, err := NewArtifactStore(t.TempDir(), "/host/infra")
+	require.NoError(t, err)
+
+	source, err := store.StageTree(context.Background(), digest, true, true, func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(archive)), nil
+	})
+	require.NoError(t, err)
+
+	tool, err := source.Resolve("/bin/tool")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(source.PodRoot, "usr", "bin", "tool"), tool.PodPath)
+	require.Equal(t, filepath.Join(source.HostRoot, "usr", "bin", "tool"), tool.HostPath)
+	target, err := os.Readlink(filepath.Join(source.PodRoot, "bin", "tool"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join("..", "usr", "bin", "tool"), target)
+}
+
+type tarEntry struct {
+	name     string
+	mode     int64
+	body     string
+	typeflag byte
+	linkname string
+}
+
+func gzipTar(t *testing.T, entries []tarEntry) []byte {
+	t.Helper()
+	var result bytes.Buffer
+	compressed := gzip.NewWriter(&result)
+	writer := tar.NewWriter(compressed)
+	for _, entry := range entries {
+		mode := entry.mode
+		if mode == 0 {
+			mode = 0o444
+		}
+		typeflag := entry.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		size := int64(0)
+		if typeflag == tar.TypeReg || typeflag == tar.TypeRegA {
+			size = int64(len(entry.body))
+		}
+		require.NoError(t, writer.WriteHeader(&tar.Header{
+			Name: entry.name, Mode: mode, Size: size, Typeflag: typeflag, Linkname: entry.linkname,
+		}))
+		if size > 0 {
+			_, err := io.WriteString(writer, entry.body)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, writer.Close())
+	require.NoError(t, compressed.Close())
+	return result.Bytes()
 }

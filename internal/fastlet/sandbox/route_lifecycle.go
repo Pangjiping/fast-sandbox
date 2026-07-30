@@ -84,11 +84,16 @@ func (m *SandboxManager) routePublication(metadata *SandboxMetadata) (RoutePubli
 	if metadata.ClaimNamespace == "" || metadata.SandboxID == "" || metadata.FastletPodUID == "" || metadata.AssignmentAttempt <= 0 {
 		return RoutePublication{}, fmt.Errorf("incomplete Sandbox route identity")
 	}
+	components := make(map[string]dataplane.ComponentRoute, len(metadata.InfraServices))
+	for _, endpoint := range metadata.InfraServices {
+		components[endpoint.Component] = dataplane.ComponentRoute{
+			Protocol: endpoint.Protocol, Port: endpoint.Port,
+		}
+	}
 	return RoutePublication{
 		Namespace: metadata.ClaimNamespace, SandboxUID: metadata.SandboxID,
 		FastletPodUID: metadata.FastletPodUID, AssignmentAttempt: metadata.AssignmentAttempt,
-		RouteGeneration: routeGeneration, Access: access,
-		UpstreamHeadersByPort: dataplane.CloneHeadersByPort(metadata.InfraUpstreamHeadersByPort),
+		RouteGeneration: routeGeneration, Access: access, Components: components,
 	}, nil
 }
 

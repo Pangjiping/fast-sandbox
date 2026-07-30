@@ -1,4 +1,4 @@
-package v1alpha1
+package v1alpha2
 
 import (
 	"testing"
@@ -39,10 +39,47 @@ func TestGenerationAndAssignmentValidation(t *testing.T) {
 	require.Equal(t, int64(1), NextInstanceGeneration(0))
 	require.Equal(t, int64(2), NextInstanceGeneration(1))
 
-	assignment := &SandboxAssignment{FastletName: "fastlet-1", FastletPodUID: "pod-uid", Attempt: 1}
+	assignment := &SandboxAssignment{
+		FastletName: "fastlet-1", FastletPodUID: "pod-uid", Attempt: 1, InfraRevision: "sha256:infra",
+	}
 	require.NoError(t, assignment.Validate())
 	assignment.Attempt = 0
 	require.Error(t, assignment.Validate())
+}
+
+func TestValidateInfraComponents(t *testing.T) {
+	valid := SandboxPoolSpec{InfraComponents: []InfraComponent{{
+		Name: "execd",
+		Artifact: InfraArtifact{
+			Source: InfraArtifactSource{Image: &InfraArtifactImage{
+				Reference: "ghcr.io/opensandbox/execd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			}},
+			Mappings: []InfraArtifactMapping{{
+				SourcePath: "/usr/local/bin/execd", TargetPath: "/.fast/components/execd/execd",
+			}},
+		},
+		Process: InfraProcess{
+			Command:     []string{"/.fast/components/execd/execd", "--port", "44772"},
+			HealthCheck: InfraHealthCheck{HTTPGet: &InfraHTTPGet{Path: "/ping"}, TimeoutSeconds: 10},
+		},
+		Endpoint: InfraEndpoint{Protocol: "HTTP", Port: 44772},
+	}}}
+	require.NoError(t, valid.ValidateInfraComponents())
+
+	duplicatePort := *valid.DeepCopy()
+	second := duplicatePort.InfraComponents[0]
+	second.Name = "envd"
+	second.Artifact.Mappings[0].TargetPath = "/.fast/components/envd/envd"
+	duplicatePort.InfraComponents = append(duplicatePort.InfraComponents, second)
+	require.ErrorIs(t, duplicatePort.ValidateInfraComponents(), ErrInfraComponentsInvalid)
+
+	escapedTarget := *valid.DeepCopy()
+	escapedTarget.InfraComponents[0].Artifact.Mappings[0].TargetPath = "/usr/local/bin/execd"
+	require.ErrorIs(t, escapedTarget.ValidateInfraComponents(), ErrInfraComponentsInvalid)
+
+	tokenEnv := *valid.DeepCopy()
+	tokenEnv.InfraComponents[0].Process.Env = map[string]string{"FAST_SANDBOX_TOKEN": "bad"}
+	require.ErrorIs(t, tokenEnv.ValidateInfraComponents(), ErrInfraComponentsInvalid)
 }
 
 func TestSandboxResourceProfileHashIsCanonical(t *testing.T) {

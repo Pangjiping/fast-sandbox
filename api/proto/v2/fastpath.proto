@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+package fastpath.v2;
+
+option go_package = "fast-sandbox/api/proto/v2;fastpathv2";
+
+service FastPathService {
+  rpc CreateSandbox(CreateRequest) returns (SandboxInfo);
+  rpc DeleteSandbox(DeleteRequest) returns (DeleteResponse);
+  rpc UpdateSandbox(UpdateRequest) returns (UpdateResponse);
+  rpc ListSandboxes(ListRequest) returns (ListResponse);
+  rpc GetSandbox(GetRequest) returns (SandboxInfo);
+  rpc GetSandboxDiagnostics(SandboxDiagnosticsRequest) returns (SandboxDiagnosticsResponse);
+
+  // WaitSandboxReady waits on the assigned Fastlet, never on CRD status
+  // propagation.
+  rpc WaitSandboxReady(WaitSandboxReadyRequest) returns (SandboxInfo);
+
+  // ResolveEndpoint resolves one named component or raw user port.
+  rpc ResolveEndpoint(ResolveEndpointRequest) returns (ResolveEndpointResponse);
+
+  rpc GetPool(GetPoolRequest) returns (PoolInfo);
+  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+}
+
+message NamespacedName {
+  string namespace = 1;
+  string name = 2;
+}
+
+message SandboxReference {
+  oneof reference {
+    string sandbox_uid = 1;
+    NamespacedName namespaced_name = 2;
+  }
+}
+
+enum FailurePolicy {
+  MANUAL = 0;
+  AUTO_RECREATE = 1;
+}
+
+message ComponentInfo {
+  string name = 1;
+  string state = 2;
+  string protocol = 3;
+  uint32 port = 4;
+  int64 observed_route_generation = 5;
+  int64 last_transition_unix_seconds = 6;
+  string message = 7;
+}
+
+message SandboxInfo {
+  string sandbox_uid = 1;
+  string sandbox_name = 2;
+  string namespace = 3;
+  string runtime_state = 4;
+  string data_plane_state = 5;
+  string user_process_state = 6;
+  string fastlet_pod = 7;
+  int64 created_at_unix_seconds = 8;
+  string image = 9;
+  string pool_ref = 10;
+  map<string, string> metadata = 11;
+  int64 expires_at_unix_seconds = 12;
+  FailurePolicy failure_policy = 13;
+  int32 recovery_timeout_seconds = 14;
+  int64 assignment_attempt = 15;
+  int64 instance_generation = 16;
+  int64 route_generation = 17;
+  string infra_revision = 18;
+  repeated ComponentInfo components = 19;
+}
+
+message CreateRequest {
+  string request_id = 1;
+  string namespace = 2;
+  string image = 3;
+  string pool_ref = 4;
+  repeated string command = 5;
+  repeated string args = 6;
+  map<string, string> envs = 7;
+  string working_dir = 8;
+  int64 expires_at_unix_seconds = 9;
+  map<string, string> metadata = 10;
+  FailurePolicy failure_policy = 11;
+  int32 recovery_timeout_seconds = 12;
+}
+
+message GetRequest {
+  string sandbox_name = 1;
+  string namespace = 2;
+}
+
+message ListRequest {
+  string namespace = 1;
+  map<string, string> metadata = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListResponse {
+  repeated SandboxInfo items = 1;
+  string next_page_token = 2;
+}
+
+message DeleteRequest {
+  string sandbox_name = 1;
+  string namespace = 2;
+}
+
+message DeleteResponse {
+  bool success = 1;
+}
+
+message UpdateRequest {
+  string sandbox_name = 1;
+  string namespace = 2;
+
+  oneof update {
+    int64 expires_at_unix_seconds = 3;
+    string reset_revision = 4;
+    FailurePolicy failure_policy = 5;
+    int32 recovery_timeout_seconds = 6;
+  }
+
+  map<string, string> metadata_upsert = 7;
+  repeated string metadata_delete_keys = 8;
+}
+
+message UpdateResponse {
+  bool success = 1;
+  string message = 2;
+  SandboxInfo sandbox = 3;
+}
+
+message SandboxDiagnosticsRequest {
+  string sandbox_name = 1;
+  string namespace = 2;
+  int32 limit = 3;
+}
+
+message SandboxDiagnosticEvent {
+  int64 timestamp_unix_nano = 1;
+  string level = 2;
+  string source = 3;
+  string phase = 4;
+  string message = 5;
+}
+
+message SandboxDiagnosticsResponse {
+  SandboxInfo sandbox = 1;
+  string assignment_state = 2;
+  string runtime_instance_id = 3;
+  int64 assignment_attempt = 4;
+  bool fastlet_reachable = 5;
+  string fastlet_error = 6;
+  repeated SandboxDiagnosticEvent events = 7;
+}
+
+message WaitSandboxReadyRequest {
+  SandboxReference sandbox = 1;
+  oneof target {
+    bool data_plane = 2;
+    string component_name = 3;
+  }
+  int32 wait_timeout_millis = 4;
+}
+
+message EndpointTarget {
+  oneof target {
+    string component_name = 1;
+    uint32 port = 2;
+  }
+}
+
+enum EndpointAccessMode {
+  CENTRAL_PROXY = 0;
+  DIRECT_FASTLET_PROXY = 1;
+}
+
+message ResolveEndpointRequest {
+  SandboxReference sandbox = 1;
+  EndpointTarget target = 2;
+  EndpointAccessMode access_mode = 3;
+  bool wait_until_ready = 4;
+  int32 wait_timeout_millis = 5;
+}
+
+message ResolveEndpointResponse {
+  string sandbox_uid = 1;
+  EndpointTarget target = 2;
+  string component_name = 3;
+  string protocol = 4;
+  uint32 resolved_port = 5;
+  string proxy_endpoint = 6;
+  map<string, string> required_headers = 7;
+  int64 route_generation = 8;
+  int64 expires_at_unix_seconds = 9;
+}
+
+message ComponentCapability {
+  string name = 1;
+  string protocol = 2;
+  uint32 port = 3;
+  string health_kind = 4;
+}
+
+message WarmImageInfo {
+  string image = 1;
+  int32 desired_fastlets = 2;
+  int32 cached_fastlets = 3;
+  int32 pulling_fastlets = 4;
+  int32 failed_fastlets = 5;
+  int64 observed_generation = 6;
+  string last_error = 7;
+}
+
+message RegistryInfo {
+  int64 target_generation = 1;
+  int32 applied_fastlets = 2;
+  int32 total_fastlets = 3;
+  string last_error = 4;
+}
+
+message PoolInfo {
+  string namespace = 1;
+  string name = 2;
+  string runtime = 3;
+  string sandbox_cpu = 4;
+  string sandbox_memory = 5;
+  int64 sandbox_pids = 6;
+  int32 max_sandboxes_per_pod = 7;
+  int32 total_fastlets = 8;
+  int32 ready_fastlets = 9;
+  int32 idle_fastlets = 10;
+  string infra_revision = 11;
+  int32 prepared_fastlets = 12;
+  repeated ComponentCapability components = 13;
+  RegistryInfo registry = 14;
+  repeated WarmImageInfo warm_images = 15;
+}
+
+message GetPoolRequest {
+  string namespace = 1;
+  string pool_name = 2;
+}
+
+message ListPoolsRequest {
+  string namespace = 1;
+}
+
+message ListPoolsResponse {
+  repeated PoolInfo items = 1;
+}

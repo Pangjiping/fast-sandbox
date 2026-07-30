@@ -161,15 +161,15 @@ generate: $(PROTOC) $(TOOLS_BIN)/protoc-gen-go $(TOOLS_BIN)/protoc-gen-go-grpc $
 	@PATH=$(TOOLS_BIN):$$PATH $(PROTOC) -I . \
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
-		api/proto/v1/fastpath.proto
+		api/proto/v2/fastpath.proto
 	@PYTHON=$(PYTHON) bash sdk/python/generate_proto.sh
-	@$(CONTROLLER_GEN) object paths=./api/v1alpha1/...
-	@$(CONTROLLER_GEN) crd paths=./api/v1alpha1/... output:crd:artifacts:config=config/crd
+	@$(CONTROLLER_GEN) object paths=./api/v1alpha2/...
+	@$(CONTROLLER_GEN) crd paths=./api/v1alpha2/... output:crd:artifacts:config=config/crd
 
 verify: generate
 	@git diff --exit-code -- \
-		api/proto/v1 \
-		api/v1alpha1/zz_generated.deepcopy.go \
+		api/proto/v2 \
+		api/v1alpha2/zz_generated.deepcopy.go \
 		config/crd \
 		sdk/python/fast_sandbox/proto
 	@$(GO) test $(UNIT_PACKAGES)
@@ -253,6 +253,7 @@ quickstart:
 			pool=kata-clh-execd-pool; sandbox=quickstart-kata-clh-execd-sandbox; data_plane=execd ;; \
 		*) echo "unsupported Quick Start RUNTIME=$(RUNTIME) INFRA=$(INFRA)" >&2; exit 2 ;; \
 	esac; \
+	resource_namespace=fast-sandbox; \
 	echo ""; \
 	echo "Fast Sandbox Quick Start"; \
 	echo "Runtime:  $(RUNTIME)"; \
@@ -268,26 +269,26 @@ quickstart:
 	kubectl apply -f "$$pool_file" || exit $$?; \
 	image_id=$$(docker image inspect --format='{{.Id}}' "$(FASTLET_IMAGE)") || exit $$?; \
 	patch=$$(printf '{"spec":{"fastletTemplate":{"metadata":{"annotations":{"fast-sandbox.io/quickstart-image-id":"%s"}}}}}' "$$image_id"); \
-	kubectl patch "sandboxpool/$$pool" --type=merge -p "$$patch" >/dev/null || exit $$?; \
+	kubectl patch "sandboxpool/$$pool" -n "$$resource_namespace" --type=merge -p "$$patch" >/dev/null || exit $$?; \
 	echo "[quickstart 3/4] Waiting for a ready Fastlet built from $$image_id..."; \
 	ready=false; \
 	for i in $$(seq 1 90); do \
-		for pod in $$(kubectl get pods -l "fast-sandbox.io/pool=$$pool" -o name); do \
-			pod_image_id=$$(kubectl get "$$pod" -o jsonpath='{.metadata.annotations.fast-sandbox\.io/quickstart-image-id}'); \
-			pod_ready=$$(kubectl get "$$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'); \
+		for pod in $$(kubectl get pods -n "$$resource_namespace" -l "fast-sandbox.io/pool=$$pool" -o name); do \
+			pod_image_id=$$(kubectl get "$$pod" -n "$$resource_namespace" -o jsonpath='{.metadata.annotations.fast-sandbox\.io/quickstart-image-id}'); \
+			pod_ready=$$(kubectl get "$$pod" -n "$$resource_namespace" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'); \
 			if [ "$$pod_image_id" = "$$image_id" ] && [ "$$pod_ready" = "True" ]; then \
 				ready=true; ready_pod=$$pod; ready_after=$$((($$i - 1) * 2)); break 2; \
 			fi; \
 		done; \
 		if [ $$(( $$i % 5 )) -eq 0 ]; then \
 			echo "  still waiting ($$(( $$i * 2 ))s elapsed):"; \
-			kubectl get pods -l "fast-sandbox.io/pool=$$pool" --no-headers 2>/dev/null | sed 's/^/    /'; \
+			kubectl get pods -n "$$resource_namespace" -l "fast-sandbox.io/pool=$$pool" --no-headers 2>/dev/null | sed 's/^/    /'; \
 		fi; \
 		sleep 2; \
 	done; \
 	if [ "$$ready" != true ]; then \
 		echo "timed out waiting for the current Fastlet image in Pool $$pool" >&2; \
-		kubectl get pods -l "fast-sandbox.io/pool=$$pool" -o wide; \
+		kubectl get pods -n "$$resource_namespace" -l "fast-sandbox.io/pool=$$pool" -o wide; \
 		exit 1; \
 	fi; \
 	echo "  ready after $${ready_after}s: $$ready_pod"; \
@@ -302,6 +303,7 @@ quickstart:
 	echo "Quick Start environment is ready."; \
 	printf "Context: "; kubectl config current-context; \
 	echo "Pool:    $$pool"; \
+	echo "Namespace: $$resource_namespace"; \
 	echo ""; \
 	bash test/e2e/hack/quickstart-print.sh \
 		"$$pool" "$$sandbox" "$$data_plane" "$$config_state" \

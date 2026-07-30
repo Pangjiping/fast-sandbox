@@ -120,6 +120,12 @@ func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 	require.NotNil(t, diagnostics.Sandbox)
 	require.Equal(t, "running", diagnostics.Sandbox.Phase)
 	require.Len(t, diagnostics.Events, 2)
+	var ready fastletapi.WaitSandboxReadyResponse
+	recorder = postJSON(t, handler, "/api/v2/fastlet/wait-data-plane", fastletapi.WaitSandboxReadyRequest{
+		Identity: identity, DataPlane: true, NoWait: true,
+	}, &ready)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.True(t, ready.Ready)
 
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v2/fastlet/heartbeat", nil))

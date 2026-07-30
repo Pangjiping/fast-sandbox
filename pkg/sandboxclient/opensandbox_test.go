@@ -18,15 +18,15 @@ type staticResolver struct {
 	err   error
 }
 
-func (r staticResolver) Resolve(_ context.Context, _ SandboxRef, port uint32) (Route, error) {
+func (r staticResolver) Resolve(_ context.Context, _ SandboxRef, target RouteTarget) (Route, error) {
 	result := r.route
-	result.TargetPort = port
+	result.ComponentName = target.ComponentName
 	return result, r.err
 }
 
 func openSandboxAdapterForServer(t *testing.T, server *httptest.Server) *OpenSandboxExecd {
 	t.Helper()
-	endpoint, err := url.Parse(server.URL + "/v1/sandboxes/uid-a/ports/44772")
+	endpoint, err := url.Parse(server.URL + "/v2/sandboxes/uid-a/components/execd")
 	require.NoError(t, err)
 	return &OpenSandboxExecd{Resolver: staticResolver{route: Route{
 		SandboxUID: "uid-a", Endpoint: endpoint,
@@ -36,7 +36,7 @@ func openSandboxAdapterForServer(t *testing.T, server *httptest.Server) *OpenSan
 
 func TestOpenSandboxExecdUsesOfficialSDKAndForwardsRouteHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		require.Equal(t, "/v1/sandboxes/uid-a/ports/44772/command", request.URL.Path)
+		require.Equal(t, "/v2/sandboxes/uid-a/components/execd/command", request.URL.Path)
 		require.Equal(t, "Bearer route-token", request.Header.Get("Authorization"))
 		require.Contains(t, request.Header.Get("User-Agent"), "OpenSandbox-Go-SDK")
 		writer.Header().Set("Content-Type", "text/event-stream")
@@ -46,7 +46,7 @@ func TestOpenSandboxExecdUsesOfficialSDKAndForwardsRouteHeaders(t *testing.T) {
 	defer server.Close()
 	client, route, err := openSandboxAdapterForServer(t, server).Client(context.Background(), SandboxRef{Name: "sandbox-a"})
 	require.NoError(t, err)
-	require.Equal(t, OpenSandboxExecdPort, route.TargetPort)
+	require.Equal(t, DefaultOpenSandboxExecdComponent, route.ComponentName)
 	var events []opensandbox.StreamEvent
 	require.NoError(t, client.RunCommand(context.Background(), opensandbox.RunCommandRequest{Command: "printf hello"}, func(event opensandbox.StreamEvent) error {
 		events = append(events, event)
@@ -59,11 +59,11 @@ func TestOpenSandboxExecdFileCallsUseOfficialSDK(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		require.Equal(t, "Bearer route-token", request.Header.Get("Authorization"))
 		switch request.URL.Path {
-		case "/v1/sandboxes/uid-a/ports/44772/files/info":
+		case "/v2/sandboxes/uid-a/components/execd/files/info":
 			fmt.Fprint(writer, `{`+`"/tmp/value":{"path":"/tmp/value","size":5,"mode":644}`+`}`)
-		case "/v1/sandboxes/uid-a/ports/44772/files/download":
+		case "/v2/sandboxes/uid-a/components/execd/files/download":
 			fmt.Fprint(writer, "value")
-		case "/v1/sandboxes/uid-a/ports/44772/files/upload":
+		case "/v2/sandboxes/uid-a/components/execd/files/upload":
 			require.NoError(t, request.ParseMultipartForm(1<<20))
 			file, _, err := request.FormFile("file")
 			require.NoError(t, err)

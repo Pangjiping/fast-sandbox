@@ -3,19 +3,25 @@ package reconciler
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
-	apiv1alpha1 "fast-sandbox/api/v1alpha1"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/yaml"
 )
 
 // SandboxPoolReconciler reconciles SandboxPool resources.
@@ -37,7 +44,6 @@ type SandboxPoolReconciler struct {
 	Scheme               *runtime.Scheme
 	Registry             placement.FastletRegistry
 	Catalog              *runtimecatalog.Catalog
-	InfraCatalog         *infracatalog.Catalog
 	FastletDrainer       FastletDrainer
 	FastletProxyImage    string
 	BoxLiteRuntimeImage  string
@@ -59,7 +65,7 @@ const (
 func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := klog.FromContext(ctx)
 
-	var pool apiv1alpha1.SandboxPool
+	var pool apiv1alpha2.SandboxPool
 	if err := r.Get(ctx, req.NamespacedName, &pool); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -68,52 +74,69 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err != nil {
 		logger.Error(err, "Runtime profile resolution failed")
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
-			Type:    apiv1alpha1.PoolConditionRuntimeReady,
+			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
-			Reason:  apiv1alpha1.ReasonRuntimeProfileInvalid,
+			Reason:  apiv1alpha2.ReasonRuntimeProfileInvalid,
 			Message: err.Error(),
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if profile.Capabilities.DefaultState == runtimecatalog.CapabilityUnsupported {
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
-			Type:    apiv1alpha1.PoolConditionRuntimeReady,
+			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
-			Reason:  apiv1alpha1.ReasonRuntimeUnsupported,
+			Reason:  apiv1alpha2.ReasonRuntimeUnsupported,
 			Message: profile.Capabilities.Reason,
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if profile.Capabilities.DefaultState == runtimecatalog.CapabilityDegraded {
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
-			Type:    apiv1alpha1.PoolConditionRuntimeReady,
+			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
-			Reason:  apiv1alpha1.ReasonRuntimeUnavailable,
+			Reason:  apiv1alpha2.ReasonRuntimeUnavailable,
 			Message: profile.Capabilities.Reason,
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	if err := apiv1alpha1.ValidateSandboxResourceProfile(pool.Spec.SandboxResources); err != nil {
+	if err := apiv1alpha2.ValidateSandboxResourceProfile(pool.Spec.SandboxResources); err != nil {
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
-			Type:    apiv1alpha1.PoolConditionRuntimeReady,
+			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
-			Reason:  apiv1alpha1.ReasonResourceProfileInvalid,
+			Reason:  apiv1alpha2.ReasonResourceProfileInvalid,
 			Message: err.Error(),
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	_, err = r.resolveInfraPlan(&pool, profile)
+	compiledRegistry, err := r.ensureRegistrySecret(ctx, &pool)
 	if err != nil {
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
-			Type: apiv1alpha1.PoolConditionInfraReady, Status: metav1.ConditionFalse,
-			Reason: apiv1alpha1.ReasonInfraProfileInvalid, Message: err.Error(),
+			Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionFalse,
+			Reason: apiv1alpha2.ReasonRegistryInvalid, Message: boundedStatusMessage(err.Error()),
+		})
+		pool.Status.Registry.LastError = boundedStatusMessage(err.Error())
+		_ = r.Status().Update(ctx, &pool)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+		Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionTrue,
+		Reason: apiv1alpha2.ReasonRegistryAvailable, Message: "Registry configuration is valid and compiled",
+	})
+	infraPlan, err := r.resolveInfraPlan(&pool, profile)
+	if err != nil {
+		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+			Type: apiv1alpha2.PoolConditionInfraReady, Status: metav1.ConditionFalse,
+			Reason: apiv1alpha2.ReasonInfraComponentsInvalid, Message: err.Error(),
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
-		Type: apiv1alpha1.PoolConditionInfraReady, Status: metav1.ConditionTrue,
-		Reason: apiv1alpha1.ReasonInfraProfileAvailable, Message: "InfraProfile is compatible with the selected runtime",
+		Type: apiv1alpha2.PoolConditionInfraReady, Status: metav1.ConditionTrue,
+		Reason: apiv1alpha2.ReasonInfraComponentsAvailable, Message: "Infra Components are valid for the selected runtime",
 	})
+	if err := r.ensureInfraPlanConfigMap(ctx, &pool, infraPlan); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	var childPods corev1.PodList
 	if err := r.durableReader().List(ctx, &childPods, client.InNamespace(req.Namespace), client.MatchingLabels(poolLabels(pool.Name))); err != nil {
@@ -123,7 +146,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.updatePoolCondition(ctx, &pool, runtimeCondition); err != nil {
 		return ctrl.Result{}, err
 	}
-	var allSandboxes apiv1alpha1.SandboxList
+	var allSandboxes apiv1alpha2.SandboxList
 	if err := r.durableReader().List(ctx, &allSandboxes, client.InNamespace(req.Namespace)); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -186,10 +209,27 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{RequeueAfter: drainRequeue}, nil
 	}
-	if pool.Status.CurrentPods != currentCount || pool.Status.TotalFastlets != currentCount || pool.Status.ReadyPods != readyPods {
+	preparedFastlets := r.preparedFastletCount(&pool, infraPlan.Revision)
+	componentSummaries := infraComponentSummaries(infraPlan)
+	warmImageStatuses := r.aggregateWarmImageStatus(&pool, childPods.Items)
+	registryStatus := r.aggregateRegistryStatus(&pool, compiledRegistry, childPods.Items)
+	idleFastlets, busyFastlets := r.fastletUtilizationCounts(&pool, childPods.Items)
+	if pool.Status.CurrentPods != currentCount || pool.Status.TotalFastlets != currentCount ||
+		pool.Status.ReadyPods != readyPods || pool.Status.IdleFastlets != idleFastlets ||
+		pool.Status.BusyFastlets != busyFastlets ||
+		pool.Status.InfraRevision != infraPlan.Revision ||
+		pool.Status.PreparedFastlets != preparedFastlets || !reflect.DeepEqual(pool.Status.InfraComponents, componentSummaries) ||
+		!reflect.DeepEqual(pool.Status.WarmImages, warmImageStatuses) || !reflect.DeepEqual(pool.Status.Registry, registryStatus) {
 		pool.Status.CurrentPods = currentCount
 		pool.Status.TotalFastlets = currentCount
 		pool.Status.ReadyPods = readyPods
+		pool.Status.IdleFastlets = idleFastlets
+		pool.Status.BusyFastlets = busyFastlets
+		pool.Status.InfraRevision = infraPlan.Revision
+		pool.Status.PreparedFastlets = preparedFastlets
+		pool.Status.InfraComponents = componentSummaries
+		pool.Status.WarmImages = warmImageStatuses
+		pool.Status.Registry = registryStatus
 		if err := r.Status().Update(ctx, &pool); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -203,11 +243,100 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-func (r *SandboxPoolReconciler) runtimeCapabilityCondition(pool *apiv1alpha1.SandboxPool, pods []corev1.Pod) (metav1.Condition, int32) {
+func (r *SandboxPoolReconciler) aggregateWarmImageStatus(
+	pool *apiv1alpha2.SandboxPool,
+	pods []corev1.Pod,
+) []apiv1alpha2.WarmImageStatus {
+	children := childPodIdentities(pods)
+	totalFastlets := int32(len(children))
+	desired := uniqueWarmImages(pool.Spec.WarmImages)
+	result := make([]apiv1alpha2.WarmImageStatus, 0, len(desired))
+	byImage := make(map[string]*apiv1alpha2.WarmImageStatus, len(desired))
+	for _, image := range desired {
+		result = append(result, apiv1alpha2.WarmImageStatus{
+			Image: image, DesiredFastlets: totalFastlets, ObservedGeneration: pool.Generation,
+		})
+		byImage[image] = &result[len(result)-1]
+	}
+	if r.Registry == nil {
+		return result
+	}
+	for _, info := range r.Registry.GetAllFastlets() {
+		if info.Namespace != pool.Namespace || info.PoolName != pool.Name {
+			continue
+		}
+		if _, exists := children[info.PodName+"/"+info.PodUID]; !exists {
+			continue
+		}
+		for _, observed := range info.WarmImages {
+			status := byImage[observed.Image]
+			if status == nil {
+				continue
+			}
+			switch observed.State {
+			case "Cached":
+				status.CachedFastlets++
+			case "Failed":
+				status.FailedFastlets++
+				if observed.Message != "" {
+					status.LastError = boundedStatusMessage(observed.Message)
+				}
+			default:
+				status.PullingFastlets++
+			}
+		}
+	}
+	return result
+}
+
+func (r *SandboxPoolReconciler) fastletUtilizationCounts(
+	pool *apiv1alpha2.SandboxPool,
+	pods []corev1.Pod,
+) (idle int32, busy int32) {
+	if r.Registry == nil {
+		return 0, 0
+	}
+	children := childPodIdentities(pods)
+	for _, info := range r.Registry.GetAllFastlets() {
+		if info.Namespace != pool.Namespace || info.PoolName != pool.Name {
+			continue
+		}
+		if _, exists := children[info.PodName+"/"+info.PodUID]; !exists {
+			continue
+		}
+		if !info.PodReady || !info.RuntimeReady || !info.InfraReady || info.Draining || info.DrainRequested {
+			continue
+		}
+		if info.Used() == 0 {
+			idle++
+		} else {
+			busy++
+		}
+	}
+	return idle, busy
+}
+
+func childPodIdentities(pods []corev1.Pod) map[string]struct{} {
+	children := make(map[string]struct{}, len(pods))
+	for index := range pods {
+		children[podIdentity(&pods[index])] = struct{}{}
+	}
+	return children
+}
+
+func boundedStatusMessage(message string) string {
+	const maxStatusMessage = 512
+	if len(message) > maxStatusMessage {
+		return message[:maxStatusMessage]
+	}
+	return message
+}
+
+func (r *SandboxPoolReconciler) runtimeCapabilityCondition(pool *apiv1alpha2.SandboxPool, pods []corev1.Pod) (metav1.Condition, int32) {
 	condition := metav1.Condition{
-		Type:               apiv1alpha1.PoolConditionRuntimeReady,
+		Type:               apiv1alpha2.PoolConditionRuntimeReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             apiv1alpha1.ReasonRuntimeCapabilityPending,
+		Reason:             apiv1alpha2.ReasonRuntimeCapabilityPending,
 		Message:            "Waiting for a child Fastlet heartbeat with a ready runtime",
 		ObservedGeneration: pool.Generation,
 	}
@@ -237,10 +366,10 @@ func (r *SandboxPoolReconciler) runtimeCapabilityCondition(pool *apiv1alpha1.San
 	}
 	if ready > 0 {
 		condition.Status = metav1.ConditionTrue
-		condition.Reason = apiv1alpha1.ReasonRuntimeAvailable
+		condition.Reason = apiv1alpha2.ReasonRuntimeAvailable
 		condition.Message = fmt.Sprintf("%d child Fastlet pod(s) report the runtime ready", ready)
 	} else if observedHeartbeat {
-		condition.Reason = apiv1alpha1.ReasonRuntimeUnavailable
+		condition.Reason = apiv1alpha2.ReasonRuntimeUnavailable
 		condition.Message = "Child Fastlet heartbeats report no ready runtime"
 	}
 	return condition, ready
@@ -248,9 +377,9 @@ func (r *SandboxPoolReconciler) runtimeCapabilityCondition(pool *apiv1alpha1.San
 
 func (r *SandboxPoolReconciler) reconcileDraining(
 	ctx context.Context,
-	pool *apiv1alpha1.SandboxPool,
+	pool *apiv1alpha2.SandboxPool,
 	pods []corev1.Pod,
-	sandboxes []apiv1alpha1.Sandbox,
+	sandboxes []apiv1alpha2.Sandbox,
 	desiredPods int32,
 	desiredPodHash string,
 ) (ctrl.Result, bool, error) {
@@ -398,7 +527,7 @@ func (r *SandboxPoolReconciler) requestDrain(ctx context.Context, pod *corev1.Po
 	return true, nil
 }
 
-func activeAssignmentsByPod(sandboxes []apiv1alpha1.Sandbox, poolName string) map[string]int {
+func activeAssignmentsByPod(sandboxes []apiv1alpha2.Sandbox, poolName string) map[string]int {
 	result := make(map[string]int)
 	for index := range sandboxes {
 		sandbox := &sandboxes[index]
@@ -411,13 +540,13 @@ func activeAssignmentsByPod(sandboxes []apiv1alpha1.Sandbox, poolName string) ma
 	return result
 }
 
-func sandboxNeedsPlacement(sandbox *apiv1alpha1.Sandbox) bool {
+func sandboxNeedsPlacement(sandbox *apiv1alpha2.Sandbox) bool {
 	if sandbox == nil || sandbox.Status.Assignment != nil || sandbox.DeletionTimestamp != nil {
 		return false
 	}
 	if sandbox.Status.HasCondition(orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonExpired) ||
 		sandbox.Status.HasCondition(orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost) ||
-		sandbox.Status.RuntimeState == apiv1alpha1.ObservedStateDraining {
+		sandbox.Status.RuntimeState == apiv1alpha2.ObservedStateDraining {
 		return false
 	}
 	return true
@@ -449,9 +578,9 @@ func (r *SandboxPoolReconciler) durableReader() client.Reader {
 // constructPod builds a Fastlet Pod from the template and a platform-owned
 // RuntimeProfile. RuntimeClass and backend handler overrides are never copied
 // from the Pool into the Pod.
-func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha1.SandboxPool, profile runtimecatalog.RuntimeProfile) (*corev1.Pod, error) {
+func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, profile runtimecatalog.RuntimeProfile) (*corev1.Pod, error) {
 	sandboxResources := pool.Spec.SandboxResources
-	if err := apiv1alpha1.ValidateSandboxResourceProfile(sandboxResources); err != nil {
+	if err := apiv1alpha2.ValidateSandboxResourceProfile(sandboxResources); err != nil {
 		return nil, err
 	}
 	infraPlan, err := r.resolveInfraPlan(pool, profile)
@@ -467,14 +596,14 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha1.SandboxPool, prof
 	}
 	labels["fast-sandbox.io/runtime"] = string(profile.Name)
 	labels["fast-sandbox.io/runtime-profile"] = shortProfileIdentity(profile)
-	labels["fast-sandbox.io/infra-profile"] = infraPlan.ProfileName
+	labels["fast-sandbox.io/infra-revision"] = shortRevision(infraPlan.Revision)
 	annotations := make(map[string]string)
 	for k, v := range pool.Spec.FastletTemplate.ObjectMeta.Annotations {
 		annotations[k] = v
 	}
 	annotations["fast-sandbox.io/runtime-profile-hash"] = profile.ProfileHash
 	annotations["fast-sandbox.io/resource-profile-hash"] = sandboxResources.Hash()
-	annotations["fast-sandbox.io/infra-profile-hash"] = infraPlan.ProfileHash
+	annotations["fast-sandbox.io/infra-revision"] = infraPlan.Revision
 	warmImagesJSON, err := json.Marshal(uniqueWarmImages(pool.Spec.WarmImages))
 	if err != nil {
 		return nil, fmt.Errorf("encode warmImages: %w", err)
@@ -558,18 +687,17 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha1.SandboxPool, prof
 			corev1.EnvVar{Name: "FAST_SANDBOX_RESOURCE_CPU", Value: sandboxResources.CPU.String()},
 			corev1.EnvVar{Name: "FAST_SANDBOX_RESOURCE_MEMORY", Value: sandboxResources.Memory.String()},
 			corev1.EnvVar{Name: "FAST_SANDBOX_RESOURCE_PIDS", Value: strconv.FormatInt(sandboxResources.PIDs, 10)},
-			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_PROFILE", Value: infraPlan.ProfileName},
-			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_PROFILE_HASH", Value: infraPlan.ProfileHash},
+			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_REVISION", Value: infraPlan.Revision},
+			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_PLAN_PATH", Value: "/etc/fast-sandbox/infra/plan.json"},
+			corev1.EnvVar{Name: "FAST_SANDBOX_REGISTRY_CONFIG_PATH", Value: registryconfig.MountPath},
 			corev1.EnvVar{Name: "RUNTIME_SOCKET", Value: "/run/containerd/containerd.sock"},
 			corev1.EnvVar{Name: "INFRA_DIR_IN_POD", Value: "/opt/fast-sandbox/infra"},
 		)
-		if infraPlanUsesStaticArtifacts(infraPlan) {
-			c.Env = append(c.Env, corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_STATIC_ROOTS", Value: "/opt/fast-sandbox/components"})
-		}
-
 		c.VolumeMounts = append(c.VolumeMounts,
 			corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"},
 			corev1.VolumeMount{Name: "infra-tools", MountPath: "/opt/fast-sandbox/infra"},
+			corev1.VolumeMount{Name: "infra-plan", MountPath: "/etc/fast-sandbox/infra", ReadOnly: true},
+			corev1.VolumeMount{Name: "registry-config", MountPath: "/etc/fast-sandbox/registry", ReadOnly: true},
 			corev1.VolumeMount{Name: "proxy-control", MountPath: "/run/fast-sandbox/proxy"},
 		)
 		if runtimeResourceOwner == c.Name {
@@ -637,6 +765,18 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha1.SandboxPool, prof
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
+		},
+		corev1.Volume{
+			Name: "infra-plan",
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: infraPlanConfigMapName(pool.Name, infraPlan.Revision)},
+			}},
+		},
+		corev1.Volume{
+			Name: "registry-config",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: registrySecretName(pool.Name),
+			}},
 		},
 		corev1.Volume{Name: "proxy-control", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	)
@@ -774,11 +914,13 @@ func (r *SandboxPoolReconciler) boxLiteRuntimeContainer(config runtimecatalog.Bo
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}},
 			},
 			{Name: "FAST_SANDBOX_INFRA_STORE_ROOT", Value: "/opt/fast-sandbox/infra"},
+			{Name: "FAST_SANDBOX_REGISTRY_CONFIG_PATH", Value: registryconfig.MountPath},
 		},
 		SecurityContext: &corev1.SecurityContext{Privileged: boolPtr(true)},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "boxlite-control", MountPath: "/run/fast-sandbox/boxlite"},
 			{Name: "infra-tools", MountPath: "/opt/fast-sandbox/infra", ReadOnly: true},
+			{Name: "registry-config", MountPath: "/etc/fast-sandbox/registry", ReadOnly: true},
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{
@@ -793,6 +935,8 @@ func validatePlatformOwnedStorage(podSpec *corev1.PodSpec) error {
 	reservedVolumes := map[string]string{
 		"tmp":             "/tmp",
 		"infra-tools":     "/opt/fast-sandbox/infra",
+		"infra-plan":      "/etc/fast-sandbox/infra",
+		"registry-config": "/etc/fast-sandbox/registry",
 		"proxy-control":   "/run/fast-sandbox/proxy",
 		"boxlite-control": "/run/fast-sandbox/boxlite",
 	}
@@ -844,11 +988,11 @@ func poolLabels(poolName string) map[string]string {
 	}
 }
 
-func getFastletCapacity(pool *apiv1alpha1.SandboxPool) int32 {
+func getFastletCapacity(pool *apiv1alpha2.SandboxPool) int32 {
 	return pool.Spec.MaxSandboxesPerPod
 }
 
-func (r *SandboxPoolReconciler) resolveRuntimeProfile(pool *apiv1alpha1.SandboxPool) (runtimecatalog.RuntimeProfile, error) {
+func (r *SandboxPoolReconciler) resolveRuntimeProfile(pool *apiv1alpha2.SandboxPool) (runtimecatalog.RuntimeProfile, error) {
 	if err := pool.Spec.ValidateRuntime(); err != nil {
 		return runtimecatalog.RuntimeProfile{}, err
 	}
@@ -859,29 +1003,288 @@ func (r *SandboxPoolReconciler) resolveRuntimeProfile(pool *apiv1alpha1.SandboxP
 	return catalog.Resolve(pool.Spec.Runtime)
 }
 
-func (r *SandboxPoolReconciler) resolveInfraPlan(pool *apiv1alpha1.SandboxPool, runtimeProfile runtimecatalog.RuntimeProfile) (infracatalog.Plan, error) {
-	catalog := r.InfraCatalog
-	if catalog == nil {
-		catalog = infracatalog.Builtin()
-	}
-	return catalog.Compile(pool.Spec.InfraProfile, runtimeProfile)
+func (r *SandboxPoolReconciler) resolveInfraPlan(pool *apiv1alpha2.SandboxPool, runtimeProfile runtimecatalog.RuntimeProfile) (infracatalog.Plan, error) {
+	return infracatalog.Compile(pool.Spec.InfraComponents, runtimeProfile)
 }
 
-func infraPlanUsesStaticArtifacts(plan infracatalog.Plan) bool {
-	for _, component := range plan.Components {
-		if component.Component.Artifact.SourceType == infracatalog.SourceStatic {
-			return true
+func shortRevision(revision string) string {
+	value := strings.TrimPrefix(revision, "sha256:")
+	if len(value) > 12 {
+		value = value[:12]
+	}
+	return value
+}
+
+func infraPlanConfigMapName(poolName, revision string) string {
+	suffix := "-infra-" + shortRevision(revision)
+	maxPoolLength := 253 - len(suffix)
+	if len(poolName) > maxPoolLength {
+		poolName = strings.TrimRight(poolName[:maxPoolLength], "-.")
+	}
+	return poolName + suffix
+}
+
+func registrySecretName(poolName string) string {
+	const suffix = "-registry"
+	maxPoolLength := 253 - len(suffix)
+	if len(poolName) > maxPoolLength {
+		poolName = strings.TrimRight(poolName[:maxPoolLength], "-.")
+	}
+	return poolName + suffix
+}
+
+type dockerConfigJSON struct {
+	Auths map[string]dockerAuthConfig `json:"auths"`
+}
+
+type dockerAuthConfig struct {
+	Username      string `json:"username,omitempty"`
+	Password      string `json:"password,omitempty"`
+	Auth          string `json:"auth,omitempty"`
+	IdentityToken string `json:"identitytoken,omitempty"`
+}
+
+func (r *SandboxPoolReconciler) ensureRegistrySecret(ctx context.Context, pool *apiv1alpha2.SandboxPool) (registryconfig.Compiled, error) {
+	var source corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: registryconfig.ConfigMapName}, &source)
+	if apierrors.IsNotFound(err) {
+		compiled, compileErr := registryconfig.NewCompiled(nil)
+		if compileErr != nil {
+			return registryconfig.Compiled{}, compileErr
+		}
+		return compiled, r.persistRegistrySecret(ctx, pool, compiled)
+	}
+	if err != nil {
+		return registryconfig.Compiled{}, fmt.Errorf("read Registry ConfigMap: %w", err)
+	}
+	raw, found := source.Data[registryconfig.ConfigMapKey]
+	if !found {
+		return registryconfig.Compiled{}, fmt.Errorf("ConfigMap %s must contain %s", registryconfig.ConfigMapName, registryconfig.ConfigMapKey)
+	}
+	var config registryconfig.Config
+	if err := yaml.UnmarshalStrict([]byte(raw), &config); err != nil {
+		return registryconfig.Compiled{}, fmt.Errorf("decode Registry configuration: %w", err)
+	}
+	config, err = registryconfig.NormalizeAndValidate(config)
+	if err != nil {
+		return registryconfig.Compiled{}, err
+	}
+	credentials := make([]registryconfig.Credential, 0, len(config.Registries))
+	for _, rule := range config.Registries {
+		credential, err := r.registryCredentialFromSecret(ctx, pool.Namespace, rule)
+		if err != nil {
+			return registryconfig.Compiled{}, err
+		}
+		credentials = append(credentials, credential)
+	}
+	compiled, err := registryconfig.NewCompiled(credentials)
+	if err != nil {
+		return registryconfig.Compiled{}, err
+	}
+	return compiled, r.persistRegistrySecret(ctx, pool, compiled)
+}
+
+func (r *SandboxPoolReconciler) registryCredentialFromSecret(
+	ctx context.Context,
+	namespace string,
+	rule registryconfig.RegistryRule,
+) (registryconfig.Credential, error) {
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: rule.SecretRef.Name}, &secret); err != nil {
+		return registryconfig.Credential{}, fmt.Errorf("read Registry Secret %s: %w", rule.SecretRef.Name, err)
+	}
+	if secret.Type != corev1.SecretTypeDockerConfigJson {
+		return registryconfig.Credential{}, fmt.Errorf("Registry Secret %s must have type %s", secret.Name, corev1.SecretTypeDockerConfigJson)
+	}
+	content := secret.Data[corev1.DockerConfigJsonKey]
+	if len(content) == 0 {
+		return registryconfig.Credential{}, fmt.Errorf("Registry Secret %s has no %s data", secret.Name, corev1.DockerConfigJsonKey)
+	}
+	var dockerConfig dockerConfigJSON
+	if err := json.Unmarshal(content, &dockerConfig); err != nil {
+		return registryconfig.Credential{}, fmt.Errorf("decode Registry Secret %s: %w", secret.Name, err)
+	}
+	var auth dockerAuthConfig
+	found := false
+	for host, candidate := range dockerConfig.Auths {
+		if registryconfig.NormalizeHost(host) == rule.Host {
+			auth = candidate
+			found = true
+			break
 		}
 	}
-	return false
+	if !found {
+		return registryconfig.Credential{}, fmt.Errorf("Registry Secret %s has no credentials for host %s", secret.Name, rule.Host)
+	}
+	if auth.Username == "" && auth.Password == "" && auth.Auth != "" {
+		decoded, err := base64.StdEncoding.DecodeString(auth.Auth)
+		if err != nil {
+			return registryconfig.Credential{}, fmt.Errorf("decode auth for host %s in Secret %s: %w", rule.Host, secret.Name, err)
+		}
+		username, password, found := strings.Cut(string(decoded), ":")
+		if !found {
+			return registryconfig.Credential{}, fmt.Errorf("auth for host %s in Secret %s is invalid", rule.Host, secret.Name)
+		}
+		auth.Username, auth.Password = username, password
+	}
+	if auth.Username == "" && auth.Password == "" && auth.IdentityToken == "" {
+		return registryconfig.Credential{}, fmt.Errorf("Registry Secret %s has empty credentials for host %s", secret.Name, rule.Host)
+	}
+	return registryconfig.Credential{
+		Host: rule.Host, RepositoryPrefix: rule.RepositoryPrefix,
+		Username: auth.Username, Password: auth.Password, IdentityToken: auth.IdentityToken,
+	}, nil
+}
+
+func (r *SandboxPoolReconciler) persistRegistrySecret(
+	ctx context.Context,
+	pool *apiv1alpha2.SandboxPool,
+	compiled registryconfig.Compiled,
+) error {
+	content, err := compiled.Marshal()
+	if err != nil {
+		return err
+	}
+	key := client.ObjectKey{Namespace: pool.Namespace, Name: registrySecretName(pool.Name)}
+	var secret corev1.Secret
+	err = r.Get(ctx, key, &secret)
+	if apierrors.IsNotFound(err) {
+		secret = corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: key.Name, Namespace: key.Namespace,
+				Labels: map[string]string{"fast-sandbox.io/pool": pool.Name, "fast-sandbox.io/registry-config": "compiled"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{registryconfig.SecretKey: content},
+		}
+		if err := ctrl.SetControllerReference(pool, &secret, r.Scheme); err != nil {
+			return err
+		}
+		return r.Create(ctx, &secret)
+	}
+	if err != nil {
+		return err
+	}
+	if string(secret.Data[registryconfig.SecretKey]) == string(content) && secret.Type == corev1.SecretTypeOpaque {
+		return nil
+	}
+	before := secret.DeepCopy()
+	secret.Type = corev1.SecretTypeOpaque
+	if secret.Data == nil {
+		secret.Data = make(map[string][]byte)
+	}
+	secret.Data[registryconfig.SecretKey] = content
+	return r.Patch(ctx, &secret, client.MergeFrom(before))
+}
+
+func registryGeneration(revision string) int64 {
+	digest := strings.TrimPrefix(revision, "sha256:")
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) < 8 {
+		sum := sha256.Sum256([]byte(revision))
+		decoded = sum[:]
+	}
+	return int64(binary.BigEndian.Uint64(decoded[:8]) & uint64(^uint64(0)>>1))
+}
+
+func (r *SandboxPoolReconciler) aggregateRegistryStatus(
+	pool *apiv1alpha2.SandboxPool,
+	compiled registryconfig.Compiled,
+	pods []corev1.Pod,
+) apiv1alpha2.RegistryApplicationStatus {
+	children := childPodIdentities(pods)
+	status := apiv1alpha2.RegistryApplicationStatus{
+		TargetGeneration: registryGeneration(compiled.Revision),
+		TotalFastlets:    int32(len(children)),
+	}
+	if r.Registry == nil {
+		return status
+	}
+	for _, info := range r.Registry.GetAllFastlets() {
+		if info.Namespace != pool.Namespace || info.PoolName != pool.Name || info.RegistryRevision != compiled.Revision {
+			continue
+		}
+		if _, exists := children[info.PodName+"/"+info.PodUID]; exists {
+			status.AppliedFastlets++
+		}
+	}
+	return status
+}
+
+func (r *SandboxPoolReconciler) ensureInfraPlanConfigMap(
+	ctx context.Context,
+	pool *apiv1alpha2.SandboxPool,
+	plan infracatalog.Plan,
+) error {
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		return fmt.Errorf("encode Infra plan: %w", err)
+	}
+	key := client.ObjectKey{Namespace: pool.Namespace, Name: infraPlanConfigMapName(pool.Name, plan.Revision)}
+	var existing corev1.ConfigMap
+	err = r.Get(ctx, key, &existing)
+	if err == nil {
+		if existing.Data["plan.json"] != string(payload) {
+			return fmt.Errorf("immutable Infra plan ConfigMap %s contains a different plan", key.Name)
+		}
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+	immutable := true
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: key.Name, Namespace: key.Namespace,
+			Labels: map[string]string{
+				"fast-sandbox.io/pool":           pool.Name,
+				"fast-sandbox.io/infra-revision": shortRevision(plan.Revision),
+			},
+			Annotations: map[string]string{"fast-sandbox.io/infra-revision": plan.Revision},
+		},
+		Immutable: &immutable,
+		Data:      map[string]string{"plan.json": string(payload)},
+	}
+	if err := ctrl.SetControllerReference(pool, configMap, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, configMap); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create immutable Infra plan ConfigMap: %w", err)
+	}
+	return nil
+}
+
+func (r *SandboxPoolReconciler) preparedFastletCount(pool *apiv1alpha2.SandboxPool, revision string) int32 {
+	if r.Registry == nil {
+		return 0
+	}
+	var count int32
+	for _, info := range r.Registry.GetAllFastlets() {
+		if info.Namespace == pool.Namespace && info.PoolName == pool.Name &&
+			info.InfraRevision == revision && info.InfraReady {
+			count++
+		}
+	}
+	return count
+}
+
+func infraComponentSummaries(plan infracatalog.Plan) []apiv1alpha2.InfraComponentSummary {
+	result := make([]apiv1alpha2.InfraComponentSummary, 0, len(plan.Components))
+	for _, component := range plan.Components {
+		result = append(result, apiv1alpha2.InfraComponentSummary{
+			Name: component.Name, Protocol: component.Endpoint.Protocol,
+			Port: int32(component.Endpoint.Port), HealthKind: string(component.Process.Readiness.Type),
+		})
+	}
+	return result
 }
 
 var runtimeOwnedEnv = map[string]struct{}{
 	"FAST_SANDBOX_RUNTIME": {}, "FAST_SANDBOX_RUNTIME_PROFILE_HASH": {},
 	"FAST_SANDBOX_RESOURCE_CPU": {}, "FAST_SANDBOX_RESOURCE_MEMORY": {}, "FAST_SANDBOX_RESOURCE_PIDS": {},
-	"FAST_SANDBOX_INFRA_PROFILE": {}, "FAST_SANDBOX_INFRA_PROFILE_HASH": {}, "FASTLET_CAPACITY": {},
-	"FAST_SANDBOX_INFRA_STATIC_ROOTS": {},
-	"RUNTIME_SOCKET":                  {}, "INFRA_DIR_IN_POD": {},
+	"FAST_SANDBOX_INFRA_REVISION": {}, "FAST_SANDBOX_INFRA_PLAN_PATH": {}, "FASTLET_CAPACITY": {},
+	"FAST_SANDBOX_REGISTRY_CONFIG_PATH": {},
+	"RUNTIME_SOCKET":                    {}, "INFRA_DIR_IN_POD": {},
 	"FASTLET_CONTROL_PORT":         {},
 	"FASTLET_PROXY_CONTROL_SOCKET": {},
 	"FAST_SANDBOX_WARM_IMAGES":     {},
@@ -912,7 +1315,7 @@ func mergeNodeSelector(podSpec *corev1.PodSpec, required map[string]string) erro
 	return nil
 }
 
-func applyFastletResources(container *corev1.Container, overhead corev1.ResourceList, sandbox apiv1alpha1.SandboxResourceProfile, capacity int32) error {
+func applyFastletResources(container *corev1.Container, overhead corev1.ResourceList, sandbox apiv1alpha2.SandboxResourceProfile, capacity int32) error {
 	required := overhead.DeepCopy()
 	if required == nil {
 		required = corev1.ResourceList{}
@@ -999,7 +1402,7 @@ func mountPropagation(value *corev1.MountPropagationMode) corev1.MountPropagatio
 }
 
 // updatePoolCondition updates a condition on the pool status.
-func (r *SandboxPoolReconciler) updatePoolCondition(ctx context.Context, pool *apiv1alpha1.SandboxPool, condition metav1.Condition) error {
+func (r *SandboxPoolReconciler) updatePoolCondition(ctx context.Context, pool *apiv1alpha2.SandboxPool, condition metav1.Condition) error {
 	condition.ObservedGeneration = pool.Generation
 	existing := apiMeta.FindStatusCondition(pool.Status.Conditions, condition.Type)
 	if existing != nil && existing.Status == condition.Status && existing.Reason == condition.Reason &&
@@ -1016,10 +1419,20 @@ func boolPtr(b bool) *bool {
 
 func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&apiv1alpha1.SandboxPool{}).
+		For(&apiv1alpha2.SandboxPool{}).
 		Owns(&corev1.Pod{}).
-		Watches(&apiv1alpha1.Sandbox{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
-			sandbox, ok := obj.(*apiv1alpha1.Sandbox)
+		Owns(&corev1.ConfigMap{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+			if obj.GetName() != registryconfig.ConfigMapName {
+				return nil
+			}
+			return r.mapNamespaceToPools(ctx, obj.GetNamespace())
+		})).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+			return r.mapNamespaceToPools(ctx, obj.GetNamespace())
+		})).
+		Watches(&apiv1alpha2.Sandbox{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+			sandbox, ok := obj.(*apiv1alpha2.Sandbox)
 			if !ok {
 				return nil
 			}
@@ -1031,4 +1444,16 @@ func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return nil
 		})).
 		Complete(r)
+}
+
+func (r *SandboxPoolReconciler) mapNamespaceToPools(ctx context.Context, namespace string) []ctrl.Request {
+	var pools apiv1alpha2.SandboxPoolList
+	if err := r.List(ctx, &pools, client.InNamespace(namespace)); err != nil {
+		return nil
+	}
+	result := make([]ctrl.Request, 0, len(pools.Items))
+	for index := range pools.Items {
+		result = append(result, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&pools.Items[index])})
+	}
+	return result
 }
