@@ -641,6 +641,36 @@ func TestRouteRemovalPrecedesAndGatesRuntimeDeletion(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestDeleteRemovesRouteWhenRuntimeAccessIsAlreadyAbsent(t *testing.T) {
+	runtime := newAdmissionRuntime()
+	publisher := &admissionRoutePublisher{}
+	manager, err := NewSandboxManagerWithConfig(runtime, SandboxManagerConfig{
+		Capacity: 1, FastletPodUID: "pod-uid-a", RoutePublisher: publisher,
+	})
+	require.NoError(t, err)
+	request := ensureRequest("sandbox-a", 1, 1)
+	_, err = manager.CreateSandbox(context.Background(), request)
+	require.NoError(t, err)
+
+	// Model a partial prior delete: the runtime/container is already gone, but
+	// the manager still owns admission state and must retry route removal.
+	runtime.mu.Lock()
+	delete(runtime.sandboxes, request.Identity.SandboxUID)
+	runtime.mu.Unlock()
+
+	_, err = manager.DeleteSandboxV2(&fastletapi.DeleteSandboxV2Request{Identity: request.Identity})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		admission, _, _ := manager.State()
+		return admission.Used == 0
+	}, time.Second, 10*time.Millisecond)
+	publisher.mu.Lock()
+	require.Len(t, publisher.removed, 1)
+	require.Equal(t, request.Identity.SandboxUID, publisher.removed[0].SandboxUID)
+	require.Equal(t, request.Identity.RouteGeneration, publisher.removed[0].RouteGeneration)
+	publisher.mu.Unlock()
+}
+
 func TestRecoveryReconcilesRoutesBeforeReadiness(t *testing.T) {
 	runtime := newAdmissionRuntime()
 	runtime.managed = []*SandboxMetadata{{SandboxSpec: fastletapi.SandboxSpec{

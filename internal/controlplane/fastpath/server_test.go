@@ -287,7 +287,7 @@ func TestNoCandidateFailsBeforeCRDCreate(t *testing.T) {
 	fastlet.mu.Unlock()
 }
 
-func TestFastletRejectionKeepsPersistedIntent(t *testing.T) {
+func TestFastletRejectionRollsBackNewIntent(t *testing.T) {
 	server, k8sClient, _, fastlet := newV2Server(t)
 	fastlet.createFailure = &fastletapi.FastletError{
 		Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true, Outcome: fastletapi.OutcomeRejectedBeforeSideEffects,
@@ -295,8 +295,8 @@ func TestFastletRejectionKeepsPersistedIntent(t *testing.T) {
 	_, err := server.CreateSandbox(context.Background(), createRequest("request-a"))
 	require.Equal(t, codes.ResourceExhausted, status.Code(err))
 	var persisted apiv1alpha2.Sandbox
-	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "request-a"}, &persisted))
-	require.NotEmpty(t, persisted.Annotations[assignment.AnnotationAssignment])
+	err = k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "request-a"}, &persisted)
+	require.Error(t, err)
 }
 
 func TestCreateRetryUsesSameCRDAndRuntimeIdentity(t *testing.T) {

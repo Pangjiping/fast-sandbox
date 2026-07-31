@@ -62,3 +62,8 @@ func TestDefaultRouteDevice(t *testing.T) {
 	require.Equal(t, "ens5", defaultRouteDevice("default via 192.0.2.1 dev ens5 proto dhcp"))
 	require.Empty(t, defaultRouteDevice("unreachable default"))
 }
+
+func TestMissingNetworkResourceRecognizesIdempotentIPLinkDelete(t *testing.T) {
+	require.True(t, isMissingNetworkResource(errors.New("ip link delete fh123: exit status 2: RTNETLINK answers: No such device")))
+	require.False(t, isMissingNetworkResource(errors.New("ip link delete fh123: permission denied")))
+}

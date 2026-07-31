@@ -117,9 +117,18 @@ func (m *SandboxManager) removeRoute(ctx context.Context, metadata *SandboxMetad
 	if m.routePublisher == nil {
 		return nil
 	}
-	publication, err := m.routePublication(metadata)
-	if err != nil {
-		return err
+	// Removing a route only needs its fenced identity. Runtime deletion may
+	// already have removed the AccessDescriptor when a previous cleanup attempt
+	// failed later (for example while releasing a network slot). Re-resolving
+	// runtime access here would turn an otherwise idempotent retry into a
+	// permanent delete-failed loop.
+	publication := RoutePublication{
+		Namespace: metadata.ClaimNamespace, SandboxUID: metadata.SandboxID,
+		FastletPodUID: metadata.FastletPodUID, AssignmentAttempt: metadata.AssignmentAttempt,
+		RouteGeneration: metadata.RouteGeneration,
+	}
+	if publication.RouteGeneration <= 0 {
+		publication.RouteGeneration = 1
 	}
 	return m.routePublisher.RemoveRoute(ctx, publication)
 }

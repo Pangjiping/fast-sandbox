@@ -404,6 +404,7 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateRe
 	}
 
 	sandbox := sandboxFromCreateRequest(request, createSpecHash)
+	createdIntent := false
 	ctx = observability.WithIdentity(ctx, observability.Identity{SandboxName: sandbox.Name})
 	_, finishCandidates := startCreateStage(ctx, "candidate_selection")
 	candidates, err := orchestrator.FastPathCandidates(sandbox, request.RequestId)
@@ -457,6 +458,7 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateRe
 		candidates = []placement.FastletInfo{selected}
 		observeCreateAccepted("idempotent", started, nil)
 	} else {
+		createdIntent = true
 		observeCreateAccepted("crd", started, nil)
 	}
 	acceptedObserved = true
@@ -502,6 +504,13 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateRe
 			continue
 		}
 		if orchestration.IsCandidateRejection(createErr) {
+			if createdIntent {
+				uid := sandbox.UID
+				rollbackErr := s.K8sClient.Delete(ctx, sandbox, client.Preconditions{UID: &uid})
+				if rollbackErr != nil && !apierrors.IsNotFound(rollbackErr) {
+					return nil, status.Errorf(codes.Unavailable, "all Fastlet candidates rejected admission and Sandbox intent rollback failed: rejection=%v rollback=%v", createErr, rollbackErr)
+				}
+			}
 			return nil, status.Errorf(codes.ResourceExhausted, "all Fastlet candidates rejected admission: %v", createErr)
 		}
 		return nil, status.Errorf(codes.Unavailable, "Sandbox intent is persisted and Controller will retry the same runtime identity: %v", createErr)

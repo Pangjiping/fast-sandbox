@@ -243,5 +243,5 @@ func defaultRouteDevice(output string) string {
 func isMissingNetworkResource(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "cannot find device") || strings.Contains(message, "no such file") ||
-		strings.Contains(message, "cannot open network namespace")
+		strings.Contains(message, "no such device") || strings.Contains(message, "cannot open network namespace")
 }
