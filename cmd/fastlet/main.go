@@ -22,6 +22,7 @@ import (
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	runtimefactory "fast-sandbox/internal/runtime/factory"
+	"fast-sandbox/internal/runtimeenv"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
@@ -44,15 +45,20 @@ func main() {
 	namespace := getEnv("NAMESPACE", "")
 	fastletPort := getEnv("FASTLET_CONTROL_PORT", ":5758")
 	runtimeName := getEnv("FAST_SANDBOX_RUNTIME", "container")
-	runtimeSocket := getEnv("RUNTIME_SOCKET", "")
-	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeName(runtimeName))
+	runtimePlan, err := loadRuntimePlan(getEnv("FAST_SANDBOX_RUNTIME_PLAN_PATH", runtimeenv.PlanMountPath+"/"+runtimeenv.PlanFileName))
 	if err != nil {
-		klog.ErrorS(err, "Failed to resolve runtime profile")
+		klog.ErrorS(err, "Failed to load runtime plan")
 		os.Exit(1)
 	}
+	runtimeProfile := runtimePlan.Profile
+	if runtimeProfile.Name != apiv1alpha2.RuntimeName(runtimeName) {
+		klog.ErrorS(runtimecontract.ErrSandboxProfileMismatch, "Runtime plan name does not match injected runtime", "plan", runtimeProfile.Name, "injected", runtimeName)
+		os.Exit(1)
+	}
+	runtimeSocket := runtimePlan.Containerd.Socket
 	injectedRuntimeHash := getEnv("FAST_SANDBOX_RUNTIME_PROFILE_HASH", runtimeProfile.ProfileHash)
 	if injectedRuntimeHash != runtimeProfile.ProfileHash {
-		klog.ErrorS(runtimecontract.ErrSandboxProfileMismatch, "Injected runtime profile hash does not match built-in catalog", "injected", injectedRuntimeHash, "expected", runtimeProfile.ProfileHash)
+		klog.ErrorS(runtimecontract.ErrSandboxProfileMismatch, "Injected runtime profile hash does not match runtime plan", "injected", injectedRuntimeHash, "expected", runtimeProfile.ProfileHash)
 		os.Exit(1)
 	}
 	resourceProfile, err := resourceProfileFromEnvironment()
@@ -72,7 +78,7 @@ func main() {
 	ctx := context.Background()
 	var rt runtimecontract.Driver
 
-	rt, _, err = runtimefactory.New(runtimecatalog.Builtin(), runtimefactory.NewHostCapabilityProber()).Create(ctx, runtimeProfile.Name, runtimeSocket)
+	rt, _, err = runtimefactory.New(runtimecatalog.Builtin(), runtimefactory.NewHostCapabilityProber()).CreateProfile(ctx, runtimeProfile, runtimeSocket)
 
 	if err != nil {
 		klog.ErrorS(err, "Failed to initialize runtime")
@@ -115,7 +121,7 @@ func main() {
 		runtimeProfile,
 		getEnv("FAST_SANDBOX_INFRA_PLAN_PATH", "/etc/fast-sandbox/infra/plan.json"),
 		infraRevision,
-		runtimeSocket,
+		runtimePlan,
 		registryProvider,
 	)
 	if err != nil {
@@ -243,10 +249,13 @@ func newInfraManager(
 	runtimeProfile runtimecatalog.RuntimeProfile,
 	planPath string,
 	expectedRevision string,
-	runtimeSocket string,
+	runtimePlan runtimeenv.ResolvedRuntimePlan,
 	registryProvider registryconfig.Provider,
 ) (*fastletinfra.Manager, error) {
-	podRoot, hostRoot, err := fastletinfra.DefaultStorePaths(podUID)
+	podRoot, hostRoot, err := fastletinfra.StorePaths(
+		podUID,
+		runtimePlan.Kubelet.Root,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -269,8 +278,9 @@ func newInfraManager(
 		return nil, fmt.Errorf("Infra plan revision %s does not match expected %s", plan.Revision, expectedRevision)
 	}
 	ociOpener := fastletinfra.NewContainerdOCIArtifactOpener(
-		runtimeSocket,
-		getEnv("FAST_SANDBOX_SNAPSHOTTER", "overlayfs"),
+		runtimePlan.Containerd.Socket,
+		runtimePlan.Containerd.Snapshotter,
+		runtimeProfile.ContainerdNamespace(),
 		registryProvider,
 	)
 	return fastletinfra.NewManagerWithConfig(fastletinfra.ManagerConfig{
@@ -281,6 +291,15 @@ func newInfraManager(
 		SandboxInitPath:   getEnv("FAST_SANDBOX_SANDBOX_INIT_PATH", "/opt/fast-sandbox/bin/sandbox-init"),
 		SandboxTunnelPath: getEnv("FAST_SANDBOX_SANDBOX_TUNNEL_PATH", "/opt/fast-sandbox/bin/sandbox-tunnel"),
 	})
+}
+
+func loadRuntimePlan(path string) (runtimeenv.ResolvedRuntimePlan, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return runtimeenv.ResolvedRuntimePlan{}, err
+	}
+	defer file.Close()
+	return runtimeenv.DecodePlan(file)
 }
 
 func watchProxyRoutes(ctx context.Context, manager *fastletsandbox.SandboxManager, proxyClient *fastletproxy.ControlClient) {

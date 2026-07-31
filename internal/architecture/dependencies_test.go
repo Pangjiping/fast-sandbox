@@ -57,6 +57,57 @@ func TestInternalDependencyBoundaries(t *testing.T) {
 	}
 }
 
+func TestPrivateRuntimeMarkersStayInExtensionBoundary(t *testing.T) {
+	root := repositoryRoot(t)
+	markers := []string{
+		"RuntimeRunD",
+		"io.containerd.rund.v2",
+		"alibabacloud.com/rund-enabled",
+		"/home/admin/t4",
+	}
+	allowedPrefixes := []string{
+		"api/v1alpha2/",
+		"config/crd/",
+		"config/runtime-environments/rund",
+		"internal/architecture/dependencies_test.go",
+		"internal/catalog/runtime/rund",
+		"test/e2e/runtimes/rund/",
+	}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" || entry.Name() == ".tools" || entry.Name() == "bin" || entry.Name() == ".build" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		for _, prefix := range allowedPrefixes {
+			if strings.HasPrefix(filepath.ToSlash(relative), prefix) {
+				return nil
+			}
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, marker := range markers {
+			if strings.Contains(string(contents), marker) {
+				t.Errorf("private runtime marker %q leaked into %s", marker, relative)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan repository: %v", err)
+	}
+}
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	_, filename, _, ok := runtime.Caller(0)

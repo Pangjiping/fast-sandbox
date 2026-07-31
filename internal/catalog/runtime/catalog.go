@@ -27,9 +27,11 @@ type NetworkMode string
 
 const (
 	NetworkModeLinuxNetNS NetworkMode = "linux-netns"
-	NetworkModeKata       NetworkMode = "kata"
+	NetworkModeGuestNetNS NetworkMode = "guest-netns"
 	NetworkModeBoxLite    NetworkMode = "boxlite-gvproxy"
 )
+
+const DefaultContainerdNamespace = "k8s.io"
 
 type InfraDeliveryMode string
 
@@ -53,6 +55,7 @@ const (
 )
 
 type ContainerdConfig struct {
+	Namespace   string `json:"namespace"`
 	Handler     string `json:"handler"`
 	RuntimePath string `json:"runtimePath,omitempty"`
 	ConfigPath  string `json:"configPath,omitempty"`
@@ -98,7 +101,10 @@ type Capabilities struct {
 	Reason           string          `json:"reason,omitempty"`
 }
 
-type RuntimeProfile struct {
+// RuntimeDefinition describes the runtime behavior owned by fast-sandbox.
+// Node-specific installation details are applied later by runtimeenv when it
+// produces an immutable ResolvedRuntimePlan for a SandboxPool.
+type RuntimeDefinition struct {
 	Name               apiv1alpha2.RuntimeName `json:"name"`
 	Version            string                  `json:"version"`
 	ProfileHash        string                  `json:"profileHash"`
@@ -111,12 +117,26 @@ type RuntimeProfile struct {
 	InfraDeliveryModes []InfraDeliveryMode     `json:"infraDeliveryModes"`
 }
 
+// RuntimeProfile remains the name used at the runtime driver boundary. A
+// profile is a RuntimeDefinition after the selected node environment has been
+// applied. Keeping the alias avoids duplicating the capability contract.
+type RuntimeProfile = RuntimeDefinition
+
 // UsesFastletNetNS reports whether the runtime consumes a Fastlet-owned Linux
-// network namespace. Kata keeps a distinct NetworkMode because its shim turns
-// that namespace into a guest NIC, but it still needs the same slot lifecycle
-// and DirectIP access contract as the container and gVisor profiles.
+// network namespace. GuestNetNS runtimes turn that namespace into a guest NIC,
+// but retain the same slot lifecycle and DirectIP access contract.
 func (p RuntimeProfile) UsesFastletNetNS() bool {
-	return p.NetworkMode == NetworkModeLinuxNetNS || p.NetworkMode == NetworkModeKata
+	return p.NetworkMode == NetworkModeLinuxNetNS || p.NetworkMode == NetworkModeGuestNetNS
+}
+
+// ContainerdNamespace returns the namespace used by runtime and artifact
+// operations. Non-containerd profiles use the Kubernetes-compatible default
+// when they fetch OCI artifacts through the host containerd.
+func (p RuntimeProfile) ContainerdNamespace() string {
+	if p.Containerd != nil && p.Containerd.Namespace != "" {
+		return p.Containerd.Namespace
+	}
+	return DefaultContainerdNamespace
 }
 
 var ErrRuntimeNotFound = errors.New("runtime profile not found")

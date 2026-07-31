@@ -51,6 +51,9 @@ spec:
           mountPropagation: Bidirectional
         - name: boxlite-state
           mountPath: /var/lib/fast-sandbox/boxlite
+        - name: runtime-environments
+          mountPath: /etc/fast-sandbox/runtime-environments
+          readOnly: true
       volumes:
       - name: sock
         hostPath:
@@ -72,3 +75,6 @@ spec:
         hostPath:
           path: /var/lib/fast-sandbox/boxlite
           type: DirectoryOrCreate
+      - name: runtime-environments
+        configMap:
+          name: fast-sandbox-runtime-environments

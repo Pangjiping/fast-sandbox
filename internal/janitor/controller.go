@@ -24,7 +24,7 @@ func NewJanitor(kubeClient kubernetes.Interface, ctrdClient *containerd.Client, 
 		ScanInterval: 2 * time.Minute, // 默认值
 	}
 	if ctrdClient != nil {
-		janitor.AddBackend(NewContainerdBackend(ctrdClient, "/run/containerd/fifo"))
+		janitor.AddBackend(NewContainerdBackend(ctrdClient, "/run/containerd/fifo", "k8s.io"))
 	}
 	return janitor
 }

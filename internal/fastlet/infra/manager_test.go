@@ -14,6 +14,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStorePathsUsesConfiguredKubeletRoot(t *testing.T) {
+	podRoot, hostRoot, err := StorePaths("pod-uid", "/srv/kubelet")
+	require.NoError(t, err)
+	require.Equal(t, "/opt/fast-sandbox/infra", podRoot)
+	require.Equal(t,
+		"/srv/kubelet/pods/pod-uid/volumes/kubernetes.io~empty-dir/infra-tools",
+		hostRoot,
+	)
+
+	_, _, err = StorePaths("pod-uid", "relative/kubelet")
+	require.EqualError(t, err, "kubelet root must be an absolute path")
+}
+
 func TestManagerPreparesInlinePlanAndSupervisorOnce(t *testing.T) {
 	manager, resolver := testManager(t, apiv1alpha2.RuntimeContainer)
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
@@ -97,8 +98,15 @@ func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.
 	if err != nil {
 		return RuntimeParameters{}, fmt.Errorf("compile Infra Components: %w", err)
 	}
+	runtimeProfileHash := strings.TrimPrefix(pool.Status.RuntimeRevision, "sha256:")
+	if runtimeProfileHash == "" {
+		// The Pool controller normally publishes the resolved environment
+		// revision before a Fastlet can register. Retain the definition hash as
+		// a compatibility fallback for unit tests and pre-v1alpha2 objects.
+		runtimeProfileHash = profile.ProfileHash
+	}
 	return RuntimeParameters{
-		RuntimeName: pool.Spec.Runtime, RuntimeProfileHash: profile.ProfileHash,
+		RuntimeName: pool.Spec.Runtime, RuntimeProfileHash: runtimeProfileHash,
 		ResourceProfileHash: pool.Spec.SandboxResources.Hash(),
 		InfraRevision:       infraPlan.Revision,
 	}, nil

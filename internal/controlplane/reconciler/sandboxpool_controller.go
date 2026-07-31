@@ -22,6 +22,7 @@ import (
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
+	"fast-sandbox/internal/runtimeenv"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,16 +41,18 @@ import (
 // SandboxPoolReconciler reconciles SandboxPool resources.
 type SandboxPoolReconciler struct {
 	client.Client
-	DurableReader        client.Reader
-	Scheme               *runtime.Scheme
-	Registry             placement.FastletRegistry
-	Catalog              *runtimecatalog.Catalog
-	FastletDrainer       FastletDrainer
-	FastletProxyImage    string
-	BoxLiteRuntimeImage  string
-	RouteVerifyPublicKey string
-	DrainTimeout         time.Duration
-	Now                  func() time.Time
+	DurableReader               client.Reader
+	Scheme                      *runtime.Scheme
+	Registry                    placement.FastletRegistry
+	Catalog                     *runtimecatalog.Catalog
+	FastletDrainer              FastletDrainer
+	FastletProxyImage           string
+	BoxLiteRuntimeImage         string
+	RouteVerifyPublicKey        string
+	RuntimeEnvironmentNamespace string
+	RuntimeEnvironmentConfigMap string
+	DrainTimeout                time.Duration
+	Now                         func() time.Time
 }
 
 type FastletDrainer interface {
@@ -70,7 +73,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	profile, err := r.resolveRuntimeProfile(&pool)
+	runtimePlan, err := r.resolveRuntimePlan(ctx, &pool)
 	if err != nil {
 		logger.Error(err, "Runtime profile resolution failed")
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
@@ -81,6 +84,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	profile := runtimePlan.Profile
 	if profile.Capabilities.DefaultState == runtimecatalog.CapabilityUnsupported {
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
 			Type:    apiv1alpha2.PoolConditionRuntimeReady,
@@ -137,6 +141,9 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.ensureInfraPlanConfigMap(ctx, &pool, infraPlan); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.ensureRuntimePlanConfigMap(ctx, &pool, runtimePlan); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	var childPods corev1.PodList
 	if err := r.durableReader().List(ctx, &childPods, client.InNamespace(req.Namespace), client.MatchingLabels(poolLabels(pool.Name))); err != nil {
@@ -185,7 +192,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	currentCount := int32(len(childPods.Items))
-	desiredPod, err := r.constructPod(&pool, profile)
+	desiredPod, err := r.constructPodWithRuntimePlan(&pool, runtimePlan)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -217,7 +224,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if pool.Status.CurrentPods != currentCount || pool.Status.TotalFastlets != currentCount ||
 		pool.Status.ReadyPods != readyPods || pool.Status.IdleFastlets != idleFastlets ||
 		pool.Status.BusyFastlets != busyFastlets ||
-		pool.Status.InfraRevision != infraPlan.Revision ||
+		pool.Status.RuntimeRevision != runtimePlan.Revision || pool.Status.InfraRevision != infraPlan.Revision ||
 		pool.Status.PreparedFastlets != preparedFastlets || !reflect.DeepEqual(pool.Status.InfraComponents, componentSummaries) ||
 		!reflect.DeepEqual(pool.Status.WarmImages, warmImageStatuses) || !reflect.DeepEqual(pool.Status.Registry, registryStatus) {
 		pool.Status.CurrentPods = currentCount
@@ -225,6 +232,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		pool.Status.ReadyPods = readyPods
 		pool.Status.IdleFastlets = idleFastlets
 		pool.Status.BusyFastlets = busyFastlets
+		pool.Status.RuntimeRevision = runtimePlan.Revision
 		pool.Status.InfraRevision = infraPlan.Revision
 		pool.Status.PreparedFastlets = preparedFastlets
 		pool.Status.InfraComponents = componentSummaries
@@ -579,6 +587,15 @@ func (r *SandboxPoolReconciler) durableReader() client.Reader {
 // RuntimeProfile. RuntimeClass and backend handler overrides are never copied
 // from the Pool into the Pod.
 func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, profile runtimecatalog.RuntimeProfile) (*corev1.Pod, error) {
+	plan, err := runtimeenv.ResolveDefault(r.Catalog, profile.Name)
+	if err != nil {
+		return nil, err
+	}
+	return r.constructPodWithRuntimePlan(pool, plan)
+}
+
+func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.SandboxPool, runtimePlan runtimeenv.ResolvedRuntimePlan) (*corev1.Pod, error) {
+	profile := runtimePlan.Profile
 	sandboxResources := pool.Spec.SandboxResources
 	if err := apiv1alpha2.ValidateSandboxResourceProfile(sandboxResources); err != nil {
 		return nil, err
@@ -602,6 +619,7 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, prof
 		annotations[k] = v
 	}
 	annotations["fast-sandbox.io/runtime-profile-hash"] = profile.ProfileHash
+	annotations["fast-sandbox.io/runtime-plan-revision"] = runtimePlan.Revision
 	annotations["fast-sandbox.io/resource-profile-hash"] = sandboxResources.Hash()
 	annotations["fast-sandbox.io/infra-revision"] = infraPlan.Revision
 	warmImagesJSON, err := json.Marshal(uniqueWarmImages(pool.Spec.WarmImages))
@@ -684,19 +702,23 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, prof
 				Name:  "FAST_SANDBOX_RUNTIME_PROFILE_HASH",
 				Value: profile.ProfileHash,
 			},
+			corev1.EnvVar{Name: "FAST_SANDBOX_RUNTIME_PLAN_PATH", Value: runtimeenv.PlanMountPath + "/" + runtimeenv.PlanFileName},
 			corev1.EnvVar{Name: "FAST_SANDBOX_RESOURCE_CPU", Value: sandboxResources.CPU.String()},
 			corev1.EnvVar{Name: "FAST_SANDBOX_RESOURCE_MEMORY", Value: sandboxResources.Memory.String()},
 			corev1.EnvVar{Name: "FAST_SANDBOX_RESOURCE_PIDS", Value: strconv.FormatInt(sandboxResources.PIDs, 10)},
 			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_REVISION", Value: infraPlan.Revision},
 			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_PLAN_PATH", Value: "/etc/fast-sandbox/infra/plan.json"},
 			corev1.EnvVar{Name: "FAST_SANDBOX_REGISTRY_CONFIG_PATH", Value: registryconfig.MountPath},
-			corev1.EnvVar{Name: "RUNTIME_SOCKET", Value: "/run/containerd/containerd.sock"},
+			corev1.EnvVar{Name: "RUNTIME_SOCKET", Value: runtimePlan.Containerd.Socket},
+			corev1.EnvVar{Name: "FAST_SANDBOX_SNAPSHOTTER", Value: runtimePlan.Containerd.Snapshotter},
+			corev1.EnvVar{Name: "FAST_SANDBOX_KUBELET_ROOT", Value: runtimePlan.Kubelet.Root},
 			corev1.EnvVar{Name: "INFRA_DIR_IN_POD", Value: "/opt/fast-sandbox/infra"},
 		)
 		c.VolumeMounts = append(c.VolumeMounts,
 			corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"},
 			corev1.VolumeMount{Name: "infra-tools", MountPath: "/opt/fast-sandbox/infra"},
 			corev1.VolumeMount{Name: "infra-plan", MountPath: "/etc/fast-sandbox/infra", ReadOnly: true},
+			corev1.VolumeMount{Name: "runtime-plan", MountPath: runtimeenv.PlanMountPath, ReadOnly: true},
 			corev1.VolumeMount{Name: "registry-config", MountPath: "/etc/fast-sandbox/registry", ReadOnly: true},
 			corev1.VolumeMount{Name: "proxy-control", MountPath: "/run/fast-sandbox/proxy"},
 		)
@@ -770,6 +792,12 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, prof
 			Name: "infra-plan",
 			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: infraPlanConfigMapName(pool.Name, infraPlan.Revision)},
+			}},
+		},
+		corev1.Volume{
+			Name: "runtime-plan",
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: runtimePlanConfigMapName(pool.Name, runtimePlan.Revision)},
 			}},
 		},
 		corev1.Volume{
@@ -936,6 +964,7 @@ func validatePlatformOwnedStorage(podSpec *corev1.PodSpec) error {
 		"tmp":             "/tmp",
 		"infra-tools":     "/opt/fast-sandbox/infra",
 		"infra-plan":      "/etc/fast-sandbox/infra",
+		"runtime-plan":    runtimeenv.PlanMountPath,
 		"registry-config": "/etc/fast-sandbox/registry",
 		"proxy-control":   "/run/fast-sandbox/proxy",
 		"boxlite-control": "/run/fast-sandbox/boxlite",
@@ -1003,6 +1032,45 @@ func (r *SandboxPoolReconciler) resolveRuntimeProfile(pool *apiv1alpha2.SandboxP
 	return catalog.Resolve(pool.Spec.Runtime)
 }
 
+func (r *SandboxPoolReconciler) resolveRuntimePlan(ctx context.Context, pool *apiv1alpha2.SandboxPool) (runtimeenv.ResolvedRuntimePlan, error) {
+	if err := pool.Spec.ValidateRuntime(); err != nil {
+		return runtimeenv.ResolvedRuntimePlan{}, err
+	}
+	config, err := r.loadRuntimeEnvironmentConfig(ctx)
+	if err != nil {
+		return runtimeenv.ResolvedRuntimePlan{}, err
+	}
+	catalog := r.Catalog
+	if catalog == nil {
+		catalog = runtimecatalog.Builtin()
+	}
+	return runtimeenv.Resolve(catalog, config, pool.Spec.Runtime)
+}
+
+func (r *SandboxPoolReconciler) loadRuntimeEnvironmentConfig(ctx context.Context) (runtimeenv.Config, error) {
+	namespace := r.RuntimeEnvironmentNamespace
+	if namespace == "" {
+		namespace = runtimeenv.SystemNamespace
+	}
+	name := r.RuntimeEnvironmentConfigMap
+	if name == "" {
+		name = runtimeenv.ConfigMapName
+	}
+	var source corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &source)
+	if apierrors.IsNotFound(err) {
+		return runtimeenv.DefaultConfig(), nil
+	}
+	if err != nil {
+		return runtimeenv.Config{}, fmt.Errorf("read runtime environment ConfigMap: %w", err)
+	}
+	raw, found := source.Data[runtimeenv.ConfigMapKey]
+	if !found {
+		return runtimeenv.Config{}, fmt.Errorf("ConfigMap %s/%s must contain %s", namespace, name, runtimeenv.ConfigMapKey)
+	}
+	return runtimeenv.Parse([]byte(raw))
+}
+
 func (r *SandboxPoolReconciler) resolveInfraPlan(pool *apiv1alpha2.SandboxPool, runtimeProfile runtimecatalog.RuntimeProfile) (infracatalog.Plan, error) {
 	return infracatalog.Compile(pool.Spec.InfraComponents, runtimeProfile)
 }
@@ -1017,6 +1085,15 @@ func shortRevision(revision string) string {
 
 func infraPlanConfigMapName(poolName, revision string) string {
 	suffix := "-infra-" + shortRevision(revision)
+	maxPoolLength := 253 - len(suffix)
+	if len(poolName) > maxPoolLength {
+		poolName = strings.TrimRight(poolName[:maxPoolLength], "-.")
+	}
+	return poolName + suffix
+}
+
+func runtimePlanConfigMapName(poolName, revision string) string {
+	suffix := "-runtime-" + shortRevision(revision)
 	maxPoolLength := 253 - len(suffix)
 	if len(poolName) > maxPoolLength {
 		poolName = strings.TrimRight(poolName[:maxPoolLength], "-.")
@@ -1254,6 +1331,49 @@ func (r *SandboxPoolReconciler) ensureInfraPlanConfigMap(
 	return nil
 }
 
+func (r *SandboxPoolReconciler) ensureRuntimePlanConfigMap(
+	ctx context.Context,
+	pool *apiv1alpha2.SandboxPool,
+	plan runtimeenv.ResolvedRuntimePlan,
+) error {
+	payload, err := plan.Marshal()
+	if err != nil {
+		return fmt.Errorf("encode runtime plan: %w", err)
+	}
+	key := client.ObjectKey{Namespace: pool.Namespace, Name: runtimePlanConfigMapName(pool.Name, plan.Revision)}
+	var existing corev1.ConfigMap
+	err = r.Get(ctx, key, &existing)
+	if err == nil {
+		if existing.Data[runtimeenv.PlanFileName] != string(payload) {
+			return fmt.Errorf("immutable runtime plan ConfigMap %s contains a different plan", key.Name)
+		}
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+	immutable := true
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: key.Name, Namespace: key.Namespace,
+			Labels: map[string]string{
+				"fast-sandbox.io/pool":             pool.Name,
+				"fast-sandbox.io/runtime-revision": shortRevision(plan.Revision),
+			},
+			Annotations: map[string]string{"fast-sandbox.io/runtime-revision": plan.Revision},
+		},
+		Immutable: &immutable,
+		Data:      map[string]string{runtimeenv.PlanFileName: string(payload)},
+	}
+	if err := ctrl.SetControllerReference(pool, configMap, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, configMap); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create immutable runtime plan ConfigMap: %w", err)
+	}
+	return nil
+}
+
 func (r *SandboxPoolReconciler) preparedFastletCount(pool *apiv1alpha2.SandboxPool, revision string) int32 {
 	if r.Registry == nil {
 		return 0
@@ -1281,6 +1401,7 @@ func infraComponentSummaries(plan infracatalog.Plan) []apiv1alpha2.InfraComponen
 
 var runtimeOwnedEnv = map[string]struct{}{
 	"FAST_SANDBOX_RUNTIME": {}, "FAST_SANDBOX_RUNTIME_PROFILE_HASH": {},
+	"FAST_SANDBOX_RUNTIME_PLAN_PATH": {}, "FAST_SANDBOX_SNAPSHOTTER": {}, "FAST_SANDBOX_KUBELET_ROOT": {},
 	"FAST_SANDBOX_RESOURCE_CPU": {}, "FAST_SANDBOX_RESOURCE_MEMORY": {}, "FAST_SANDBOX_RESOURCE_PIDS": {},
 	"FAST_SANDBOX_INFRA_REVISION": {}, "FAST_SANDBOX_INFRA_PLAN_PATH": {}, "FASTLET_CAPACITY": {},
 	"FAST_SANDBOX_REGISTRY_CONFIG_PATH": {},
@@ -1423,6 +1544,17 @@ func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+			runtimeNamespace := r.RuntimeEnvironmentNamespace
+			if runtimeNamespace == "" {
+				runtimeNamespace = runtimeenv.SystemNamespace
+			}
+			runtimeConfigMap := r.RuntimeEnvironmentConfigMap
+			if runtimeConfigMap == "" {
+				runtimeConfigMap = runtimeenv.ConfigMapName
+			}
+			if obj.GetNamespace() == runtimeNamespace && obj.GetName() == runtimeConfigMap {
+				return r.mapAllPools(ctx)
+			}
 			if obj.GetName() != registryconfig.ConfigMapName {
 				return nil
 			}
@@ -1444,6 +1576,18 @@ func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return nil
 		})).
 		Complete(r)
+}
+
+func (r *SandboxPoolReconciler) mapAllPools(ctx context.Context) []ctrl.Request {
+	var pools apiv1alpha2.SandboxPoolList
+	if err := r.List(ctx, &pools); err != nil {
+		return nil
+	}
+	result := make([]ctrl.Request, 0, len(pools.Items))
+	for index := range pools.Items {
+		result = append(result, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&pools.Items[index])})
+	}
+	return result
 }
 
 func (r *SandboxPoolReconciler) mapNamespaceToPools(ctx context.Context, namespace string) []ctrl.Request {

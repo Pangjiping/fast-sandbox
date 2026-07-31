@@ -25,12 +25,14 @@ import (
 type ContainerdOCIArtifactOpener struct {
 	socketPath  string
 	snapshotter string
+	namespace   string
 	registry    registryconfig.Provider
 }
 
 func NewContainerdOCIArtifactOpener(
 	socketPath string,
 	snapshotter string,
+	namespace string,
 	registry registryconfig.Provider,
 ) *ContainerdOCIArtifactOpener {
 	if socketPath == "" {
@@ -39,8 +41,11 @@ func NewContainerdOCIArtifactOpener(
 	if snapshotter == "" {
 		snapshotter = "overlayfs"
 	}
+	if namespace == "" {
+		namespace = "k8s.io"
+	}
 	return &ContainerdOCIArtifactOpener{
-		socketPath: socketPath, snapshotter: snapshotter, registry: registry,
+		socketPath: socketPath, snapshotter: snapshotter, namespace: namespace, registry: registry,
 	}
 }
 
@@ -51,7 +56,7 @@ func (o *ContainerdOCIArtifactOpener) OpenOCI(
 	if source.Type != infracatalog.SourceOCIImage {
 		return nil, fmt.Errorf("%w: source %s is not an OCI image", ErrArtifactSourceUnsupported, source.Type)
 	}
-	client, err := containerd.New(o.socketPath, containerd.WithDefaultNamespace("k8s.io"))
+	client, err := containerd.New(o.socketPath, containerd.WithDefaultNamespace(o.namespace))
 	if err != nil {
 		return nil, fmt.Errorf("connect containerd for Infra artifact: %w", err)
 	}
@@ -62,7 +67,7 @@ func (o *ContainerdOCIArtifactOpener) OpenOCI(
 		}
 	}()
 
-	namespaced := namespaces.WithNamespace(ctx, "k8s.io")
+	namespaced := namespaces.WithNamespace(ctx, o.namespace)
 	image, err := client.GetImage(namespaced, source.Reference)
 	if err != nil {
 		options := []containerd.RemoteOpt{
@@ -112,6 +117,11 @@ func (o *ContainerdOCIArtifactOpener) OpenOCI(
 		namespaced,
 		key,
 		containerd.WithImage(image),
+		// Older containerd servers validate that every container object has an
+		// OCI spec, even when it only owns a read-only snapshot view and will
+		// never create a task. Keep the temporary artifact container portable
+		// across those servers by generating the image's default spec.
+		containerd.WithNewSpec(),
 		containerd.WithSnapshotter(o.snapshotter),
 		containerd.WithNewSnapshotView(key, image),
 	)
@@ -148,7 +158,7 @@ func (o *ContainerdOCIArtifactOpener) OpenOCI(
 		cleanup: func() error {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			cleanupCtx = namespaces.WithNamespace(cleanupCtx, "k8s.io")
+			cleanupCtx = namespaces.WithNamespace(cleanupCtx, o.namespace)
 			return errors.Join(
 				mount.UnmountAll(mountRoot, 0),
 				os.RemoveAll(mountRoot),

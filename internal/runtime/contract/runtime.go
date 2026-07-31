@@ -56,6 +56,7 @@ type AccessDescriptorProvider interface {
 }
 
 type Config struct {
+	Namespace   string
 	Handler     string
 	RuntimePath string
 	ConfigPath  string

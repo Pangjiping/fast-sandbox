@@ -10,22 +10,18 @@ import (
 const builtinProfileVersion = "v1"
 
 func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
-	containerdPaths := []HostPathRequirement{
-		{Name: "containerd-run", HostPath: "/run/containerd", MountPath: "/run/containerd", Type: corev1.HostPathDirectory},
-		{Name: "containerd-root", HostPath: "/var/lib/containerd", MountPath: "/var/lib/containerd", Type: corev1.HostPathDirectory},
-	}
 	linuxNetworkPaths := []HostPathRequirement{
 		{Name: "fast-sandbox-netns", HostPath: "/run/fast-sandbox/netns", MountPath: "/run/netns", Type: corev1.HostPathDirectoryOrCreate, MountPropagation: corev1.MountPropagationBidirectional},
 		{Name: "fast-sandbox-network", HostPath: "/run/fast-sandbox/network", MountPath: "/run/fast-sandbox/network", Type: corev1.HostPathDirectoryOrCreate},
 	}
-	containerPaths := append(append([]HostPathRequirement{}, containerdPaths...), linuxNetworkPaths...)
+	containerPaths := append([]HostPathRequirement{}, linuxNetworkPaths...)
 	gvisorPaths := append([]HostPathRequirement{}, containerPaths...)
 	gvisorPaths = append(gvisorPaths,
 		HostPathRequirement{Name: "gvisor-runsc", HostPath: "/usr/local/bin/runsc", MountPath: "/usr/local/bin/runsc", Type: corev1.HostPathFile, ReadOnly: true},
 		HostPathRequirement{Name: "gvisor-shim", HostPath: "/usr/local/bin/containerd-shim-runsc-v1", MountPath: "/usr/local/bin/containerd-shim-runsc-v1", Type: corev1.HostPathFile, ReadOnly: true},
 		HostPathRequirement{Name: "gvisor-config", HostPath: "/etc/containerd/runsc.toml", MountPath: "/etc/containerd/runsc.toml", Type: corev1.HostPathFile, ReadOnly: true},
 	)
-	kataPaths := append(append([]HostPathRequirement{}, containerdPaths...), linuxNetworkPaths...)
+	kataPaths := append([]HostPathRequirement{}, linuxNetworkPaths...)
 	kataPaths = append(kataPaths,
 		HostPathRequirement{Name: "dev-kvm", HostPath: "/dev/kvm", MountPath: "/dev/kvm", Type: corev1.HostPathCharDev},
 		HostPathRequirement{Name: "kata-runtime", HostPath: "/opt/kata", MountPath: "/opt/kata", Type: corev1.HostPathDirectory, ReadOnly: true},
@@ -34,7 +30,7 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 	return map[apiv1alpha2.RuntimeName]RuntimeProfile{
 		apiv1alpha2.RuntimeContainer: {
 			Name: apiv1alpha2.RuntimeContainer, Version: builtinProfileVersion, Driver: DriverKindContainerd,
-			Containerd:         &ContainerdConfig{Handler: "io.containerd.runc.v2"},
+			Containerd:         &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.runc.v2"},
 			Deployment:         DeploymentRequirements{Privileged: true, HostPaths: containerPaths, Overhead: overhead("100m", "128Mi")},
 			Capabilities:       Capabilities{DefaultState: CapabilityConfigured, SupportsNetwork: true, SupportsCache: true, SupportsRecovery: true},
 			NetworkMode:        NetworkModeLinuxNetNS,
@@ -42,7 +38,7 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 		},
 		apiv1alpha2.RuntimeGVisor: {
 			Name: apiv1alpha2.RuntimeGVisor, Version: builtinProfileVersion, Driver: DriverKindContainerd,
-			Containerd:         &ContainerdConfig{Handler: "io.containerd.runsc.v1", ConfigPath: "/etc/containerd/runsc.toml", OptionsType: "io.containerd.runsc.v1.options", NeedsTTY: true},
+			Containerd:         &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.runsc.v1", ConfigPath: "/etc/containerd/runsc.toml", OptionsType: "io.containerd.runsc.v1.options", NeedsTTY: true},
 			Deployment:         DeploymentRequirements{Privileged: true, HostPaths: gvisorPaths, Overhead: overhead("200m", "256Mi")},
 			Capabilities:       Capabilities{DefaultState: CapabilityConfigured, SupportsNetwork: true, SupportsCache: true, SupportsRecovery: true},
 			NetworkMode:        NetworkModeLinuxNetNS,
@@ -82,10 +78,10 @@ func unavailableKataProfile(name apiv1alpha2.RuntimeName, configPath string, pat
 func kataProfile(name apiv1alpha2.RuntimeName, configPath string, paths []HostPathRequirement) RuntimeProfile {
 	return RuntimeProfile{
 		Name: name, Version: builtinProfileVersion, Driver: DriverKindContainerd,
-		Containerd:   &ContainerdConfig{Handler: "io.containerd.kata.v2", RuntimePath: "/opt/kata/bin/containerd-shim-kata-v2", ConfigPath: configPath},
+		Containerd:   &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.kata.v2", RuntimePath: "/opt/kata/bin/containerd-shim-kata-v2", ConfigPath: configPath},
 		Deployment:   DeploymentRequirements{Privileged: true, RequiresKVM: true, HostPaths: paths, Overhead: overhead("250m", "256Mi")},
 		Capabilities: Capabilities{DefaultState: CapabilityConfigured, SupportsNetwork: true, SupportsCache: true, SupportsRecovery: true},
-		NetworkMode:  NetworkModeKata,
+		NetworkMode:  NetworkModeGuestNetNS,
 		InfraDeliveryModes: []InfraDeliveryMode{
 			// Kata/containerd carries OCI bind mounts into the guest through
 			// its shared filesystem. Quick Start uses this path for immutable

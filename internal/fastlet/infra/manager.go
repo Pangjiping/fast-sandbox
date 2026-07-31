@@ -187,10 +187,17 @@ func clonePreparedPlan(plan PreparedPlan) PreparedPlan {
 }
 
 func DefaultStorePaths(podUID string) (string, string, error) {
+	return StorePaths(podUID, "/var/lib/kubelet")
+}
+
+func StorePaths(podUID, kubeletRoot string) (string, string, error) {
 	if podUID == "" {
 		return "", "", errors.New("POD_UID is required for Infra artifact storage")
 	}
+	if !filepath.IsAbs(kubeletRoot) {
+		return "", "", errors.New("kubelet root must be an absolute path")
+	}
 	podRoot := "/opt/fast-sandbox/infra"
-	hostRoot := filepath.Join("/var/lib/kubelet/pods", podUID, "volumes/kubernetes.io~empty-dir/infra-tools")
+	hostRoot := filepath.Join(kubeletRoot, "pods", podUID, "volumes/kubernetes.io~empty-dir/infra-tools")
 	return podRoot, hostRoot, nil
 }

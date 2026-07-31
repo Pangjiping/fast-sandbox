@@ -65,8 +65,10 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 
 	container, err := catalog.Resolve(apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
+	require.Equal(t, DefaultContainerdNamespace, container.ContainerdNamespace())
 	require.Equal(t, corev1.MountPropagationBidirectional, hostPath(container.Deployment.HostPaths, "/run/fast-sandbox/netns").MountPropagation)
 	require.Equal(t, "/run/netns", hostPath(container.Deployment.HostPaths, "/run/fast-sandbox/netns").MountPath)
+
 }
 
 func TestRuntimeProfilesUsingFastletNetworkHaveRequiredMounts(t *testing.T) {
@@ -128,5 +130,5 @@ func TestResolveReturnsIndependentProfile(t *testing.T) {
 	second, err := catalog.Resolve(apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
 	require.Equal(t, "io.containerd.runc.v2", second.Containerd.Handler)
-	require.Equal(t, "/run/containerd", second.Deployment.HostPaths[0].HostPath)
+	require.Equal(t, "/run/fast-sandbox/netns", second.Deployment.HostPaths[0].HostPath)
 }

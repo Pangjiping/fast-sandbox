@@ -39,6 +39,7 @@ func TestNewUsesCanonicalProfile(t *testing.T) {
 	require.Equal(t, apiv1alpha2.RuntimeGVisor, driver.runtimeName)
 	require.Equal(t, profile.ProfileHash, driver.runtimeProfileHash)
 	require.Equal(t, "io.containerd.runsc.v1", driver.config.Handler)
+	require.Equal(t, runtimecatalog.DefaultContainerdNamespace, driver.containerdNamespace())
 }
 
 func TestRuntimeConfig_KataVariantsUseKataV2Runtime(t *testing.T) {

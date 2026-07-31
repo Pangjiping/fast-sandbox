@@ -1,0 +1,80 @@
+// Package runtimeenv resolves platform-owned runtime definitions against the
+// container runtime installation present on a class of Kubernetes nodes.
+package runtimeenv
+
+import (
+	"encoding/json"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+)
+
+const (
+	ConfigMapName      = "fast-sandbox-runtime-environments"
+	ConfigMapKey       = "runtime-environments.yaml"
+	SystemNamespace    = "fast-sandbox-system"
+	DefaultEnvironment = "default"
+	PlanVersion        = "v1"
+	PlanFileName       = "plan.json"
+	PlanMountPath      = "/etc/fast-sandbox/runtime"
+	ConfigMountPath    = "/etc/fast-sandbox/runtime-environments"
+	ConfigFilePath     = ConfigMountPath + "/" + ConfigMapKey
+)
+
+type Config struct {
+	Environments map[string]NodeRuntimeEnvironment `json:"environments"`
+}
+
+// NodeRuntimeEnvironment describes where a platform administrator installed
+// containerd, kubelet and optional runtime-specific dependencies. Pool users
+// cannot supply these privileged host paths.
+type NodeRuntimeEnvironment struct {
+	NodeSelector map[string]string                          `json:"nodeSelector,omitempty"`
+	Containerd   ContainerdEnvironment                      `json:"containerd"`
+	Kubelet      KubeletEnvironment                         `json:"kubelet"`
+	HostPaths    []runtimecatalog.HostPathRequirement       `json:"hostPaths,omitempty"`
+	Runtimes     map[apiv1alpha2.RuntimeName]RuntimeBinding `json:"runtimes,omitempty"`
+}
+
+type ContainerdEnvironment struct {
+	Socket      string `json:"socket"`
+	Namespace   string `json:"namespace"`
+	Snapshotter string `json:"snapshotter"`
+	Root        string `json:"root"`
+}
+
+type KubeletEnvironment struct {
+	Root string `json:"root"`
+}
+
+type ContainerdEndpoint struct {
+	Socket     string
+	Namespaces []string
+}
+
+// RuntimeBinding contains installation values which may vary without changing
+// the logical runtime definition.
+type RuntimeBinding struct {
+	Handler     string                               `json:"handler,omitempty"`
+	RuntimePath string                               `json:"runtimePath,omitempty"`
+	ConfigPath  string                               `json:"configPath,omitempty"`
+	OptionsType string                               `json:"optionsType,omitempty"`
+	NeedsTTY    *bool                                `json:"needsTTY,omitempty"`
+	HostPaths   []runtimecatalog.HostPathRequirement `json:"hostPaths,omitempty"`
+}
+
+// ResolvedRuntimePlan is the immutable contract shared by the Pool
+// controller, Fastlet and lifecycle placement. Revision is also used as the
+// runtime profile identity advertised by Fastlet heartbeats.
+type ResolvedRuntimePlan struct {
+	Version     string                        `json:"version"`
+	Environment string                        `json:"environment"`
+	Revision    string                        `json:"revision"`
+	Profile     runtimecatalog.RuntimeProfile `json:"profile"`
+	Containerd  ContainerdEnvironment         `json:"containerd"`
+	Kubelet     KubeletEnvironment            `json:"kubelet"`
+}
+
+func (p ResolvedRuntimePlan) Marshal() ([]byte, error) {
+	return json.Marshal(p)
+}

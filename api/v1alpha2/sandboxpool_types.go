@@ -188,6 +188,7 @@ type SandboxPoolStatus struct {
 	TotalFastlets      int32                     `json:"totalFastlets,omitempty"`
 	IdleFastlets       int32                     `json:"idleFastlets,omitempty"`
 	BusyFastlets       int32                     `json:"busyFastlets,omitempty"`
+	RuntimeRevision    string                    `json:"runtimeRevision,omitempty"`
 	InfraRevision      string                    `json:"infraRevision,omitempty"`
 	PreparedFastlets   int32                     `json:"preparedFastlets,omitempty"`
 	InfraComponents    []InfraComponentSummary   `json:"infraComponents,omitempty"`

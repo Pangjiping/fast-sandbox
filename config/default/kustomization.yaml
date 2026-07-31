@@ -4,5 +4,6 @@ resources:
 - ../namespaces
 - ../crd
 - ../rbac
+- ../runtime-environments
 - ../manager
 - ../janitor

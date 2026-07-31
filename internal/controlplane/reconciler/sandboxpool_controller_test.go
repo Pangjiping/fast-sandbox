@@ -12,6 +12,7 @@ import (
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
+	"fast-sandbox/internal/runtimeenv"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -93,6 +94,40 @@ func TestResolveRuntimeProfileUsesCanonicalRuntime(t *testing.T) {
 	require.Equal(t, apiv1alpha2.RuntimeKataFc, canonical.Name)
 	_, err = reconciler.resolveRuntimeProfile(&apiv1alpha2.SandboxPool{})
 	require.Error(t, err)
+}
+
+func TestResolveRuntimePlanUsesPlatformConfigMap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	source := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: runtimeenv.ConfigMapName, Namespace: runtimeenv.SystemNamespace},
+		Data: map[string]string{runtimeenv.ConfigMapKey: `
+environments:
+  custom:
+    nodeSelector:
+      example.com/runtime: custom
+    containerd:
+      namespace: custom
+      root: /srv/containerd
+    kubelet:
+      root: /srv/kubelet
+    runtimes:
+      container:
+        handler: io.containerd.custom.v2
+`},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(source).Build()
+	reconciler := &SandboxPoolReconciler{Client: k8sClient, Scheme: scheme, Catalog: runtimecatalog.Builtin()}
+	pool := &apiv1alpha2.SandboxPool{Spec: apiv1alpha2.SandboxPoolSpec{Runtime: apiv1alpha2.RuntimeContainer}}
+
+	plan, err := reconciler.resolveRuntimePlan(context.Background(), pool)
+	require.NoError(t, err)
+	require.Equal(t, "custom", plan.Environment)
+	require.Equal(t, "custom", plan.Profile.Containerd.Namespace)
+	require.Equal(t, "io.containerd.custom.v2", plan.Profile.Containerd.Handler)
+	require.Equal(t, "/srv/kubelet", plan.Kubelet.Root)
+	require.Equal(t, "custom", plan.Profile.Deployment.NodeSelector["example.com/runtime"])
 }
 
 func seedControllerRegistry(t *testing.T, registry *placement.InMemoryRegistry, info placement.FastletInfo) {
@@ -197,9 +232,10 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 			}},
 		},
 	}
-	profile, err := reconciler.resolveRuntimeProfile(pool)
+	runtimePlan, err := runtimeenv.ResolveDefault(reconciler.Catalog, pool.Spec.Runtime)
 	require.NoError(t, err)
-	pod, err := reconciler.constructPod(pool, profile)
+	profile := runtimePlan.Profile
+	pod, err := reconciler.constructPodWithRuntimePlan(pool, runtimePlan)
 	require.NoError(t, err)
 	require.Nil(t, pod.Spec.RuntimeClassName)
 	require.Equal(t, "container", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_RUNTIME"))
@@ -213,6 +249,11 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	require.NotEmpty(t, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_REVISION"))
 	require.Equal(t, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_REVISION"), pod.Annotations["fast-sandbox.io/infra-revision"])
 	require.Equal(t, "/etc/fast-sandbox/infra/plan.json", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_INFRA_PLAN_PATH"))
+	require.Equal(t, "/etc/fast-sandbox/runtime/plan.json", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_RUNTIME_PLAN_PATH"))
+	require.Equal(t, "/run/containerd/containerd.sock", envValue(pod.Spec.Containers[0].Env, "RUNTIME_SOCKET"))
+	require.Equal(t, "overlayfs", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_SNAPSHOTTER"))
+	require.Equal(t, "/var/lib/kubelet", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_KUBELET_ROOT"))
+	require.Equal(t, runtimePlan.Revision, pod.Annotations["fast-sandbox.io/runtime-plan-revision"])
 	require.NotEmpty(t, pod.Annotations[placement.AnnotationPodTemplateHash])
 	require.Equal(t, shortRevision(pod.Annotations["fast-sandbox.io/infra-revision"]), pod.Labels["fast-sandbox.io/infra-revision"])
 	require.Equal(t, ":5758", envValue(pod.Spec.Containers[0].Env, "FASTLET_CONTROL_PORT"))

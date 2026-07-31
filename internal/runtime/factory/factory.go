@@ -30,6 +30,12 @@ func (f *Factory) Create(ctx context.Context, runtimeName apiv1alpha2.RuntimeNam
 	if err != nil {
 		return nil, CapabilityReport{}, err
 	}
+	return f.CreateProfile(ctx, profile, socketPath)
+}
+
+// CreateProfile constructs a driver from the immutable runtime plan delivered
+// to Fastlet. It deliberately does not resolve the built-in catalog again.
+func (f *Factory) CreateProfile(ctx context.Context, profile runtimecatalog.RuntimeProfile, socketPath string) (RuntimeDriver, CapabilityReport, error) {
 	report := f.prober.Probe(ctx, profile, socketPath)
 	if report.State == runtimecatalog.CapabilityUnsupported || report.State == runtimecatalog.CapabilityDegraded {
 		return nil, report, fmt.Errorf("%w: %s: %s", ErrRuntimeCapabilityUnavailable, report.Reason, report.Message)

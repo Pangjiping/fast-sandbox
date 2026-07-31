@@ -60,7 +60,8 @@ func New(profile runtimecatalog.RuntimeProfile) (*Driver, error) {
 		return nil, fmt.Errorf("containerd runtime profile %q has no private configuration", profile.Name)
 	}
 	config := RuntimeConfig{
-		Handler: profile.Containerd.Handler, RuntimePath: profile.Containerd.RuntimePath,
+		Namespace: profile.Containerd.Namespace,
+		Handler:   profile.Containerd.Handler, RuntimePath: profile.Containerd.RuntimePath,
 		ConfigPath: profile.Containerd.ConfigPath, NeedsTTY: profile.Containerd.NeedsTTY,
 		OptionsType: profile.Containerd.OptionsType,
 	}
@@ -81,14 +82,14 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	if r.socketPath == "" {
 		r.socketPath = "/run/containerd/containerd.sock"
 	}
-	klog.InfoS("Initializing runtime", "handler", r.config.Handler)
+	klog.InfoS("Initializing runtime", "handler", r.config.Handler, "containerdNamespace", r.containerdNamespace())
 
 	ctx, cancel := context.WithTimeout(ctx, defaultOperationTimeout)
 	defer cancel()
 
 	client, err := containerd.New(
 		r.socketPath,
-		containerd.WithDefaultNamespace("k8s.io"),
+		containerd.WithDefaultNamespace(r.containerdNamespace()),
 		containerd.WithExtraDialOpts([]grpc.DialOption{
 			grpc.WithChainUnaryInterceptor(containerdCreateRPCInterceptor),
 		}),
@@ -113,7 +114,7 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	logger.Info("Creating sandbox", "image", config.Image, "runtime", r.config.Handler, "netns", config.NetworkNamespacePath)
 	ctx, cancel := context.WithTimeout(ctx, defaultOperationTimeout)
 	defer cancel()
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = r.withNamespace(ctx)
 	ctx = withContainerdCreateRPCMetrics(ctx, string(r.runtimeName))
 
 	// 1. Image preparation
@@ -598,7 +599,7 @@ func (r *Driver) DeleteSandbox(ctx context.Context, sandboxID string) error {
 }
 
 func (r *Driver) deleteContainerdSandbox(ctx context.Context, sandboxID string) error {
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = r.withNamespace(ctx)
 	return ensureContainerdSandboxAbsent(
 		ctx,
 		containerdDeleteClient{client: r.client},
@@ -609,7 +610,7 @@ func (r *Driver) deleteContainerdSandbox(ctx context.Context, sandboxID string) 
 }
 
 func (r *Driver) GetSandboxStatus(ctx context.Context, sandboxID string) (string, error) {
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = r.withNamespace(ctx)
 	container, err := r.client.LoadContainer(ctx, sandboxID)
 	if err != nil {
 		// 容器不存在
@@ -634,7 +635,7 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 	if r.client == nil {
 		return nil, ErrRuntimeNotInitialized
 	}
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = r.withNamespace(ctx)
 	container, err := r.client.LoadContainer(ctx, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSandboxNotFound, err)
@@ -735,7 +736,7 @@ func (r *Driver) ListManagedSandboxes(ctx context.Context) ([]*SandboxMetadata, 
 	if r.client == nil {
 		return nil, ErrRuntimeNotInitialized
 	}
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = r.withNamespace(ctx)
 	containers, err := r.client.Containers(ctx)
 	if err != nil {
 		return nil, err
@@ -777,7 +778,7 @@ func (r *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 }
 
 func (r *Driver) ListImages(ctx context.Context) ([]string, error) {
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = r.withNamespace(ctx)
 	images, err := r.client.ListImages(ctx)
 	if err != nil {
 		return nil, err
@@ -790,7 +791,7 @@ func (r *Driver) ListImages(ctx context.Context) ([]string, error) {
 }
 
 func (r *Driver) PullImage(ctx context.Context, image string) error {
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	ctx = r.withNamespace(ctx)
 	_, err := r.client.GetImage(ctx, image)
 	if err == nil {
 		return nil
@@ -804,6 +805,17 @@ func (r *Driver) Close() error {
 		return r.client.Close()
 	}
 	return nil
+}
+
+func (r *Driver) containerdNamespace() string {
+	if r.config.Namespace != "" {
+		return r.config.Namespace
+	}
+	return runtimecatalog.DefaultContainerdNamespace
+}
+
+func (r *Driver) withNamespace(ctx context.Context) context.Context {
+	return namespaces.WithNamespace(ctx, r.containerdNamespace())
 }
 
 func envMapToSlice(env map[string]string) []string {

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fast-sandbox-runtime-environments
+  namespace: fast-sandbox-system
+data:
+  runtime-environments.yaml: |
+    environments:
+      default:
+        containerd:
+          socket: /run/containerd/containerd.sock
+          namespace: k8s.io
+          snapshotter: overlayfs
+          root: /var/lib/containerd
+        kubelet:
+          root: /var/lib/kubelet
+        runtimes:
+          container: {}
+          gvisor: {}
+          kata-qemu: {}
+          kata-clh: {}
+          kata-fc: {}
+          boxlite: {}

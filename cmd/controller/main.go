@@ -23,6 +23,7 @@ import (
 	routeauth "fast-sandbox/internal/dataplane/auth"
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/runtimeenv"
 
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,6 +59,8 @@ func main() {
 	var routeSigningPrivateKey string
 	var routeCredentialTTL time.Duration
 	var sandboxProxyBaseURL string
+	var runtimeEnvironmentNamespace string
+	var runtimeEnvironmentConfigMap string
 
 	flag.StringVar(&roleValue, "role", "all", "Control-plane role: fastpath, controller, or all.")
 	flag.StringVar(&metricsAddress, "metrics-bind-address", ":9091", "Metrics listen address.")
@@ -74,6 +77,8 @@ func main() {
 	flag.StringVar(&routeSigningPrivateKey, "route-signing-private-key", os.Getenv("FAST_SANDBOX_ROUTE_SIGNING_PRIVATE_KEY"), "Base64 Ed25519 seed/private key used only by FastPath.")
 	flag.DurationVar(&routeCredentialTTL, "route-credential-ttl", 5*time.Minute, "Lifetime of a Sandbox route credential.")
 	flag.StringVar(&sandboxProxyBaseURL, "sandbox-proxy-base-url", envOrDefault("FAST_SANDBOX_PROXY_BASE_URL", "http://fast-sandbox-proxy.fast-sandbox-system.svc:8080"), "Client-visible Sandbox Proxy base URL.")
+	flag.StringVar(&runtimeEnvironmentNamespace, "runtime-environment-namespace", envOrDefault("FAST_SANDBOX_RUNTIME_ENVIRONMENT_NAMESPACE", runtimeenv.SystemNamespace), "Namespace containing the platform runtime environment ConfigMap.")
+	flag.StringVar(&runtimeEnvironmentConfigMap, "runtime-environment-configmap", envOrDefault("FAST_SANDBOX_RUNTIME_ENVIRONMENT_CONFIGMAP", runtimeenv.ConfigMapName), "Platform runtime environment ConfigMap name.")
 	flag.Parse()
 
 	role, err := controlplane.ParseRole(roleValue)
@@ -161,6 +166,7 @@ func main() {
 			Client: manager.GetClient(), DurableReader: durableClient, Scheme: manager.GetScheme(), Registry: registry, Catalog: catalog,
 			FastletDrainer: fastletClient, DrainTimeout: fastletDrainTimeout,
 			FastletProxyImage: fastletProxyImage, BoxLiteRuntimeImage: boxLiteRuntimeImage, RouteVerifyPublicKey: routeVerifyPublicKey,
+			RuntimeEnvironmentNamespace: runtimeEnvironmentNamespace, RuntimeEnvironmentConfigMap: runtimeEnvironmentConfigMap,
 		}).SetupWithManager(manager); err != nil {
 			klog.ErrorS(err, "Register SandboxPool controller")
 			os.Exit(1)

@@ -16,15 +16,17 @@ import (
 )
 
 type ContainerdBackend struct {
-	client  *containerd.Client
-	fifoDir string
+	client     *containerd.Client
+	fifoDir    string
+	namespaces []string
 }
 
-func NewContainerdBackend(client *containerd.Client, fifoDir string) *ContainerdBackend {
+func NewContainerdBackend(client *containerd.Client, fifoDir string, runtimeNamespaces ...string) *ContainerdBackend {
 	if fifoDir == "" {
 		fifoDir = "/run/containerd/fifo"
 	}
-	return &ContainerdBackend{client: client, fifoDir: fifoDir}
+	runtimeNamespaces = normalizedContainerdNamespaces(runtimeNamespaces)
+	return &ContainerdBackend{client: client, fifoDir: fifoDir, namespaces: runtimeNamespaces}
 }
 
 func (*ContainerdBackend) Name() ResourceBackend { return BackendContainerd }
@@ -33,18 +35,20 @@ func (b *ContainerdBackend) Scan(ctx context.Context) ([]ResourceIdentity, error
 	if b.client == nil {
 		return nil, errors.New("containerd client is not configured")
 	}
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
-	containers, err := b.client.Containers(ctx, "labels.\"fast-sandbox.io/managed\"==\"true\"")
-	if err != nil {
-		return nil, err
-	}
-	resources := make([]ResourceIdentity, 0, len(containers))
-	for _, container := range containers {
-		resource, err := b.identity(ctx, container)
+	var resources []ResourceIdentity
+	for _, runtimeNamespace := range b.namespaces {
+		namespaced := namespaces.WithNamespace(ctx, runtimeNamespace)
+		containers, err := b.client.Containers(namespaced, "labels.\"fast-sandbox.io/managed\"==\"true\"")
 		if err != nil {
-			return nil, fmt.Errorf("read container %s identity: %w", container.ID(), err)
+			return nil, fmt.Errorf("list managed containers in namespace %s: %w", runtimeNamespace, err)
 		}
-		resources = append(resources, resource)
+		for _, container := range containers {
+			resource, err := b.identity(namespaced, container, runtimeNamespace)
+			if err != nil {
+				return nil, fmt.Errorf("read container %s identity in namespace %s: %w", container.ID(), runtimeNamespace, err)
+			}
+			resources = append(resources, resource)
+		}
 	}
 	return resources, nil
 }
@@ -53,7 +57,11 @@ func (b *ContainerdBackend) Cleanup(ctx context.Context, expected ResourceIdenti
 	if b.client == nil {
 		return errors.New("containerd client is not configured")
 	}
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+	runtimeNamespace := expected.ContainerdNamespace
+	if runtimeNamespace == "" {
+		runtimeNamespace = "k8s.io"
+	}
+	ctx = namespaces.WithNamespace(ctx, runtimeNamespace)
 	container, err := b.client.LoadContainer(ctx, expected.ResourceID)
 	if errdefs.IsNotFound(err) {
 		return nil
@@ -61,7 +69,7 @@ func (b *ContainerdBackend) Cleanup(ctx context.Context, expected ResourceIdenti
 	if err != nil {
 		return err
 	}
-	current, err := b.identity(ctx, container)
+	current, err := b.identity(ctx, container, runtimeNamespace)
 	if err != nil {
 		return err
 	}
@@ -101,7 +109,7 @@ func (b *ContainerdBackend) Cleanup(ctx context.Context, expected ResourceIdenti
 	return result
 }
 
-func (b *ContainerdBackend) identity(ctx context.Context, container containerd.Container) (ResourceIdentity, error) {
+func (b *ContainerdBackend) identity(ctx context.Context, container containerd.Container, runtimeNamespace string) (ResourceIdentity, error) {
 	info, err := container.Info(ctx)
 	if err != nil {
 		return ResourceIdentity{}, err
@@ -116,7 +124,7 @@ func (b *ContainerdBackend) identity(ctx context.Context, container containerd.C
 		sandboxUID = labels["fast-sandbox.io/id"]
 	}
 	return ResourceIdentity{
-		Backend: BackendContainerd, ResourceID: container.ID(), CreatedAt: info.CreatedAt,
+		Backend: BackendContainerd, ResourceID: container.ID(), ContainerdNamespace: runtimeNamespace, CreatedAt: info.CreatedAt,
 		FastletPodUID: labels["fast-sandbox.io/fastlet-uid"], FastletPodName: labels["fast-sandbox.io/fastlet-name"],
 		FastletPodNamespace: labels["fast-sandbox.io/namespace"],
 		SandboxUID:          sandboxUID, SandboxName: labels["fast-sandbox.io/sandbox-name"], SandboxNamespace: sandboxNamespace,
@@ -150,6 +158,29 @@ func parseInt64(value string) int64 {
 
 func sameResourceFence(expected, current ResourceIdentity) bool {
 	return expected.Backend == current.Backend && expected.ResourceID == current.ResourceID &&
+		expected.ContainerdNamespace == current.ContainerdNamespace &&
 		expected.FastletPodUID == current.FastletPodUID && expected.SandboxUID == current.SandboxUID &&
 		expected.InstanceGeneration == current.InstanceGeneration && expected.AssignmentAttempt == current.AssignmentAttempt
+}
+
+func normalizedContainerdNamespaces(values []string) []string {
+	if len(values) == 0 {
+		return []string{"k8s.io"}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return []string{"k8s.io"}
+	}
+	return result
 }

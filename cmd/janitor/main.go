@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	"fast-sandbox/internal/janitor"
+	"fast-sandbox/internal/runtimeenv"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -34,6 +36,7 @@ func main() {
 	var networkStateRoot string
 	var boxLiteStateRoot string
 	var metricsAddress string
+	var runtimeEnvironmentsFile string
 
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "Name of the node this janitor is running on")
@@ -43,6 +46,7 @@ func main() {
 	flag.StringVar(&networkStateRoot, "network-state-root", "/run/fast-sandbox/network", "Host-mounted Fastlet Linux network state root")
 	flag.StringVar(&boxLiteStateRoot, "boxlite-state-root", "/var/lib/fast-sandbox/boxlite", "Host-mounted BoxLite state root")
 	flag.StringVar(&metricsAddress, "metrics-address", ":9092", "Prometheus metrics listen address; empty disables the server")
+	flag.StringVar(&runtimeEnvironmentsFile, "runtime-environments-file", runtimeenv.ConfigFilePath, "Path to the platform runtime environment configuration")
 
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -85,12 +89,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctrdClient, err := containerd.New(ctrdSocket)
+	runtimeConfig, err := loadRuntimeEnvironments(runtimeEnvironmentsFile)
 	if err != nil {
-		klog.ErrorS(err, "Failed to connect to containerd")
+		klog.ErrorS(err, "Failed to load runtime environments")
 		os.Exit(1)
 	}
-	defer ctrdClient.Close()
+	endpoints := runtimeConfig.ContainerdEndpoints()
+	if ctrdSocket != "" && len(endpoints) == 1 && endpoints[0].Socket == "/run/containerd/containerd.sock" {
+		endpoints[0].Socket = ctrdSocket
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -111,7 +118,22 @@ func main() {
 		}()
 	}
 
-	j := janitor.NewJanitor(clientset, ctrdClient, nodeName)
+	j := janitor.NewJanitor(clientset, nil, nodeName)
+	var containerdClients []*containerd.Client
+	for _, endpoint := range endpoints {
+		ctrdClient, connectErr := containerd.New(endpoint.Socket)
+		if connectErr != nil {
+			klog.ErrorS(connectErr, "Failed to connect to containerd", "socket", endpoint.Socket)
+			os.Exit(1)
+		}
+		containerdClients = append(containerdClients, ctrdClient)
+		j.AddBackend(janitor.NewContainerdBackend(ctrdClient, filepath.Join(filepath.Dir(endpoint.Socket), "fifo"), endpoint.Namespaces...))
+	}
+	defer func() {
+		for _, ctrdClient := range containerdClients {
+			_ = ctrdClient.Close()
+		}
+	}()
 	j.AddBackend(janitor.NewLinuxNetworkBackend(networkStateRoot, fastletnetwork.NewLinuxNetNSDriver(fastletnetwork.LinuxDriverConfig{})))
 	j.AddBackend(janitor.NewBoxLiteBackend(boxLiteStateRoot))
 	j.K8sClient = k8sClient
@@ -122,4 +144,15 @@ func main() {
 		klog.ErrorS(err, "Janitor exited with error")
 		os.Exit(1)
 	}
+}
+
+func loadRuntimeEnvironments(path string) (runtimeenv.Config, error) {
+	payload, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return runtimeenv.DefaultConfig(), nil
+	}
+	if err != nil {
+		return runtimeenv.Config{}, err
+	}
+	return runtimeenv.Parse(payload)
 }

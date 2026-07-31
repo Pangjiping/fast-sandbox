@@ -26,6 +26,7 @@ const (
 type ResourceIdentity struct {
 	Backend             ResourceBackend
 	ResourceID          string
+	ContainerdNamespace string
 	FastletPodUID       string
 	FastletPodName      string
 	FastletPodNamespace string
