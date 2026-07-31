@@ -132,3 +132,22 @@ func TestResolveReturnsIndependentProfile(t *testing.T) {
 	require.Equal(t, "io.containerd.runc.v2", second.Containerd.Handler)
 	require.Equal(t, "/run/fast-sandbox/netns", second.Deployment.HostPaths[0].HostPath)
 }
+
+func TestBuiltinCatalogIncludesRegisteredExtension(t *testing.T) {
+	previous := builtinExtensions
+	builtinExtensions = make(map[apiv1alpha2.RuntimeName]RuntimeDefinition)
+	t.Cleanup(func() { builtinExtensions = previous })
+
+	name := apiv1alpha2.RuntimeName("extension-test")
+	registerBuiltinDefinition(RuntimeDefinition{
+		Name:       name,
+		Version:    "v1",
+		Driver:     DriverKindContainerd,
+		Containerd: &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.extension.v2"},
+	})
+
+	profile, err := Builtin().Resolve(name)
+	require.NoError(t, err)
+	require.Equal(t, "io.containerd.extension.v2", profile.Containerd.Handler)
+	require.NotEmpty(t, profile.ProfileHash)
+}

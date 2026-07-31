@@ -145,8 +145,30 @@ type Catalog struct {
 	profiles map[apiv1alpha2.RuntimeName]RuntimeProfile
 }
 
+// builtinExtensions is populated by optional runtime-specific files in this
+// package. It keeps private or platform-specific definitions out of the shared
+// built-in catalog implementation while preserving one immutable Catalog for
+// Controllers and Fastlets.
+var builtinExtensions = make(map[apiv1alpha2.RuntimeName]RuntimeDefinition)
+
+func registerBuiltinDefinition(definition RuntimeDefinition) {
+	if definition.Name == "" {
+		panic("runtime extension name is required")
+	}
+	if _, exists := builtinExtensions[definition.Name]; exists {
+		panic(fmt.Sprintf("runtime extension %q is registered more than once", definition.Name))
+	}
+	builtinExtensions[definition.Name] = cloneProfile(definition)
+}
+
 func Builtin() *Catalog {
 	profiles := builtinProfiles()
+	for name, profile := range builtinExtensions {
+		if _, exists := profiles[name]; exists {
+			panic(fmt.Sprintf("runtime extension %q conflicts with a built-in definition", name))
+		}
+		profiles[name] = cloneProfile(profile)
+	}
 	for name, profile := range profiles {
 		profile.ProfileHash = mustProfileHash(profile)
 		profiles[name] = profile
