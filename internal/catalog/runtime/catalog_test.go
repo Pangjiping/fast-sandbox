@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"sort"
 	"testing"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
@@ -12,14 +13,19 @@ import (
 
 func TestBuiltinCatalogProfiles(t *testing.T) {
 	catalog := Builtin()
-	require.Equal(t, []apiv1alpha2.RuntimeName{
+	expectedNames := []apiv1alpha2.RuntimeName{
 		apiv1alpha2.RuntimeBoxLite,
 		apiv1alpha2.RuntimeContainer,
 		apiv1alpha2.RuntimeGVisor,
 		apiv1alpha2.RuntimeKataClh,
 		apiv1alpha2.RuntimeKataFc,
 		apiv1alpha2.RuntimeKataQemu,
-	}, catalog.Names())
+	}
+	for name := range builtinExtensions {
+		expectedNames = append(expectedNames, name)
+	}
+	sort.Slice(expectedNames, func(i, j int) bool { return expectedNames[i] < expectedNames[j] })
+	require.Equal(t, expectedNames, catalog.Names())
 
 	for _, name := range catalog.Names() {
 		profile, err := catalog.Resolve(name)
