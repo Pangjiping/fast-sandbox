@@ -93,12 +93,14 @@ func TestManagerEnsureBasicCreatesMissingClusterAndDeploys(t *testing.T) {
 		"-n", "default", "--ignore-not-found=true", "--wait=true",
 	)
 	assertCommand(t, runner.commands, "kubectl", "apply", "-k", "config/crd")
+	assertCommand(t, runner.commands, "kubectl", "apply", "-k", "config/runtime-environments")
 	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "deployment/fast-sandbox-controller", "-n", "fast-sandbox-system")
 	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-controller", "-n", "fast-sandbox-system", "--timeout=120s")
 	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "deployment/fast-sandbox-fastpath", "-n", "fast-sandbox-system")
 	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-fastpath", "-n", "fast-sandbox-system", "--timeout=120s")
 	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "deployment/fast-sandbox-proxy", "-n", "fast-sandbox-system", "--timeout=120s")
 	assertCommand(t, runner.commands, "kubectl", "rollout", "restart", "ds/fast-sandbox-janitor", "-n", "fast-sandbox-system")
+	assertCommand(t, runner.commands, "kubectl", "rollout", "status", "ds/fast-sandbox-janitor", "-n", "fast-sandbox-system", "--timeout=120s")
 }
 
 func TestManagerEnsureBasicReusesExistingCluster(t *testing.T) {
@@ -156,10 +158,10 @@ func TestManagerEnsureReportsProgress(t *testing.T) {
 		"[environment 2/6] Preparing kind cluster fsb-e2e-basic...",
 		"[environment 4/6] Preparing runtime container...",
 		"[environment 6/6] Building and deploying Fast Sandbox...",
-		"[1/24] Building core development images",
-		"[8/24] Removing legacy default-namespace components",
-		"[9/24] Checking alpha CRD compatibility",
-		"[24/24] Waiting for NodeJanitor",
+		"[1/25] Building core development images",
+		"[8/25] Removing legacy default-namespace components",
+		"[9/25] Checking alpha CRD compatibility",
+		"[25/25] Waiting for NodeJanitor",
 		"Environment ready: context=kind-fsb-e2e-basic",
 	} {
 		if !strings.Contains(output, want) {

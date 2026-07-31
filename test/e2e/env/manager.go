@@ -677,6 +677,7 @@ func (m *Manager) deployFastSandbox(ctx context.Context) error {
 		{label: "Waiting for Sandbox CRD", name: "kubectl", args: []string{"wait", "--for=condition=Established", "crd/sandboxes.sandbox.fast.io", "--timeout=30s"}},
 		{label: "Waiting for SandboxPool CRD", name: "kubectl", args: []string{"wait", "--for=condition=Established", "crd/sandboxpools.sandbox.fast.io", "--timeout=30s"}},
 		{label: "Applying RBAC", name: "kubectl", args: []string{"apply", "-f", "config/rbac/base.yaml"}},
+		{label: "Applying runtime environments", name: "kubectl", args: []string{"apply", "-k", "config/runtime-environments"}},
 		{label: "Applying development route keys", name: "kubectl", args: []string{"apply", "-f", "config/dev/route-keys.yaml"}},
 		{label: "Applying control-plane workloads", name: "kubectl", args: []string{"apply", "-f", "config/manager/controller.yaml"}},
 		{label: "Restarting Reconcilers", action: func(ctx context.Context) error {
@@ -695,7 +696,7 @@ func (m *Manager) deployFastSandbox(ctx context.Context) error {
 		{label: "Restarting NodeJanitor", action: func(ctx context.Context) error {
 			return m.rolloutRestart(ctx, "ds/fast-sandbox-janitor")
 		}},
-		{label: "Waiting for NodeJanitor", name: "kubectl", args: []string{"rollout", "status", "ds/fast-sandbox-janitor", "-n", fastSandboxSystemNamespace, "--timeout=60s"}},
+		{label: "Waiting for NodeJanitor", name: "kubectl", args: []string{"rollout", "status", "ds/fast-sandbox-janitor", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
 	}
 
 	for index, step := range steps {
