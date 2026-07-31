@@ -30,6 +30,7 @@ Fast Sandbox documentation is organized by reader intent:
 - [OpenSandbox Execd](guides/opensandbox-execd.md)
 - [Private registries](guides/private-registries.md)
 - [Secure runtimes](guides/secure-runtimes.md)
+- [Runtime environments](guides/runtime-environments.md)
 - [Observability](guides/observability.md)
 - [Performance](guides/performance.md)
 - [Testing](guides/testing.md)

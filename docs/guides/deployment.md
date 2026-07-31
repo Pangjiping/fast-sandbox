@@ -63,6 +63,7 @@ The default overlay contains:
 - Fast-Path and Proxy Services;
 - PDB and HPA examples;
 - NodeJanitor DaemonSet.
+- the platform-owned runtime environment ConfigMap.
 
 Production deployments must create `fast-sandbox-route-keys` through a secret manager. Do not copy the public development key from `config/dev`.
 
@@ -88,6 +89,8 @@ Fastlet and NodeJanitor are privileged node components. Production clusters shou
 - monitor privileged Pods and host cleanup.
 
 See [Secure runtimes](secure-runtimes.md) for gVisor and Kata prerequisites.
+See [Runtime environments](runtime-environments.md) when containerd or kubelet
+uses non-default sockets, namespaces, roots, handlers, or node selectors.
 
 ## SandboxPools
 

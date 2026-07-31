@@ -18,6 +18,8 @@ and platform-owned runtime implementation details.
 | `--fastlet-drain-timeout` | `5m` | Drain deadline before failure policy |
 | `--route-credential-ttl` | `5m` | Caller route credential lifetime |
 | `--sandbox-proxy-base-url` | cluster Service URL | Client-visible proxy base URL |
+| `--runtime-environment-namespace` | `fast-sandbox-system` | Namespace of the platform runtime environment ConfigMap |
+| `--runtime-environment-configmap` | `fast-sandbox-runtime-environments` | Platform runtime environment ConfigMap name |
 
 Image and route-key flags can also be supplied by environment:
 
@@ -41,6 +43,7 @@ The Pool Controller injects platform-owned Fastlet configuration. Important grou
 - `FAST_SANDBOX_RESOURCE_MEMORY`;
 - `FAST_SANDBOX_RESOURCE_PIDS`;
 - `FAST_SANDBOX_WARM_IMAGES`.
+- `FAST_SANDBOX_RUNTIME_PLAN_PATH`.
 
 ### Infra
 
@@ -100,6 +103,7 @@ Data and metrics listeners are separate.
 | `--network-state-root` | `/run/fast-sandbox/network` |
 | `--boxlite-state-root` | `/var/lib/fast-sandbox/boxlite` |
 | `--metrics-address` | `:9092` |
+| `--runtime-environments-file` | `/etc/fast-sandbox/runtime-environments/runtime-environments.yaml` |
 
 ## OpenTelemetry
 

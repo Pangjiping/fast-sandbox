@@ -1,22 +1,33 @@
 # Runtime model
 
-A SandboxPool selects one immutable runtime name. Fast Sandbox resolves that name through a platform-owned RuntimeCatalog and passes the resulting RuntimeProfile to both the Pool Controller and Fastlet.
+A SandboxPool selects one immutable runtime name. Fast Sandbox combines the
+platform-owned runtime definition with the node runtime environment selected by
+the operator. The Pool Controller publishes the result as an immutable runtime
+plan consumed by Fastlet.
 
 ## Public and internal abstractions
 
 ```text
 SandboxPool.spec.runtime
   -> RuntimeCatalog
-  -> RuntimeProfile
+  -> RuntimeDefinition
+  +  NodeRuntimeEnvironment
+  -> ResolvedRuntimePlan
   -> RuntimeDriver
   -> backend runtime
 ```
 
 - `RuntimeName` is the public Pool value.
-- `RuntimeProfile` is the platform-owned deployment and capability contract.
+- `RuntimeDefinition` is the code-owned behavior and capability contract.
+- `NodeRuntimeEnvironment` records the installed containerd, kubelet, node
+  selector, host path, and optional runtime binding.
+- `ResolvedRuntimePlan` is the immutable merged contract mounted into one
+  Fastlet generation.
 - `RuntimeDriver` is Fastlet's runtime-neutral lifecycle interface.
 
-Users cannot override containerd handlers, shim paths, runtime configuration paths, network modes, or platform mounts independently.
+Pool users cannot override containerd handlers, shim paths, runtime
+configuration paths, network modes, or platform mounts independently. Runtime
+environment configuration is restricted to platform administrators.
 
 ## Canonical runtime names
 
@@ -31,9 +42,9 @@ Users cannot override containerd handlers, shim paths, runtime configuration pat
 
 The names define stable profiles, not unconditional production support. See [Runtime support](../reference/runtime-support.md).
 
-## RuntimeProfile
+## Runtime plan
 
-A RuntimeProfile fixes:
+A resolved runtime plan fixes:
 
 - driver kind and backend configuration;
 - privileged mode and host paths;
@@ -42,9 +53,17 @@ A RuntimeProfile fixes:
 - network mode;
 - Infra delivery modes;
 - cache, recovery, and network capabilities;
-- a deterministic profile hash.
+- containerd socket, namespace, snapshotter and root;
+- kubelet state root;
+- a deterministic revision/profile hash.
 
-The profile hash lets Controllers and Fastlets detect incompatible configuration instead of interpreting the same Pool differently.
+The Pool Controller writes the complete plan into an immutable ConfigMap and
+mounts it into Fastlet. Fastlet does not independently resolve the built-in
+catalog. The revision lets Controllers, placement and Fastlets reject
+incompatible generations instead of interpreting the same Pool differently.
+
+See [Runtime environments](../guides/runtime-environments.md) for the operator
+configuration and rollout behavior.
 
 ## RuntimeDriver
 
