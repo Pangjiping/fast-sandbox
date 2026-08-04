@@ -5,21 +5,23 @@ import "fmt"
 type Profile string
 
 const (
-	ProfileBasic    Profile = "basic"
-	ProfileGVisor   Profile = "gvisor"
-	ProfileKataQemu Profile = "kata-qemu"
-	ProfileKataClh  Profile = "kata-clh"
-	ProfileKataFc   Profile = "kata-fc"
+	ProfileBasic          Profile = "basic"
+	ProfileGVisor         Profile = "gvisor"
+	ProfileKataQemu       Profile = "kata-qemu"
+	ProfileKataClh        Profile = "kata-clh"
+	ProfileKataFc         Profile = "kata-fc"
+	ProfileKataDragonball Profile = "kata-dragonball"
 )
 
 type RuntimeKind string
 
 const (
-	RuntimeContainer RuntimeKind = "container"
-	RuntimeGVisor    RuntimeKind = "gvisor"
-	RuntimeKataQemu  RuntimeKind = "kata-qemu"
-	RuntimeKataClh   RuntimeKind = "kata-clh"
-	RuntimeKataFc    RuntimeKind = "kata-fc"
+	RuntimeContainer      RuntimeKind = "container"
+	RuntimeGVisor         RuntimeKind = "gvisor"
+	RuntimeKataQemu       RuntimeKind = "kata-qemu"
+	RuntimeKataClh        RuntimeKind = "kata-clh"
+	RuntimeKataFc         RuntimeKind = "kata-fc"
+	RuntimeKataDragonball RuntimeKind = "kata-dragonball"
 )
 
 type ProfileSettings struct {
@@ -64,6 +66,13 @@ func (p Profile) Settings() (ProfileSettings, error) {
 			KindConfig:  "test/e2e/manifests/kind/kata.yaml",
 			KindImage:   "kindest/node:v1.31.0",
 			Runtime:     RuntimeKataFc,
+		}, nil
+	case ProfileKataDragonball:
+		return ProfileSettings{
+			ClusterName: "fsb-e2e-kata",
+			KindConfig:  "test/e2e/manifests/kind/kata.yaml",
+			KindImage:   "kindest/node:v1.31.0",
+			Runtime:     RuntimeKataDragonball,
 		}, nil
 	default:
 		return ProfileSettings{}, fmt.Errorf("unknown e2e profile %q", p)

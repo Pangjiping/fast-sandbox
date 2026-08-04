@@ -38,6 +38,7 @@ environment configuration is restricted to platform administrators.
 | `kata-qemu` | containerd | Kata shim with QEMU configuration |
 | `kata-clh` | containerd | Kata shim with Cloud Hypervisor configuration |
 | `kata-fc` | containerd | Kata shim with Firecracker configuration |
+| `kata-dragonball` | containerd | Kata Rust shim with Dragonball configuration |
 | `boxlite` | BoxLite | Pod-local BoxLite runtime sidecar |
 
 The names define stable profiles, not unconditional production support. See [Runtime support](../reference/runtime-support.md).
@@ -100,7 +101,15 @@ Both receive fixed CPU, memory, and PID limits from the Pool's Sandbox resource 
 
 Kata profiles use the containerd Kata shim. Fastlet still owns the network slot, while the shim exposes the interface to the guest.
 
-QEMU and Cloud Hypervisor are validated profiles. Firecracker remains capability-gated because the validation environment lacks the complete kernel and block-snapshotter contract required by that profile.
+QEMU, Cloud Hypervisor, Firecracker, and Dragonball are validated profiles. Firecracker is
+bound to a Firecracker-specific runtime configuration and snapshotter override
+inside the node environment because it requires a compatible `virtio-mmio`
+guest kernel and a block-device snapshotter rather than the environment's
+default overlayfs snapshotter.
+
+Dragonball uses Kata's Rust shim and a separate Fast Sandbox compatibility
+configuration. Keeping that file separate from the upstream configuration
+makes upgrades and rollback explicit.
 
 Kata supports Infra delivery through OCI bind mounts, image/template baking, preinstalled artifacts, or runtime-specific guest copy.
 

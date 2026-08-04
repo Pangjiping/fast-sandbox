@@ -18,6 +18,7 @@ import (
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
 	"fast-sandbox/internal/fastlet/server"
+	"fast-sandbox/internal/nodecleanup"
 	"fast-sandbox/internal/observability"
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
@@ -87,6 +88,14 @@ func main() {
 	defer rt.Close()
 
 	rt.SetNamespace(namespace)
+	if runtimeProfile.ResidualProcess != runtimecatalog.ResidualProcessNone {
+		configurable, ok := rt.(nodeCleanupConfigurable)
+		if !ok {
+			klog.ErrorS(runtimecontract.ErrUnsupportedRuntime, "Runtime profile requires node process cleanup but driver is not configurable", "kind", runtimeProfile.ResidualProcess)
+			os.Exit(1)
+		}
+		configurable.SetNodeCleanupClient(nodecleanup.NewClient(getEnv("FAST_SANDBOX_NODE_CLEANUP_SOCKET", nodecleanup.DefaultSocketPath)))
+	}
 	registryProvider := registryconfig.NewFileProvider(getEnv("FAST_SANDBOX_REGISTRY_CONFIG_PATH", registryconfig.MountPath))
 	if revision, err := registryProvider.Refresh(); err != nil {
 		klog.ErrorS(err, "Failed to load Registry configuration")
@@ -191,6 +200,10 @@ type infraConfigurable interface {
 
 type registryConfigurable interface {
 	SetRegistryProvider(registryconfig.Provider)
+}
+
+type nodeCleanupConfigurable interface {
+	SetNodeCleanupClient(nodecleanup.RuntimeProcessCleaner)
 }
 
 func recoverUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager, proxyClient *fastletproxy.ControlClient) {

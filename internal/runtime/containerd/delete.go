@@ -33,7 +33,8 @@ type containerdDeleteTask interface {
 }
 
 type containerdDeleteClient struct {
-	client *containerd.Client
+	client      *containerd.Client
+	snapshotter string
 }
 
 func (b containerdDeleteClient) LoadContainer(ctx context.Context, id string) (containerdDeleteContainer, error) {
@@ -45,11 +46,11 @@ func (b containerdDeleteClient) LoadContainer(ctx context.Context, id string) (c
 }
 
 func (b containerdDeleteClient) RemoveSnapshot(ctx context.Context, name string) error {
-	return b.client.SnapshotService("").Remove(ctx, name)
+	return b.client.SnapshotService(b.snapshotter).Remove(ctx, name)
 }
 
 func (b containerdDeleteClient) StatSnapshot(ctx context.Context, name string) error {
-	_, err := b.client.SnapshotService("").Stat(ctx, name)
+	_, err := b.client.SnapshotService(b.snapshotter).Stat(ctx, name)
 	return err
 }
 

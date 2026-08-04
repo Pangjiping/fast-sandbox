@@ -73,6 +73,8 @@ Select another runtime with:
 make quickstart RUNTIME=gvisor
 make quickstart RUNTIME=kata-qemu
 make quickstart RUNTIME=kata-clh
+make quickstart RUNTIME=kata-fc
+make quickstart RUNTIME=kata-dragonball
 ```
 
 See the [full Quick Start](docs/getting-started/quickstart.md) for file transfer,
@@ -215,7 +217,8 @@ backend and direct-ingress contract, and
 | gVisor | `gvisor` | Yes | Validated |
 | Kata QEMU | `kata-qemu` | Yes | Validated |
 | Kata Cloud Hypervisor | `kata-clh` | Yes | Validated |
-| Kata Firecracker | `kata-fc` | No | Capability-gated |
+| Kata Firecracker | `kata-fc` | Yes | Validated |
+| Kata Dragonball | `kata-dragonball` | Yes | Validated |
 | BoxLite | `boxlite` | No | Experimental integration; fail closed |
 
 This table describes Fast Sandbox validation status, not the upstream runtimes'
@@ -258,7 +261,7 @@ boundary, and percentile distribution. See
   the first component contract.
 - Snapshot, pause/resume, persistent storage, and live migration are not
   current capabilities.
-- Kata Firecracker and BoxLite remain explicit capability gates.
+- BoxLite remains an explicit capability gate.
 
 Private registry credentials are configured per namespace through a static
 ConfigMap and referenced Secrets; Pools do not embed credentials. See

@@ -11,6 +11,7 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
+	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -39,8 +40,56 @@ func TestNewUsesCanonicalProfile(t *testing.T) {
 	require.Equal(t, apiv1alpha2.RuntimeGVisor, driver.runtimeName)
 	require.Equal(t, profile.ProfileHash, driver.runtimeProfileHash)
 	require.Equal(t, "io.containerd.runsc.v1", driver.config.Handler)
+	require.Equal(t, "overlayfs", driver.snapshotter())
 	require.Equal(t, runtimecatalog.DefaultContainerdNamespace, driver.containerdNamespace())
 }
+
+func TestNewUsesResolvedSnapshotter(t *testing.T) {
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeKataFc)
+	require.NoError(t, err)
+	profile.Containerd.Snapshotter = "blockfile"
+	driver, err := New(profile)
+	require.NoError(t, err)
+	require.Equal(t, "blockfile", driver.snapshotter())
+	require.Equal(t, runtimecatalog.ResidualProcessFirecracker, driver.residualProcess)
+}
+
+func TestKataFCDeletionRequiresVerifiedNodeCleanup(t *testing.T) {
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeKataFc)
+	require.NoError(t, err)
+	driver, err := New(profile)
+	require.NoError(t, err)
+
+	err = driver.ensureResidualProcessAbsent(context.Background(), "sandbox-a")
+
+	require.ErrorContains(t, err, "node cleanup client is not configured")
+}
+
+func TestKataFCDeletionDelegatesResidualProcessCleanup(t *testing.T) {
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeKataFc)
+	require.NoError(t, err)
+	driver, err := New(profile)
+	require.NoError(t, err)
+	cleaner := &fakeRuntimeProcessCleaner{}
+	driver.SetNodeCleanupClient(cleaner)
+
+	require.NoError(t, driver.ensureResidualProcessAbsent(context.Background(), "sandbox-a"))
+	require.Equal(t, runtimecatalog.ResidualProcessFirecracker, cleaner.kind)
+	require.Equal(t, "sandbox-a", cleaner.sandboxID)
+}
+
+type fakeRuntimeProcessCleaner struct {
+	kind      runtimecatalog.ResidualProcessKind
+	sandboxID string
+}
+
+func (c *fakeRuntimeProcessCleaner) EnsureRuntimeProcessesAbsent(_ context.Context, kind runtimecatalog.ResidualProcessKind, sandboxID string) error {
+	c.kind = kind
+	c.sandboxID = sandboxID
+	return nil
+}
+
+var _ nodecleanup.RuntimeProcessCleaner = (*fakeRuntimeProcessCleaner)(nil)
 
 func TestRuntimeConfig_KataVariantsUseKataV2Runtime(t *testing.T) {
 	tests := []struct {

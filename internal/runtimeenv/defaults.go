@@ -5,11 +5,11 @@ import (
 )
 
 func DefaultConfig() Config {
-	return Config{Environments: map[string]NodeRuntimeEnvironment{
+	return Config{Version: ConfigVersion, Environments: map[string]NodeRuntimeEnvironment{
 		DefaultEnvironment: {
 			Containerd: ContainerdEnvironment{
 				Socket: "/run/containerd/containerd.sock", Namespace: "k8s.io",
-				Snapshotter: "overlayfs", Root: "/var/lib/containerd",
+				DefaultSnapshotter: "overlayfs", Root: "/var/lib/containerd",
 			},
 			Kubelet: KubeletEnvironment{Root: "/var/lib/kubelet"},
 			Runtimes: map[apiv1alpha2.RuntimeName]RuntimeBinding{
@@ -17,8 +17,14 @@ func DefaultConfig() Config {
 				apiv1alpha2.RuntimeGVisor:    {},
 				apiv1alpha2.RuntimeKataQemu:  {},
 				apiv1alpha2.RuntimeKataClh:   {},
-				apiv1alpha2.RuntimeKataFc:    {},
-				apiv1alpha2.RuntimeBoxLite:   {},
+				apiv1alpha2.RuntimeKataFc: {
+					Snapshotter: "blockfile",
+					ConfigPath:  "/opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml",
+				},
+				apiv1alpha2.RuntimeKataDragonball: {
+					ConfigPath: "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml",
+				},
+				apiv1alpha2.RuntimeBoxLite: {},
 			},
 		},
 	}}

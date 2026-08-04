@@ -18,6 +18,7 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 		apiv1alpha2.RuntimeContainer,
 		apiv1alpha2.RuntimeGVisor,
 		apiv1alpha2.RuntimeKataClh,
+		apiv1alpha2.RuntimeKataDragonball,
 		apiv1alpha2.RuntimeKataFc,
 		apiv1alpha2.RuntimeKataQemu,
 	}
@@ -54,12 +55,18 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 	require.Equal(t, DriverKindContainerd, kata.Driver)
 	require.True(t, kata.Deployment.RequiresKVM)
 	require.Contains(t, kata.Containerd.ConfigPath, "configuration-fc.toml")
-	require.Equal(t, CapabilityDegraded, kata.Capabilities.DefaultState)
-	require.Equal(t, "KataFirecrackerNotValidated", kata.Capabilities.Reason)
-	for _, name := range []apiv1alpha2.RuntimeName{apiv1alpha2.RuntimeKataQemu, apiv1alpha2.RuntimeKataClh} {
+	require.Equal(t, CapabilityConfigured, kata.Capabilities.DefaultState)
+	require.Equal(t, ResidualProcessFirecracker, kata.ResidualProcess)
+	dragonball, err := catalog.Resolve(apiv1alpha2.RuntimeKataDragonball)
+	require.NoError(t, err)
+	require.Equal(t, "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2", dragonball.Containerd.RuntimePath)
+	require.Contains(t, dragonball.Containerd.ConfigPath, "configuration-dragonball.toml")
+
+	for _, name := range []apiv1alpha2.RuntimeName{apiv1alpha2.RuntimeKataQemu, apiv1alpha2.RuntimeKataClh, apiv1alpha2.RuntimeKataDragonball} {
 		kataProfile, resolveErr := catalog.Resolve(name)
 		require.NoError(t, resolveErr)
 		require.Contains(t, kataProfile.InfraDeliveryModes, InfraDeliveryBindMount)
+		require.Equal(t, ResidualProcessNone, kataProfile.ResidualProcess)
 	}
 
 	gvisor, err := catalog.Resolve(apiv1alpha2.RuntimeGVisor)
@@ -84,6 +91,7 @@ func TestRuntimeProfilesUsingFastletNetworkHaveRequiredMounts(t *testing.T) {
 		apiv1alpha2.RuntimeGVisor,
 		apiv1alpha2.RuntimeKataQemu,
 		apiv1alpha2.RuntimeKataClh,
+		apiv1alpha2.RuntimeKataDragonball,
 		apiv1alpha2.RuntimeKataFc,
 	} {
 		profile, err := catalog.Resolve(name)

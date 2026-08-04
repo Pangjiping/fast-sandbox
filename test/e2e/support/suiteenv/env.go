@@ -169,6 +169,11 @@ func RequireKataFc(t testing.TB) *e2eenv.Manager {
 	return requireProfile(t, e2eenv.ProfileKataFc)
 }
 
+func RequireKataDragonball(t testing.TB) *e2eenv.Manager {
+	t.Helper()
+	return requireProfile(t, e2eenv.ProfileKataDragonball)
+}
+
 func (e *SuiteEnv) MustKubeClient(t *testing.T) client.Client {
 	t.Helper()
 

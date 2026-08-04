@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +41,7 @@ type ResourceIdentity struct {
 	CreatedAt           time.Time
 	NetworkSlotID       string
 	NetworkStatePodUID  string
+	ResidualProcess     runtimecatalog.ResidualProcessKind
 }
 
 type CleanupBackend interface {

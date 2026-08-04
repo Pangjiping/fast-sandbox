@@ -14,6 +14,7 @@ const (
 	ConfigMapKey       = "runtime-environments.yaml"
 	SystemNamespace    = "fast-sandbox-system"
 	DefaultEnvironment = "default"
+	ConfigVersion      = "v1alpha2"
 	PlanVersion        = "v1"
 	PlanFileName       = "plan.json"
 	PlanMountPath      = "/etc/fast-sandbox/runtime"
@@ -22,6 +23,7 @@ const (
 )
 
 type Config struct {
+	Version      string                            `json:"version"`
 	Environments map[string]NodeRuntimeEnvironment `json:"environments"`
 }
 
@@ -37,10 +39,10 @@ type NodeRuntimeEnvironment struct {
 }
 
 type ContainerdEnvironment struct {
-	Socket      string `json:"socket"`
-	Namespace   string `json:"namespace"`
-	Snapshotter string `json:"snapshotter"`
-	Root        string `json:"root"`
+	Socket             string `json:"socket"`
+	Namespace          string `json:"namespace"`
+	DefaultSnapshotter string `json:"defaultSnapshotter"`
+	Root               string `json:"root"`
 }
 
 type KubeletEnvironment struct {
@@ -56,11 +58,22 @@ type ContainerdEndpoint struct {
 // the logical runtime definition.
 type RuntimeBinding struct {
 	Handler     string                               `json:"handler,omitempty"`
+	Snapshotter string                               `json:"snapshotter,omitempty"`
 	RuntimePath string                               `json:"runtimePath,omitempty"`
 	ConfigPath  string                               `json:"configPath,omitempty"`
 	OptionsType string                               `json:"optionsType,omitempty"`
 	NeedsTTY    *bool                                `json:"needsTTY,omitempty"`
 	HostPaths   []runtimecatalog.HostPathRequirement `json:"hostPaths,omitempty"`
+}
+
+// ResolvedContainerdEnvironment is the per-runtime view consumed by Fastlet.
+// Snapshotter has already applied the runtime binding override on top of the
+// node environment default.
+type ResolvedContainerdEnvironment struct {
+	Socket      string `json:"socket"`
+	Namespace   string `json:"namespace"`
+	Snapshotter string `json:"snapshotter"`
+	Root        string `json:"root"`
 }
 
 // ResolvedRuntimePlan is the immutable contract shared by the Pool
@@ -71,7 +84,7 @@ type ResolvedRuntimePlan struct {
 	Environment string                        `json:"environment"`
 	Revision    string                        `json:"revision"`
 	Profile     runtimecatalog.RuntimeProfile `json:"profile"`
-	Containerd  ContainerdEnvironment         `json:"containerd"`
+	Containerd  ResolvedContainerdEnvironment `json:"containerd"`
 	Kubelet     KubeletEnvironment            `json:"kubelet"`
 }
 

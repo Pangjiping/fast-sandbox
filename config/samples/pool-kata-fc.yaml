@@ -1,0 +1,42 @@
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxPool
+metadata:
+  name: kata-fc-execd-pool
+  namespace: fast-sandbox
+spec:
+  runtime: kata-fc
+  infraComponents:
+  - name: execd
+    artifact:
+      source:
+        image:
+          reference: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd@sha256:1dc98c7de10b9a73450ac75aa0f200ad7972f2c40f5225f6a8998e166b45d6dd
+      mappings:
+      - sourcePath: /execd
+        targetPath: /.fast/components/execd/execd
+    process:
+      command: ["/.fast/components/execd/execd"]
+      restartPolicy: OnFailure
+      healthCheck:
+        httpGet:
+          path: /ping
+        timeoutSeconds: 10
+    endpoint:
+      protocol: HTTP
+      port: 44772
+  sandboxResources:
+    cpu: 250m
+    memory: 256Mi
+    pids: 128
+  capacity:
+    poolMin: 1
+    poolMax: 1
+    bufferMin: 0
+    bufferMax: 0
+  maxSandboxesPerPod: 5
+  fastletTemplate:
+    spec:
+      containers:
+      - name: fastlet
+        image: fast-sandbox/fastlet:dev
+        imagePullPolicy: IfNotPresent

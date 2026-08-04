@@ -54,8 +54,20 @@ const (
 	CapabilityUnsupported CapabilityState = "Unsupported"
 )
 
+// ResidualProcessKind identifies a host process which may outlive the
+// containerd task/container objects for a runtime. Fastlet never receives
+// host PID visibility; it delegates exact-ID cleanup to the node-local
+// NodeJanitor over its private Unix socket.
+type ResidualProcessKind string
+
+const (
+	ResidualProcessNone        ResidualProcessKind = ""
+	ResidualProcessFirecracker ResidualProcessKind = "firecracker"
+)
+
 type ContainerdConfig struct {
 	Namespace   string `json:"namespace"`
+	Snapshotter string `json:"snapshotter"`
 	Handler     string `json:"handler"`
 	RuntimePath string `json:"runtimePath,omitempty"`
 	ConfigPath  string `json:"configPath,omitempty"`
@@ -114,6 +126,7 @@ type RuntimeDefinition struct {
 	Deployment         DeploymentRequirements  `json:"deployment"`
 	Capabilities       Capabilities            `json:"capabilities"`
 	NetworkMode        NetworkMode             `json:"networkMode"`
+	ResidualProcess    ResidualProcessKind     `json:"residualProcess,omitempty"`
 	InfraDeliveryModes []InfraDeliveryMode     `json:"infraDeliveryModes"`
 }
 

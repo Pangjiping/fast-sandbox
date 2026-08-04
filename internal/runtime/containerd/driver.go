@@ -15,6 +15,7 @@ import (
 	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
+	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
@@ -23,6 +24,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -44,6 +46,8 @@ type Driver struct {
 	config             RuntimeConfig // cached runtime configuration
 	networkManager     *fastletnetwork.Manager
 	registryProvider   registryconfig.Provider
+	residualProcess    runtimecatalog.ResidualProcessKind
+	nodeCleanup        nodecleanup.RuntimeProcessCleaner
 }
 
 const (
@@ -60,12 +64,14 @@ func New(profile runtimecatalog.RuntimeProfile) (*Driver, error) {
 		return nil, fmt.Errorf("containerd runtime profile %q has no private configuration", profile.Name)
 	}
 	config := RuntimeConfig{
-		Namespace: profile.Containerd.Namespace,
-		Handler:   profile.Containerd.Handler, RuntimePath: profile.Containerd.RuntimePath,
+		Namespace: profile.Containerd.Namespace, Snapshotter: profile.Containerd.Snapshotter,
+		Handler: profile.Containerd.Handler, RuntimePath: profile.Containerd.RuntimePath,
 		ConfigPath: profile.Containerd.ConfigPath, NeedsTTY: profile.Containerd.NeedsTTY,
 		OptionsType: profile.Containerd.OptionsType,
 	}
-	return newWithConfig(profile.Name, profile.ProfileHash, config), nil
+	driver := newWithConfig(profile.Name, profile.ProfileHash, config)
+	driver.residualProcess = profile.ResidualProcess
+	return driver, nil
 }
 
 func newWithConfig(rt apiv1alpha2.RuntimeName, profileHash string, cfg RuntimeConfig) *Driver {
@@ -154,6 +160,7 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		containerContext,
 		containerID,
 		instrumentContainerOption(string(r.runtimeName), "container_image_opt", containerd.WithImage(image)),
+		instrumentContainerOption(string(r.runtimeName), "container_snapshotter_opt", containerd.WithSnapshotter(r.snapshotter())),
 		instrumentContainerOption(string(r.runtimeName), "snapshot_prepare_opt", containerd.WithNewSnapshot(snapShotName(containerID), image)),
 		instrumentContainerOption(string(r.runtimeName), "container_runtime_opt", containerd.WithRuntime(r.config.Handler, r.getRuntimeOptions())),
 		instrumentContainerOption(string(r.runtimeName), "spec_generate_opt", containerd.WithNewSpec(specOpts...)),
@@ -294,7 +301,7 @@ func (r *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	createConfig := *config
 	var owner fastletnetwork.Owner
 	if r.networkManager != nil {
-		owner = networkOwner(config)
+		owner = r.networkOwner(config)
 		networkContext, finishNetwork := startContainerdCreateStage(ctx, string(r.runtimeName), "network_acquire")
 		slot, acquireErr := r.networkManager.Acquire(networkContext, owner)
 		finishNetwork(acquireErr)
@@ -347,6 +354,16 @@ func (r *Driver) prepareImage(ctx context.Context, imageName string) (containerd
 		if err != nil {
 			return nil, err
 		}
+		return image, nil
+	}
+	unpacked, err := image.IsUnpacked(ctx, r.snapshotter())
+	if err != nil {
+		return nil, fmt.Errorf("inspect image %q in snapshotter %q: %w", imageName, r.snapshotter(), err)
+	}
+	if !unpacked {
+		if err := image.Unpack(ctx, r.snapshotter()); err != nil {
+			return nil, fmt.Errorf("unpack image %q in snapshotter %q: %w", imageName, r.snapshotter(), err)
+		}
 	}
 	return image, nil
 }
@@ -356,7 +373,7 @@ func (r *Driver) SetRegistryProvider(provider registryconfig.Provider) {
 }
 
 func (r *Driver) pullImage(ctx context.Context, imageName string) (containerd.Image, error) {
-	options := []containerd.RemoteOpt{containerd.WithPullUnpack}
+	options := []containerd.RemoteOpt{containerd.WithPullUnpack, containerd.WithPullSnapshotter(r.snapshotter())}
 	if r.registryProvider != nil {
 		credential, found, err := r.registryProvider.Credentials(imageName)
 		if err != nil {
@@ -573,6 +590,10 @@ func (r *Driver) SetNamespace(ns string) {
 	r.fastletNamespace = ns
 }
 
+func (r *Driver) SetNodeCleanupClient(client nodecleanup.RuntimeProcessCleaner) {
+	r.nodeCleanup = client
+}
+
 func (r *Driver) DeleteSandbox(ctx context.Context, sandboxID string) error {
 	var owner fastletnetwork.Owner
 	if r.networkManager != nil {
@@ -600,13 +621,29 @@ func (r *Driver) DeleteSandbox(ctx context.Context, sandboxID string) error {
 
 func (r *Driver) deleteContainerdSandbox(ctx context.Context, sandboxID string) error {
 	ctx = r.withNamespace(ctx)
-	return ensureContainerdSandboxAbsent(
+	if err := ensureContainerdSandboxAbsent(
 		ctx,
-		containerdDeleteClient{client: r.client},
+		containerdDeleteClient{client: r.client, snapshotter: r.snapshotter()},
 		sandboxID,
 		snapShotName(sandboxID),
 		waitStopTimeout,
-	)
+	); err != nil {
+		return err
+	}
+	return r.ensureResidualProcessAbsent(ctx, sandboxID)
+}
+
+func (r *Driver) ensureResidualProcessAbsent(ctx context.Context, sandboxID string) error {
+	if r.residualProcess == runtimecatalog.ResidualProcessNone {
+		return nil
+	}
+	if r.nodeCleanup == nil {
+		return fmt.Errorf("verify %s residual process cleanup for sandbox %q: node cleanup client is not configured", r.residualProcess, sandboxID)
+	}
+	if err := r.nodeCleanup.EnsureRuntimeProcessesAbsent(ctx, r.residualProcess, sandboxID); err != nil {
+		return fmt.Errorf("verify %s residual process cleanup for sandbox %q: %w", r.residualProcess, sandboxID, err)
+	}
+	return nil
 }
 
 func (r *Driver) GetSandboxStatus(ctx context.Context, sandboxID string) (string, error) {
@@ -696,7 +733,7 @@ func (r *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 			metadata.NetworkNamespacePath != slot.HostNetNSPath || metadata.NetworkIP != slot.IP {
 			return fmt.Errorf("%w: runtime sandbox %s does not match its durable network descriptor", fastletnetwork.ErrStateInconsistent, metadata.SandboxID)
 		}
-		owners = append(owners, networkOwner(&metadata.SandboxSpec))
+		owners = append(owners, r.networkOwner(&metadata.SandboxSpec))
 	}
 	return r.networkManager.Reconcile(ctx, owners)
 }
@@ -716,7 +753,7 @@ func (r *Driver) GetAccessDescriptor(sandboxID string) (dataplane.AccessDescript
 	return slot.Access, nil
 }
 
-func networkOwner(config *fastletapi.SandboxSpec) fastletnetwork.Owner {
+func (r *Driver) networkOwner(config *fastletapi.SandboxSpec) fastletnetwork.Owner {
 	generation := config.InstanceGeneration
 	if generation <= 0 {
 		generation = 1
@@ -728,7 +765,7 @@ func networkOwner(config *fastletapi.SandboxSpec) fastletnetwork.Owner {
 	return fastletnetwork.Owner{
 		SandboxUID: config.SandboxID, SandboxName: config.ClaimName, SandboxNamespace: config.ClaimNamespace,
 		InstanceGeneration: generation, RuntimeInstanceID: config.RuntimeInstanceID,
-		AssignmentAttempt: attempt,
+		AssignmentAttempt: attempt, ResidualProcess: r.residualProcess,
 	}
 }
 
@@ -771,6 +808,11 @@ func (r *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 		report.Message = err.Error()
 		return report
 	}
+	if err := r.client.SnapshotService(r.snapshotter()).Walk(ctx, func(context.Context, snapshots.Info) error { return nil }); err != nil {
+		report.Reason = "ContainerdSnapshotterUnavailable"
+		report.Message = fmt.Sprintf("containerd snapshotter %q is unavailable: %v", r.snapshotter(), err)
+		return report
+	}
 	report.State = runtimecatalog.CapabilityReady
 	report.Reason = "RuntimeDriverReady"
 	report.Message = "containerd runtime driver is ready"
@@ -792,11 +834,7 @@ func (r *Driver) ListImages(ctx context.Context) ([]string, error) {
 
 func (r *Driver) PullImage(ctx context.Context, image string) error {
 	ctx = r.withNamespace(ctx)
-	_, err := r.client.GetImage(ctx, image)
-	if err == nil {
-		return nil
-	}
-	_, err = r.pullImage(ctx, image)
+	_, err := r.prepareImage(ctx, image)
 	return err
 }
 
@@ -812,6 +850,13 @@ func (r *Driver) containerdNamespace() string {
 		return r.config.Namespace
 	}
 	return runtimecatalog.DefaultContainerdNamespace
+}
+
+func (r *Driver) snapshotter() string {
+	if r.config.Snapshotter != "" {
+		return r.config.Snapshotter
+	}
+	return "overlayfs"
 }
 
 func (r *Driver) withNamespace(ctx context.Context) context.Context {

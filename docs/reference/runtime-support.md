@@ -9,7 +9,8 @@ of each upstream runtime.
 | `gvisor` | containerd/runsc | private Linux netns | read-only artifact mapping | Yes | Validated |
 | `kata-qemu` | containerd/Kata | slot netns to guest NIC | guest-visible artifact mapping | Yes | Validated |
 | `kata-clh` | containerd/Kata | slot netns to guest NIC | guest-visible artifact mapping | Yes | Validated |
-| `kata-fc` | containerd/Kata | slot netns to guest NIC | capability-gated | No | Degraded; fail closed |
+| `kata-fc` | containerd/Kata | slot netns to guest NIC | guest-visible artifact mapping | Yes | Validated |
+| `kata-dragonball` | containerd/Kata Rust | slot netns to guest NIC | guest-visible artifact mapping | Yes | Validated |
 | `boxlite` | BoxLite sidecar | authenticated LocalForward | artifact volume | No | Unsupported; fail closed |
 
 ## Validation meaning
@@ -32,9 +33,16 @@ migration.
 `io.containerd.runsc.v1`. Kata QEMU and Cloud Hypervisor use
 `containerd-shim-kata-v2` with distinct platform-owned configuration.
 
-Kata Firecracker remains degraded as `KataFirecrackerNotValidated`; the
-development environment does not provide the complete kernel, block
-snapshotter, and MMIO path required by that runtime.
+Kata Firecracker uses a runtime-specific binding in the node environment. The
+binding selects the `blockfile` snapshotter and a Firecracker configuration
+backed by a guest kernel with `CONFIG_VIRTIO_MMIO=y`. The development setup validates the
+runtime, private networking, inline Execd delivery, named routing, Fastlet
+recovery, and cleanup under nested KVM.
+
+Kata Dragonball uses the Kata Rust shim with an independent Fast Sandbox
+compatibility configuration. The validation covers runtime creation, resource
+limits, private networking, proxy access, Fastlet restart recovery, and
+idempotent cleanup under nested KVM.
 
 BoxLite is integrated through a versioned Pod-local UDS sidecar and
 runtime-owned LocalForward tunnel. The profile remains unavailable because

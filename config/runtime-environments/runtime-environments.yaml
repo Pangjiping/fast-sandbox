@@ -5,12 +5,13 @@ metadata:
   namespace: fast-sandbox-system
 data:
   runtime-environments.yaml: |
+    version: v1alpha2
     environments:
       default:
         containerd:
           socket: /run/containerd/containerd.sock
           namespace: k8s.io
-          snapshotter: overlayfs
+          defaultSnapshotter: overlayfs
           root: /var/lib/containerd
         kubelet:
           root: /var/lib/kubelet
@@ -19,5 +20,9 @@ data:
           gvisor: {}
           kata-qemu: {}
           kata-clh: {}
-          kata-fc: {}
+          kata-fc:
+            snapshotter: blockfile
+            configPath: /opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml
+          kata-dragonball:
+            configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml
           boxlite: {}

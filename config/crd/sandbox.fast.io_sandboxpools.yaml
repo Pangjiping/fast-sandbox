@@ -238,6 +238,7 @@ spec:
                 - kata-qemu
                 - kata-clh
                 - kata-fc
+                - kata-dragonball
                 - boxlite
                 type: string
                 x-kubernetes-validations:

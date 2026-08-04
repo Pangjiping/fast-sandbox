@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
+	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
 	"fast-sandbox/internal/runtimeenv"
@@ -103,6 +105,7 @@ func TestResolveRuntimePlanUsesPlatformConfigMap(t *testing.T) {
 	source := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: runtimeenv.ConfigMapName, Namespace: runtimeenv.SystemNamespace},
 		Data: map[string]string{runtimeenv.ConfigMapKey: `
+version: v1alpha2
 environments:
   custom:
     nodeSelector:
@@ -503,6 +506,31 @@ func TestConstructPodAddsKVMWithoutRuntimeClass(t *testing.T) {
 	require.Nil(t, pod.Spec.RuntimeClassName)
 	require.True(t, hasHostPath(pod, "/dev/kvm"))
 	require.True(t, hasHostPath(pod, "/opt/kata"))
+}
+
+func TestConstructKataFCPodDelegatesHostProcessCleanupWithoutHostPID(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "kata-fc-pool", Namespace: "default", UID: types.UID("pool-uid")},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeKataFc, MaxSandboxesPerPod: 1, SandboxResources: testSandboxResources(),
+			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}},
+			}},
+		},
+	}
+	profile, err := reconciler.resolveRuntimeProfile(pool)
+	require.NoError(t, err)
+	pod, err := reconciler.constructPod(pool, profile)
+	require.NoError(t, err)
+
+	require.False(t, pod.Spec.HostPID, "host PID visibility belongs only to NodeJanitor")
+	fastlet := containerForName(t, pod, "fastlet")
+	require.Equal(t, nodecleanup.DefaultSocketPath, envValue(fastlet.Env, "FAST_SANDBOX_NODE_CLEANUP_SOCKET"))
+	require.Equal(t, filepath.Dir(nodecleanup.DefaultSocketPath), volumeMountForNamedContainer(t, pod, "fastlet", "node-cleanup").MountPath)
+	require.Nil(t, volumeMountForNamedContainer(t, pod, "fastlet-proxy", "node-cleanup"))
 }
 
 func TestConstructPodInjectsBoxLiteRuntimeSidecarAsResourceOwner(t *testing.T) {

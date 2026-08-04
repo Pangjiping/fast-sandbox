@@ -131,7 +131,7 @@ spec:
 | `fastletTemplate` | Yes | Kubernetes Pod template with platform-owned fields protected |
 
 Runtime names are `container`, `gvisor`, `kata-qemu`, `kata-clh`, `kata-fc`,
-and `boxlite`.
+`kata-dragonball`, and `boxlite`.
 
 Pool status exposes Fastlet capacity, the deterministic Infra revision,
 prepared Fastlet counts, safe component summaries, Registry rollout status, and

@@ -46,12 +46,14 @@ func TestHostCapabilityProberFailsClosed(t *testing.T) {
 	require.Contains(t, report.Missing, kata.Containerd.ConfigPath)
 }
 
-func TestHostCapabilityProberRejectsUnvalidatedFirecrackerProfile(t *testing.T) {
+func TestHostCapabilityProberAcceptsConfiguredFirecrackerProfile(t *testing.T) {
 	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeKataFc)
 	require.NoError(t, err)
-	report := NewHostCapabilityProber().Probe(context.Background(), profile, "/run/containerd/containerd.sock")
-	require.Equal(t, runtimecatalog.CapabilityDegraded, report.State)
-	require.Equal(t, "KataFirecrackerNotValidated", report.Reason)
+	prober := NewHostCapabilityProber()
+	prober.stat = func(string) (os.FileInfo, error) { return fakeFileInfo{}, nil }
+	report := prober.Probe(context.Background(), profile, "/run/containerd/containerd.sock")
+	require.Equal(t, runtimecatalog.CapabilityAvailable, report.State)
+	require.Empty(t, report.Missing)
 }
 
 func TestHostCapabilityProberRequiresFastSandboxCLHCgroupMode(t *testing.T) {

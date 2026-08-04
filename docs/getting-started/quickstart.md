@@ -118,6 +118,8 @@ make quickstart RUNTIME=container
 make quickstart RUNTIME=gvisor
 make quickstart RUNTIME=kata-qemu
 make quickstart RUNTIME=kata-clh
+make quickstart RUNTIME=kata-fc
+make quickstart RUNTIME=kata-dragonball
 ```
 
 Use `INFRA=minimal` only with `RUNTIME=container` to prepare a lifecycle-only Pool without exec or file operations:
@@ -126,7 +128,11 @@ Use `INFRA=minimal` only with `RUNTIME=container` to prepare a lifecycle-only Po
 make quickstart RUNTIME=container INFRA=minimal
 ```
 
-gVisor setup installs and validates runsc. Kata QEMU and Cloud Hypervisor require nested KVM. Kata Firecracker and BoxLite have no Quick Start profile because their Fast Sandbox capability gates are not satisfied.
+gVisor setup installs and validates runsc. Kata QEMU, Cloud Hypervisor,
+Firecracker, and Dragonball require nested KVM. The Firecracker setup also installs a
+compatible guest kernel and configures containerd's blockfile snapshotter.
+BoxLite has no Quick Start profile because its Fast Sandbox capability gate is
+not satisfied.
 
 ## Declarative creation
 

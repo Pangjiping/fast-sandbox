@@ -8,15 +8,25 @@ import (
 	"path/filepath"
 
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
+	"fast-sandbox/internal/nodecleanup"
 )
 
 type LinuxNetworkBackend struct {
-	stateRoot string
-	driver    fastletnetwork.Driver
+	stateRoot      string
+	driver         fastletnetwork.Driver
+	processCleaner nodecleanup.RuntimeProcessCleaner
 }
 
-func NewLinuxNetworkBackend(stateRoot string, driver fastletnetwork.Driver) *LinuxNetworkBackend {
-	return &LinuxNetworkBackend{stateRoot: stateRoot, driver: driver}
+func NewLinuxNetworkBackend(
+	stateRoot string,
+	driver fastletnetwork.Driver,
+	processCleaners ...nodecleanup.RuntimeProcessCleaner,
+) *LinuxNetworkBackend {
+	backend := &LinuxNetworkBackend{stateRoot: stateRoot, driver: driver}
+	if len(processCleaners) > 0 {
+		backend.processCleaner = processCleaners[0]
+	}
+	return backend
 }
 
 func (*LinuxNetworkBackend) Name() ResourceBackend { return BackendLinuxNetwork }
@@ -78,6 +88,15 @@ func (b *LinuxNetworkBackend) Cleanup(ctx context.Context, expected ResourceIden
 	if !sameResourceFence(expected, networkResource(current)) {
 		return errors.New("network slot identity changed before cleanup")
 	}
+	if current.Owner.ResidualProcess != "" {
+		if b.processCleaner == nil {
+			return fmt.Errorf("clean %s process for sandbox %s: node process cleaner is not configured", current.Owner.ResidualProcess, current.Owner.SandboxUID)
+		}
+		if err := b.processCleaner.EnsureRuntimeProcessesAbsent(ctx, current.Owner.ResidualProcess, current.Owner.SandboxUID); err != nil {
+			// Keep the durable network record so a later Janitor scan can retry.
+			return fmt.Errorf("clean %s process for sandbox %s: %w", current.Owner.ResidualProcess, current.Owner.SandboxUID, err)
+		}
+	}
 	if err := b.driver.Destroy(ctx, current); err != nil {
 		return err
 	}
@@ -98,5 +117,6 @@ func networkResource(slot *fastletnetwork.Slot) ResourceIdentity {
 		SandboxUID: slot.Owner.SandboxUID, SandboxName: slot.Owner.SandboxName, SandboxNamespace: slot.Owner.SandboxNamespace,
 		InstanceGeneration: slot.Owner.InstanceGeneration, AssignmentAttempt: slot.Owner.AssignmentAttempt,
 		CreatedAt: slot.CreatedAt, NetworkSlotID: slot.ID, NetworkStatePodUID: slot.OwnerPodUID,
+		ResidualProcess: slot.Owner.ResidualProcess,
 	}
 }

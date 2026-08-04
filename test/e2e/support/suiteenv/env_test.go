@@ -159,6 +159,7 @@ func TestRequireKataProfiles(t *testing.T) {
 		{name: "qemu", require: RequireKataQemu, want: e2eenv.ProfileKataQemu},
 		{name: "clh", require: RequireKataClh, want: e2eenv.ProfileKataClh},
 		{name: "fc", require: RequireKataFc, want: e2eenv.ProfileKataFc},
+		{name: "dragonball", require: RequireKataDragonball, want: e2eenv.ProfileKataDragonball},
 	}
 
 	for _, tt := range tests {

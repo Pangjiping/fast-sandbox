@@ -30,23 +30,29 @@ type FastletAdmissionClient interface {
 var _ FastletAdmissionClient = (*FastletClient)(nil)
 
 const (
-	// defaultFastletTimeout is the default timeout for fastlet API calls
+	// defaultFastletTimeout keeps control and observation calls responsive.
 	defaultFastletTimeout = 5 * time.Second
+	// Runtime creation may legitimately take longer for secure runtimes such as
+	// Kata. Keep its transport deadline aligned with the runtime driver's
+	// operation window instead of cancelling it at the generic control timeout.
+	defaultFastletCreateTimeout = 2 * time.Minute
 )
 
 // FastletClient handles HTTP communication with fastlets.
 type FastletClient struct {
-	httpClient  *http.Client
-	timeout     time.Duration
-	fastletPort int
+	httpClient    *http.Client
+	timeout       time.Duration
+	createTimeout time.Duration
+	fastletPort   int
 }
 
 // NewFastletClient creates a new fastlet client.
 func NewFastletClient(fastletPort int) *FastletClient {
 	return &FastletClient{
-		httpClient:  &http.Client{},
-		timeout:     defaultFastletTimeout,
-		fastletPort: fastletPort,
+		httpClient:    &http.Client{},
+		timeout:       defaultFastletTimeout,
+		createTimeout: defaultFastletCreateTimeout,
+		fastletPort:   fastletPort,
 	}
 }
 
@@ -55,12 +61,18 @@ func (c *FastletClient) SetTimeout(timeout time.Duration) {
 	c.timeout = timeout
 }
 
+// SetCreateTimeout sets the timeout for the atomic Fastlet admission/create
+// request without weakening the timeout used by heartbeats and observations.
+func (c *FastletClient) SetCreateTimeout(timeout time.Duration) {
+	c.createTimeout = timeout
+}
+
 func (c *FastletClient) CreateSandbox(ctx context.Context, fastletIP string, req *CreateSandboxRequest) (*CreateSandboxResponse, error) {
 	if req != nil {
 		ctx = withFastletIdentity(ctx, req.Identity)
 		ctx = observability.WithIdentity(ctx, observability.Identity{Namespace: req.Sandbox.ClaimNamespace, SandboxName: req.Sandbox.ClaimName})
 	}
-	return postFastletJSON[CreateSandboxRequest, CreateSandboxResponse](c, ctx, fastletIP, "/api/v2/fastlet/create", req)
+	return postFastletJSONWithTimeout[CreateSandboxRequest, CreateSandboxResponse](c, ctx, fastletIP, "/api/v2/fastlet/create", req, c.createTimeout)
 }
 
 func (c *FastletClient) InspectSandbox(ctx context.Context, fastletIP string, req *InspectSandboxRequest) (*InspectSandboxResponse, error) {
@@ -112,13 +124,17 @@ func (c *FastletClient) SetDraining(ctx context.Context, fastletIP string, req *
 }
 
 func postFastletJSON[Request any, Response any](c *FastletClient, ctx context.Context, fastletIP, path string, request *Request) (_ *Response, resultErr error) {
+	return postFastletJSONWithTimeout[Request, Response](c, ctx, fastletIP, path, request, c.timeout)
+}
+
+func postFastletJSONWithTimeout[Request any, Response any](c *FastletClient, ctx context.Context, fastletIP, path string, request *Request, timeout time.Duration) (_ *Response, resultErr error) {
 	ctx, span := observability.StartClient(ctx, "fastlet.client "+path)
 	defer func() { observability.End(span, resultErr) }()
 	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
-	requestContext, cancel := c.requestContext(ctx)
+	requestContext, cancel := c.requestContext(ctx, timeout)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, c.endpoint(fastletIP, path), bytes.NewReader(body))
 	if err != nil {
@@ -132,7 +148,7 @@ func postFastletJSON[Request any, Response any](c *FastletClient, ctx context.Co
 func getFastletJSON[Response any](c *FastletClient, ctx context.Context, fastletIP, path string) (_ *Response, resultErr error) {
 	ctx, span := observability.StartClient(ctx, "fastlet.client "+path)
 	defer func() { observability.End(span, resultErr) }()
-	requestContext, cancel := c.requestContext(ctx)
+	requestContext, cancel := c.requestContext(ctx, c.timeout)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodGet, c.endpoint(fastletIP, path), nil)
 	if err != nil {
@@ -189,9 +205,9 @@ func (c *FastletClient) endpoint(fastletIP, path string) string {
 	return fmt.Sprintf("http://%s:%d%s", fastletIP, c.fastletPort, path)
 }
 
-func (c *FastletClient) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, hasDeadline := ctx.Deadline(); hasDeadline || c.timeout <= 0 {
+func (c *FastletClient) requestContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline || timeout <= 0 {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, c.timeout)
+	return context.WithTimeout(ctx, timeout)
 }

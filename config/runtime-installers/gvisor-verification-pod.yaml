@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fast-sandbox-gvisor-verification
+spec:
+  restartPolicy: Never
+  runtimeClassName: gvisor
+  containers:
+    - name: verify
+      image: docker.io/library/alpine:3.20
+      command:
+        - /bin/sh
+        - -ec
+        - dmesg | grep -qi gvisor

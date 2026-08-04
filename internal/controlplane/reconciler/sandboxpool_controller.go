@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
+	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
 	"fast-sandbox/internal/runtimeenv"
@@ -714,6 +716,9 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			corev1.EnvVar{Name: "FAST_SANDBOX_KUBELET_ROOT", Value: runtimePlan.Kubelet.Root},
 			corev1.EnvVar{Name: "INFRA_DIR_IN_POD", Value: "/opt/fast-sandbox/infra"},
 		)
+		if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
+			c.Env = append(c.Env, corev1.EnvVar{Name: "FAST_SANDBOX_NODE_CLEANUP_SOCKET", Value: nodecleanup.DefaultSocketPath})
+		}
 		c.VolumeMounts = append(c.VolumeMounts,
 			corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"},
 			corev1.VolumeMount{Name: "infra-tools", MountPath: "/opt/fast-sandbox/infra"},
@@ -722,6 +727,9 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			corev1.VolumeMount{Name: "registry-config", MountPath: "/etc/fast-sandbox/registry", ReadOnly: true},
 			corev1.VolumeMount{Name: "proxy-control", MountPath: "/run/fast-sandbox/proxy"},
 		)
+		if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
+			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "node-cleanup", MountPath: filepath.Dir(nodecleanup.DefaultSocketPath)})
+		}
 		if runtimeResourceOwner == c.Name {
 			if err := applyFastletResources(c, profile.Deployment.Overhead, sandboxResources, getFastletCapacity(pool)); err != nil {
 				return nil, err
@@ -808,6 +816,15 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 		},
 		corev1.Volume{Name: "proxy-control", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	)
+	if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
+		hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: "node-cleanup",
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: filepath.Dir(nodecleanup.DefaultSocketPath), Type: &hostPathDirectoryOrCreate,
+			}},
+		})
+	}
 	runtimeContainer := &podSpec.Containers[0]
 	if profile.Deployment.Sidecar != "" {
 		podSpec.Volumes = append(podSpec.Volumes,
@@ -967,6 +984,7 @@ func validatePlatformOwnedStorage(podSpec *corev1.PodSpec) error {
 		"runtime-plan":    runtimeenv.PlanMountPath,
 		"registry-config": "/etc/fast-sandbox/registry",
 		"proxy-control":   "/run/fast-sandbox/proxy",
+		"node-cleanup":    filepath.Dir(nodecleanup.DefaultSocketPath),
 		"boxlite-control": "/run/fast-sandbox/boxlite",
 	}
 	for _, volume := range podSpec.Volumes {

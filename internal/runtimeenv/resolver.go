@@ -35,7 +35,7 @@ func Resolve(catalog *runtimecatalog.Catalog, config Config, runtimeName apiv1al
 	}
 	plan := ResolvedRuntimePlan{
 		Version: PlanVersion, Environment: environmentName, Profile: profile,
-		Containerd: environment.Containerd, Kubelet: environment.Kubelet,
+		Containerd: resolvedContainerdEnvironment(environment.Containerd, profile), Kubelet: environment.Kubelet,
 	}
 	if err := stampRevision(&plan); err != nil {
 		return ResolvedRuntimePlan{}, err
@@ -102,6 +102,10 @@ func applyEnvironment(profile *runtimecatalog.RuntimeProfile, environment NodeRu
 			return errors.New("containerd runtime definition has no configuration")
 		}
 		profile.Containerd.Namespace = environment.Containerd.Namespace
+		profile.Containerd.Snapshotter = environment.Containerd.DefaultSnapshotter
+		if binding.Snapshotter != "" {
+			profile.Containerd.Snapshotter = binding.Snapshotter
+		}
 		if binding.Handler != "" {
 			profile.Containerd.Handler = binding.Handler
 		}
@@ -135,6 +139,17 @@ func applyEnvironment(profile *runtimecatalog.RuntimeProfile, environment NodeRu
 	}
 	profile.Deployment.HostPaths = merged
 	return nil
+}
+
+func resolvedContainerdEnvironment(environment ContainerdEnvironment, profile runtimecatalog.RuntimeProfile) ResolvedContainerdEnvironment {
+	resolved := ResolvedContainerdEnvironment{
+		Socket: environment.Socket, Namespace: environment.Namespace,
+		Snapshotter: environment.DefaultSnapshotter, Root: environment.Root,
+	}
+	if profile.Containerd != nil && profile.Containerd.Snapshotter != "" {
+		resolved.Snapshotter = profile.Containerd.Snapshotter
+	}
+	return resolved
 }
 
 func mergeStringMap(existing map[string]string, incoming map[string]string) error {

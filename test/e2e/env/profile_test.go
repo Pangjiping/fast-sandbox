@@ -51,6 +51,14 @@ func TestProfileSettings(t *testing.T) {
 			kindImage:   "kindest/node:v1.31.0",
 			runtime:     RuntimeKataFc,
 		},
+		{
+			name:        "kata dragonball",
+			profile:     ProfileKataDragonball,
+			clusterName: "fsb-e2e-kata",
+			kindConfig:  "test/e2e/manifests/kind/kata.yaml",
+			kindImage:   "kindest/node:v1.31.0",
+			runtime:     RuntimeKataDragonball,
+		},
 	}
 
 	for _, tt := range tests {

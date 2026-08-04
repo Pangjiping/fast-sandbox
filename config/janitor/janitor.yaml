@@ -20,6 +20,9 @@ spec:
     spec:
       serviceAccountName: fast-sandbox-janitor
       hostNetwork: true
+      # NodeJanitor alone receives host PID visibility. Fastlet delegates
+      # exact-ID cleanup of leaked VMM processes over a private Unix socket.
+      hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
       tolerations:
       - operator: Exists
@@ -46,6 +49,8 @@ spec:
           mountPath: /run/containerd/fifo
         - name: network-state
           mountPath: /run/fast-sandbox/network
+        - name: node-cleanup
+          mountPath: /run/fast-sandbox/janitor
         - name: network-namespaces
           mountPath: /run/netns
           mountPropagation: Bidirectional
@@ -66,6 +71,10 @@ spec:
       - name: network-state
         hostPath:
           path: /run/fast-sandbox/network
+          type: DirectoryOrCreate
+      - name: node-cleanup
+        hostPath:
+          path: /run/fast-sandbox/janitor
           type: DirectoryOrCreate
       - name: network-namespaces
         hostPath:

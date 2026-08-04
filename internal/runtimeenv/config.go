@@ -25,6 +25,9 @@ func Parse(raw []byte) (Config, error) {
 	if err := yaml.UnmarshalStrict(raw, &override); err != nil {
 		return Config{}, fmt.Errorf("decode runtime environments: %w", err)
 	}
+	if override.Version == "" {
+		return Config{}, errors.New("runtime environment config version is required")
+	}
 	mergeConfig(&config, override)
 	if err := config.Validate(); err != nil {
 		return Config{}, err
@@ -33,6 +36,9 @@ func Parse(raw []byte) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.Version != ConfigVersion {
+		return fmt.Errorf("unsupported runtime environment config version %q; expected %q", c.Version, ConfigVersion)
+	}
 	if len(c.Environments) == 0 {
 		return errors.New("at least one runtime environment is required")
 	}
@@ -53,8 +59,8 @@ func (c Config) Validate() error {
 		if !containerdNamespacePattern.MatchString(environment.Containerd.Namespace) {
 			return fmt.Errorf("environment %s: invalid containerd namespace %q", name, environment.Containerd.Namespace)
 		}
-		if environment.Containerd.Snapshotter == "" {
-			return fmt.Errorf("environment %s: containerd snapshotter is required", name)
+		if environment.Containerd.DefaultSnapshotter == "" {
+			return fmt.Errorf("environment %s: containerd defaultSnapshotter is required", name)
 		}
 		if len(environment.Runtimes) == 0 {
 			return fmt.Errorf("environment %s: at least one runtime binding is required", name)
@@ -67,6 +73,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("runtime %s is bound to both %s and %s", runtimeName, owner, name)
 			}
 			owners[runtimeName] = name
+			if strings.TrimSpace(binding.Snapshotter) != binding.Snapshotter {
+				return fmt.Errorf("environment %s runtime %s: snapshotter must not contain surrounding whitespace", name, runtimeName)
+			}
 			for _, value := range []struct{ field, path string }{
 				{"runtimePath", binding.RuntimePath}, {"configPath", binding.ConfigPath},
 			} {
@@ -121,6 +130,9 @@ func (c Config) ContainerdEndpoints() []ContainerdEndpoint {
 }
 
 func mergeConfig(base *Config, override Config) {
+	if override.Version != "" {
+		base.Version = override.Version
+	}
 	if base.Environments == nil {
 		base.Environments = make(map[string]NodeRuntimeEnvironment)
 	}
@@ -163,8 +175,8 @@ func mergeEnvironment(base *NodeRuntimeEnvironment, incoming NodeRuntimeEnvironm
 	if incoming.Containerd.Namespace != "" {
 		base.Containerd.Namespace = incoming.Containerd.Namespace
 	}
-	if incoming.Containerd.Snapshotter != "" {
-		base.Containerd.Snapshotter = incoming.Containerd.Snapshotter
+	if incoming.Containerd.DefaultSnapshotter != "" {
+		base.Containerd.DefaultSnapshotter = incoming.Containerd.DefaultSnapshotter
 	}
 	if incoming.Containerd.Root != "" {
 		base.Containerd.Root = incoming.Containerd.Root

@@ -52,8 +52,9 @@ changing lifecycle ordering.
 - The container sample used the minimal Infra profile. The gVisor and Kata
   validation samples injected OpenSandbox Execd; Execd readiness remained
   asynchronous and is outside the reported Create latency.
-- Kata Firecracker and BoxLite were capability-gate tests only and therefore
-  have no positive Create result.
+- Kata Firecracker and Dragonball were validated after this measurement run
+  and therefore have no comparable Create result in this report. BoxLite was a
+  capability-gate test only.
 
 ### RuntimeReady observations
 

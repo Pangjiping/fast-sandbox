@@ -71,14 +71,14 @@ help:
 	@echo "  make test [SCOPE=unit|python|race|network]"
 	@echo "      Run one local or Linux integration test scope."
 	@echo ""
-	@echo "  make env PROFILE=basic|gvisor|kata-qemu|kata-clh|kata-fc"
+	@echo "  make env PROFILE=basic|gvisor|kata-qemu|kata-clh|kata-fc|kata-dragonball"
 	@echo "      Prepare a reusable kind environment without running tests."
 	@echo ""
 	@echo "  make e2e [SUITE=all|controlplane|network|proxy|infra|sdk|quickstart|runtime|drain|<suite>]"
 	@echo "           [RUNTIME=container|gvisor|kata|boxlite]"
 	@echo "      Run E2E tests; each suite prepares the runtime profile it needs."
 	@echo ""
-	@echo "  make quickstart [RUNTIME=container|gvisor|kata-qemu|kata-clh] [INFRA=execd|minimal]"
+	@echo "  make quickstart [RUNTIME=container|gvisor|kata-qemu|kata-clh|kata-fc|kata-dragonball] [INFRA=execd|minimal]"
 	@echo "      Prepare an interactive environment and print copy/paste examples."
 	@echo ""
 	@echo "  make quickstart-forward"
@@ -198,7 +198,7 @@ _network-test:
 
 env:
 	@case "$(PROFILE)" in \
-		basic|gvisor|kata-qemu|kata-clh|kata-fc) ;; \
+		basic|gvisor|kata-qemu|kata-clh|kata-fc|kata-dragonball) ;; \
 		*) echo "unknown PROFILE=$(PROFILE)" >&2; exit 2 ;; \
 	esac
 	@FAST_SANDBOX_FASTLET_IMAGE=$(FASTLET_IMAGE) \
@@ -220,7 +220,7 @@ e2e:
 			case "$(RUNTIME)" in \
 				container) flags="-run ^TestRuntimeValidationContainerDefault$$" ;; \
 				gvisor) flags="-run ^TestGVisor" ;; \
-				kata) flags="-p 1 -failfast -run ^TestKata\\(QemuSandbox\\|ClhSandbox\\|FcSandbox\\)$$" ;; \
+				kata) flags="-p 1 -failfast -run ^TestKata" ;; \
 				boxlite) flags="-run ^TestRuntimeValidationUnsupportedBoxLite$$" ;; \
 				*) echo "unknown runtime gate RUNTIME=$(RUNTIME)" >&2; exit 2 ;; \
 			esac ;; \
@@ -251,6 +251,12 @@ quickstart:
 		kata-clh:execd) \
 			profile=kata-clh; pool_file=config/samples/pool-kata.yaml; \
 			pool=kata-clh-execd-pool; sandbox=quickstart-kata-clh-execd-sandbox; data_plane=execd ;; \
+		kata-fc:execd) \
+			profile=kata-fc; pool_file=config/samples/pool-kata-fc.yaml; \
+			pool=kata-fc-execd-pool; sandbox=quickstart-kata-fc-execd-sandbox; data_plane=execd ;; \
+		kata-dragonball:execd) \
+			profile=kata-dragonball; pool_file=config/samples/pool-kata-dragonball.yaml; \
+			pool=kata-dragonball-execd-pool; sandbox=quickstart-kata-dragonball-execd-sandbox; data_plane=execd ;; \
 		*) echo "unsupported Quick Start RUNTIME=$(RUNTIME) INFRA=$(INFRA)" >&2; exit 2 ;; \
 	esac; \
 	resource_namespace=fast-sandbox; \

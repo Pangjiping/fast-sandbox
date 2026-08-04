@@ -15,6 +15,7 @@ func TestResolveDefaultProducesCompleteImmutablePlan(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, DefaultEnvironment, plan.Environment)
 	require.Equal(t, "k8s.io", plan.Profile.ContainerdNamespace())
+	require.Equal(t, "overlayfs", plan.Profile.Containerd.Snapshotter)
 	require.Equal(t, "/run/containerd/containerd.sock", plan.Containerd.Socket)
 	require.Equal(t, "/var/lib/kubelet", plan.Kubelet.Root)
 	require.NotEmpty(t, plan.Profile.ProfileHash)
@@ -29,8 +30,18 @@ func TestResolveDefaultProducesCompleteImmutablePlan(t *testing.T) {
 	require.Equal(t, plan, decoded)
 }
 
+func TestResolveKataFirecrackerUsesRuntimeSnapshotterOverride(t *testing.T) {
+	plan, err := ResolveDefault(runtimecatalog.Builtin(), apiv1alpha2.RuntimeKataFc)
+	require.NoError(t, err)
+	require.Equal(t, DefaultEnvironment, plan.Environment)
+	require.Equal(t, "blockfile", plan.Containerd.Snapshotter)
+	require.Equal(t, "blockfile", plan.Profile.Containerd.Snapshotter)
+	require.Equal(t, "/opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml", plan.Profile.Containerd.ConfigPath)
+}
+
 func TestParseMovesRuntimeToConfiguredEnvironment(t *testing.T) {
 	config, err := Parse([]byte(`
+version: v1alpha2
 environments:
   secure:
     nodeSelector:
@@ -60,6 +71,7 @@ environments:
 
 func TestParseRejectsInvalidPlatformPaths(t *testing.T) {
 	_, err := Parse([]byte(`
+version: v1alpha2
 environments:
   invalid:
     containerd:
@@ -68,6 +80,59 @@ environments:
       container: {}
 `))
 	require.ErrorContains(t, err, "containerd.root must be an absolute path")
+}
+
+func TestParseRequiresExplicitConfigVersion(t *testing.T) {
+	_, err := Parse([]byte(`
+environments:
+  default:
+    runtimes:
+      container: {}
+`))
+	require.ErrorContains(t, err, "config version is required")
+}
+
+func TestParseRejectsUnknownConfigVersion(t *testing.T) {
+	_, err := Parse([]byte(`
+version: v9
+environments:
+  default:
+    runtimes:
+      container: {}
+`))
+	require.ErrorContains(t, err, `unsupported runtime environment config version "v9"`)
+}
+
+func TestParseRejectsLegacyEnvironmentSnapshotterField(t *testing.T) {
+	_, err := Parse([]byte(`
+version: v1alpha2
+environments:
+  default:
+    containerd:
+      snapshotter: overlayfs
+    runtimes:
+      container: {}
+`))
+	require.ErrorContains(t, err, `unknown field "snapshotter"`)
+}
+
+func TestRuntimeBindingOverridesEnvironmentDefaultSnapshotter(t *testing.T) {
+	config, err := Parse([]byte(`
+version: v1alpha2
+environments:
+  default:
+    containerd:
+      defaultSnapshotter: overlayfs
+    runtimes:
+      kata-fc:
+        snapshotter: blockfile
+`))
+	require.NoError(t, err)
+
+	plan, err := Resolve(runtimecatalog.Builtin(), config, apiv1alpha2.RuntimeKataFc)
+	require.NoError(t, err)
+	require.Equal(t, "blockfile", plan.Profile.Containerd.Snapshotter)
+	require.Equal(t, "blockfile", plan.Containerd.Snapshotter)
 }
 
 func TestDecodePlanRejectsMutation(t *testing.T) {

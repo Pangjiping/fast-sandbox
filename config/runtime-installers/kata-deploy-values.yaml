@@ -1,0 +1,62 @@
+# Example values for the upstream Kata Containers 3.31.0 kata-deploy chart.
+# This file is not included by any Fast Sandbox kustomization. Operators must
+# review it against their node image, containerd layout, and storage backend.
+imagePullPolicy: IfNotPresent
+
+image:
+  reference: quay.io/kata-containers/kata-deploy
+  tag: "3.31.0"
+
+nodeSelector:
+  fast-sandbox.io/kata-node: "true"
+
+priorityClassName: system-node-critical
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+# Fast Sandbox does not require a RuntimeClass for its direct containerd path,
+# but installing the classes gives operators an independent Kubernetes smoke
+# test before a Fastlet is scheduled to the node.
+runtimeClasses:
+  enabled: true
+  createDefault: false
+
+# Install only the runtimes validated by Fast Sandbox. Firecracker is disabled
+# here because its production snapshotter must be provisioned explicitly.
+shims:
+  disableAll: true
+  qemu:
+    enabled: true
+  clh:
+    enabled: true
+  dragonball:
+    enabled: true
+  fc:
+    enabled: false
+
+# Do not install an unrelated snapshotter by default. The operator owns the
+# Firecracker block snapshotter and any guest-pull snapshotter configuration.
+snapshotter:
+  setup: []
+
+health:
+  port: 8090
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 1
+    periodSeconds: 10
+    failureThreshold: 120
+    timeoutSeconds: 3
+  livenessProbe:
+    enabled: true
+    periodSeconds: 30
+    failureThreshold: 3
+    timeoutSeconds: 3
+  readinessProbe:
+    enabled: true
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 3

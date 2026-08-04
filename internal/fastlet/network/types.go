@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
@@ -39,6 +40,10 @@ type Owner struct {
 	InstanceGeneration int64  `json:"instanceGeneration"`
 	RuntimeInstanceID  string `json:"runtimeInstanceId,omitempty"`
 	AssignmentAttempt  int64  `json:"assignmentAttempt"`
+	// ResidualProcess is a durable cleanup hint owned by Fast Sandbox. It lets
+	// NodeJanitor remove a VMM which outlived both its containerd object and the
+	// Fastlet Pod without scanning or killing unrelated host processes.
+	ResidualProcess runtimecatalog.ResidualProcessKind `json:"residualProcess,omitempty"`
 }
 
 func (o Owner) Equal(other Owner) bool {

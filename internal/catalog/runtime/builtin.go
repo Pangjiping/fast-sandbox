@@ -46,7 +46,15 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 		},
 		apiv1alpha2.RuntimeKataQemu: kataProfile(apiv1alpha2.RuntimeKataQemu, "/opt/kata/share/defaults/kata-containers/configuration-qemu.toml", kataPaths),
 		apiv1alpha2.RuntimeKataClh:  kataProfile(apiv1alpha2.RuntimeKataClh, "/opt/kata/share/defaults/kata-containers/configuration-clh.toml", kataPaths),
-		apiv1alpha2.RuntimeKataFc:   unavailableKataProfile(apiv1alpha2.RuntimeKataFc, "/opt/kata/share/defaults/kata-containers/configuration-fc.toml", kataPaths, "KataFirecrackerNotValidated"),
+		apiv1alpha2.RuntimeKataFc: withResidualProcess(
+			kataProfile(apiv1alpha2.RuntimeKataFc, "/opt/kata/share/defaults/kata-containers/configuration-fc.toml", kataPaths),
+			ResidualProcessFirecracker,
+		),
+		apiv1alpha2.RuntimeKataDragonball: kataRustProfile(
+			apiv1alpha2.RuntimeKataDragonball,
+			"/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball.toml",
+			kataPaths,
+		),
 		apiv1alpha2.RuntimeBoxLite: {
 			Name: apiv1alpha2.RuntimeBoxLite, Version: builtinProfileVersion, Driver: DriverKindBoxLite,
 			BoxLite: &BoxLiteConfig{
@@ -68,17 +76,23 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 	}
 }
 
-func unavailableKataProfile(name apiv1alpha2.RuntimeName, configPath string, paths []HostPathRequirement, reason string) RuntimeProfile {
-	profile := kataProfile(name, configPath, paths)
-	profile.Capabilities.DefaultState = CapabilityDegraded
-	profile.Capabilities.Reason = reason
+func withResidualProcess(profile RuntimeProfile, kind ResidualProcessKind) RuntimeProfile {
+	profile.ResidualProcess = kind
 	return profile
 }
 
 func kataProfile(name apiv1alpha2.RuntimeName, configPath string, paths []HostPathRequirement) RuntimeProfile {
+	return kataProfileWithRuntime(name, "/opt/kata/bin/containerd-shim-kata-v2", configPath, paths)
+}
+
+func kataRustProfile(name apiv1alpha2.RuntimeName, configPath string, paths []HostPathRequirement) RuntimeProfile {
+	return kataProfileWithRuntime(name, "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2", configPath, paths)
+}
+
+func kataProfileWithRuntime(name apiv1alpha2.RuntimeName, runtimePath, configPath string, paths []HostPathRequirement) RuntimeProfile {
 	return RuntimeProfile{
 		Name: name, Version: builtinProfileVersion, Driver: DriverKindContainerd,
-		Containerd:   &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.kata.v2", RuntimePath: "/opt/kata/bin/containerd-shim-kata-v2", ConfigPath: configPath},
+		Containerd:   &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.kata.v2", RuntimePath: runtimePath, ConfigPath: configPath},
 		Deployment:   DeploymentRequirements{Privileged: true, RequiresKVM: true, HostPaths: paths, Overhead: overhead("250m", "256Mi")},
 		Capabilities: Capabilities{DefaultState: CapabilityConfigured, SupportsNetwork: true, SupportsCache: true, SupportsRecovery: true},
 		NetworkMode:  NetworkModeGuestNetNS,

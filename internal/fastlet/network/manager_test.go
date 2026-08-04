@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,6 +68,15 @@ func newTestManager(t *testing.T, capacity int, root string, driver Driver, ids 
 
 func owner(id string, attempt int64) Owner {
 	return Owner{SandboxUID: id, InstanceGeneration: 1, AssignmentAttempt: attempt}
+}
+
+func TestOwnerEqualIgnoresCleanupHint(t *testing.T) {
+	legacy := owner("sandbox-a", 1)
+	current := legacy
+	current.ResidualProcess = runtimecatalog.ResidualProcessFirecracker
+
+	require.True(t, legacy.Equal(current))
+	require.True(t, current.Equal(legacy))
 }
 
 func TestManagerAcquireReleaseDestroysUsedSlot(t *testing.T) {

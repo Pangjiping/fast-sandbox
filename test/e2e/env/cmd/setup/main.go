@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	profile := flag.String("profile", string(e2eenv.ProfileBasic), "kind runtime profile: basic, gvisor, kata-qemu, kata-clh, kata-fc")
+	profile := flag.String("profile", string(e2eenv.ProfileBasic), "kind runtime profile: basic, gvisor, kata-qemu, kata-clh, kata-fc, kata-dragonball")
 	timeout := flag.Duration("timeout", 20*time.Minute, "maximum time to prepare the e2e environment")
 	flag.Parse()
 

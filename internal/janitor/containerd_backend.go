@@ -160,7 +160,8 @@ func sameResourceFence(expected, current ResourceIdentity) bool {
 	return expected.Backend == current.Backend && expected.ResourceID == current.ResourceID &&
 		expected.ContainerdNamespace == current.ContainerdNamespace &&
 		expected.FastletPodUID == current.FastletPodUID && expected.SandboxUID == current.SandboxUID &&
-		expected.InstanceGeneration == current.InstanceGeneration && expected.AssignmentAttempt == current.AssignmentAttempt
+		expected.InstanceGeneration == current.InstanceGeneration && expected.AssignmentAttempt == current.AssignmentAttempt &&
+		expected.ResidualProcess == current.ResidualProcess
 }
 
 func normalizedContainerdNamespaces(values []string) []string {

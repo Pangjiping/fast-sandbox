@@ -40,7 +40,10 @@ make e2e SUITE=runtime RUNTIME=kata
 make e2e SUITE=runtime RUNTIME=boxlite
 ```
 
-A skipped runtime test is not a passing capability gate. BoxLite and Kata Firecracker gates prove fail-closed behavior until their requirements are satisfied.
+A skipped runtime test is not a passing capability gate. The Kata Firecracker
+test is a positive runtime, network, Infra, proxy, and recovery test; the
+BoxLite gate continues to prove fail-closed behavior until its requirements
+are satisfied.
 
 ## Suite coverage
 
@@ -82,7 +85,13 @@ make env PROFILE=gvisor
 make env PROFILE=kata-qemu
 make env PROFILE=kata-clh
 make env PROFILE=kata-fc
+make env PROFILE=kata-dragonball
 ```
+
+The Kata profiles use the pinned upstream `kata-deploy` image as their artifact
+source. gVisor defaults to the pinned `20260714` release and verifies upstream
+checksums. Production installation and the independent RuntimeClass smoke gates
+are covered by [Runtime node installation](runtime-node-installation.md).
 
 ## Manifest checks
 

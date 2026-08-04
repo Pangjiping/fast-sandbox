@@ -287,20 +287,33 @@ func waitForSecureRuntimeNetworkState(ctx context.Context, t *testing.T, namespa
 	}
 }
 
-func waitForSecureRuntimeHTTP(ctx context.Context, t *testing.T, namespace, pod, ip string, port int, want string) string {
+func waitForSecureRuntimeHTTP(ctx context.Context, t *testing.T, namespace, pod, ip string, port int, want string, sandboxIDs ...string) string {
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var last string
+	var lastErr error
 	for {
 		output, err := secureRuntimeKubectl(waitCtx, "exec", "-n", namespace, pod, "-c", "fastlet", "--", "wget", "-q", "-O", "-", fmt.Sprintf("http://%s:%d/", ip, port))
 		last = string(output)
+		lastErr = err
 		if err == nil && strings.Contains(last, want) {
 			return last
 		}
 		select {
 		case <-waitCtx.Done():
-			t.Fatalf("wait for secure runtime private HTTP endpoint: %v; last=%q", waitCtx.Err(), last)
+			var workloadLog string
+			if len(sandboxIDs) > 0 && sandboxIDs[0] != "" {
+				logCtx, logCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				output, logErr := secureRuntimeKubectl(logCtx, "exec", "-n", namespace, pod, "-c", "fastlet", "--", "cat", fmt.Sprintf("/var/log/fast-sandbox/%s.log", sandboxIDs[0]))
+				logCancel()
+				if logErr != nil {
+					workloadLog = fmt.Sprintf("<read failed: %v: %s>", logErr, output)
+				} else {
+					workloadLog = string(output)
+				}
+			}
+			t.Fatalf("wait for secure runtime private HTTP endpoint: %v; last request error=%v output=%q workload log=%q", waitCtx.Err(), lastErr, last, workloadLog)
 		case <-time.After(250 * time.Millisecond):
 		}
 	}

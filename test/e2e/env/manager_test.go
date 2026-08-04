@@ -394,6 +394,13 @@ func TestManagerDownloadsAndVerifiesGVisorBinariesWhenMissing(t *testing.T) {
 	assertCommand(t, runner.commands, "chmod", "a+rx", runsc, shim)
 }
 
+func TestGVisorReleaseIsPinnedByDefault(t *testing.T) {
+	t.Setenv("GVISOR_RELEASE", "")
+	if got, want := gvisorRelease(), "20260714"; got != want {
+		t.Fatalf("gvisor release = %q, want %q", got, want)
+	}
+}
+
 func TestManagerEnsureGVisorConfiguresRuntimeOnKindNodes(t *testing.T) {
 	t.Setenv("GVISOR_RUNSC_BIN", "/opt/gvisor/runsc")
 	t.Setenv("GVISOR_SHIM_BIN", "/opt/gvisor/containerd-shim-runsc-v1")
@@ -470,8 +477,6 @@ func TestManagerEnsureGVisorSkipsContainerdRestartWhenRunscTomlAlreadyMatches(t 
 }
 
 func TestManagerEnsureKataInstallsRuntimeAndAppliesRuntimeClasses(t *testing.T) {
-	t.Setenv("HOME", "/home/test")
-	t.Setenv("DATA_DIR", "/data")
 	t.Setenv("KATA_VERSION", "3.27.0")
 
 	const node = "fsb-e2e-kata-control-plane"
@@ -481,8 +486,9 @@ func TestManagerEnsureKataInstallsRuntimeAndAppliesRuntimeClasses(t *testing.T) 
 			commandKey("docker", "ps", "--filter", "name=fsb-e2e-kata-", "--format", "{{.Names}}"): node + "\n",
 		},
 		errs: map[string]error{
-			commandKey("docker", "exec", node, "bash", "-c", kataInstalledScript()):            errors.New("kata missing"),
-			commandKey("docker", "exec", node, "bash", "-c", kataContainerdConfiguredScript()): errors.New("kata runtime missing"),
+			commandKey("docker", "exec", node, "bash", "-c", kataInstalledScript()):                          errors.New("kata missing"),
+			commandKey("docker", "container", "inspect", kataArtifactContainerName()):                        errors.New("artifact container missing"),
+			commandKey("docker", "exec", node, "bash", "-c", kataContainerdConfiguredScript(RuntimeKataClh)): errors.New("kata runtime missing"),
 		},
 	}
 	manager, err := NewManager(ProfileKataClh,
@@ -501,15 +507,104 @@ func TestManagerEnsureKataInstallsRuntimeAndAppliesRuntimeClasses(t *testing.T) 
 	assertCommand(t, runner.commands, "sh", "-c", "test -e /dev/kvm")
 	assertCommand(t, runner.commands, "sh", "-c", "test -e /dev/vhost-vsock")
 	assertCommand(t, runner.commands, "sh", "-c", "test -e /dev/net/tun")
-	assertCommand(t, runner.commands, "mkdir", "-p", "/data", "/home/test/.cache")
-	assertCommand(t, runner.commands, "cp", "/home/test/.cache/kata-static-3.27.0-amd64.tar.zst", "/data/kata-static-3.27.0-amd64.tar.zst")
-	assertCommand(t, runner.commands, "docker", "cp", "/data/kata-static-3.27.0-amd64.tar.zst", node+":/root/kata.tar.zst")
-	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "tar -xf /root/kata.tar -C /")
+	assertCommand(t, runner.commands, "docker", "pull", "quay.io/kata-containers/kata-deploy:3.27.0")
+	assertCommand(t, runner.commands, "docker", "create", "--name", kataArtifactContainerName(), "quay.io/kata-containers/kata-deploy:3.27.0")
+	assertCommand(t, runner.commands, "sh", "-c", kataPayloadCopyScript(node))
+	assertCommand(t, runner.commands, "docker", "exec", node, "bash", "-c", kataPayloadVerificationScript())
 	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "sandbox_cgroup_only = true")
 	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "runtimes.kata-clh")
 	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "systemctl restart containerd")
 	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "ctr -n k8s.io image tag")
 	assertCommand(t, runner.commands, "kubectl", "apply", "-f", "test/e2e/manifests/runtimeclass/kata.yaml")
+}
+
+func TestManagerEnsureKataFirecrackerPreparesKernelBlockfileAndLoopDevices(t *testing.T) {
+	const node = "fsb-e2e-kata-control-plane"
+	runner := &fakeRunner{
+		outputs: map[string]string{
+			commandKey("kind", "get", "clusters"):                                                  "fsb-e2e-kata\n",
+			commandKey("docker", "ps", "--filter", "name=fsb-e2e-kata-", "--format", "{{.Names}}"): node + "\n",
+		},
+		errs: map[string]error{
+			commandKey("docker", "exec", node, "bash", "-c", kataContainerdConfiguredScript(RuntimeKataFc)): errors.New("firecracker storage missing"),
+		},
+	}
+	manager, err := NewManager(ProfileKataFc,
+		WithRunner(runner),
+		WithRootDir("/repo"),
+		WithHostOS("linux"),
+	)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+
+	if err := manager.Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure returned error: %v", err)
+	}
+
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "CONFIG_VIRTIO_MMIO=y")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "configuration-fc-fast-sandbox.toml")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "truncate -s 512M")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "mknod -m 0660")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "snapshotter = \"blockfile\"")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "snapshotter.v1.blockfile")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "systemctl restart containerd")
+}
+
+func TestKataContainerdConfigIncludesDragonballRustRuntime(t *testing.T) {
+	config := kataContainerdConfig()
+	for _, expected := range []string{
+		`runtimes.kata-dragonball`,
+		`runtime_path = "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"`,
+		`ConfigPath = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml"`,
+	} {
+		if !strings.Contains(config, expected) {
+			t.Fatalf("Kata containerd config missing %q:\n%s", expected, config)
+		}
+	}
+}
+
+func TestManagerEnsureKataDragonballPreparesCompatibleConfig(t *testing.T) {
+	const node = "fsb-e2e-kata-control-plane"
+	runner := &fakeRunner{
+		outputs: map[string]string{
+			commandKey("kind", "get", "clusters"):                                                  "fsb-e2e-kata\n",
+			commandKey("docker", "ps", "--filter", "name=fsb-e2e-kata-", "--format", "{{.Names}}"): node + "\n",
+		},
+		errs: map[string]error{
+			commandKey("docker", "exec", node, "bash", "-c", kataContainerdConfiguredScript(RuntimeKataDragonball)): errors.New("dragonball compatibility config missing"),
+		},
+	}
+	manager, err := NewManager(ProfileKataDragonball,
+		WithRunner(runner),
+		WithRootDir("/repo"),
+		WithHostOS("linux"),
+	)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+
+	if err := manager.Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure returned error: %v", err)
+	}
+
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "configuration-dragonball-fast-sandbox.toml")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "vmlinux.container")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "static_sandbox_resource_mgmt = true")
+	assertCommandContaining(t, runner.commands, "docker exec "+node+" bash -c", "default_vcpus = 2")
+}
+
+func TestKataContainerdUpgradeAddsMissingHandlersIndependently(t *testing.T) {
+	script := kataConfigureContainerdScript(RuntimeKataDragonball)
+	for _, runtimeName := range []RuntimeKind{RuntimeKataClh, RuntimeKataQemu, RuntimeKataFc, RuntimeKataDragonball} {
+		expected := "if ! grep -q 'runtimes." + string(runtimeName) + "' /etc/containerd/config.toml; then"
+		if !strings.Contains(script, expected) {
+			t.Fatalf("Kata upgrade script missing independent guard for %s:\n%s", runtimeName, script)
+		}
+	}
+	if strings.Contains(script, "if ! ("+kataBaseContainerdConfiguredScript()+")") {
+		t.Fatalf("Kata upgrade must not append duplicate existing runtime tables:\n%s", script)
+	}
 }
 
 func TestManagerEnsureKataSkipsInstallAndRestartWhenAlreadyConfigured(t *testing.T) {
@@ -544,15 +639,18 @@ func TestManagerEnsureKataSkipsInstallAndRestartWhenAlreadyConfigured(t *testing
 	assertCommand(t, runner.commands, "kubectl", "apply", "-f", "test/e2e/manifests/runtimeclass/kata.yaml")
 }
 
-func TestKataInstallScriptOnlySkipsCompleteInstallation(t *testing.T) {
-	script := kataInstallScript()
-
-	if !strings.Contains(script, "if "+kataInstalledScript()+"; then") {
-		t.Fatalf("install script should skip only when the full Kata installation is present:\n%s", script)
+func TestKataPayloadCopyUsesPinnedOfficialDeployImage(t *testing.T) {
+	t.Setenv("KATA_VERSION", "")
+	t.Setenv("KATA_DEPLOY_IMAGE", "")
+	requireContains := func(value, expected string) {
+		t.Helper()
+		if !strings.Contains(value, expected) {
+			t.Fatalf("%q does not contain %q", value, expected)
+		}
 	}
-	if !strings.Contains(script, "zstd -df /root/kata.tar.zst -o /root/kata.tar") {
-		t.Fatalf("install script should overwrite stale extraction output:\n%s", script)
-	}
+	requireContains(kataDeployImage(), "quay.io/kata-containers/kata-deploy:3.31.0@sha256:")
+	requireContains(kataPayloadCopyScript("kind-control-plane"), kataArtifactContainerName()+":/opt/kata-artifacts/opt/kata")
+	requireContains(kataPayloadCopyScript("kind-control-plane"), "kind-control-plane:/opt")
 }
 
 func TestManagerBuildFastctlInvokesGoBuild(t *testing.T) {

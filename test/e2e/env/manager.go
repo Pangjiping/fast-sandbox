@@ -3,6 +3,7 @@ package env
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -348,7 +349,7 @@ func (m *Manager) ensureRuntime(ctx context.Context) error {
 		return nil
 	case RuntimeGVisor:
 		return m.ensureGVisorRuntime(ctx)
-	case RuntimeKataQemu, RuntimeKataClh, RuntimeKataFc:
+	case RuntimeKataQemu, RuntimeKataClh, RuntimeKataFc, RuntimeKataDragonball:
 		return m.ensureKataRuntime(ctx)
 	default:
 		return nil
@@ -393,11 +394,16 @@ func (m *Manager) ensureKataRuntime(ctx context.Context) error {
 		if err := m.ensureKataInstalled(ctx, node); err != nil {
 			return err
 		}
-		if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataFastSandboxConfigScript()); err != nil {
+		if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataFastSandboxConfigScript(m.settings.Runtime)); err != nil {
 			return err
 		}
-		if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataContainerdConfiguredScript()); err != nil {
-			if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataConfigureContainerdScript()); err != nil {
+		if m.settings.Runtime == RuntimeKataFc {
+			if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataFirecrackerStorageScript()); err != nil {
+				return err
+			}
+		}
+		if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataContainerdConfiguredScript(m.settings.Runtime)); err != nil {
+			if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataConfigureContainerdScript(m.settings.Runtime)); err != nil {
 				return err
 			}
 			if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataRestartContainerdScript()); err != nil {
@@ -437,26 +443,25 @@ func (m *Manager) ensureKataInstalled(ctx context.Context, node string) error {
 	if _, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataInstalledScript()); err == nil {
 		return nil
 	}
-	if err := m.ensureKataTarball(ctx); err != nil {
+	if err := m.ensureKataArtifactContainer(ctx); err != nil {
 		return err
 	}
-	if _, err := m.run(ctx, "docker", "cp", kataDataFile(), node+":/root/kata.tar.zst"); err != nil {
+	if _, err := m.runLive(ctx, "sh", "-c", kataPayloadCopyScript(node)); err != nil {
 		return err
 	}
-	_, err := m.runLive(ctx, "docker", "exec", node, "bash", "-c", kataInstallScript())
+	_, err := m.run(ctx, "docker", "exec", node, "bash", "-c", kataPayloadVerificationScript())
 	return err
 }
 
-func (m *Manager) ensureKataTarball(ctx context.Context) error {
-	if _, err := m.run(ctx, "mkdir", "-p", kataDataDir(), kataCacheDir()); err != nil {
+func (m *Manager) ensureKataArtifactContainer(ctx context.Context) error {
+	name := kataArtifactContainerName()
+	if _, err := m.run(ctx, "docker", "container", "inspect", name); err == nil {
+		return nil
+	}
+	if _, err := m.runLive(ctx, "docker", "pull", kataDeployImage()); err != nil {
 		return err
 	}
-	if _, err := m.run(ctx, "sh", "-c", "test -f "+shellQuote(kataCacheFile())); err != nil {
-		if _, err := m.runLive(ctx, "wget", "-q", "--show-progress", kataURL(), "-O", kataCacheFile()); err != nil {
-			return err
-		}
-	}
-	_, err := m.run(ctx, "cp", kataCacheFile(), kataDataFile())
+	_, err := m.run(ctx, "docker", "create", "--name", name, kataDeployImage())
 	return err
 }
 
@@ -494,7 +499,7 @@ debug-log = "/var/log/runsc/%ID%/gvisor.%COMMAND%.log"`
 
 func isKataRuntime(runtime RuntimeKind) bool {
 	switch runtime {
-	case RuntimeKataQemu, RuntimeKataClh, RuntimeKataFc:
+	case RuntimeKataQemu, RuntimeKataClh, RuntimeKataFc, RuntimeKataDragonball:
 		return true
 	default:
 		return false
@@ -515,79 +520,167 @@ func kataRequiredHostPaths() []string {
 }
 
 func kataInstalledScript() string {
-	return "test -x /opt/kata/bin/containerd-shim-kata-v2 && test -f /opt/kata/share/defaults/kata-containers/configuration-clh.toml && test -f /opt/kata/share/defaults/kata-containers/configuration-qemu.toml && test -f /opt/kata/share/defaults/kata-containers/configuration-fc.toml"
+	return "test \"$(cat /opt/kata/VERSION 2>/dev/null)\" = " + shellQuote(kataVersion()) + " && test -x /opt/kata/bin/containerd-shim-kata-v2 && test -x /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 && test -f /opt/kata/share/defaults/kata-containers/configuration-clh.toml && test -f /opt/kata/share/defaults/kata-containers/configuration-qemu.toml && test -f /opt/kata/share/defaults/kata-containers/configuration-fc.toml && test -f /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball.toml"
 }
 
-func kataFastSandboxConfigScript() string {
-	return `set -e
+func kataPayloadVerificationScript() string {
+	return "set -e\n" + kataInstalledScript()
+}
+
+func kataFastSandboxConfigScript(runtime RuntimeKind) string {
+	script := `set -e
 config=/opt/kata/share/defaults/kata-containers/configuration-clh.toml
 sed -i 's/^sandbox_cgroup_only = false$/sandbox_cgroup_only = true/' "$config"
 grep -q '^sandbox_cgroup_only = true$' "$config"`
+	switch runtime {
+	case RuntimeKataDragonball:
+		return script + `
+source=/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball.toml
+target=/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml
+cp "$source" "$target"
+sed -i 's#vmlinux-dragonball-experimental.container#vmlinux.container#' "$target"
+sed -i 's/^static_sandbox_resource_mgmt = false$/static_sandbox_resource_mgmt = true/' "$target"
+sed -i 's/^default_vcpus = 1$/default_vcpus = 2/' "$target"
+grep -q '^kernel = "/opt/kata/share/kata-containers/vmlinux.container"$' "$target"
+grep -q '^static_sandbox_resource_mgmt = true$' "$target"
+grep -q '^default_vcpus = 2$' "$target"`
+	case RuntimeKataFc:
+		return script + `
+source=/opt/kata/share/defaults/kata-containers/configuration-fc.toml
+target=/opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml
+kernel_target=$(basename "$(readlink -f /opt/kata/share/kata-containers/vmlinux.container)")
+kernel_config=/opt/kata/share/kata-containers/config-${kernel_target#vmlinux-}
+test -f "$kernel_config"
+grep -q '^CONFIG_VIRTIO_MMIO=y$' "$kernel_config"
+cp "$source" "$target"
+grep -q '^kernel = "/opt/kata/share/kata-containers/vmlinux.container"$' "$target"`
+	default:
+		return script
+	}
 }
 
-func kataInstallScript() string {
+func kataFirecrackerStorageScript() string {
 	return `set -e
-if ` + kataInstalledScript() + `; then
-  exit 0
+mkdir -p /var/lib/containerd/blockfile-source /var/lib/containerd/io.containerd.snapshotter.v1.blockfile
+scratch=/var/lib/containerd/blockfile-source/scratch.ext4
+if [ ! -f "$scratch" ]; then
+  truncate -s 512M "$scratch"
+  mkfs.ext4 -F -q "$scratch"
 fi
-if ! command -v zstd >/dev/null 2>&1; then
-  if [ -f /etc/apt/sources.list.d/debian.sources ]; then
-    sed -i "s|http://deb.debian.org|https://mirrors.aliyun.com|g" /etc/apt/sources.list.d/debian.sources
-  elif [ -f /etc/apt/sources.list ]; then
-    sed -i "s|http://deb.debian.org|https://mirrors.aliyun.com|g" /etc/apt/sources.list
-    sed -i "s|http://security.debian.org|https://mirrors.aliyun.com|g" /etc/apt/sources.list 2>/dev/null || true
-  fi
-  for i in 1 2 3; do
-    timeout 60 apt-get update -qq && break
-    sleep 2
-  done
-  apt-get install -y -qq zstd
-fi
-zstd -df /root/kata.tar.zst -o /root/kata.tar
-tar -xf /root/kata.tar -C /
-rm -f /root/kata.tar.zst /root/kata.tar
-test -x /opt/kata/bin/containerd-shim-kata-v2`
+for minor in $(seq 0 31); do
+  test -e /dev/loop$minor || mknod -m 0660 /dev/loop$minor b 7 $minor
+done`
 }
 
-func kataContainerdConfiguredScript() string {
-	return "grep -q 'runtimes.kata-clh' /etc/containerd/config.toml && grep -q 'runtimes.kata-qemu' /etc/containerd/config.toml && grep -q 'runtimes.kata-fc' /etc/containerd/config.toml"
+func kataBaseContainerdConfiguredScript() string {
+	return "grep -q 'runtimes.kata-clh' /etc/containerd/config.toml && grep -q 'runtimes.kata-qemu' /etc/containerd/config.toml && grep -q 'runtimes.kata-fc' /etc/containerd/config.toml && grep -q 'runtimes.kata-dragonball' /etc/containerd/config.toml"
 }
 
-func kataConfigureContainerdScript() string {
-	return `set -e
-` + kataContainerdConfiguredScript() + ` && exit 0
-cp /etc/containerd/config.toml /etc/containerd/config.toml.bak 2>/dev/null || true
-cat >> /etc/containerd/config.toml <<'EOF'
-` + kataContainerdConfig() + `
-EOF`
+func kataContainerdConfiguredScript(runtime RuntimeKind) string {
+	configured := kataBaseContainerdConfiguredScript()
+	switch runtime {
+	case RuntimeKataDragonball:
+		return configured + ` &&
+grep -A10 'runtimes.kata-dragonball]$' /etc/containerd/config.toml | grep -q 'configuration-dragonball-fast-sandbox.toml' &&
+grep -q '^kernel = "/opt/kata/share/kata-containers/vmlinux.container"$' /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml &&
+grep -q '^static_sandbox_resource_mgmt = true$' /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml &&
+grep -q '^default_vcpus = 2$' /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml`
+	case RuntimeKataFc:
+		return configured + ` &&
+grep -A10 'runtimes.kata-fc]$' /etc/containerd/config.toml | grep -q 'snapshotter = "blockfile"' &&
+grep -q 'configuration-fc-fast-sandbox.toml' /etc/containerd/config.toml &&
+grep -q 'snapshotter.v1.blockfile' /etc/containerd/config.toml &&
+ctr plugins ls | grep -E 'snapshotter.v1[[:space:]]+blockfile[[:space:]].*[[:space:]]ok[[:space:]]*$'`
+	default:
+		return configured
+	}
+}
+
+func kataConfigureContainerdScript(runtime RuntimeKind) string {
+	script := `set -e
+cp /etc/containerd/config.toml /etc/containerd/config.toml.bak 2>/dev/null || true`
+	for _, runtimeName := range []RuntimeKind{RuntimeKataClh, RuntimeKataQemu, RuntimeKataFc, RuntimeKataDragonball} {
+		script += `
+if ! grep -q 'runtimes.` + string(runtimeName) + `' /etc/containerd/config.toml; then
+  cat >> /etc/containerd/config.toml <<'EOF'
+` + kataRuntimeContainerdConfig(runtimeName) + `
+EOF
+fi`
+	}
+	if runtime == RuntimeKataFc {
+		script += `
+if ! grep -A10 'runtimes.kata-fc]$' /etc/containerd/config.toml | grep -q 'snapshotter = "blockfile"'; then
+  sed -i '/runtimes.kata-fc]$/a\  snapshotter = "blockfile"' /etc/containerd/config.toml
+fi
+sed -i 's#ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-fc.toml"#ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml"#' /etc/containerd/config.toml
+if ! grep -q 'snapshotter.v1.blockfile' /etc/containerd/config.toml; then
+  cat >> /etc/containerd/config.toml <<'EOF'
+` + kataBlockfileContainerdConfig() + `
+EOF
+fi`
+	}
+	if runtime == RuntimeKataDragonball {
+		script += `
+sed -i 's#ConfigPath = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball.toml"#ConfigPath = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml"#' /etc/containerd/config.toml`
+	}
+	return script
 }
 
 func kataContainerdConfig() string {
-	return `
-# Kata Containers runtime configurations
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-clh]
+	return "\n# Kata Containers runtime configurations\n" +
+		kataRuntimeContainerdConfig(RuntimeKataClh) + "\n" +
+		kataRuntimeContainerdConfig(RuntimeKataQemu) + "\n" +
+		kataRuntimeContainerdConfig(RuntimeKataFc) + "\n" +
+		kataRuntimeContainerdConfig(RuntimeKataDragonball) + "\n" +
+		kataBlockfileContainerdConfig()
+}
+
+func kataRuntimeContainerdConfig(runtime RuntimeKind) string {
+	switch runtime {
+	case RuntimeKataClh:
+		return `[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-clh]
   runtime_type = "io.containerd.kata.v2"
   runtime_path = "/opt/kata/bin/containerd-shim-kata-v2"
   privileged_without_host_devices = true
   pod_annotations = ["io.kata-containers.*"]
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-clh.options]
-    ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-clh.toml"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu]
+    ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-clh.toml"`
+	case RuntimeKataQemu:
+		return `[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu]
   runtime_type = "io.containerd.kata.v2"
   runtime_path = "/opt/kata/bin/containerd-shim-kata-v2"
   privileged_without_host_devices = true
   pod_annotations = ["io.kata-containers.*"]
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu.options]
-    ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-qemu.toml"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-fc]
+    ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-qemu.toml"`
+	case RuntimeKataFc:
+		return `[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-fc]
   runtime_type = "io.containerd.kata.v2"
   runtime_path = "/opt/kata/bin/containerd-shim-kata-v2"
+  snapshotter = "blockfile"
   privileged_without_host_devices = true
   pod_annotations = ["io.kata-containers.*"]
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-fc.options]
-    ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-fc.toml"`
+    ConfigPath = "/opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml"`
+	case RuntimeKataDragonball:
+		return `[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-dragonball]
+  runtime_type = "io.containerd.kata.v2"
+  runtime_path = "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
+  privileged_without_host_devices = true
+  pod_annotations = ["io.kata-containers.*"]
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-dragonball.options]
+    ConfigPath = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml"`
+	default:
+		return ""
+	}
+}
+
+func kataBlockfileContainerdConfig() string {
+	return `[plugins."io.containerd.snapshotter.v1.blockfile"]
+  root_path = "/var/lib/containerd/io.containerd.snapshotter.v1.blockfile"
+  scratch_file = "/var/lib/containerd/blockfile-source/scratch.ext4"
+  fs_type = "ext4"
+  mount_options = ["loop", "direct-io", "sync"]`
 }
 
 func kataRestartContainerdScript() string {
@@ -603,35 +696,29 @@ fi`
 }
 
 func kataVersion() string {
-	return firstNonEmpty(os.Getenv("KATA_VERSION"), "3.27.0")
+	return firstNonEmpty(os.Getenv("KATA_VERSION"), "3.31.0")
 }
 
-func kataArch() string {
-	return firstNonEmpty(os.Getenv("KATA_ARCH"), "amd64")
+func kataDeployImage() string {
+	if configured := strings.TrimSpace(os.Getenv("KATA_DEPLOY_IMAGE")); configured != "" {
+		return configured
+	}
+	if kataVersion() == "3.31.0" {
+		return "quay.io/kata-containers/kata-deploy:3.31.0@sha256:643471067559cbde3258a62eb60840ce435383d9a6dae7a803bd9418eb81be8b"
+	}
+	return "quay.io/kata-containers/kata-deploy:" + kataVersion()
 }
 
-func kataTarballName() string {
-	return "kata-static-" + kataVersion() + "-" + kataArch() + ".tar.zst"
+func kataArtifactContainerName() string {
+	version := strings.NewReplacer(".", "-", "/", "-", ":", "-").Replace(kataVersion())
+	digest := sha256.Sum256([]byte(kataDeployImage()))
+	return fmt.Sprintf("fast-sandbox-kata-artifacts-%s-%x", version, digest[:6])
 }
 
-func kataURL() string {
-	return "https://github.com/kata-containers/kata-containers/releases/download/" + kataVersion() + "/" + kataTarballName()
-}
-
-func kataDataDir() string {
-	return firstNonEmpty(os.Getenv("DATA_DIR"), filepath.Join(homeDir(), "data"))
-}
-
-func kataCacheDir() string {
-	return firstNonEmpty(os.Getenv("KATA_CACHE_DIR"), filepath.Join(homeDir(), ".cache"))
-}
-
-func kataDataFile() string {
-	return filepath.Join(kataDataDir(), kataTarballName())
-}
-
-func kataCacheFile() string {
-	return filepath.Join(kataCacheDir(), kataTarballName())
+func kataPayloadCopyScript(node string) string {
+	source := kataArtifactContainerName() + ":/opt/kata-artifacts/opt/kata"
+	destination := node + ":/opt"
+	return "docker cp " + shellQuote(source) + " - | docker cp - " + shellQuote(destination)
 }
 
 func homeDir() string {
@@ -905,7 +992,7 @@ func gvisorCacheDir() string {
 }
 
 func gvisorRelease() string {
-	return firstNonEmpty(os.Getenv("GVISOR_RELEASE"), "latest")
+	return firstNonEmpty(os.Getenv("GVISOR_RELEASE"), "20260714")
 }
 
 func gvisorArch() string {

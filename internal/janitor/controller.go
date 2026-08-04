@@ -90,6 +90,19 @@ func (j *Janitor) handlePodDeletion(ctx context.Context, pod *corev1.Pod) {
 	if pool, ok := pod.Labels["fast-sandbox.io/pool"]; ok {
 		klog.InfoS("Detected Fastlet Pod deletion, scanning node resources", "pod", pod.Name, "podUID", pod.UID, "pool", pool)
 		go j.Scan(ctx)
+		// The first scan can race the Sandbox reconciler's durable FastletPodLost
+		// observation. Retry after the orphan grace period instead of leaving the
+		// resource until the much slower periodic scan.
+		go func() {
+			timer := time.NewTimer(j.orphanTimeout())
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				j.Scan(ctx)
+			}
+		}()
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	"fast-sandbox/internal/janitor"
+	"fast-sandbox/internal/nodecleanup"
 	"fast-sandbox/internal/runtimeenv"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -37,6 +38,7 @@ func main() {
 	var boxLiteStateRoot string
 	var metricsAddress string
 	var runtimeEnvironmentsFile string
+	var controlSocket string
 
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "Name of the node this janitor is running on")
@@ -47,6 +49,7 @@ func main() {
 	flag.StringVar(&boxLiteStateRoot, "boxlite-state-root", "/var/lib/fast-sandbox/boxlite", "Host-mounted BoxLite state root")
 	flag.StringVar(&metricsAddress, "metrics-address", ":9092", "Prometheus metrics listen address; empty disables the server")
 	flag.StringVar(&runtimeEnvironmentsFile, "runtime-environments-file", runtimeenv.ConfigFilePath, "Path to the platform runtime environment configuration")
+	flag.StringVar(&controlSocket, "control-socket", nodecleanup.DefaultSocketPath, "Unix socket used by Fastlet for fenced host-process cleanup")
 
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -101,6 +104,19 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	hostProcessCleaner := nodecleanup.NewHostProcessCleaner()
+	cleanupServer, err := nodecleanup.NewServer(controlSocket, hostProcessCleaner)
+	if err != nil {
+		klog.ErrorS(err, "Failed to initialize NodeJanitor cleanup server")
+		os.Exit(1)
+	}
+	defer cleanupServer.Close()
+	go func() {
+		if serveErr := cleanupServer.Serve(ctx); serveErr != nil {
+			klog.ErrorS(serveErr, "NodeJanitor cleanup server exited")
+			stop()
+		}
+	}()
 	var metricsServer *http.Server
 	if metricsAddress != "" {
 		metricsServer = &http.Server{Addr: metricsAddress, Handler: promhttp.Handler(), ReadHeaderTimeout: 5 * time.Second}
@@ -134,12 +150,16 @@ func main() {
 			_ = ctrdClient.Close()
 		}
 	}()
-	j.AddBackend(janitor.NewLinuxNetworkBackend(networkStateRoot, fastletnetwork.NewLinuxNetNSDriver(fastletnetwork.LinuxDriverConfig{})))
+	j.AddBackend(janitor.NewLinuxNetworkBackend(
+		networkStateRoot,
+		fastletnetwork.NewLinuxNetNSDriver(fastletnetwork.LinuxDriverConfig{}),
+		hostProcessCleaner,
+	))
 	j.AddBackend(janitor.NewBoxLiteBackend(boxLiteStateRoot))
 	j.K8sClient = k8sClient
 	j.OrphanTimeout = orphanTimeout
 	j.ScanInterval = scanInterval
-	klog.InfoS("Starting Janitor", "node", nodeName, "orphan-timeout", orphanTimeout, "scan-interval", scanInterval, "metricsAddress", metricsAddress)
+	klog.InfoS("Starting Janitor", "node", nodeName, "orphan-timeout", orphanTimeout, "scan-interval", scanInterval, "metricsAddress", metricsAddress, "controlSocket", controlSocket)
 	if err := j.Run(ctx); err != nil {
 		klog.ErrorS(err, "Janitor exited with error")
 		os.Exit(1)

@@ -89,6 +89,8 @@ Fastlet and NodeJanitor are privileged node components. Production clusters shou
 - monitor privileged Pods and host cleanup.
 
 See [Secure runtimes](secure-runtimes.md) for gVisor and Kata prerequisites.
+See [Runtime node installation](runtime-node-installation.md) for the
+production Kata DaemonSet, gVisor node preparation, and runtime smoke gates.
 See [Runtime environments](runtime-environments.md) when containerd or kubelet
 uses non-default sockets, namespaces, roots, handlers, or node selectors.
 
