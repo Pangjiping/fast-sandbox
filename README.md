@@ -217,12 +217,18 @@ backend and direct-ingress contract, and
 | gVisor | `gvisor` | Yes | Validated |
 | Kata QEMU | `kata-qemu` | Yes | Validated |
 | Kata Cloud Hypervisor | `kata-clh` | Yes | Validated |
-| Kata Firecracker | `kata-fc` | Yes | Validated |
-| Kata Dragonball | `kata-dragonball` | Yes | Validated |
+| Kata Firecracker | `kata-fc` | Yes | Validated; block snapshotter required |
+| Kata Dragonball | `kata-dragonball` | Yes | Validated; compatibility binding required |
 | BoxLite | `boxlite` | No | Experimental integration; fail closed |
 
 This table describes Fast Sandbox validation status, not the upstream runtimes'
 general capabilities.
+
+Secure-runtime latency is strongly environment-dependent. In the current warm,
+concurrency-1 engineering measurements, `kata-fc` reached `RuntimeReady` in
+about 561 ms on a non-nested KVM host and 5.47 s in a resource-constrained
+nested-KVM VM. These are diagnostic baselines, not release claims. See
+[Performance](docs/guides/performance.md#kata-331-secure-runtime-comparison).
 
 ## Fast Sandbox and Agent Sandbox
 

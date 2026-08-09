@@ -101,11 +101,13 @@ Both receive fixed CPU, memory, and PID limits from the Pool's Sandbox resource 
 
 Kata profiles use the containerd Kata shim. Fastlet still owns the network slot, while the shim exposes the interface to the guest.
 
-QEMU, Cloud Hypervisor, Firecracker, and Dragonball are validated profiles. Firecracker is
-bound to a Firecracker-specific runtime configuration and snapshotter override
-inside the node environment because it requires a compatible `virtio-mmio`
-guest kernel and a block-device snapshotter rather than the environment's
-default overlayfs snapshotter.
+QEMU, Cloud Hypervisor, Firecracker, and Dragonball are validated profiles.
+Firecracker is bound to a runtime-specific configuration and snapshotter
+override inside the node environment because it requires a compatible
+`virtio-mmio` guest kernel and a block-device snapshotter rather than the
+environment's default overlayfs snapshotter. Its lifecycle, networking, Infra
+delivery, recovery, and cleanup paths are covered by E2E tests; its startup
+latency remains especially sensitive to virtualization and storage.
 
 Dragonball uses Kata's Rust shim and a separate Fast Sandbox compatibility
 configuration. Keeping that file separate from the upstream configuration

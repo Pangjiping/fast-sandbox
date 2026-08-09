@@ -10,8 +10,8 @@ Fast Sandbox supports runtime profiles with different isolation boundaries. The 
 | `gvisor` | runsc user-space kernel | runsc shim and configuration | Validated |
 | `kata-qemu` | QEMU virtual machine | KVM and Kata installation | Validated |
 | `kata-clh` | Cloud Hypervisor virtual machine | KVM and Kata installation | Validated |
-| `kata-fc` | Firecracker virtual machine | KVM, compatible kernel, block snapshotter | Validated |
-| `kata-dragonball` | Dragonball microVM | KVM and Kata Rust runtime installation | Validated |
+| `kata-fc` | Firecracker virtual machine | KVM, compatible kernel, block snapshotter | Validated; environment-sensitive latency |
+| `kata-dragonball` | Dragonball microVM | KVM and Kata Rust runtime installation | Validated; compatibility binding required |
 
 See [Runtime support](../reference/runtime-support.md) for the canonical capability matrix.
 
@@ -100,6 +100,25 @@ already removed the task and container, NodeJanitor uses that record to remove
 only the VMM belonging to the orphaned Sandbox before it releases the slot.
 The E2E covers both ordinary deletion and Fastlet Pod loss, and repeats
 create/delete on one slot to catch accumulating VMM processes.
+
+### Firecracker performance characteristics
+
+`kata-fc` is functionally validated, including private networking, Infra
+delivery, Fastlet recovery, repeated deletion, and orphaned-VMM cleanup. It is
+not assigned a universal startup number: the current blockfile and cold-VM
+path is especially sensitive to storage and nested virtualization.
+
+With a warm image and concurrency 1, a 20-sample engineering run measured a
+mean of 560.6 ms to `RuntimeReady` on a non-nested KVM host, but 5,474.6 ms in
+a resource-constrained nested-KVM VM with a nearly full root disk. The latter
+spent about 4.34 s in `NewContainer` and blockfile preparation, compared with
+about 21.7 ms on the non-nested host. Neither result includes asynchronous
+`DataPlaneReady` or Execd health.
+
+These values are regression evidence, not a production performance promise.
+No Firecracker VM template, snapshot restore, or prepared-VM mechanism is
+enabled. See [Performance](performance.md#kata-331-secure-runtime-comparison)
+for the complete contract and all runtime results.
 
 ## Dragonball compatibility contract
 

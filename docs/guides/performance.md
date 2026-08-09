@@ -53,8 +53,9 @@ changing lifecycle ordering.
   validation samples injected OpenSandbox Execd; Execd readiness remained
   asynchronous and is outside the reported Create latency.
 - Kata Firecracker and Dragonball were validated after this measurement run
-  and therefore have no comparable Create result in this report. BoxLite was a
-  capability-gate test only.
+  and therefore have no comparable Create result in this dated baseline. A
+  later comparison is reported separately below. BoxLite was a capability-gate
+  test only.
 
 ### RuntimeReady observations
 
@@ -74,6 +75,62 @@ These rows are not a fair product or even runtime ranking. The secure-runtime
 profiles have different initialization work, and Kata is measured under nested
 virtualization. They show where the current Fast Sandbox integration spends
 time on this environment.
+
+### Kata 3.31 secure-runtime comparison
+
+A later engineering run at revision
+`cde6d5c8e82f568ae3dbfd919ea7284713603f13` compared the complete Kata 3.31
+runtime set on a non-nested KVM host and a nested-KVM development VM. Both
+environments used a single-node Kind cluster, containerd 1.7.18, a warm Alpine
+image, pre-created network slots, no Infra Components, and concurrency 1. Each
+row contains 20 measured Creates and ends when the FastPath Create RPC returns
+at `RuntimeReady`. Every runtime was warmed before measurement; the secure
+runtimes used two warm-up requests, while nested runc was combined from two
+separately warmed batches.
+
+#### Non-nested KVM host
+
+| Runtime | Mean | p50 | p95 | Maximum | Success |
+|---|---:|---:|---:|---:|---:|
+| container (`runc`) | 72.4 ms | 72.7 ms | 80.2 ms | 83.1 ms | 20/20 |
+| Kata Firecracker | 560.6 ms | 559.6 ms | 622.8 ms | 626.9 ms | 20/20 |
+| Kata QEMU | 1,065.8 ms | 1,050.6 ms | 1,142.1 ms | 1,170.0 ms | 20/20 |
+| Kata Cloud Hypervisor | 829.4 ms | 828.8 ms | 861.6 ms | 871.5 ms | 20/20 |
+| Kata Dragonball | 783.6 ms | 775.6 ms | 814.4 ms | 828.9 ms | 20/20 |
+
+The host exposed 104 vCPUs and 187 GiB of memory. The Pool capacity was 24 and
+the 20 measured Sandboxes remained live until the batch cleanup. Firecracker
+used the resolved `blockfile` snapshotter. Its mean RuntimeDriver stages were
+approximately 1.1 ms for image preparation, 21.7 ms for `NewContainer`, 528.3
+ms for `NewTask`, and 1.5 ms for `Start`.
+
+#### Resource-constrained nested-KVM VM
+
+| Runtime | Mean | p50 | p95 | Maximum | Success |
+|---|---:|---:|---:|---:|---:|
+| container (`runc`) | 73.2 ms | 73.1 ms | 77.2 ms | 82.9 ms | 20/20 |
+| Kata Firecracker | 5,474.6 ms | 5,462.3 ms | 5,575.1 ms | 5,725.3 ms | 20/20 |
+| Kata QEMU | 2,068.7 ms | 2,065.9 ms | 2,153.6 ms | 2,193.8 ms | 20/20 |
+| Kata Cloud Hypervisor | 1,338.5 ms | 1,335.4 ms | 1,373.5 ms | 1,403.1 ms | 20/20 |
+| Kata Dragonball | 2,425.6 ms | 2,414.5 ms | 2,499.9 ms | 2,545.2 ms | 20/20 |
+
+The VM had 8 vCPUs, 16 GiB of memory, nested KVM, no swap, and a nearly full
+root disk during the run. To stay within its disk and memory limits, the runc
+samples ran in two batches of ten, while each Kata sample was deleted and
+allowed to settle before the next Create. The method therefore differs from
+the non-nested batch and the ratio is directional, not a controlled A/B result.
+
+The contrast explains why one Firecracker number is misleading. On the
+non-nested host its work was dominated by VM task creation; in the constrained
+nested VM, `NewContainer` and blockfile preparation grew from about 21.7 ms to
+4.34 s, while `NewTask` grew from about 528 ms to 1.11 s. QEMU, Cloud
+Hypervisor, and Dragonball were dominated primarily by nested VM task creation.
+Runc remained near 73 ms in both environments.
+
+These measurements validate the runtime paths and provide regression evidence.
+They do not include `DataPlaneReady`, Execd health, registry pulls, or an
+OpenSandbox client path, and they are not release-grade latency promises. No VM
+template, snapshot restore, or prepared-VM mechanism was enabled.
 
 ### Warm container stage breakdown
 

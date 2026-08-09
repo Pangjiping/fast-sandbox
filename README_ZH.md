@@ -200,7 +200,8 @@ Fast Sandbox 不定义 Exec 或 File 协议。其他 Component 可以用另一�
 | gVisor | `gvisor` | 支持 | 已验证 |
 | Kata QEMU | `kata-qemu` | 支持 | 已验证 |
 | Kata Cloud Hypervisor | `kata-clh` | 支持 | 已验证 |
-| Kata Firecracker | `kata-fc` | 不支持 | 保持 capability gate |
+| Kata Firecracker | `kata-fc` | 支持 | 已验证；需要 block snapshotter |
+| Kata Dragonball | `kata-dragonball` | 支持 | 已验证；需要兼容配置 |
 | BoxLite | `boxlite` | 不支持 | 实验性接入，fail closed |
 
 这个表描述 Fast Sandbox 的验收状态，不代表上游 runtime 的通用能力。
@@ -237,7 +238,10 @@ Create 延迟终止于 `RuntimeReady`。Component 健康检查和路由发布独
 - 公共命名 Component 路由目前支持 HTTP，包括 SSE 和 WebSocket upgrade。通用 raw TCP、
   gRPC 和 upstream TLS 不属于第一版 Component contract。
 - Snapshot、pause/resume、持久化存储和 live migration 不是当前能力。
-- Kata Firecracker 和 BoxLite 继续保持显式 capability gate。
+- Secure Runtime 延迟高度依赖宿主环境。当前 warm、并发为 1 的工程测试中，
+  `kata-fc` 在非嵌套 KVM 宿主机上约为 561 ms，在资源受限的嵌套 KVM VM 中约为
+  5.47 s。这些数据是诊断基线，不是发布级性能承诺。
+- BoxLite 继续保持显式 capability gate。
 
 私有镜像仓库凭证通过 namespace 级静态 ConfigMap 和被引用的 Secret 配置，Pool 不直接
 保存凭证。详见 [Private registries](docs/guides/private-registries.md)。
