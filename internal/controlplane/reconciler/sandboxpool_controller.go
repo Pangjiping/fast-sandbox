@@ -21,6 +21,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
+	"fast-sandbox/internal/fastlet/podcgroup"
 	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
@@ -727,6 +728,11 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			corev1.VolumeMount{Name: "registry-config", MountPath: "/etc/fast-sandbox/registry", ReadOnly: true},
 			corev1.VolumeMount{Name: "proxy-control", MountPath: "/run/fast-sandbox/proxy"},
 		)
+		if profile.Driver == runtimecatalog.DriverKindContainerd {
+			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+				Name: podcgroup.VolumeName, MountPath: podcgroup.HostRoot,
+			})
+		}
 		if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
 			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "node-cleanup", MountPath: filepath.Dir(nodecleanup.DefaultSocketPath)})
 		}
@@ -782,6 +788,9 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			return nil, err
 		}
 	}
+	if err := ensureBoundedPodContainers(podSpec, runtimeResourceOwner); err != nil {
+		return nil, err
+	}
 
 	hostPathDirectory := corev1.HostPathDirectory
 
@@ -816,6 +825,14 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 		},
 		corev1.Volume{Name: "proxy-control", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	)
+	if profile.Driver == runtimecatalog.DriverKindContainerd {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: podcgroup.VolumeName,
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: podcgroup.HostPath, Type: &hostPathDirectory,
+			}},
+		})
+	}
 	if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
 		hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
@@ -978,14 +995,15 @@ func (r *SandboxPoolReconciler) boxLiteRuntimeContainer(config runtimecatalog.Bo
 
 func validatePlatformOwnedStorage(podSpec *corev1.PodSpec) error {
 	reservedVolumes := map[string]string{
-		"tmp":             "/tmp",
-		"infra-tools":     "/opt/fast-sandbox/infra",
-		"infra-plan":      "/etc/fast-sandbox/infra",
-		"runtime-plan":    runtimeenv.PlanMountPath,
-		"registry-config": "/etc/fast-sandbox/registry",
-		"proxy-control":   "/run/fast-sandbox/proxy",
-		"node-cleanup":    filepath.Dir(nodecleanup.DefaultSocketPath),
-		"boxlite-control": "/run/fast-sandbox/boxlite",
+		"tmp":                "/tmp",
+		"infra-tools":        "/opt/fast-sandbox/infra",
+		"infra-plan":         "/etc/fast-sandbox/infra",
+		"runtime-plan":       runtimeenv.PlanMountPath,
+		"registry-config":    "/etc/fast-sandbox/registry",
+		"proxy-control":      "/run/fast-sandbox/proxy",
+		"node-cleanup":       filepath.Dir(nodecleanup.DefaultSocketPath),
+		"boxlite-control":    "/run/fast-sandbox/boxlite",
+		podcgroup.VolumeName: podcgroup.HostRoot,
 	}
 	for _, volume := range podSpec.Volumes {
 		if _, reserved := reservedVolumes[volume.Name]; reserved {
@@ -1455,22 +1473,133 @@ func mergeNodeSelector(podSpec *corev1.PodSpec, required map[string]string) erro
 }
 
 func applyFastletResources(container *corev1.Container, overhead corev1.ResourceList, sandbox apiv1alpha2.SandboxResourceProfile, capacity int32) error {
-	required := overhead.DeepCopy()
-	if required == nil {
-		required = corev1.ResourceList{}
+	defaultAggregate := overhead.DeepCopy()
+	if defaultAggregate == nil {
+		defaultAggregate = corev1.ResourceList{}
 	}
-	addScaledQuantity(required, corev1.ResourceCPU, sandbox.CPU, int64(capacity))
-	addScaledQuantity(required, corev1.ResourceMemory, sandbox.Memory, int64(capacity))
+	addScaledQuantity(defaultAggregate, corev1.ResourceCPU, sandbox.CPU, int64(capacity))
+	addScaledQuantity(defaultAggregate, corev1.ResourceMemory, sandbox.Memory, int64(capacity))
 	if container.Resources.Requests == nil {
 		container.Resources.Requests = corev1.ResourceList{}
 	}
-	for name, quantity := range required {
-		current := container.Resources.Requests[name]
-		if current.IsZero() || current.Cmp(quantity) < 0 {
-			container.Resources.Requests[name] = quantity.DeepCopy()
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		defaultQuantity, configured := defaultAggregate[name]
+		if !configured || defaultQuantity.IsZero() {
+			continue
 		}
-		if limit, ok := container.Resources.Limits[name]; ok && !limit.IsZero() && limit.Cmp(quantity) < 0 {
-			return fmt.Errorf("runtime owner container %q limit %s=%s is below runtime requirement %s", container.Name, name, limit.String(), quantity.String())
+
+		request, hasRequest := container.Resources.Requests[name]
+		if hasRequest && request.IsZero() {
+			hasRequest = false
+		}
+		limit, hasLimit := container.Resources.Limits[name]
+		if hasLimit && limit.IsZero() {
+			hasLimit = false
+		}
+
+		if hasLimit {
+			minimum := overhead[name]
+			if !minimum.IsZero() && limit.Cmp(minimum) < 0 {
+				return fmt.Errorf("runtime owner container %q limit %s=%s is below runtime overhead %s", container.Name, name, limit.String(), minimum.String())
+			}
+			if hasRequest && request.Cmp(limit) > 0 {
+				return fmt.Errorf("runtime owner container %q request %s=%s exceeds aggregate limit %s", container.Name, name, request.String(), limit.String())
+			}
+			if !hasRequest {
+				request = defaultQuantity.DeepCopy()
+				if request.Cmp(limit) > 0 {
+					request = limit.DeepCopy()
+				}
+				container.Resources.Requests[name] = request
+			}
+			continue
+		}
+
+		// Without an explicit aggregate limit, retain the safe non-overcommitted
+		// default. Operators opt into overcommit by setting a lower Fastlet
+		// runtime-owner limit in fastletTemplate.
+		limit = defaultQuantity.DeepCopy()
+		if hasRequest && request.Cmp(limit) > 0 {
+			limit = request.DeepCopy()
+		}
+		container.Resources.Limits[name] = limit
+		if !hasRequest {
+			container.Resources.Requests[name] = defaultQuantity.DeepCopy()
+		}
+	}
+	return nil
+}
+
+func ensureBoundedPodContainers(podSpec *corev1.PodSpec, runtimeResourceOwner string) error {
+	for index := range podSpec.Containers {
+		container := &podSpec.Containers[index]
+		if container.Name == runtimeResourceOwner {
+			continue
+		}
+		if index == 0 || container.Name == "fastlet-proxy" {
+			applyDefaultPlatformResources(container)
+			continue
+		}
+		if err := validateContainerHasLimits(container); err != nil {
+			return fmt.Errorf("Fastlet sidecar resources: %w", err)
+		}
+	}
+	for index := range podSpec.InitContainers {
+		if err := validateContainerHasLimits(&podSpec.InitContainers[index]); err != nil {
+			return fmt.Errorf("Fastlet init container resources: %w", err)
+		}
+	}
+	return nil
+}
+
+func applyDefaultPlatformResources(container *corev1.Container) {
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	defaults := map[corev1.ResourceName]struct {
+		request resource.Quantity
+		limit   resource.Quantity
+	}{
+		corev1.ResourceCPU: {
+			request: resource.MustParse("50m"),
+			limit:   resource.MustParse("250m"),
+		},
+		corev1.ResourceMemory: {
+			request: resource.MustParse("64Mi"),
+			limit:   resource.MustParse("256Mi"),
+		},
+	}
+	for name, defaultValue := range defaults {
+		request, hasRequest := container.Resources.Requests[name]
+		if !hasRequest || request.IsZero() {
+			request = defaultValue.request.DeepCopy()
+			container.Resources.Requests[name] = request
+		}
+		limit, hasLimit := container.Resources.Limits[name]
+		if !hasLimit || limit.IsZero() {
+			limit = defaultValue.limit.DeepCopy()
+			if request.Cmp(limit) > 0 {
+				limit = request.DeepCopy()
+			}
+			container.Resources.Limits[name] = limit
+		}
+	}
+}
+
+func validateContainerHasLimits(container *corev1.Container) error {
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		limit, ok := container.Resources.Limits[name]
+		if !ok || limit.IsZero() {
+			return fmt.Errorf("container %q must define a non-zero %s limit so the Kubernetes Pod cgroup remains bounded", container.Name, name)
+		}
+		if request, exists := container.Resources.Requests[name]; exists && request.Cmp(limit) > 0 {
+			return fmt.Errorf("container %q request %s=%s exceeds limit %s", container.Name, name, request.String(), limit.String())
 		}
 	}
 	return nil

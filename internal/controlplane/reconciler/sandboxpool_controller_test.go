@@ -11,6 +11,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
+	"fast-sandbox/internal/fastlet/podcgroup"
 	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
@@ -271,6 +272,8 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	require.Equal(t, ":9093", envValue(pod.Spec.Containers[1].Env, "FASTLET_PROXY_METRICS_ADDRESS"))
 	require.Equal(t, int32(9093), containerPortForName(t, &pod.Spec.Containers[1], "proxy-metrics"))
 	require.Equal(t, int32(5780), pod.Spec.Containers[1].ReadinessProbe.HTTPGet.Port.IntVal)
+	require.Equal(t, "250m", pod.Spec.Containers[1].Resources.Limits.Cpu().String())
+	require.Equal(t, "256Mi", pod.Spec.Containers[1].Resources.Limits.Memory().String())
 	require.Equal(t, "/run/fast-sandbox/proxy/control.sock", envValue(pod.Spec.Containers[0].Env, "FASTLET_PROXY_CONTROL_SOCKET"))
 	require.NotNil(t, volumeMountForContainer(pod, 0, "proxy-control"))
 	require.NotNil(t, volumeMountForContainer(pod, 1, "proxy-control"))
@@ -279,8 +282,14 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	memory := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]
 	require.Equal(t, "5100m", cpu.String())
 	require.Equal(t, "5248Mi", memory.String())
+	cpuLimit := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	memoryLimit := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+	require.Equal(t, "5100m", cpuLimit.String())
+	require.Equal(t, "5248Mi", memoryLimit.String())
 	require.True(t, hasHostPath(pod, "/run/containerd"))
 	require.True(t, hasHostPath(pod, "/var/lib/containerd"))
+	require.True(t, hasHostPath(pod, podcgroup.HostPath))
+	require.False(t, volumeMountForNamedContainer(t, pod, "fastlet", podcgroup.VolumeName).ReadOnly)
 	require.True(t, hasHostPath(pod, "/run/fast-sandbox/netns"))
 	propagation := volumeMount(pod, "fast-sandbox-netns")
 	require.NotNil(t, propagation)
@@ -293,6 +302,60 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	changedPod, err := reconciler.constructPod(pool, profile)
 	require.NoError(t, err)
 	require.NotEqual(t, pod.Annotations[placement.AnnotationPodTemplateHash], changedPod.Annotations[placement.AnnotationPodTemplateHash])
+}
+
+func TestApplyFastletResourcesAllowsExplicitAggregateOvercommit(t *testing.T) {
+	container := corev1.Container{
+		Name: "fastlet",
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("5"),
+			corev1.ResourceMemory: resource.MustParse("5Gi"),
+		}},
+	}
+	overhead := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("128Mi"),
+	}
+	sandbox := apiv1alpha2.SandboxResourceProfile{
+		CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 128,
+	}
+
+	require.NoError(t, applyFastletResources(&container, overhead, sandbox, 10))
+	require.Equal(t, "5", container.Resources.Limits.Cpu().String())
+	require.Equal(t, "5Gi", container.Resources.Limits.Memory().String())
+	require.Equal(t, "5", container.Resources.Requests.Cpu().String())
+	require.Equal(t, "5Gi", container.Resources.Requests.Memory().String())
+}
+
+func TestApplyFastletResourcesRejectsLimitBelowRuntimeOverhead(t *testing.T) {
+	container := corev1.Container{
+		Name: "fastlet",
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("50m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		}},
+	}
+	overhead := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("128Mi"),
+	}
+	sandbox := apiv1alpha2.SandboxResourceProfile{
+		CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 128,
+	}
+
+	err := applyFastletResources(&container, overhead, sandbox, 10)
+	require.ErrorContains(t, err, "below runtime overhead")
+}
+
+func TestEnsureBoundedPodContainersRejectsUnboundedUserSidecar(t *testing.T) {
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{
+		{Name: "fastlet"},
+		{Name: "metrics-extension"},
+		{Name: "fastlet-proxy"},
+	}}
+
+	err := ensureBoundedPodContainers(podSpec, "fastlet")
+	require.ErrorContains(t, err, `container "metrics-extension" must define a non-zero cpu limit`)
 }
 
 func testInlineComponent() apiv1alpha2.InfraComponent {
@@ -563,7 +626,10 @@ func TestConstructPodInjectsBoxLiteRuntimeSidecarAsResourceOwner(t *testing.T) {
 	require.Equal(t, "boxlite-runtime:test", boxLite.Image)
 	require.False(t, *fastlet.SecurityContext.Privileged)
 	require.True(t, *boxLite.SecurityContext.Privileged)
-	require.Empty(t, fastlet.Resources.Requests)
+	require.Equal(t, "50m", fastlet.Resources.Requests.Cpu().String())
+	require.Equal(t, "64Mi", fastlet.Resources.Requests.Memory().String())
+	require.Equal(t, "250m", fastlet.Resources.Limits.Cpu().String())
+	require.Equal(t, "256Mi", fastlet.Resources.Limits.Memory().String())
 	cpu := boxLite.Resources.Requests[corev1.ResourceCPU]
 	memory := boxLite.Resources.Requests[corev1.ResourceMemory]
 	require.Equal(t, "3200m", cpu.String())

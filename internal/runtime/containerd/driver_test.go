@@ -11,6 +11,7 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
+	"fast-sandbox/internal/fastlet/podcgroup"
 	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 
@@ -42,6 +43,62 @@ func TestNewUsesCanonicalProfile(t *testing.T) {
 	require.Equal(t, "io.containerd.runsc.v1", driver.config.Handler)
 	require.Equal(t, "overlayfs", driver.snapshotter())
 	require.Equal(t, runtimecatalog.DefaultContainerdNamespace, driver.containerdNamespace())
+}
+
+func TestSandboxCgroupSpecOptPlacesRuntimeBelowFastletPod(t *testing.T) {
+	driver := newTestContainerdRuntime()
+	driver.podCgroup = &podcgroup.Layout{
+		Version: podcgroup.VersionV2,
+		PodPath: "/kubepods/burstable/pod873c13da-c645-461e-93f0-dfc24f63a6ad",
+	}
+	opt, err := driver.sandboxCgroupSpecOpt("sandbox-a")
+	require.NoError(t, err)
+	spec := &oci.Spec{}
+	require.NoError(t, opt(context.Background(), nil, nil, spec))
+	require.Equal(t,
+		"/kubepods/burstable/pod873c13da-c645-461e-93f0-dfc24f63a6ad/fast-sandbox/fsb-315bbe38938f7266",
+		spec.Linux.CgroupsPath,
+	)
+}
+
+func TestSandboxCgroupSpecOptUsesShimCompatibleSystemdEncoding(t *testing.T) {
+	layout := &podcgroup.Layout{
+		Version: podcgroup.VersionV2,
+		PodPath: "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod873c13da_c645_461e_93f0_dfc24f63a6ad.slice",
+		Systemd: true,
+	}
+
+	for _, testCase := range []struct {
+		name    string
+		runtime apiv1alpha2.RuntimeName
+		want    string
+	}{
+		{
+			name:    "runc systemd unit",
+			runtime: apiv1alpha2.RuntimeContainer,
+			want:    "kubepods-burstable-pod873c13da_c645_461e_93f0_dfc24f63a6ad.slice:fast-sandbox:fsb-315bbe38938f7266",
+		},
+		{
+			name:    "gvisor systemd unit",
+			runtime: apiv1alpha2.RuntimeGVisor,
+			want:    "kubepods-burstable-pod873c13da_c645_461e_93f0_dfc24f63a6ad.slice:fast-sandbox:fsb-315bbe38938f7266",
+		},
+		{
+			name:    "kata filesystem child",
+			runtime: apiv1alpha2.RuntimeKataQemu,
+			want:    "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod873c13da_c645_461e_93f0_dfc24f63a6ad.slice/fast-sandbox/fsb-315bbe38938f7266",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			driver := newWithConfig(testCase.runtime, "test-profile-hash", RuntimeConfig{})
+			driver.podCgroup = layout
+			opt, err := driver.sandboxCgroupSpecOpt("sandbox-a")
+			require.NoError(t, err)
+			spec := &oci.Spec{}
+			require.NoError(t, opt(context.Background(), nil, nil, spec))
+			require.Equal(t, testCase.want, spec.Linux.CgroupsPath)
+		})
+	}
 }
 
 func TestNewUsesResolvedSnapshotter(t *testing.T) {

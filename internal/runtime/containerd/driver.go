@@ -15,6 +15,7 @@ import (
 	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
+	"fast-sandbox/internal/fastlet/podcgroup"
 	"fast-sandbox/internal/nodecleanup"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
@@ -40,6 +41,7 @@ type Driver struct {
 	fastletPodName     string
 	fastletPodUID      string
 	fastletNamespace   string
+	podCgroup          *podcgroup.Layout
 	infraMgr           *infra.Manager
 	runtimeName        apiv1alpha2.RuntimeName // runtime profile identifier
 	runtimeProfileHash string
@@ -88,6 +90,24 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	if r.socketPath == "" {
 		r.socketPath = "/run/containerd/containerd.sock"
 	}
+	r.fastletPodName = os.Getenv("POD_NAME")
+	r.fastletPodUID = os.Getenv("POD_UID")
+	if r.fastletPodUID != "" {
+		layout, err := podcgroup.Discover(podcgroup.HostRoot, r.fastletPodUID)
+		if err != nil {
+			return fmt.Errorf("discover Fastlet Pod cgroup: %w", err)
+		}
+		r.podCgroup = &layout
+		if r.runtimeName == apiv1alpha2.RuntimeContainer {
+			if err := layout.EnsureShimGroup(podcgroup.HostRoot); err != nil {
+				return fmt.Errorf("prepare Fastlet shim cgroup: %w", err)
+			}
+		}
+		klog.InfoS("Discovered Fastlet Pod cgroup", "version", layout.Version, "path", layout.PodPath, "systemd", layout.Systemd)
+	} else {
+		klog.InfoS("POD_UID is not set; Sandbox cgroup aggregation is disabled outside Kubernetes")
+	}
+
 	klog.InfoS("Initializing runtime", "handler", r.config.Handler, "containerdNamespace", r.containerdNamespace())
 
 	ctx, cancel := context.WithTimeout(ctx, defaultOperationTimeout)
@@ -105,8 +125,6 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	}
 
 	r.client = client
-	r.fastletPodName = os.Getenv("POD_NAME")
-	r.fastletPodUID = os.Getenv("POD_UID")
 
 	return nil
 }
@@ -203,6 +221,12 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	var taskOpts []containerd.NewTaskOpts
 	if r.config.RuntimePath != "" {
 		taskOpts = append(taskOpts, containerd.WithRuntimePath(r.config.RuntimePath))
+	}
+	// WithShimCgroup mutates the runc-v2 task options and therefore is only
+	// valid for the built-in runc profile. Other shims still place their main
+	// workload/VMM through the OCI cgroupsPath below the Fastlet Pod.
+	if r.podCgroup != nil && r.runtimeName == apiv1alpha2.RuntimeContainer {
+		taskOpts = append(taskOpts, containerd.WithShimCgroup(r.podCgroup.ShimPath()))
 	}
 
 	taskCreateStarted := time.Now()
@@ -423,6 +447,13 @@ func (r *Driver) prepareSpecOpts(ctx context.Context, config *fastletapi.Sandbox
 		return nil, nil, err
 	}
 	specOpts = append(specOpts, resourceOpts...)
+	if r.podCgroup != nil {
+		cgroupOpt, err := r.sandboxCgroupSpecOpt(config.SandboxID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("derive Sandbox cgroup path: %w", err)
+		}
+		specOpts = append(specOpts, cgroupOpt)
+	}
 
 	// Add TTY option if required by runtime (e.g., gVisor)
 	if r.config.NeedsTTY {
@@ -450,6 +481,20 @@ func (r *Driver) prepareSpecOpts(ctx context.Context, config *fastletapi.Sandbox
 	specOpts = append(specOpts, oci.WithLinuxNamespace(networkNamespace))
 
 	return specOpts, infraInstance, nil
+}
+
+func (r *Driver) sandboxCgroupSpecOpt(sandboxID string) (oci.SpecOpts, error) {
+	if r.podCgroup == nil {
+		return nil, errors.New("Fastlet Pod cgroup is not initialized")
+	}
+	path, err := r.podCgroup.SandboxPath(sandboxID)
+	if r.runtimeName == apiv1alpha2.RuntimeContainer || r.runtimeName == apiv1alpha2.RuntimeGVisor {
+		path, err = r.podCgroup.SandboxSystemdPath(sandboxID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return oci.WithCgroup(path), nil
 }
 
 func withSandboxInit() oci.SpecOpts {
@@ -630,7 +675,15 @@ func (r *Driver) deleteContainerdSandbox(ctx context.Context, sandboxID string) 
 	); err != nil {
 		return err
 	}
-	return r.ensureResidualProcessAbsent(ctx, sandboxID)
+	if err := r.ensureResidualProcessAbsent(ctx, sandboxID); err != nil {
+		return err
+	}
+	if r.podCgroup != nil {
+		if err := r.podCgroup.RemoveSandboxGroups(podcgroup.HostRoot, sandboxID); err != nil {
+			return fmt.Errorf("remove Sandbox cgroup: %w", err)
+		}
+	}
+	return nil
 }
 
 func (r *Driver) ensureResidualProcessAbsent(ctx context.Context, sandboxID string) error {

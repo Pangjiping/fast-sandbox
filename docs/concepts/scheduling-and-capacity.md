@@ -16,6 +16,58 @@ One SandboxPool fixes:
 
 Runtime, resource, and Infra profiles are immutable because changing them would alter the meaning of already assigned Sandboxes.
 
+## Logical capacity and physical budget
+
+`maxSandboxesPerPod` is an admission count, while the Fastlet Pod's CPU and
+memory limits are its physical aggregate budget. They intentionally do not
+have to multiply to the same value.
+
+The safe default is:
+
+```text
+Fastlet runtime-owner request and limit
+  = runtime overhead + maxSandboxesPerPod * per-Sandbox resources
+```
+
+An operator enables overcommit explicitly by setting a lower runtime-owner
+limit in `fastletTemplate`. If no request is supplied, the Controller uses the
+lower explicit limit as the request. If a request is supplied, it must not
+exceed the limit. The limit must still cover the runtime overhead.
+
+Each Sandbox keeps its own CPU, memory, and PID limits. For containerd-backed
+runtimes, its OCI cgroup is created below the Kubernetes-owned Fastlet Pod
+cgroup. The bounded Pod parent therefore limits the sum of runc processes,
+gVisor sandboxes, or Kata VMMs even when their individual limits add up to
+more than the Pod budget.
+
+Example:
+
+```yaml
+spec:
+  maxSandboxesPerPod: 10
+  sandboxResources:
+    cpu: "1"
+    memory: 1Gi
+    pids: 256
+  fastletTemplate:
+    spec:
+      containers:
+        - name: fastlet
+          image: fast-sandbox/fastlet:dev
+          resources:
+            requests:
+              cpu: "5"
+              memory: 5Gi
+            limits:
+              cpu: "5"
+              memory: 5Gi
+```
+
+This Pool admits ten Sandboxes, each with a one-CPU/1 GiB ceiling, while their
+aggregate runtime budget is five CPUs/5 GiB plus the bounded platform proxy
+budget. Admission still fails at ten instances; CPU contention and memory OOM
+behavior are enforced by the cgroup hierarchy rather than by the Registry.
+
 ## Registry inputs
 
 Every Fast-Path and Controller replica maintains its own Registry from:

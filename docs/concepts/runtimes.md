@@ -128,15 +128,40 @@ BoxLite networking produces a local-forward access descriptor rather than a Fast
 See [BoxLite runtime](boxlite-runtime.md) for the implemented adapter, capability
 gaps, and proposed Prepared Runtime architecture.
 
-## Fixed Pool resources
+## Fixed Pool resources and aggregate overcommit
 
 Every Sandbox in one Pool uses the same immutable CPU, memory, and PID limits. Fastlet passes those values to the selected RuntimeDriver and is the enforcement boundary.
 
-The Pool Controller sizes the resource-owning Fastlet or runtime sidecar from:
+By default, the Pool Controller sizes both the request and limit of the
+resource-owning Fastlet or runtime sidecar from:
 
 ```text
 per-Sandbox resources * maxSandboxesPerPod + runtime overhead
 ```
+
+This default does not overcommit. An operator can opt into aggregate CPU or
+memory overcommit by setting a lower limit on the resource-owning container in
+`fastletTemplate`. For example, ten Sandboxes can each retain a `1` CPU limit
+while the Fastlet runtime owner has a `5` CPU aggregate limit. Per-Sandbox
+limits still isolate noisy neighbors, while the Kubernetes Pod cgroup caps
+their combined execution.
+
+Containerd-backed runtimes do not remain in containerd's top-level cgroup.
+Fastlet discovers its Kubernetes Pod cgroup from the Pod UID and the mounted
+host cgroup hierarchy, then gives every Sandbox a deterministic child cgroup.
+The discovery supports cgroup v1/v2 and cgroupfs/systemd layouts; it does not
+require a Runtime Environment field or a provider-specific annotation.
+The driver uses the systemd unit encoding understood by runc and runsc, while
+Kata and extension shims receive the equivalent filesystem-style child path.
+Deletion is not considered complete until the runtime process has left and
+the deterministic Sandbox cgroup can be removed.
+
+All long-running containers in the Fastlet Pod must have CPU and memory
+limits, otherwise Kubernetes cannot guarantee a bounded Pod parent cgroup.
+Fast Sandbox supplies bounded defaults for platform-owned control/proxy
+containers and rejects an unbounded user-provided sidecar. A configured
+aggregate limit may be lower than the sum of Sandbox limits, but not lower
+than the runtime's fixed overhead.
 
 A runtime that cannot enforce the requested profile must reject the Pool capability instead of silently weakening isolation.
 

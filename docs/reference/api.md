@@ -125,10 +125,10 @@ spec:
 | `capacity` | Yes | Pool size and idle-buffer bounds |
 | `maxSandboxesPerPod` | Yes | Fastlet-authoritative admission limit |
 | `runtime` | Yes | Immutable runtime name |
-| `sandboxResources` | Yes | Immutable per-Sandbox CPU, memory, and PID limits |
+| `sandboxResources` | Yes | Immutable per-Sandbox CPU, memory, and PID limits; their sum may exceed an explicitly lower Fastlet aggregate limit |
 | `warmImages` | No | Asynchronous, GC-protected cache inputs |
 | `infraComponents` | No | Inline immutable artifact/process/health/endpoint definitions |
-| `fastletTemplate` | Yes | Kubernetes Pod template with platform-owned fields protected |
+| `fastletTemplate` | Yes | Kubernetes Pod template with platform-owned fields protected; runtime-owner limits define the optional aggregate overcommit budget |
 
 Runtime names are `container`, `gvisor`, `kata-qemu`, `kata-clh`, `kata-fc`,
 `kata-dragonball`, and `boxlite`.
