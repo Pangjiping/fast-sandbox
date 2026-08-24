@@ -19,17 +19,18 @@ import (
 type DriverKind string
 
 const (
-	DriverKindContainerd DriverKind = "containerd"
-	DriverKindBoxLite    DriverKind = "boxlite"
+	DriverKindContainerd  DriverKind = "containerd"
+	DriverKindBoxLite     DriverKind = "boxlite"
 	DriverKindFirecracker DriverKind = "firecracker"
 )
 
 type NetworkMode string
 
 const (
-	NetworkModeLinuxNetNS NetworkMode = "linux-netns"
-	NetworkModeGuestNetNS NetworkMode = "guest-netns"
-	NetworkModeBoxLite    NetworkMode = "boxlite-gvproxy"
+	NetworkModeLinuxNetNS  NetworkMode = "linux-netns"
+	NetworkModeGuestNetNS  NetworkMode = "guest-netns"
+	NetworkModeBoxLite     NetworkMode = "boxlite-gvproxy"
+	NetworkModeFirecracker NetworkMode = "firecracker-tap"
 )
 
 const DefaultContainerdNamespace = "k8s.io"
@@ -91,14 +92,18 @@ type BoxLiteConfig struct {
 // direct Firecracker runtime driver. The driver boots one Firecracker
 // microVM on demand for every Sandbox create request; nothing is pre-warmed.
 type FirecrackerConfig struct {
-	BinaryPath      string `json:"binaryPath"`
-	JailerPath      string `json:"jailerPath,omitempty"`
-	KernelPath      string `json:"kernelPath"`
-	RootfsPath      string `json:"rootfsPath"`
-	StateRoot       string `json:"stateRoot"`
-	DefaultVCPUs    int32  `json:"defaultVCPUs"`
-	DefaultMemory   string `json:"defaultMemory"`
-	BootTimeoutSeconds int32 `json:"bootTimeoutSeconds"`
+	BinaryPath         string `json:"binaryPath"`
+	JailerPath         string `json:"jailerPath,omitempty"`
+	KernelPath         string `json:"kernelPath"`
+	RootfsPath         string `json:"rootfsPath"`
+	StateRoot          string `json:"stateRoot"`
+	DefaultVCPUs       int32  `json:"defaultVCPUs"`
+	DefaultMemory      string `json:"defaultMemory"`
+	BootTimeoutSeconds int32  `json:"bootTimeoutSeconds"`
+	// BootArgs is the optional base guest kernel command line. The guest
+	// network ip= argument is appended per Sandbox; an empty value selects
+	// the driver default.
+	BootArgs string `json:"bootArgs,omitempty"`
 }
 
 type HostPathRequirement struct {
@@ -153,9 +158,11 @@ type RuntimeProfile = RuntimeDefinition
 
 // UsesFastletNetNS reports whether the runtime consumes a Fastlet-owned Linux
 // network namespace. GuestNetNS runtimes turn that namespace into a guest NIC,
-// but retain the same slot lifecycle and DirectIP access contract.
+// but retain the same slot lifecycle and DirectIP access contract. The
+// firecracker-tap mode uses the slot for IP and access-descriptor allocation
+// and prepares its tap inside the slot lifecycle.
 func (p RuntimeProfile) UsesFastletNetNS() bool {
-	return p.NetworkMode == NetworkModeLinuxNetNS || p.NetworkMode == NetworkModeGuestNetNS
+	return p.NetworkMode == NetworkModeLinuxNetNS || p.NetworkMode == NetworkModeGuestNetNS || p.NetworkMode == NetworkModeFirecracker
 }
 
 // ContainerdNamespace returns the namespace used by runtime and artifact

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type CommandRunner interface {
@@ -157,7 +158,7 @@ func (d *LinuxNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 	}
 	var result error
 	if slot.NetNSName != "" {
-		if _, err := d.runner.Run(ctx, d.ipCommand, "netns", "delete", slot.NetNSName); err != nil && !isMissingNetworkResource(err) {
+		if err := deleteNetNSWithRetry(ctx, d.runner, d.ipCommand, slot.NetNSName); err != nil && !isMissingNetworkResource(err) {
 			result = errors.Join(result, err)
 		}
 	}
@@ -244,4 +245,22 @@ func isMissingNetworkResource(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "cannot find device") || strings.Contains(message, "no such file") ||
 		strings.Contains(message, "no such device") || strings.Contains(message, "cannot open network namespace")
+}
+
+// deleteNetNSWithRetry removes a slot network namespace. The deletion races
+// a VMM that is still exiting and returns EBUSY, which would otherwise leak
+// the namespace (and its private addresses) onto the shared bridge.
+func deleteNetNSWithRetry(ctx context.Context, runner CommandRunner, ipCommand, name string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = runner.Run(ctx, ipCommand, "netns", "delete", name); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return err
 }
