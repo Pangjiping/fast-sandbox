@@ -107,7 +107,7 @@ func main() {
 		configurable.SetRegistryProvider(registryProvider)
 	}
 	if runtimeProfile.UsesFastletNetNS() {
-		networkManager, err := newNetworkManager(capacityFromEnvironment(), podUID)
+		networkManager, err := newNetworkManager(capacityFromEnvironment(), podUID, runtimeProfile.NetworkMode)
 		if err != nil {
 			klog.ErrorS(err, "Failed to configure Fastlet-owned network")
 			os.Exit(1)
@@ -171,7 +171,7 @@ func main() {
 	}
 }
 
-func newNetworkManager(capacity int, podUID string) (*fastletnetwork.Manager, error) {
+func newNetworkManager(capacity int, podUID string, networkMode runtimecatalog.NetworkMode) (*fastletnetwork.Manager, error) {
 	config := fastletnetwork.DefaultConfig(capacity, podUID)
 	config.PodName = os.Getenv("POD_NAME")
 	config.PodNamespace = os.Getenv("NAMESPACE")
@@ -187,7 +187,11 @@ func newNetworkManager(capacity int, podUID string) (*fastletnetwork.Manager, er
 	}
 	config.MTU = mtu
 	store := fastletnetwork.NewFileStateStore(filepath.Join(config.StateRoot, podUID))
-	return fastletnetwork.NewManager(config, fastletnetwork.NewLinuxNetNSDriver(fastletnetwork.LinuxDriverConfig{}), store)
+	var driver fastletnetwork.Driver = fastletnetwork.NewLinuxNetNSDriver(fastletnetwork.LinuxDriverConfig{})
+	if networkMode == runtimecatalog.NetworkModeFirecracker {
+		driver = fastletnetwork.NewGuestVMNetNSDriver(fastletnetwork.LinuxDriverConfig{})
+	}
+	return fastletnetwork.NewManager(config, driver, store)
 }
 
 type networkConfigurable interface {

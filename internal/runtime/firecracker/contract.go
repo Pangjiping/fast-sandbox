@@ -10,8 +10,11 @@ type RuntimeResourceRecoverer = runtimecontract.ResourceRecoverer
 type AccessDescriptorProvider = runtimecontract.AccessDescriptorProvider
 
 var (
-	ErrInvalidConfig      = runtimecontract.ErrInvalidConfig
-	ErrNetworkUnavailable = runtimecontract.ErrNetworkUnavailable
+	ErrInvalidConfig         = runtimecontract.ErrInvalidConfig
+	ErrNetworkUnavailable    = runtimecontract.ErrNetworkUnavailable
+	ErrSandboxNotFound       = runtimecontract.ErrSandboxNotFound
+	ErrRuntimeNotInitialized = runtimecontract.ErrRuntimeNotInitialized
+	ErrInfraUnavailable      = runtimecontract.ErrInfraUnavailable
 )
 
 var validateExistingRuntimeProfile = runtimecontract.ValidateProfile

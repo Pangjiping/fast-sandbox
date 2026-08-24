@@ -10,7 +10,7 @@ FROM golang:1.25-alpine
 # EXPOSE 2345
 
 WORKDIR /workspace
-RUN apk add --no-cache iproute2 iptables
+RUN apk add --no-cache iproute2 iptables e2fsprogs
 COPY .build/linux-amd64/fastlet .
 COPY .build/linux-amd64/sandbox-init /opt/fast-sandbox/bin/sandbox-init
 COPY .build/linux-amd64/sandbox-tunnel /opt/fast-sandbox/bin/sandbox-tunnel

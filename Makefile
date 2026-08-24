@@ -222,6 +222,7 @@ e2e:
 				gvisor) flags="-run ^TestGVisor" ;; \
 				kata) flags="-p 1 -failfast -run ^TestKata" ;; \
 				boxlite) flags="-run ^TestRuntimeValidationUnsupportedBoxLite$$" ;; \
+				firecracker) flags="-run ^TestRuntimeValidationUnsupportedFirecracker$$" ;; \
 				*) echo "unknown runtime gate RUNTIME=$(RUNTIME)" >&2; exit 2 ;; \
 			esac ;; \
 		*) \
