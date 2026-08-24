@@ -8,6 +8,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	boxlitedriver "fast-sandbox/internal/runtime/boxlite/driver"
 	"fast-sandbox/internal/runtime/containerd"
+	firecrackerdriver "fast-sandbox/internal/runtime/firecracker"
 )
 
 type Factory struct {
@@ -69,6 +70,8 @@ func buildDriver(profile runtimecatalog.RuntimeProfile) (RuntimeDriver, error) {
 		return containerd.New(profile)
 	case runtimecatalog.DriverKindBoxLite:
 		return boxlitedriver.New(profile)
+	case runtimecatalog.DriverKindFirecracker:
+		return firecrackerdriver.New(profile)
 	default:
 		return nil, fmt.Errorf("%w: driver kind %q", ErrUnsupportedRuntime, profile.Driver)
 	}

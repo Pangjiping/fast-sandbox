@@ -11,6 +11,7 @@ import (
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	boxlitedriver "fast-sandbox/internal/runtime/boxlite/driver"
 	"fast-sandbox/internal/runtime/containerd"
+	firecrackerdriver "fast-sandbox/internal/runtime/firecracker"
 
 	"github.com/stretchr/testify/require"
 )
@@ -35,6 +36,12 @@ func TestHostCapabilityProberFailsClosed(t *testing.T) {
 	require.Equal(t, runtimecatalog.CapabilityUnsupported, report.State)
 	require.Equal(t, "BoxLiteResourceEnforcementIncomplete", report.Reason)
 
+	firecracker, err := catalog.Resolve(apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	report = NewHostCapabilityProber().Probe(context.Background(), firecracker, "")
+	require.Equal(t, runtimecatalog.CapabilityUnsupported, report.State)
+	require.Equal(t, "FirecrackerDriverUnimplemented", report.Reason)
+
 	kata, err := catalog.Resolve(apiv1alpha2.RuntimeKataQemu)
 	require.NoError(t, err)
 	prober := NewHostCapabilityProber()
@@ -54,6 +61,26 @@ func TestHostCapabilityProberAcceptsConfiguredFirecrackerProfile(t *testing.T) {
 	report := prober.Probe(context.Background(), profile, "/run/containerd/containerd.sock")
 	require.Equal(t, runtimecatalog.CapabilityAvailable, report.State)
 	require.Empty(t, report.Missing)
+}
+
+func TestHostCapabilityProberFirecrackerDriverGate(t *testing.T) {
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	prober := NewHostCapabilityProber()
+	prober.stat = func(string) (os.FileInfo, error) { return fakeFileInfo{}, nil }
+	report := prober.Probe(context.Background(), profile, "")
+	require.Equal(t, runtimecatalog.CapabilityUnsupported, report.State)
+	require.Equal(t, "FirecrackerDriverUnimplemented", report.Reason)
+
+	profile.Capabilities.DefaultState = runtimecatalog.CapabilityConfigured
+	report = prober.Probe(context.Background(), profile, "")
+	require.Equal(t, runtimecatalog.CapabilityAvailable, report.State)
+	require.Empty(t, report.Missing)
+
+	profile.Firecracker.BootTimeoutSeconds = 0
+	report = prober.Probe(context.Background(), profile, "")
+	require.Equal(t, runtimecatalog.CapabilityDegraded, report.State)
+	require.Equal(t, "RuntimeProfileInvalid", report.Reason)
 }
 
 func TestHostCapabilityProberRequiresFastSandboxCLHCgroupMode(t *testing.T) {
@@ -99,4 +126,10 @@ func TestBuildRuntimeDriverSelection(t *testing.T) {
 	driver, err = buildDriver(boxlite)
 	require.NoError(t, err)
 	require.IsType(t, &boxlitedriver.Driver{}, driver)
+
+	firecracker, err := catalog.Resolve(apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	driver, err = buildDriver(firecracker)
+	require.NoError(t, err)
+	require.IsType(t, &firecrackerdriver.Driver{}, driver)
 }

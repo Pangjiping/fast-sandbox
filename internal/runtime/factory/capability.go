@@ -82,6 +82,22 @@ func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.R
 			break
 		}
 		p.requirePath(&report, profile.BoxLite.ControlSocket, "BoxLiteSidecarUnavailable")
+	case runtimecatalog.DriverKindFirecracker:
+		if profile.Firecracker == nil {
+			p.missing(&report, "firecracker runtime configuration", "RuntimeProfileInvalid")
+			break
+		}
+		if profile.Firecracker.BinaryPath == "" || profile.Firecracker.KernelPath == "" || profile.Firecracker.RootfsPath == "" || profile.Firecracker.StateRoot == "" {
+			p.missing(&report, "firecracker runtime paths", "RuntimeProfileInvalid")
+			break
+		}
+		if profile.Firecracker.DefaultVCPUs < 1 || profile.Firecracker.DefaultMemory == "" || profile.Firecracker.BootTimeoutSeconds < 1 {
+			p.missing(&report, "firecracker boot profile", "RuntimeProfileInvalid")
+			break
+		}
+		p.requirePath(&report, profile.Firecracker.BinaryPath, "RuntimeBinaryUnavailable")
+		p.requirePath(&report, profile.Firecracker.KernelPath, "RuntimeKernelUnavailable")
+		p.requirePath(&report, profile.Firecracker.StateRoot, "RuntimeStateRootUnavailable")
 	default:
 		p.missing(&report, string(profile.Driver), "RuntimeDriverUnsupported")
 	}

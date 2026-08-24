@@ -7,7 +7,7 @@ import (
 )
 
 // RuntimeName is the canonical runtime profile selected by a SandboxPool.
-// +kubebuilder:validation:Enum=container;gvisor;kata-qemu;kata-clh;kata-fc;kata-dragonball;boxlite
+// +kubebuilder:validation:Enum=container;gvisor;kata-qemu;kata-clh;kata-fc;kata-dragonball;boxlite;firecracker
 type RuntimeName string
 
 const (
@@ -25,6 +25,8 @@ const (
 	RuntimeKataDragonball RuntimeName = "kata-dragonball"
 	// RuntimeBoxLite uses the BoxLite microVM runtime driver.
 	RuntimeBoxLite RuntimeName = "boxlite"
+	// RuntimeFirecracker uses the direct Firecracker microVM runtime driver.
+	RuntimeFirecracker RuntimeName = "firecracker"
 )
 
 // SandboxResourceProfile defines the fixed resource limit for every Sandbox in

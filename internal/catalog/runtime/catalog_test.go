@@ -16,6 +16,7 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 	expectedNames := []apiv1alpha2.RuntimeName{
 		apiv1alpha2.RuntimeBoxLite,
 		apiv1alpha2.RuntimeContainer,
+		apiv1alpha2.RuntimeFirecracker,
 		apiv1alpha2.RuntimeGVisor,
 		apiv1alpha2.RuntimeKataClh,
 		apiv1alpha2.RuntimeKataDragonball,
@@ -62,6 +63,20 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 	require.Equal(t, "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2", dragonball.Containerd.RuntimePath)
 	require.Contains(t, dragonball.Containerd.ConfigPath, "configuration-dragonball.toml")
 
+	firecracker, err := catalog.Resolve(apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	require.Equal(t, DriverKindFirecracker, firecracker.Driver)
+	require.Equal(t, CapabilityUnsupported, firecracker.Capabilities.DefaultState)
+	require.Equal(t, "FirecrackerDriverUnimplemented", firecracker.Capabilities.Reason)
+	require.Equal(t, ResidualProcessFirecracker, firecracker.ResidualProcess)
+	require.True(t, firecracker.Deployment.RequiresKVM)
+	require.True(t, hasHostPath(firecracker.Deployment.HostPaths, "/dev/kvm"))
+	require.True(t, hasHostPath(firecracker.Deployment.HostPaths, "/usr/local/bin/firecracker"))
+	require.Equal(t, "/usr/local/bin/firecracker", firecracker.Firecracker.BinaryPath)
+	require.Equal(t, "/opt/fast-sandbox/firecracker/vmlinux.bin", firecracker.Firecracker.KernelPath)
+	require.Equal(t, int32(1), firecracker.Firecracker.DefaultVCPUs)
+	require.Equal(t, "512Mi", firecracker.Firecracker.DefaultMemory)
+
 	for _, name := range []apiv1alpha2.RuntimeName{apiv1alpha2.RuntimeKataQemu, apiv1alpha2.RuntimeKataClh, apiv1alpha2.RuntimeKataDragonball} {
 		kataProfile, resolveErr := catalog.Resolve(name)
 		require.NoError(t, resolveErr)
@@ -93,6 +108,7 @@ func TestRuntimeProfilesUsingFastletNetworkHaveRequiredMounts(t *testing.T) {
 		apiv1alpha2.RuntimeKataClh,
 		apiv1alpha2.RuntimeKataDragonball,
 		apiv1alpha2.RuntimeKataFc,
+		apiv1alpha2.RuntimeFirecracker,
 	} {
 		profile, err := catalog.Resolve(name)
 		require.NoError(t, err)
