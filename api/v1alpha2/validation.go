@@ -24,7 +24,7 @@ var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 // IsRuntimeName reports whether name identifies a built-in runtime profile.
 func IsRuntimeName(name RuntimeName) bool {
 	switch name {
-	case RuntimeContainer, RuntimeGVisor, RuntimeKataQemu, RuntimeKataClh, RuntimeKataFc, RuntimeKataDragonball, RuntimeBoxLite:
+	case RuntimeContainer, RuntimeGVisor, RuntimeKataQemu, RuntimeKataClh, RuntimeKataFc, RuntimeKataDragonball, RuntimeBoxLite, RuntimeFirecracker:
 		return true
 	default:
 		return false

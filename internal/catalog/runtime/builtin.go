@@ -73,6 +73,30 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 			NetworkMode:        NetworkModeBoxLite,
 			InfraDeliveryModes: []InfraDeliveryMode{InfraDeliveryTemplateBake, InfraDeliveryPreinstalled, InfraDeliveryArtifactVolume},
 		},
+		apiv1alpha2.RuntimeFirecracker: withResidualProcess(
+			RuntimeProfile{
+				Name: apiv1alpha2.RuntimeFirecracker, Version: builtinProfileVersion, Driver: DriverKindFirecracker,
+				Firecracker: &FirecrackerConfig{
+					BinaryPath: "/usr/local/bin/firecracker", KernelPath: "/opt/fast-sandbox/firecracker/vmlinux.bin",
+					RootfsPath: "/var/lib/fast-sandbox/firecracker/rootfs", StateRoot: "/var/lib/fast-sandbox/firecracker",
+					DefaultVCPUs: 1, DefaultMemory: "512Mi", BootTimeoutSeconds: 30,
+				},
+				Deployment: DeploymentRequirements{
+					Privileged: true, RequiresKVM: true, Overhead: overhead("250m", "256Mi"),
+					HostPaths: append([]HostPathRequirement{
+						{Name: "dev-kvm", HostPath: "/dev/kvm", MountPath: "/dev/kvm", Type: corev1.HostPathCharDev},
+						{Name: "firecracker-bin", HostPath: "/usr/local/bin/firecracker", MountPath: "/usr/local/bin/firecracker", Type: corev1.HostPathFile, ReadOnly: true},
+						{Name: "firecracker-kernel", HostPath: "/opt/fast-sandbox/firecracker/vmlinux.bin", MountPath: "/opt/fast-sandbox/firecracker/vmlinux.bin", Type: corev1.HostPathFile, ReadOnly: true},
+						{Name: "firecracker-rootfs", HostPath: "/var/lib/fast-sandbox/firecracker/rootfs", MountPath: "/var/lib/fast-sandbox/firecracker/rootfs", Type: corev1.HostPathDirectoryOrCreate},
+						{Name: "firecracker-state", HostPath: "/var/lib/fast-sandbox/firecracker", MountPath: "/var/lib/fast-sandbox/firecracker", Type: corev1.HostPathDirectoryOrCreate},
+					}, linuxNetworkPaths...),
+				},
+				Capabilities:       Capabilities{DefaultState: CapabilityUnsupported, SupportsNetwork: true, SupportsRecovery: true, Reason: "FirecrackerDriverUnimplemented"},
+				NetworkMode:        NetworkModeGuestNetNS,
+				InfraDeliveryModes: []InfraDeliveryMode{InfraDeliveryTemplateBake, InfraDeliveryPreinstalled, InfraDeliveryGuestCopy},
+			},
+			ResidualProcessFirecracker,
+		),
 	}
 }
 

@@ -240,6 +240,7 @@ spec:
                 - kata-fc
                 - kata-dragonball
                 - boxlite
+                - firecracker
                 type: string
                 x-kubernetes-validations:
                 - message: runtime is immutable

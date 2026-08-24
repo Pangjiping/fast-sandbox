@@ -21,6 +21,7 @@ type DriverKind string
 const (
 	DriverKindContainerd DriverKind = "containerd"
 	DriverKindBoxLite    DriverKind = "boxlite"
+	DriverKindFirecracker DriverKind = "firecracker"
 )
 
 type NetworkMode string
@@ -86,6 +87,20 @@ type BoxLiteConfig struct {
 	DefaultMemory   string `json:"defaultMemory"`
 }
 
+// FirecrackerConfig carries the platform-owned paths and defaults for the
+// direct Firecracker runtime driver. The driver boots one Firecracker
+// microVM on demand for every Sandbox create request; nothing is pre-warmed.
+type FirecrackerConfig struct {
+	BinaryPath      string `json:"binaryPath"`
+	JailerPath      string `json:"jailerPath,omitempty"`
+	KernelPath      string `json:"kernelPath"`
+	RootfsPath      string `json:"rootfsPath"`
+	StateRoot       string `json:"stateRoot"`
+	DefaultVCPUs    int32  `json:"defaultVCPUs"`
+	DefaultMemory   string `json:"defaultMemory"`
+	BootTimeoutSeconds int32 `json:"bootTimeoutSeconds"`
+}
+
 type HostPathRequirement struct {
 	Name             string                      `json:"name"`
 	HostPath         string                      `json:"hostPath"`
@@ -123,6 +138,7 @@ type RuntimeDefinition struct {
 	Driver             DriverKind              `json:"driver"`
 	Containerd         *ContainerdConfig       `json:"containerd,omitempty"`
 	BoxLite            *BoxLiteConfig          `json:"boxlite,omitempty"`
+	Firecracker        *FirecrackerConfig      `json:"firecracker,omitempty"`
 	Deployment         DeploymentRequirements  `json:"deployment"`
 	Capabilities       Capabilities            `json:"capabilities"`
 	NetworkMode        NetworkMode             `json:"networkMode"`
@@ -236,6 +252,10 @@ func cloneProfile(profile RuntimeProfile) RuntimeProfile {
 	if profile.BoxLite != nil {
 		value := *profile.BoxLite
 		clone.BoxLite = &value
+	}
+	if profile.Firecracker != nil {
+		value := *profile.Firecracker
+		clone.Firecracker = &value
 	}
 	clone.Deployment.NodeSelector = cloneStringMap(profile.Deployment.NodeSelector)
 	clone.Deployment.HostPaths = append([]HostPathRequirement(nil), profile.Deployment.HostPaths...)
