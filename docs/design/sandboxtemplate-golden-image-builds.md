@@ -101,18 +101,19 @@ user writes, the **manifest** is the contract a runtime consumes, and the
   controller (Phase 2) with identical validation.
 - Artifacts must be content-addressed (digest over the produced files and
   manifest) so consumers can verify integrity and share cached blobs.
-- The build must support three artifact tiers with strict inclusion:
-  `ext4` (converted rootfs only) → `snapshot` (+ full snapshot) →
-  `overlaybd` (+ LSMT layers).
+- Every build produces the full snapshot set — `rootfs.ext4`,
+  `vmstate.snap`, `memory.snap` — regardless of format. `output.format`
+  selects only the storage encoding: `native` keeps the raw files,
+  `overlaybd` additionally converts rootfs/memory into LSMT layers. A
+  rootfs-only artifact is not a supported output.
 - The guest init must be selectable per template (injected PID 1, or the
   image's own init) and overridable per sandbox at runtime. The override is
   carried by the existing `CreateSandboxRequest.entrypoint` field — no new
   sandbox API surface.
 - Readiness must be defined per template: custom probe first, execd `/ping`
   by default, time-based warmup plus image healthcheck as fallback.
-- Every produced format must pass a boot validation gate; for `ext4` this is
-  a boot-only validation (start, reach readiness, stop) without retaining
-  snapshot artifacts.
+- Every build must pass the boot validation gate (start, reach readiness,
+  stop) plus a restore validation of the produced snapshot.
 - The manifest must record the snapshot compatibility tuple (kernel digest,
   host kernel, CPU model, Firecracker version) so consumers can select a
   compatible restore node.
@@ -145,14 +146,17 @@ spec:
     healthCheck: ""                           # empty: image CMD-SHELL
   output:
     rootfsSize: "30Gi"
-    format: overlaybd                        # ext4 | snapshot | overlaybd
+    format: overlaybd                        # native | overlaybd (default)
     publish: s3://bucket/sandbox-images/     # optional, digest-addressed
+    publishSecretRef:                        # optional, imagePullSecrets-style
+      name: sandbox-oss-credentials          # secret maintained by the cluster
     prime:                                 # optional seed-node prime
       nodeSelector:                          # best-effort, never blocks the build
         node-role.open-sandbox.io/agent: "true"
 ```
 
-The build pipeline has three stages, selected by `output.format`:
+The build pipeline always produces the full snapshot set; `output.format`
+selects only the storage encoding of the final artifacts:
 
 1. **convert** — materialize the OCI layers directly into a sparse ext4
    image (e.g. with the `oci2rootfs` tool), repair with `e2fsck`, then
@@ -160,15 +164,13 @@ The build pipeline has three stages, selected by `output.format`:
    guest init, and `/etc/sandbox-init.env` (OCI `Config.Env` merged with
    `spec.envs`).
 2. **validate-boot** — boot the rootfs on a KVM host with the embedded
-   kernel and wait for guest readiness. For `ext4` this is the terminal
-   validation gate (start, reach readiness, stop; no snapshot artifacts are
-   retained). For `snapshot`/`overlaybd` it continues into the snapshot
-   stage.
+   kernel and wait for guest readiness (mandatory for every format).
 3. **snapshot** — pause the validated guest and create a full snapshot
    (`vmstate.snap` + `memory.snap`); restore once for validation.
-4. **package** — convert `rootfs.ext4` and `memory.snap` into independent
-   OverlayBD LSMT commit layers (windowed import, zero-run elision, seal,
-   byte-for-byte verification).
+4. **package** (overlaybd only) — convert `rootfs.ext4` and `memory.snap`
+   into independent OverlayBD LSMT commit layers (windowed import, zero-run
+   elision, seal, byte-for-byte verification). For `native`, the raw files
+   are published as-is.
 
 Every build emits a content-addressed `manifest.json`:
 
@@ -208,8 +210,8 @@ Every build emits a content-addressed `manifest.json`:
   tracks content plus runtime writes, not the declared size. The value is
   recorded as-is in the manifest for consumers (e.g. the runtime driver
   sizing the instance root drive).
-- **Runtime consumer**: the Phase 1 consumer of the `ext4` artifact is the
-  Firecracker runtime driver in the fast-sandbox project, which already
+- **Runtime consumer**: the Phase 1 consumer of the produced artifacts is
+  the Firecracker runtime driver in the fast-sandbox project, which already
   maintains the content-addressed cache
   (`<StateRoot>/images/<sha256(imageRef)>/rootfs.img`) and pulls artifacts
   by digest. The template's `publish` target becomes the pull source; the
@@ -219,6 +221,35 @@ Every build emits a content-addressed `manifest.json`:
   successful build, so P2P spread and cold-start storms start from warm
   seeds. Prime never blocks or fails the build; unreachable nodes are
   skipped and the object store remains the authoritative source.
+- **Publish credentials**: for a private object store,
+  `output.publishSecretRef` names (imagePullSecrets-style) a secret in the
+  template's namespace; the secret is created and maintained out of band by
+  the cluster — the template only references it. The secret contract is:
+
+  ```yaml
+  kind: Secret
+  metadata:
+    name: sandbox-oss-credentials
+  type: Opaque
+  stringData:
+    accessKeyId: <id>
+    secretAccessKey: <key>
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com   # optional (S3 default)
+    region: cn-hangzhou                                # optional
+  ```
+
+  The consumer resolves the secret at execution time and injects it into
+  the build environment only (e.g. the Job's env); credentials are never
+  copied into the CR status or the artifact manifest. When
+  `publishSecretRef` is unset, the build falls back to ambient credentials
+  (instance role / IRSA, or local aws configuration for the CLI).
+- **Object store is S3-compatible**: the `s3://` publish URI is a protocol
+  abstraction, not a vendor binding — every consumer (aws CLI, overlaybd)
+  speaks the S3 protocol. The secret's `endpoint` selects the actual
+  backend: an Alibaba OSS S3-compatible endpoint (e.g.
+  `https://oss-cn-hangzhou.aliyuncs.com` via `aws s3 --endpoint-url`), AWS
+  S3 (endpoint omitted, region defaults), or any other S3-compatible store
+  (MinIO, Ceph RGW, ...).
 - **execd injection boundary**: only the execd binary and fixed bootstrap
   skeleton are build-time injected. Per-sandbox configuration (infra.json,
   identity, component env) remains runtime-generated, written into the
@@ -237,22 +268,24 @@ Every build emits a content-addressed `manifest.json`:
 - **Readiness precedence**: custom `probe` (`tcp://` or `cmd://`) → execd
   `/ping` (default) → `warmupSeconds` + `healthCheck` (fallback, e.g. when
   execd is not injected; empty healthcheck uses the image `CMD-SHELL`).
-- **Format tiers are inclusive**: `overlaybd` implies `snapshot` implies
-  `ext4`; a single value selects the pipeline depth.
+- **Format selects encoding only**: `output.format` is `native` (raw
+  `rootfs.ext4` + `vmstate.snap` + `memory.snap`) or `overlaybd` (rootfs and
+  memory additionally converted to LSMT layers; `vmstate.snap` stays a plain
+  file because it is small). Both formats contain the full snapshot set —
+  there is no rootfs-only artifact. The default is `overlaybd`.
 - **Guest network**: the snapshot stage deliberately does not configure
   external connectivity so live connections are not captured in the
   snapshot. Snapshotting workloads with active connections is out of scope.
 - **Source image compatibility**: the converter applies layer ordering,
   compression, hard links, and whiteouts, but may skip device nodes and
-  timestamps/xattrs; the boot (and restore, for snapshot formats)
-  validation is a mandatory compatibility gate for the selected source
-  image.
+  timestamps/xattrs; the boot and restore validation is a mandatory
+  compatibility gate for the selected source image.
 
 ### Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Converter fidelity (whiteout leftovers, missing device nodes) | `e2fsck -fy` repair + read-only re-check + mandatory boot validation per build (restore validation for snapshot formats) |
+| Converter fidelity (whiteout leftovers, missing device nodes) | `e2fsck -fy` repair + read-only re-check + mandatory boot and restore validation per build |
 | Snapshot captures an unready or half-initialized guest | Readiness gate before snapshot; warmup baseline; application-specific readiness preferred |
 | Snapshot portability (kernel/CPU features) | Manifest records the compatibility tuple (kernel digest, host kernel, CPU model, Firecracker version); consumers match it against node labels before restore |
 | Artifact tampering or corruption in transit | Content-addressed manifest + `SHA256SUMS`; consumers verify digests |
@@ -303,9 +336,20 @@ type ReadinessSpec struct {
     HealthCheck   string `json:"healthCheck,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=ext4;snapshot;overlaybd
-// +kubebuilder:default=ext4
+// Format selects the storage encoding of the produced snapshot set. Both
+// formats contain the full artifacts — rootfs.ext4, vmstate.snap,
+// memory.snap; a rootfs-only output is not supported.
+// +kubebuilder:validation:Enum=native;overlaybd
+// +kubebuilder:default=overlaybd
 type ArtifactFormat string
+
+const (
+    // ArtifactFormatNative keeps the raw snapshot files as-is.
+    ArtifactFormatNative ArtifactFormat = "native"
+    // ArtifactFormatOverlayBD converts rootfs and memory into OverlayBD
+    // LSMT commit layers for lazy loading; vmstate.snap stays a plain file.
+    ArtifactFormatOverlayBD ArtifactFormat = "overlaybd"
+)
 
 type OutputSpec struct {
     // RootfsSize is the logical size of the converted rootfs.ext4 — the
@@ -320,6 +364,13 @@ type OutputSpec struct {
     RootfsSize string          `json:"rootfsSize"`
     Format        ArtifactFormat `json:"format"`
     Publish       string         `json:"publish,omitempty"`
+    // PublishSecretRef references (imagePullSecrets-style) the secret in the
+    // template's namespace holding the object-store credentials. The secret
+    // is created and maintained out of band by the cluster; the template only
+    // names it. Secret contents are never copied into the CR status or the
+    // manifest.
+    // +optional
+    PublishSecretRef *corev1.LocalObjectReference `json:"publishSecretRef,omitempty"`
     // Prime optionally selects seed nodes (by label selector) whose agent
     // warms the local cache after a successful build. Always best-effort:
     // it never blocks or fails the build, and the object store stays the
@@ -351,8 +402,9 @@ a shared library (`components/internal` or a dedicated package) invoked by
 both executors. External tools are dependencies, not embedded logic:
 `oci2rootfs` (or an equivalent layer-applier), `firecracker`, `e2fsprogs`,
 and the OverlayBD toolchain. The engine emits the manifest and `SHA256SUMS`.
-Every format runs the validate-boot gate; only `snapshot`/`overlaybd`
-continue into snapshot and package.
+Every build runs the validate-boot gate and the snapshot stage (with
+restore validation); the `overlaybd` format additionally packages LSMT
+layers.
 
 ### Phase 1 — `osb image` CLI
 
@@ -364,8 +416,8 @@ osb image build -f template.yaml --set image=...:v1.0.22   # overrides
 ```
 
 The CLI shares the schema validation and the engine with the controller.
-Local execution requires a KVM-capable host for `snapshot`/`overlaybd`
-formats.
+Local execution requires a KVM-capable host (every build boots and
+restores the snapshot).
 
 ### Phase 2 — controller
 
@@ -374,8 +426,12 @@ A controller watches `SandboxTemplate`:
 ```
 reconcile(template):
   validate spec
-  → create a Kubernetes Job (builder image, spec → env/args, format
-    decides pipeline depth; /dev/kvm device for snapshot/overlaybd)
+  → create a Kubernetes Job (builder image, spec → env/args; every build
+    boots and restores the snapshot, so /dev/kvm is required; format only
+    selects the overlaybd packaging step)
+  → when output.publishSecretRef is set, read the referenced secret and
+    inject accessKeyId/secretAccessKey/endpoint/region into the Job env
+    (aws CLI credentials); never persist them on the CR
   → wait for completion → read manifest (digest verified)
   → publish to spec.output.publish (digest-addressed)
   → if output.prime set: notify the agent pods on matching seed nodes
@@ -392,24 +448,23 @@ Generation tracking drives rebuilds on template changes; failed builds set
 
 The produced artifacts are consumed by the Firecracker runtime driver:
 
-- `ext4`: the existing content-addressed cache
-  (`<StateRoot>/images/<sha256(imageRef)>/rootfs.img`) — the template's
-  `publish` target becomes the source for on-demand pull with digest
-  verification.
-- `snapshot`: restore path for fast startup.
-- `overlaybd`: root drive / memory backend backed by LSMT layers (runtime
-  support lands separately).
+- `native`: raw snapshot files — `rootfs.ext4` feeds the existing
+  content-addressed cache (`<StateRoot>/images/<sha256(imageRef)>/rootfs.img`),
+  `vmstate.snap` + `memory.snap` feed the restore path for fast startup.
+- `overlaybd`: root drive / memory backend backed by LSMT layers for
+  lazy loading (runtime support lands separately); `vmstate.snap` stays a
+  plain file.
 
 The per-sandbox `init` override resolves as:
 `CreateSandboxRequest.entrypoint > template manifest.init > kernel default`.
 
 ## Test Plan
 
-- **Unit**: schema validation (field combos, format tiers, readiness
+- **Unit**: schema validation (field combos, format encodings, readiness
   precedence), manifest digest computation, engine stage wiring.
-- **Integration (CLI)**: build each format tier against a small fixture OCI
+- **Integration (CLI)**: build each format encoding against a small fixture OCI
   image; assert manifest fields, file digests, and `e2fsck` clean state.
-- **E2E**: boot the produced `ext4` rootfs in a Firecracker microVM and run
+- **E2E**: restore the produced snapshot (both `native` and `overlaybd` encodings) and run
   the execd smoke path; restore a produced snapshot and assert guest
   readiness; byte-for-byte verify OverlayBD layers against sources.
 - **Controller (Phase 2, Kind)**: apply a `SandboxTemplate`, assert the Job
@@ -450,7 +505,7 @@ The per-sandbox `init` override resolves as:
 
 ## Infrastructure Needed
 
-- A KVM-capable build environment for `snapshot`/`overlaybd` formats
+- A KVM-capable build environment (every build boots the rootfs and restores the snapshot)
   (CI runners or dedicated build nodes with `/dev/kvm`).
 - A digest-addressed object store for artifact publication
   (`spec.output.publish`), e.g. S3/OSS-compatible storage.
