@@ -199,6 +199,15 @@ Every build emits a content-addressed `manifest.json`:
 
 ### Notes/Constraints/Caveats
 
+- **rootfsSize semantics**: `output.rootfsSize` is the logical size of the
+  converted `rootfs.ext4` — the capacity the guest sees as its root drive.
+  It is an independent target (Kubernetes quantity, binary units, default
+  `"30Gi"`), not derived from the OCI image size. The expanded OCI content
+  only imposes a **lower bound**: a rootfsSize smaller than the expanded
+  content fails the conversion. The image is sparse, so actual disk usage
+  tracks content plus runtime writes, not the declared size. The value is
+  recorded as-is in the manifest for consumers (e.g. the runtime driver
+  sizing the instance root drive).
 - **Runtime consumer**: the Phase 1 consumer of the `ext4` artifact is the
   Firecracker runtime driver in the fast-sandbox project, which already
   maintains the content-addressed cache
@@ -299,7 +308,14 @@ type ReadinessSpec struct {
 type ArtifactFormat string
 
 type OutputSpec struct {
-    // Kubernetes resource quantity (e.g. "10Gi", "30Gi").
+    // RootfsSize is the logical size of the converted rootfs.ext4 — the
+    // capacity the guest sees as its root drive (/dev/vda). It is a
+    // Kubernetes resource quantity (binary units, e.g. "10Gi", "1536Mi");
+    // the file is sparse, so actual disk usage grows with content and
+    // runtime writes, not with this value. It must be large enough to hold
+    // the expanded OCI image content; there is no upper constraint other
+    // than logical-capacity cost. Independent of machine.memory (disk vs
+    // RAM). Recorded as-is in the manifest.
     // +kubebuilder:default="30Gi"
     RootfsSize string          `json:"rootfsSize"`
     Format        ArtifactFormat `json:"format"`
