@@ -234,6 +234,13 @@ Every build emits a content-addressed `manifest.json`:
   copied into the CR status or the artifact manifest. When
   `publishSecretRef` is unset, the build falls back to ambient credentials
   (instance role / IRSA, or local aws configuration for the CLI).
+- **Object store is S3-compatible**: the `s3://` publish URI is a protocol
+  abstraction, not a vendor binding — every consumer (aws CLI, overlaybd)
+  speaks the S3 protocol. The secret's `endpoint` selects the actual
+  backend: an Alibaba OSS S3-compatible endpoint (e.g.
+  `https://oss-cn-hangzhou.aliyuncs.com` via `aws s3 --endpoint-url`), AWS
+  S3 (endpoint omitted, region defaults), or any other S3-compatible store
+  (MinIO, Ceph RGW, ...).
 - **execd injection boundary**: only the execd binary and fixed bootstrap
   skeleton are build-time injected. Per-sandbox configuration (infra.json,
   identity, component env) remains runtime-generated, written into the
