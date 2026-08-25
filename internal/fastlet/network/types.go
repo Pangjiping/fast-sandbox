@@ -59,29 +59,33 @@ type AccessDescriptor = dataplane.AccessDescriptor
 // HostNetNSPath is consumed by host containerd; NetNSPath is the path visible
 // inside the Fastlet container for lifecycle operations.
 type Slot struct {
-	Version        int              `json:"version"`
-	ID             string           `json:"id"`
-	OwnerPodUID    string           `json:"ownerPodUid"`
-	OwnerPodName   string           `json:"ownerPodName,omitempty"`
-	OwnerNamespace string           `json:"ownerNamespace,omitempty"`
-	Phase          SlotPhase        `json:"phase"`
-	Owner          Owner            `json:"owner,omitempty"`
-	NetNSName      string           `json:"netnsName"`
-	NetNSPath      string           `json:"netnsPath"`
-	HostNetNSPath  string           `json:"hostNetnsPath"`
-	HostVeth       string           `json:"hostVeth"`
-	PeerVeth       string           `json:"peerVeth"`
-	Bridge         string           `json:"bridge"`
-	Address        string           `json:"address"`
-	IP             string           `json:"ip"`
-	Gateway        string           `json:"gateway"`
-	PrivateCIDR    string           `json:"privateCidr"`
-	DNSPath        string           `json:"dnsPath"`
-	MTU            int              `json:"mtu"`
-	EgressDevice   string           `json:"egressDevice"`
-	Access         AccessDescriptor `json:"access"`
-	CreatedAt      time.Time        `json:"createdAt"`
-	BoundAt        *time.Time       `json:"boundAt,omitempty"`
+	Version        int       `json:"version"`
+	ID             string    `json:"id"`
+	OwnerPodUID    string    `json:"ownerPodUid"`
+	OwnerPodName   string    `json:"ownerPodName,omitempty"`
+	OwnerNamespace string    `json:"ownerNamespace,omitempty"`
+	Phase          SlotPhase `json:"phase"`
+	Owner          Owner     `json:"owner,omitempty"`
+	NetNSName      string    `json:"netnsName"`
+	NetNSPath      string    `json:"netnsPath"`
+	HostNetNSPath  string    `json:"hostNetnsPath"`
+	HostVeth       string    `json:"hostVeth"`
+	PeerVeth       string    `json:"peerVeth"`
+	Bridge         string    `json:"bridge"`
+	// GuestTap is the host-side tap device for guest-VM runtimes (Firecracker).
+	// It is prepared by GuestVMNetNSDriver and consumed by the runtime driver
+	// as the VM's host_dev_name; container runtimes leave it unused.
+	GuestTap     string           `json:"guestTap,omitempty"`
+	Address      string           `json:"address"`
+	IP           string           `json:"ip"`
+	Gateway      string           `json:"gateway"`
+	PrivateCIDR  string           `json:"privateCidr"`
+	DNSPath      string           `json:"dnsPath"`
+	MTU          int              `json:"mtu"`
+	EgressDevice string           `json:"egressDevice"`
+	Access       AccessDescriptor `json:"access"`
+	CreatedAt    time.Time        `json:"createdAt"`
+	BoundAt      *time.Time       `json:"boundAt,omitempty"`
 }
 
 type Driver interface {

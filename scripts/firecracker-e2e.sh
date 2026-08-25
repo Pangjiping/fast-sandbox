@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# firecracker-e2e.sh — run the Firecracker runtime driver E2E on a Linux host.
+#
+# Requirements:
+#   - Linux x86_64 with KVM (/dev/kvm) and /dev/net/tun
+#   - root (netns, tap, iptables setup) — the script re-invokes itself with sudo
+#   - ip, iptables, sysctl, ping, tar, curl
+#
+# The script downloads a firecracker release and the firecracker quickstart
+# kernel/rootfs, then runs:
+#   go test -tags firecracker -run TestFirecrackerDriverE2E ./internal/runtime/firecracker/
+#
+# Host impact: the test uses a private 172.30.0.0/24 bridge and sets host-wide
+# ip_forward plus one MASQUERADE rule; these are restored automatically on
+# exit (only when they did not exist before the run). --cleanup is available
+# for interrupted runs.
+#
+# Overrides (environment):
+#   FC_VERSION    firecracker release tag, default v1.16.1 (latest upstream stable)
+#   FC_BINARY     firecracker binary path (skips download when set)
+#   FC_KERNEL     kernel image path (skips download when set)
+#   FC_ROOTFS     converted rootfs ext4 image (skips download when set)
+#   FC_STATE_ROOT driver StateRoot (defaults to a temp dir; use a reflink-
+#                 capable filesystem to avoid the first-fsync writeback cost)
+#   WORK          workspace dir, default $PWD/.firecracker-e2e
+#
+# Version baseline: latest upstream stable firecracker (vanilla). The driver
+# client only uses the stable v1.x API surface, so any v1.x >= 1.0 works for
+# cold boot; the version only matters once snapshot ABI compatibility is
+# pinned per the runtime manifest.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK="${WORK:-$PWD/.firecracker-e2e}"
+BIN_DIR="$WORK/bin"
+ART_DIR="$WORK/artifacts"
+FC_VERSION="${FC_VERSION:-v1.16.1}"
+FC_BINARY="${FC_BINARY:-$BIN_DIR/firecracker}"
+FC_KERNEL="${FC_KERNEL:-$ART_DIR/vmlinux.bin}"
+FC_ROOTFS="${FC_ROOTFS:-$ART_DIR/bionic.rootfs.ext4}"
+
+PRIVATE_CIDR="172.30.0.0/24"
+BRIDGE_NAME="fsb0"
+
+log() { printf '\033[1;34m[e2e]\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m[e2e] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# --- cleanup -----------------------------------------------------------------
+# Every resource this E2E family creates is derived from a per-run Pod UID:
+#   netns      fsb<64 hex>      resourceName("fsb", podUID, slotID, 63)
+#   host veth  fh<13 hex>       resourceName("fh", podUID, slotID, 15)
+#   guest tap  fc<13 hex>       resourceName("fc", podUID, slotID, 15)
+# Stale copies from earlier runs (crashed script, interrupted test) survive
+# `ip netns del` and carry the same private addresses, which corrupts ARP on
+# the shared bridge. purge_fsb_resources removes every fsb netns and every
+# fsb0-attached fh/fc device so a rerun starts from a clean host. The bridge
+# and its own address are restored separately by cleanup_host_state.
+
+fsb_netns_pattern='^fsb[0-9a-f]{32,}$'
+fsb0_dev_pattern='^(fc|fh)[0-9a-f]{10,}$'
+PRE_RUN_NETNS="$WORK/pre-run-netns"
+
+is_live_netns() { ip netns list 2>/dev/null | awk '{print $1}' | grep -qx "$1"; }
+
+kill_firecracker_vms() {
+    # Firecracker processes this E2E family launched carry --id e2e-sandbox-*.
+    for pid in $(pgrep -f "firecracker .*--id e2e-sandbox-" 2>/dev/null || true); do
+        kill "$pid" 2>/dev/null || true
+    done
+    # Netns deletion races the dying VMM holding the namespace (EBUSY), so
+    # wait a moment for the processes to exit before tearing devices down.
+    sleep 1
+}
+
+purge_fsb_resources() {
+    kill_firecracker_vms
+    for path in /var/run/netns/fsb*; do
+        [[ -e "$path" ]] || continue
+        name="$(basename "$path")"
+        [[ "$name" =~ $fsb_netns_pattern ]] || continue
+        if is_live_netns "$name"; then
+            for attempt in 1 2 3; do
+                ip netns del "$name" 2>/dev/null && break
+                sleep 0.2
+            done
+        fi
+        if [[ -e "$path" ]]; then
+            rm -f "$path"
+            log "removed stale netns $name"
+        fi
+    done
+    # Host-side veths/taps left on the bridge by earlier runs (or by the
+    # firecracker fallback tap naming fc-<10 hex>) keep stale addresses alive.
+    for dev in $(ip -o link show master "$BRIDGE_NAME" 2>/dev/null | awk -F'[ :]+' '{print $2}' | sort -u); do
+        [[ "$dev" =~ $fsb0_dev_pattern ]] || [[ "$dev" =~ ^fc-[0-9a-f]{10}$ ]] || continue
+        ip link del "$dev" 2>/dev/null || true
+        log "removed stale bridge device $dev"
+    done
+}
+
+record_pre_run_netns() {
+    ip netns list 2>/dev/null | awk '{print $1}' | sort > "$PRE_RUN_NETNS"
+}
+
+# Records the pre-existing host state so cleanup only removes what the test
+# created (the bridge, MASQUERADE, and ip_forward are restored by
+# cleanup_host_state; per-slot resources are always purged).
+record_host_state() {
+    _forward_before="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 1)"
+    _bridge_before="no"
+    if ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then _bridge_before="yes"; fi
+    _masq_before="no"
+    if iptables -t nat -C POSTROUTING -s "$PRIVATE_CIDR" ! -d "$PRIVATE_CIDR" -j MASQUERADE 2>/dev/null; then _masq_before="yes"; fi
+}
+
+cleanup_leftovers() {
+    # Per-slot resources of this and earlier runs: netns, taps, and veths.
+    # The bridge and host-wide rules are restored by cleanup_host_state.
+    purge_fsb_resources
+}
+
+cleanup_host_state() {
+    # Restore only what the test created.
+    if [[ "$_bridge_before" == "no" ]] && ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
+        ip link del "$BRIDGE_NAME" 2>/dev/null || true
+    fi
+    if [[ "$_masq_before" == "no" ]]; then
+        iptables -t nat -D POSTROUTING -s "$PRIVATE_CIDR" ! -d "$PRIVATE_CIDR" -j MASQUERADE 2>/dev/null || true
+    fi
+    if [[ "$_forward_before" != "1" ]]; then
+        sysctl -w net.ipv4.ip_forward="$_forward_before" >/dev/null 2>&1 || true
+    fi
+}
+
+# --- re-invoke as root -------------------------------------------------------
+if [[ "$(id -u)" -ne 0 ]]; then
+    if command -v sudo >/dev/null; then
+        log "re-invoking as root (sudo -E)"
+        exec sudo -E env "PATH=$PATH" "WORK=$WORK" "FC_VERSION=$FC_VERSION" \
+            "FC_BINARY=$FC_BINARY" "FC_KERNEL=$FC_KERNEL" "FC_ROOTFS=$FC_ROOTFS" \
+            "FC_STATE_ROOT=${FC_STATE_ROOT:-}" \
+            "$0" "$@"
+    fi
+    die "must run as root (or install sudo)"
+fi
+
+# --- explicit cleanup mode ---------------------------------------------------
+if [[ "${1:-}" == "--cleanup" ]]; then
+    record_host_state
+    cleanup_leftovers
+    cleanup_host_state
+    log "host cleanup done (netns, firecracker processes, $BRIDGE_NAME bridge, MASQUERADE rule)"
+    exit 0
+fi
+
+# --- host prechecks ----------------------------------------------------------
+[[ "$(uname -s)" == "Linux" ]] || die "requires Linux, got $(uname -s)"
+[[ "$(uname -m)" == "x86_64" ]] || die "requires x86_64, got $(uname -m)"
+[[ -e /dev/kvm ]] || die "/dev/kvm is missing (enable KVM/nested virt)"
+[[ -w /dev/kvm ]] || die "/dev/kvm is not writable"
+[[ -e /dev/net/tun ]] || die "/dev/net/tun is missing"
+for cmd in ip iptables sysctl ping tar curl; do
+    command -v "$cmd" >/dev/null || die "missing required command: $cmd"
+done
+
+mkdir -p "$BIN_DIR" "$ART_DIR" /run/netns /run/fast-sandbox/netns
+
+# --- artifacts ---------------------------------------------------------------
+download() { # url target
+    log "downloading $2"
+    curl -fL --retry 3 -o "$2.tmp" "$1" || die "download failed: $1"
+    mv "$2.tmp" "$2"
+}
+
+if [[ ! -x "$FC_BINARY" ]]; then
+    tarball="$WORK/firecracker-$FC_VERSION-x86_64.tgz"
+    download "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-x86_64.tgz" "$tarball"
+    mkdir -p "$WORK/extract"
+    tar -xzf "$tarball" -C "$WORK/extract"
+    found="$(find "$WORK/extract" -type f -name "firecracker-v${FC_VERSION#v}-x86_64" | head -1)"
+    [[ -n "$found" ]] || die "firecracker binary not found in release tarball"
+    cp "$found" "$FC_BINARY"
+    chmod +x "$FC_BINARY"
+    rm -rf "$WORK/extract"
+fi
+"$FC_BINARY" --version >/dev/null || die "firecracker binary does not run (needs recent glibc)"
+
+if [[ ! -f "$FC_KERNEL" ]]; then
+    download "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin" "$FC_KERNEL"
+fi
+if [[ ! -f "$FC_ROOTFS" ]]; then
+    download "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4" "$FC_ROOTFS"
+fi
+
+log "firecracker: $FC_BINARY ($("$FC_BINARY" --version | head -1))"
+log "kernel:     $FC_KERNEL"
+log "rootfs:     $FC_ROOTFS"
+
+# --- run the test ------------------------------------------------------------
+record_host_state
+# Purge leftovers of earlier runs (stale fsb netns with duplicate private
+# addresses corrupt ARP on the bridge) before recording the pre-run set.
+purge_fsb_resources
+record_pre_run_netns
+# On any exit: remove run-created netns/taps/firecracker processes, then
+# restore host resources (bridge, MASQUERADE, ip_forward) that did not exist
+# before the run. --cleanup remains available for interrupted runs.
+trap 'cleanup_leftovers; cleanup_host_state' EXIT
+log "running TestFirecrackerDriverE2E (+TestFirecrackerDriverE2ENoInfra, root)"
+cd "$REPO_ROOT"
+env FC_BINARY="$FC_BINARY" FC_KERNEL="$FC_KERNEL" FC_ROOTFS="$FC_ROOTFS" \
+    FC_STATE_ROOT="${FC_STATE_ROOT:-}" \
+    go test -tags firecracker -count=1 -v -run '^TestFirecrackerDriverE2E' \
+    ./internal/runtime/firecracker/
+
+log "E2E passed"
+log "host resources created by this run (netns, taps, rules) are restored automatically on exit"
+log "run the same command with --cleanup after an interrupted run"

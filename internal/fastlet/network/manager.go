@@ -348,7 +348,8 @@ func (m *Manager) prepareOne(ctx context.Context) error {
 		NetNSName: netnsName, NetNSPath: filepath.Join(m.config.NetNSRoot, netnsName),
 		HostNetNSPath: filepath.Join(m.config.HostNetNSRoot, netnsName),
 		HostVeth:      hostVeth, PeerVeth: peerVeth, Bridge: m.config.Bridge,
-		Address: address, IP: ip, Gateway: m.ipam.Gateway(), PrivateCIDR: m.ipam.CIDR(),
+		GuestTap: resourceName("fc", m.config.PodUID, id, 15),
+		Address:  address, IP: ip, Gateway: m.ipam.Gateway(), PrivateCIDR: m.ipam.CIDR(),
 		DNSPath: filepath.Join(m.config.StateRoot, m.config.PodUID, id+".resolv.conf"),
 		MTU:     m.config.MTU, EgressDevice: m.config.EgressDevice, CreatedAt: m.config.Now(),
 	}

@@ -71,6 +71,7 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 	require.Equal(t, ResidualProcessFirecracker, firecracker.ResidualProcess)
 	require.True(t, firecracker.Deployment.RequiresKVM)
 	require.True(t, hasHostPath(firecracker.Deployment.HostPaths, "/dev/kvm"))
+	require.True(t, hasHostPath(firecracker.Deployment.HostPaths, "/dev/net/tun"))
 	require.True(t, hasHostPath(firecracker.Deployment.HostPaths, "/usr/local/bin/firecracker"))
 	require.Equal(t, "/usr/local/bin/firecracker", firecracker.Firecracker.BinaryPath)
 	require.Equal(t, "/opt/fast-sandbox/firecracker/vmlinux.bin", firecracker.Firecracker.KernelPath)

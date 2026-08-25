@@ -129,6 +129,72 @@ func TestRuntimeValidationUnsupportedBoxLite(t *testing.T) {
 	testSuite.Env().Test(t, feature)
 }
 
+func TestRuntimeValidationUnsupportedFirecracker(t *testing.T) {
+	suiteenv.RequireBasic(t)
+
+	feature := features.New("firecracker-capability-gate").
+		WithLabel("suite", "secureruntime").
+		WithLabel("tier", "validation").
+		Assess("Firecracker remains fail closed until the KVM E2E suite passes", func(ctx context.Context, t *testing.T, _ *envconf.Config) context.Context {
+			k8sClient := testSuite.MustKubeClient(t)
+			fixture := fixtures.New(k8sClient, fixtures.WithPollInterval(250*time.Millisecond))
+
+			namespace := testSuite.AllocateNamespace("unsupported-firecracker")
+			if err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}); err != nil {
+				t.Fatalf("create namespace: %v", err)
+			}
+			defer suiteenv.DeleteNamespace(ctx, t, k8sClient, namespace)
+
+			// The Firecracker driver is registered but its production capability
+			// gate stays closed until the driver lifecycle and KVM E2E pass.
+			pool := newSecureRuntimePool(namespace, "unsupported-firecracker-pool", apiv1alpha2.RuntimeFirecracker, 1, 1)
+			if _, err := fixture.CreateSandboxPool(ctx, namespace, pool); err != nil {
+				t.Fatalf("create pool: %v", err)
+			}
+
+			conditionCtx, cancelCondition := context.WithTimeout(ctx, 30*time.Second)
+			defer cancelCondition()
+
+			var runtimeReady *metav1.Condition
+			for {
+				updatedPool := &apiv1alpha2.SandboxPool{}
+				if err := k8sClient.Get(conditionCtx, types.NamespacedName{Name: pool.Name, Namespace: namespace}, updatedPool); err != nil {
+					t.Fatalf("get pool: %v", err)
+				}
+				for _, c := range updatedPool.Status.Conditions {
+					if c.Type == apiv1alpha2.PoolConditionRuntimeReady {
+						runtimeReady = &c
+						break
+					}
+				}
+				if runtimeReady != nil || conditionCtx.Err() != nil {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+
+			if runtimeReady == nil {
+				t.Fatal("expected RuntimeReady condition to be set")
+			}
+			if runtimeReady.Status != metav1.ConditionFalse {
+				t.Errorf("expected RuntimeReady condition to be False, got: %v", runtimeReady.Status)
+			}
+			if runtimeReady.Reason != apiv1alpha2.ReasonRuntimeUnsupported {
+				t.Errorf("expected Reason to be RuntimeUnsupported, got: %v", runtimeReady.Reason)
+			}
+			if runtimeReady.Message != "FirecrackerDriverUnimplemented" {
+				t.Errorf("unexpected Firecracker capability message: %q", runtimeReady.Message)
+			}
+
+			t.Logf("Pool condition correctly shows error: %s", runtimeReady.Message)
+
+			return ctx
+		}).
+		Feature()
+
+	testSuite.Env().Test(t, feature)
+}
+
 func TestRuntimeValidationContainerDefault(t *testing.T) {
 	suiteenv.RequireBasic(t)
 
