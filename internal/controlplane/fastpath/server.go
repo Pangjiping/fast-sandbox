@@ -144,9 +144,9 @@ func (s *Server) resolveFastletPodPort(
 		return nil, err
 	}
 	return &fastpathv2.ResolveEndpointResponse{
-		SandboxUid:   string(sandbox.UID),
-		Target:       request.Target,
-		ResolvedPort: port,
+		SandboxUid:      string(sandbox.UID),
+		Target:          request.Target,
+		ResolvedPort:    port,
 		ProxyEndpoint:   "http://" + net.JoinHostPort(fastlet.PodIP, strconv.FormatUint(uint64(port), 10)),
 		RequiredHeaders: map[string]string{dataplane.HeaderRouteCredential: credential},
 		RouteGeneration: claims.RouteGeneration, ExpiresAtUnixSeconds: claims.ExpiresAt,

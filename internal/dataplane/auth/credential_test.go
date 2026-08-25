@@ -164,3 +164,36 @@ func TestCredentialFencesFastletPodPort(t *testing.T) {
 	_, err = verifier.VerifyFastletPortCredential(portToken, "pod-a", 9000)
 	require.ErrorIs(t, err, ErrClaimMismatch)
 }
+
+func TestCredentialRequiresProtocolForPortAndComponentKinds(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	issuer, err := NewIssuer(privateKey, time.Minute, func() time.Time { return now })
+	require.NoError(t, err)
+
+	base := Claims{
+		Namespace: "default", SandboxUID: "uid-a", TargetPort: 8080,
+		FastletPodUID: "pod-a", AssignmentAttempt: 1, RouteGeneration: 1,
+	}
+
+	rawPort := base
+	rawPort.TargetKind = TargetKindPort
+	_, _, err = issuer.Issue(rawPort)
+	require.ErrorIs(t, err, ErrInvalidCredential)
+
+	component := base
+	component.TargetKind = TargetKindComponent
+	component.ComponentName = "execd"
+	_, _, err = issuer.Issue(component)
+	require.ErrorIs(t, err, ErrInvalidCredential)
+
+	component.Protocol = "HTTP"
+	_, _, err = issuer.Issue(component)
+	require.NoError(t, err)
+
+	podPort := base
+	podPort.TargetKind = TargetKindFastletPort
+	_, _, err = issuer.Issue(podPort)
+	require.NoError(t, err)
+}

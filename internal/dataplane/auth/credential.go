@@ -14,8 +14,8 @@ import (
 const tokenVersion = "v2"
 
 const (
-	TargetKindPort       = "port"
-	TargetKindComponent  = "component"
+	TargetKindPort        = "port"
+	TargetKindComponent   = "component"
 	TargetKindFastletPort = "fastlet-port"
 )
 
@@ -59,6 +59,9 @@ func (c Claims) Validate() error {
 	case TargetKindComponent:
 		if c.ComponentName == "" {
 			return fmt.Errorf("%w: component claim requires a component name", ErrInvalidCredential)
+		}
+		if c.Protocol == "" {
+			return fmt.Errorf("%w: component claim requires a protocol", ErrInvalidCredential)
 		}
 	case TargetKindFastletPort:
 		if c.ComponentName != "" {

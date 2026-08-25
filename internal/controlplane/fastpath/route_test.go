@@ -138,7 +138,7 @@ func TestResolveEndpointPodPort(t *testing.T) {
 		},
 	}
 	server := &Server{
-		K8sClient: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox, pool).Build(),
+		K8sClient:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox, pool).Build(),
 		CredentialIssuer: issuer, SandboxProxyBaseURL: "https://proxy.example.test",
 		Orchestrator: func() *orchestration.Orchestrator {
 			registry := placement.NewInMemoryRegistry()
@@ -177,7 +177,7 @@ func TestResolveEndpointPodPortNotFound(t *testing.T) {
 	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", UID: types.UID("uid-a")},
 		Spec:       apiv1alpha2.SandboxSpec{PoolRef: "pool-a"},
-		Status: apiv1alpha2.SandboxStatus{Assignment: &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, NodeName: "node-a"}},
+		Status:     apiv1alpha2.SandboxStatus{Assignment: &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, NodeName: "node-a"}},
 	}
 	pool := &apiv1alpha2.SandboxPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},

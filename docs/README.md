@@ -26,6 +26,7 @@ Fast Sandbox documentation is organized by reader intent:
 ## Guides
 
 - [Deployment](guides/deployment.md)
+- [Fastlet Pod Port routes](guides/fastlet-pod-ports.md)
 - [OpenSandbox integration](guides/opensandbox-integration.md)
 - [OpenSandbox Execd](guides/opensandbox-execd.md)
 - [Private registries](guides/private-registries.md)
