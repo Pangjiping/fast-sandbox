@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +56,9 @@ func (s *Server) ResolveEndpoint(ctx context.Context, request *fastpathv2.Resolv
 	if err != nil {
 		return nil, err
 	}
+	if _, isPodPort := request.Target.Target.(*fastpathv2.EndpointTarget_PodPortName); isPodPort {
+		return s.resolveFastletPodPort(ctx, sandbox, request)
+	}
 	port, componentName, protocol, err := s.resolveEndpointTarget(ctx, sandbox, request.Target)
 	if err != nil {
 		return nil, err
@@ -70,7 +75,7 @@ func (s *Server) ResolveEndpoint(ctx context.Context, request *fastpathv2.Resolv
 			return nil, err
 		}
 	}
-	credential, claims, err := s.issueRouteCredential(ctx, sandbox, port, componentName, protocol)
+	credential, claims, err := s.issueRouteCredential(ctx, sandbox, port, componentName, protocol, routeauth.TargetKindPort)
 	if err != nil {
 		return nil, err
 	}
@@ -93,13 +98,73 @@ func (s *Server) ResolveEndpoint(ctx context.Context, request *fastpathv2.Resolv
 	if componentName != "" {
 		path = dataplane.ComponentRoutePath(string(sandbox.UID), componentName)
 	}
+	fastletPodName := ""
+	if envelope, assignmentErr := assignment.EffectiveAssignment(sandbox); assignmentErr == nil && envelope != nil {
+		fastletPodName = envelope.FastletName
+	}
 	return &fastpathv2.ResolveEndpointResponse{
 		SandboxUid: string(sandbox.UID),
 		Target:     request.Target, ComponentName: componentName, Protocol: protocol, ResolvedPort: port,
 		ProxyEndpoint:   baseURL + path,
 		RequiredHeaders: map[string]string{dataplane.HeaderRouteCredential: credential},
 		RouteGeneration: claims.RouteGeneration, ExpiresAtUnixSeconds: claims.ExpiresAt,
+		FastletPod: fastletPodName,
 	}, nil
+}
+
+// resolveFastletPodPort resolves one named Pod Port declared by the Pool
+// allowlist. The route targets the Fastlet Pod itself (for example a
+// control-plane sidecar) and always returns a direct Fastlet Pod address,
+// independent of access_mode. No sandbox runtime is involved. FastPath still
+// issues an instance-fenced route credential that the Pod-side service
+// verifies before serving the request.
+func (s *Server) resolveFastletPodPort(
+	ctx context.Context,
+	sandbox *apiv1alpha2.Sandbox,
+	request *fastpathv2.ResolveEndpointRequest,
+) (*fastpathv2.ResolveEndpointResponse, error) {
+	podPortName := request.Target.GetPodPortName()
+	if podPortName == "" {
+		return nil, status.Error(codes.InvalidArgument, "pod_port_name is required")
+	}
+	port, err := s.podPortForTarget(ctx, sandbox, podPortName)
+	if err != nil {
+		return nil, err
+	}
+	envelope, assignmentErr := assignment.EffectiveAssignment(sandbox)
+	if assignmentErr != nil || envelope == nil || s.Orchestrator == nil || s.Orchestrator.Registry == nil {
+		return nil, status.Error(codes.Unavailable, "assigned Fastlet is unavailable")
+	}
+	fastlet, found := s.Orchestrator.Registry.GetFastletByID(placement.FastletID(envelope.FastletName))
+	if !found || fastlet.PodUID != envelope.FastletPodUID || fastlet.PodIP == "" {
+		return nil, status.Error(codes.Unavailable, "assigned Fastlet is unavailable")
+	}
+	credential, claims, err := s.issueRouteCredential(ctx, sandbox, port, "", "", routeauth.TargetKindFastletPort)
+	if err != nil {
+		return nil, err
+	}
+	return &fastpathv2.ResolveEndpointResponse{
+		SandboxUid:   string(sandbox.UID),
+		Target:       request.Target,
+		ResolvedPort: port,
+		ProxyEndpoint:   "http://" + net.JoinHostPort(fastlet.PodIP, strconv.FormatUint(uint64(port), 10)),
+		RequiredHeaders: map[string]string{dataplane.HeaderRouteCredential: credential},
+		RouteGeneration: claims.RouteGeneration, ExpiresAtUnixSeconds: claims.ExpiresAt,
+		FastletPod: envelope.FastletName,
+	}, nil
+}
+
+func (s *Server) podPortForTarget(ctx context.Context, sandbox *apiv1alpha2.Sandbox, podPortName string) (uint32, error) {
+	var pool apiv1alpha2.SandboxPool
+	if err := s.K8sClient.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Spec.PoolRef}, &pool); err != nil {
+		return 0, grpcKubernetesError(err)
+	}
+	for index := range pool.Spec.PodPorts {
+		if pool.Spec.PodPorts[index].Name == podPortName {
+			return uint32(pool.Spec.PodPorts[index].Port), nil
+		}
+	}
+	return 0, status.Errorf(codes.NotFound, "Pod Port %q is not declared by Pool %s", podPortName, pool.Name)
 }
 
 func (s *Server) WaitSandboxReady(ctx context.Context, request *fastpathv2.WaitSandboxReadyRequest) (*fastpathv2.SandboxInfo, error) {
@@ -301,6 +366,7 @@ func (s *Server) issueRouteCredential(
 	targetPort uint32,
 	componentName string,
 	protocol string,
+	targetKind string,
 ) (string, routeauth.Claims, error) {
 	if s.CredentialIssuer == nil {
 		return "", routeauth.Claims{}, status.Error(codes.FailedPrecondition, "route credential issuer is not configured")
@@ -319,7 +385,7 @@ func (s *Server) issueRouteCredential(
 	}
 	claims := routeauth.Claims{
 		Namespace: sandbox.Namespace, SandboxUID: string(sandbox.UID), TargetPort: targetPort,
-		TargetKind: routeauth.TargetKindPort, Protocol: protocol,
+		TargetKind: targetKind, Protocol: protocol,
 		FastletPodUID: envelope.FastletPodUID, AssignmentAttempt: envelope.Attempt,
 		RouteGeneration: routeGeneration,
 	}
@@ -717,6 +783,11 @@ func poolInfo(pool *apiv1alpha2.SandboxPool) *fastpathv2.PoolInfo {
 		info.Components = append(info.Components, &fastpathv2.ComponentCapability{
 			Name: component.Name, Protocol: component.Protocol, Port: uint32(component.Port),
 			HealthKind: component.HealthKind,
+		})
+	}
+	for _, podPort := range pool.Spec.PodPorts {
+		info.PodPorts = append(info.PodPorts, &fastpathv2.PodPortInfo{
+			Name: podPort.Name, Port: uint32(podPort.Port),
 		})
 	}
 	for _, image := range pool.Status.WarmImages {

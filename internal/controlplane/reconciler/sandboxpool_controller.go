@@ -129,6 +129,13 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionTrue,
 		Reason: apiv1alpha2.ReasonRegistryAvailable, Message: "Registry configuration is valid and compiled",
 	})
+	if err := pool.Spec.ValidatePodPorts(); err != nil {
+		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+			Type: apiv1alpha2.PoolConditionInfraReady, Status: metav1.ConditionFalse,
+			Reason: apiv1alpha2.ReasonPodPortsInvalid, Message: err.Error(),
+		})
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 	infraPlan, err := r.resolveInfraPlan(&pool, profile)
 	if err != nil {
 		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{

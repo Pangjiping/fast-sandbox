@@ -32,6 +32,10 @@ type SandboxRef struct {
 type RouteTarget struct {
 	ComponentName string
 	Port          uint32
+	// PodPortName resolves one named Pod Port declared by the SandboxPool
+	// allowlist. The route targets the Fastlet Pod itself (for example a
+	// control-plane sidecar) and always resolves to a direct Pod address.
+	PodPortName string
 }
 
 func ComponentTarget(name string) RouteTarget {
@@ -40,6 +44,10 @@ func ComponentTarget(name string) RouteTarget {
 
 func PortTarget(port uint32) RouteTarget {
 	return RouteTarget{Port: port}
+}
+
+func PodPortTarget(name string) RouteTarget {
+	return RouteTarget{PodPortName: name}
 }
 
 type RouteResolver interface {
@@ -74,11 +82,14 @@ func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, targ
 		return Route{}, errors.New("Sandbox name is required")
 	}
 	componentName := strings.TrimSpace(target.ComponentName)
+	podPortName := strings.TrimSpace(target.PodPortName)
 	switch {
+	case podPortName != "" && (componentName != "" || target.Port != 0):
+		return Route{}, errors.New("pod port name may not be combined with a component name or target port")
 	case componentName != "" && target.Port != 0:
 		return Route{}, errors.New("component name and target port may not both be set")
-	case componentName == "" && target.Port == 0:
-		return Route{}, errors.New("component name or target port is required")
+	case componentName == "" && target.Port == 0 && podPortName == "":
+		return Route{}, errors.New("component name, target port, or pod port name is required")
 	}
 	namespace := sandbox.Namespace
 	if namespace == "" {
@@ -89,10 +100,14 @@ func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, targ
 	}
 	requestTarget := &fastpathv2.EndpointTarget{}
 	targetDescription := ""
-	if componentName != "" {
+	switch {
+	case componentName != "":
 		requestTarget.Target = &fastpathv2.EndpointTarget_ComponentName{ComponentName: componentName}
 		targetDescription = "component " + componentName
-	} else {
+	case podPortName != "":
+		requestTarget.Target = &fastpathv2.EndpointTarget_PodPortName{PodPortName: podPortName}
+		targetDescription = "pod port " + podPortName
+	default:
 		requestTarget.Target = &fastpathv2.EndpointTarget_Port{Port: target.Port}
 		targetDescription = fmt.Sprintf("port %d", target.Port)
 	}
@@ -103,6 +118,9 @@ func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, targ
 		Target:     requestTarget,
 		AccessMode: fastpathv2.EndpointAccessMode_CENTRAL_PROXY,
 	}
+	// Pod Port routes are always direct Fastlet Pod addresses; FastPath ignores
+	// access_mode for them, so the client must not rewrite the authority below.
+	isPodPortTarget := podPortName != ""
 	if componentName != "" {
 		waitTimeout := r.ComponentWaitTimeout
 		if waitTimeout <= 0 {
@@ -118,18 +136,25 @@ func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, targ
 	if resolved.GetSandboxUid() == "" {
 		return Route{}, errors.New("FastPath returned a route without a Sandbox UID")
 	}
-	if componentName != "" {
+	switch {
+	case isPodPortTarget:
+		if resolved.GetResolvedPort() == 0 {
+			return Route{}, errors.New("FastPath returned a Pod Port route without a resolved port")
+		}
+	case componentName != "":
 		if resolved.GetComponentName() != componentName || resolved.GetResolvedPort() == 0 {
 			return Route{}, errors.New("FastPath returned a route for a different Sandbox or Infra Component")
 		}
-	} else if resolved.GetResolvedPort() != target.Port {
-		return Route{}, errors.New("FastPath returned a route for a different Sandbox or target port")
+	default:
+		if resolved.GetResolvedPort() != target.Port {
+			return Route{}, errors.New("FastPath returned a route for a different Sandbox or target port")
+		}
 	}
 	endpoint, err := url.Parse(resolved.GetProxyEndpoint())
 	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
 		return Route{}, fmt.Errorf("FastPath returned invalid proxy endpoint %q", resolved.GetProxyEndpoint())
 	}
-	if r.ProxyBaseURL != "" {
+	if r.ProxyBaseURL != "" && !isPodPortTarget {
 		endpoint, err = replaceRouteAuthority(endpoint, r.ProxyBaseURL)
 		if err != nil {
 			return Route{}, err

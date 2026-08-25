@@ -127,3 +127,40 @@ func TestCredentialFencesNamedComponentIdentity(t *testing.T) {
 	_, err = verifier.VerifyExpected(token, rawPort)
 	require.ErrorIs(t, err, ErrClaimMismatch)
 }
+
+func TestCredentialFencesFastletPodPort(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	issuer, err := NewIssuer(privateKey, time.Minute, func() time.Time { return now })
+	require.NoError(t, err)
+	verifier, err := NewVerifier(publicKey, func() time.Time { return now })
+	require.NoError(t, err)
+
+	claims := Claims{
+		Namespace: "tenant-a", SandboxUID: "uid-a", TargetKind: TargetKindFastletPort,
+		TargetPort: 9000, FastletPodUID: "pod-a", AssignmentAttempt: 2, RouteGeneration: 4,
+	}
+	token, _, err := issuer.Issue(claims)
+	require.NoError(t, err)
+
+	actual, err := verifier.VerifyFastletPortCredential(token, "pod-a", 9000)
+	require.NoError(t, err)
+	require.Equal(t, "uid-a", actual.SandboxUID)
+	require.Equal(t, "tenant-a", actual.Namespace)
+
+	_, err = verifier.VerifyFastletPortCredential(token, "pod-replaced", 9000)
+	require.ErrorIs(t, err, ErrClaimMismatch)
+
+	_, err = verifier.VerifyFastletPortCredential(token, "pod-a", 9001)
+	require.ErrorIs(t, err, ErrClaimMismatch)
+
+	// A raw-port credential must not satisfy the Pod Port check.
+	portClaims := claims
+	portClaims.TargetKind = TargetKindPort
+	portClaims.Protocol = "HTTP"
+	portToken, _, err := issuer.Issue(portClaims)
+	require.NoError(t, err)
+	_, err = verifier.VerifyFastletPortCredential(portToken, "pod-a", 9000)
+	require.ErrorIs(t, err, ErrClaimMismatch)
+}

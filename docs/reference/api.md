@@ -154,8 +154,8 @@ The protobuf contract is
 | `DeleteSandbox` | Submit declarative deletion |
 | `GetSandboxDiagnostics` | Lifecycle and Fastlet diagnostics, not process stdout |
 | `WaitSandboxReady` | Event-driven wait on the assigned Fastlet for one component or all components |
-| `ResolveEndpoint` | Resolve a named component or raw user port in central or direct mode |
-| `GetPool`, `ListPools` | Runtime, fixed resources, components, capacity, Registry, and warm-image discovery |
+| `ResolveEndpoint` | Resolve a named component, raw user port, or named Pod Port in central or direct mode |
+| `GetPool`, `ListPools` | Runtime, fixed resources, components, Pod Ports, capacity, Registry, and warm-image discovery |
 
 ### Atomic Create
 
@@ -185,7 +185,8 @@ pagination.
 exactly one of:
 
 - `component_name`; or
-- raw `port`.
+- raw `port`; or
+- `pod_port_name` (one named Pod Port declared by the Pool allowlist).
 
 A component route can wait directly on Fastlet readiness. The response includes
 the resolved protocol/port, route generation, expiry, proxy URL, and
@@ -202,6 +203,24 @@ Direct mode is for a trusted platform ingress:
 ```text
 trusted ingress -> Fastlet Proxy -> Sandbox
 ```
+
+### Pod Port routes
+
+A Pod Port route targets the Fastlet Pod itself, not the Sandbox runtime - for
+example a control-plane sidecar co-located with Fastlet. Pod Ports are declared
+in `SandboxPoolSpec.podPorts` (an allowlist; platform ports 5758 and 5780 are
+rejected). `ResolveEndpoint` with `pod_port_name` always returns a direct
+`http://<Fastlet Pod IP>:<port>` address, independent of `access_mode`, and
+issues an instance-fenced credential with `targetKind=fastlet-port`. The
+Pod-side service must verify it before serving the request:
+
+```go
+claims, err := verifier.VerifyFastletPortCredential(token, ownPodUID, port)
+```
+
+The credential binds `fastletPodUid`, `assignmentAttempt`, and
+`routeGeneration`, so a replaced Fastlet Pod invalidates every outstanding
+credential. `GetPool`/`ListPools` expose the allowlist in `pod_ports`.
 
 Application `Authorization` is not consumed by Fast Sandbox route
 authentication.

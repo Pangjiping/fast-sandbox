@@ -17,7 +17,22 @@ var (
 	ErrRuntimeImmutable       = errors.New("spec.runtime is immutable")
 	ErrResourcesImmutable     = errors.New("spec.sandboxResources is immutable")
 	ErrInfraComponentsInvalid = errors.New("spec.infraComponents is invalid")
+	ErrPodPortsInvalid        = errors.New("spec.podPorts is invalid")
 )
+
+// ReservedPodPorts are the platform-owned ports on every Fastlet Pod: the
+// Fastlet control API (5758) and the Fastlet Proxy data plane (5780). A Pod
+// Port allowlist entry may not shadow them.
+const (
+	FastletControlPort = 5758
+	FastletProxyPort   = 5780
+)
+
+// IsReservedPodPort reports whether a Pod Port allowlist entry collides with a
+// platform-owned port on the Fastlet Pod.
+func IsReservedPodPort(port int32) bool {
+	return port == FastletControlPort || port == FastletProxyPort
+}
 
 var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
@@ -137,6 +152,39 @@ func (s *SandboxPoolSpec) ValidateInfraComponents() error {
 	return nil
 }
 
+// ValidatePodPorts verifies the cross-field constraints that the CRD structural
+// schema cannot express: unique names, unique ports, and no shadowing of
+// platform-owned Fastlet Pod ports.
+func (s *SandboxPoolSpec) ValidatePodPorts() error {
+	if s == nil {
+		return fmt.Errorf("%w: pool spec is required", ErrPodPortsInvalid)
+	}
+	names := make(map[string]struct{}, len(s.PodPorts))
+	ports := make(map[int32]string, len(s.PodPorts))
+	for index := range s.PodPorts {
+		podPort := &s.PodPorts[index]
+		if problems := k8svalidation.IsDNS1123Label(podPort.Name); len(problems) != 0 ||
+			strings.HasPrefix(podPort.Name, "fast-sandbox-") {
+			return fmt.Errorf("%w: pod port %d has invalid or reserved name %q", ErrPodPortsInvalid, index, podPort.Name)
+		}
+		if _, exists := names[podPort.Name]; exists {
+			return fmt.Errorf("%w: duplicate pod port name %q", ErrPodPortsInvalid, podPort.Name)
+		}
+		names[podPort.Name] = struct{}{}
+		if podPort.Port < 1 || podPort.Port > 65535 {
+			return fmt.Errorf("%w: pod port %s port %d is invalid", ErrPodPortsInvalid, podPort.Name, podPort.Port)
+		}
+		if IsReservedPodPort(podPort.Port) {
+			return fmt.Errorf("%w: pod port %s port %d is reserved by the Fastlet platform", ErrPodPortsInvalid, podPort.Name, podPort.Port)
+		}
+		if existing, found := ports[podPort.Port]; found {
+			return fmt.Errorf("%w: pod ports %s and %s use duplicate port %d", ErrPodPortsInvalid, existing, podPort.Name, podPort.Port)
+		}
+		ports[podPort.Port] = podPort.Name
+	}
+	return nil
+}
+
 func cleanAbsolutePath(value string) bool {
 	return strings.HasPrefix(value, "/") && value != "/" && path.Clean(value) == value
 }
@@ -159,6 +207,12 @@ func ValidateSandboxPoolUpdate(oldSpec, newSpec *SandboxPoolSpec) error {
 	}
 	if err := newSpec.ValidateInfraComponents(); err != nil {
 		return fmt.Errorf("new pool Infra Components: %w", err)
+	}
+	if err := oldSpec.ValidatePodPorts(); err != nil {
+		return fmt.Errorf("old pool Pod Ports: %w", err)
+	}
+	if err := newSpec.ValidatePodPorts(); err != nil {
+		return fmt.Errorf("new pool Pod Ports: %w", err)
 	}
 	if oldSpec.Runtime != newSpec.Runtime {
 		return ErrRuntimeImmutable

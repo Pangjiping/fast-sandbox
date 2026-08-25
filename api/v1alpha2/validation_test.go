@@ -84,6 +84,32 @@ func TestValidateInfraComponents(t *testing.T) {
 	require.ErrorIs(t, tokenEnv.ValidateInfraComponents(), ErrInfraComponentsInvalid)
 }
 
+func TestValidatePodPorts(t *testing.T) {
+	valid := SandboxPoolSpec{PodPorts: []PodPort{
+		{Name: "sidecar", Port: 9000},
+		{Name: "debug", Port: 9091},
+	}}
+	require.NoError(t, valid.ValidatePodPorts())
+
+	duplicateName := SandboxPoolSpec{PodPorts: []PodPort{
+		{Name: "sidecar", Port: 9000},
+		{Name: "sidecar", Port: 9001},
+	}}
+	require.ErrorIs(t, duplicateName.ValidatePodPorts(), ErrPodPortsInvalid)
+
+	duplicatePort := SandboxPoolSpec{PodPorts: []PodPort{
+		{Name: "sidecar", Port: 9000},
+		{Name: "debug", Port: 9000},
+	}}
+	require.ErrorIs(t, duplicatePort.ValidatePodPorts(), ErrPodPortsInvalid)
+
+	reservedPort := SandboxPoolSpec{PodPorts: []PodPort{{Name: "shadow", Port: FastletProxyPort}}}
+	require.ErrorIs(t, reservedPort.ValidatePodPorts(), ErrPodPortsInvalid)
+
+	reservedName := SandboxPoolSpec{PodPorts: []PodPort{{Name: "fast-sandbox-ctl", Port: 9000}}}
+	require.ErrorIs(t, reservedName.ValidatePodPorts(), ErrPodPortsInvalid)
+}
+
 func TestSandboxResourceProfileHashIsCanonical(t *testing.T) {
 	a := SandboxResourceProfile{CPU: resource.MustParse("1"), Memory: resource.MustParse("1024Mi"), PIDs: 256}
 	b := SandboxResourceProfile{CPU: resource.MustParse("1000m"), Memory: resource.MustParse("1Gi"), PIDs: 256}

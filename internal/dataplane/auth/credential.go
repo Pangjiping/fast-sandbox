@@ -14,8 +14,9 @@ import (
 const tokenVersion = "v2"
 
 const (
-	TargetKindPort      = "port"
-	TargetKindComponent = "component"
+	TargetKindPort       = "port"
+	TargetKindComponent  = "component"
+	TargetKindFastletPort = "fastlet-port"
 )
 
 var (
@@ -43,7 +44,7 @@ type Claims struct {
 }
 
 func (c Claims) Validate() error {
-	if c.Namespace == "" || c.SandboxUID == "" || c.TargetPort == 0 || c.TargetPort > 65535 || c.Protocol == "" ||
+	if c.Namespace == "" || c.SandboxUID == "" || c.TargetPort == 0 || c.TargetPort > 65535 ||
 		c.FastletPodUID == "" || c.AssignmentAttempt <= 0 || c.RouteGeneration <= 0 || c.ExpiresAt <= 0 {
 		return fmt.Errorf("%w: required claim is missing", ErrInvalidCredential)
 	}
@@ -52,9 +53,16 @@ func (c Claims) Validate() error {
 		if c.ComponentName != "" {
 			return fmt.Errorf("%w: raw port claim cannot contain a component name", ErrInvalidCredential)
 		}
+		if c.Protocol == "" {
+			return fmt.Errorf("%w: raw port claim requires a protocol", ErrInvalidCredential)
+		}
 	case TargetKindComponent:
 		if c.ComponentName == "" {
 			return fmt.Errorf("%w: component claim requires a component name", ErrInvalidCredential)
+		}
+	case TargetKindFastletPort:
+		if c.ComponentName != "" {
+			return fmt.Errorf("%w: Fastlet Pod port claim cannot contain a component name", ErrInvalidCredential)
 		}
 	default:
 		return fmt.Errorf("%w: target kind is invalid", ErrInvalidCredential)
@@ -192,6 +200,23 @@ func (v *Verifier) VerifyExpected(token string, expected Claims) (Claims, error)
 		actual.Protocol != expected.Protocol || actual.TargetPort != expected.TargetPort || actual.FastletPodUID != expected.FastletPodUID ||
 		actual.AssignmentAttempt != expected.AssignmentAttempt || actual.RouteGeneration != expected.RouteGeneration ||
 		(expected.Tenant != "" && actual.Tenant != expected.Tenant) {
+		return Claims{}, ErrClaimMismatch
+	}
+	return actual, nil
+}
+
+// VerifyFastletPortCredential verifies a Fastlet Pod Port route credential and
+// additionally requires it to be scoped to the given Fastlet Pod UID and Pod
+// port. This is the authorization check a Pod-side service (for example a
+// control-plane sidecar co-located with Fastlet) performs before serving a
+// request: the credential is minted by FastPath, signed by the platform key,
+// and fenced to the exact Fastlet Pod instance that received it.
+func (v *Verifier) VerifyFastletPortCredential(token string, fastletPodUID string, port uint32) (Claims, error) {
+	actual, err := v.Verify(token)
+	if err != nil {
+		return Claims{}, err
+	}
+	if actual.TargetKind != TargetKindFastletPort || actual.FastletPodUID != fastletPodUID || actual.TargetPort != port {
 		return Claims{}, ErrClaimMismatch
 	}
 	return actual, nil

@@ -137,6 +137,21 @@ type InfraComponent struct {
 	Endpoint InfraEndpoint `json:"endpoint"`
 }
 
+// PodPort declares one management port served on the Fastlet Pod itself, for
+// example by a control-plane sidecar co-located with Fastlet. Pod ports are
+// pod-scoped, not sandbox-scoped: no Sandbox runtime is involved, and requests
+// are routed straight to the Fastlet Pod IP. Pod ports are resolved through
+// FastPath, which issues an instance-fenced route credential that a sidecar
+// verifies before serving the request.
+type PodPort struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+}
+
 // SandboxPoolSpec defines the desired state of SandboxPool.
 type SandboxPoolSpec struct {
 	Capacity PoolCapacity `json:"capacity"`
@@ -164,6 +179,15 @@ type SandboxPoolSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=16
 	InfraComponents []InfraComponent `json:"infraComponents,omitempty"`
+
+	// PodPorts declares the management ports served on the Fastlet Pod itself
+	// (for example a co-located control sidecar). Updating this list is a
+	// Fastlet roll like InfraComponents. Pod ports are independent of the
+	// Sandbox runtime and are resolved to direct Fastlet Pod addresses.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	PodPorts []PodPort `json:"podPorts,omitempty"`
 
 	// FastletTemplate is intentionally preserved as a Kubernetes-native pod
 	// template. Fast Sandbox validates the platform-owned fields separately.
@@ -246,6 +270,7 @@ const (
 	ReasonResourceProfileInvalid   = "ResourceProfileInvalid"
 	ReasonInfraComponentsInvalid   = "InfraComponentsInvalid"
 	ReasonInfraComponentsAvailable = "InfraComponentsAvailable"
+	ReasonPodPortsInvalid          = "PodPortsInvalid"
 	ReasonRegistryInvalid          = "RegistryInvalid"
 	ReasonRegistryAvailable        = "RegistryAvailable"
 )

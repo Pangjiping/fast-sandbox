@@ -171,6 +171,11 @@ message EndpointTarget {
   oneof target {
     string component_name = 1;
     uint32 port = 2;
+    // pod_port_name resolves one named Pod Port declared by the SandboxPool
+    // allowlist. The route targets the Fastlet Pod itself (for example a
+    // control-plane sidecar), never the Sandbox runtime, and always resolves
+    // to a direct Fastlet Pod address regardless of access_mode.
+    string pod_port_name = 3;
   }
 }
 
@@ -197,6 +202,9 @@ message ResolveEndpointResponse {
   map<string, string> required_headers = 7;
   int64 route_generation = 8;
   int64 expires_at_unix_seconds = 9;
+  // fastlet_pod is the assigned Fastlet Pod name. It is populated for every
+  // target kind and is the authority for Pod Port routes.
+  string fastlet_pod = 10;
 }
 
 message ComponentCapability {
@@ -204,6 +212,11 @@ message ComponentCapability {
   string protocol = 2;
   uint32 port = 3;
   string health_kind = 4;
+}
+
+message PodPortInfo {
+  string name = 1;
+  uint32 port = 2;
 }
 
 message WarmImageInfo {
@@ -239,6 +252,7 @@ message PoolInfo {
   repeated ComponentCapability components = 13;
   RegistryInfo registry = 14;
   repeated WarmImageInfo warm_images = 15;
+  repeated PodPortInfo pod_ports = 16;
 }
 
 message GetPoolRequest {
