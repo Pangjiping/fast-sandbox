@@ -148,6 +148,8 @@ spec:
     rootfsSize: "30Gi"
     format: overlaybd                        # native | overlaybd (default)
     publish: s3://bucket/sandbox-images/     # optional, digest-addressed
+    publishSecretRef:                        # optional, imagePullSecrets-style
+      name: sandbox-oss-credentials          # secret maintained by the cluster
     prime:                                 # optional seed-node prime
       nodeSelector:                          # best-effort, never blocks the build
         node-role.open-sandbox.io/agent: "true"
@@ -210,6 +212,28 @@ Every build emits a content-addressed `manifest.json`:
   successful build, so P2P spread and cold-start storms start from warm
   seeds. Prime never blocks or fails the build; unreachable nodes are
   skipped and the object store remains the authoritative source.
+- **Publish credentials**: for a private object store,
+  `output.publishSecretRef` names (imagePullSecrets-style) a secret in the
+  template's namespace; the secret is created and maintained out of band by
+  the cluster — the template only references it. The secret contract is:
+
+  ```yaml
+  kind: Secret
+  metadata:
+    name: sandbox-oss-credentials
+  type: Opaque
+  stringData:
+    accessKeyId: <id>
+    secretAccessKey: <key>
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com   # optional (S3 default)
+    region: cn-hangzhou                                # optional
+  ```
+
+  The consumer resolves the secret at execution time and injects it into
+  the build environment only (e.g. the Job's env); credentials are never
+  copied into the CR status or the artifact manifest. When
+  `publishSecretRef` is unset, the build falls back to ambient credentials
+  (instance role / IRSA, or local aws configuration for the CLI).
 - **execd injection boundary**: only the execd binary and fixed bootstrap
   skeleton are build-time injected. Per-sandbox configuration (infra.json,
   identity, component env) remains runtime-generated, written into the
@@ -317,6 +341,13 @@ type OutputSpec struct {
     RootfsSize string          `json:"rootfsSize"`
     Format        ArtifactFormat `json:"format"`
     Publish       string         `json:"publish,omitempty"`
+    // PublishSecretRef references (imagePullSecrets-style) the secret in the
+    // template's namespace holding the object-store credentials. The secret
+    // is created and maintained out of band by the cluster; the template only
+    // names it. Secret contents are never copied into the CR status or the
+    // manifest.
+    // +optional
+    PublishSecretRef *corev1.LocalObjectReference `json:"publishSecretRef,omitempty"`
     // Prime optionally selects seed nodes (by label selector) whose agent
     // warms the local cache after a successful build. Always best-effort:
     // it never blocks or fails the build, and the object store stays the
@@ -375,6 +406,9 @@ reconcile(template):
   → create a Kubernetes Job (builder image, spec → env/args; every build
     boots and restores the snapshot, so /dev/kvm is required; format only
     selects the overlaybd packaging step)
+  → when output.publishSecretRef is set, read the referenced secret and
+    inject accessKeyId/secretAccessKey/endpoint/region into the Job env
+    (aws CLI credentials); never persist them on the CR
   → wait for completion → read manifest (digest verified)
   → publish to spec.output.publish (digest-addressed)
   → if output.prime set: notify the agent pods on matching seed nodes
