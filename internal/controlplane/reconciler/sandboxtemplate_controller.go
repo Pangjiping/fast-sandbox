@@ -174,7 +174,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 		template.Status.LastBuildTime = &now
 		upsertCondition(&template, apiv1alpha2.SandboxTemplateCondition{
 			Type:    apiv1alpha2.SandboxTemplateConditionBuildSucceeded,
-			Status:  "True",
+			Status:  corev1.ConditionTrue,
 			Reason:  "BuildCompleted",
 			Message: "golden image build completed",
 		})
@@ -570,7 +570,7 @@ func (r *SandboxTemplateReconciler) failBuild(ctx context.Context, template *api
 	template.Status.Phase = apiv1alpha2.SandboxTemplatePhaseFailed
 	upsertCondition(template, apiv1alpha2.SandboxTemplateCondition{
 		Type:    apiv1alpha2.SandboxTemplateConditionBuildSucceeded,
-		Status:  "False",
+		Status:  corev1.ConditionFalse,
 		Reason:  reason,
 		Message: err.Error(),
 	})
@@ -626,17 +626,19 @@ func podCompletionTime(pod *corev1.Pod) *time.Time {
 	return nil
 }
 
-// buildPodName derives the deterministic build Pod name: the template name
-// (truncated with a sha256 prefix when long, same scheme as the labels) plus
-// the generation, keeping the name within the 63-char label-ish budget that
-// Kubernetes tooling commonly assumes.
+// buildPodName derives the deterministic build Pod name from the template's
+// namespace AND name (two tenants can create same-named templates; without
+// the namespace the second build would collide on the same Pod name, its
+// Create would be swallowed by AlreadyExists, and the tenant would stay
+// stuck in Building forever). Long names are truncated with a sha256
+// prefix, keeping the result within a sane 63-char budget.
 func buildPodName(template *apiv1alpha2.SandboxTemplate) string {
-	name := template.Name
-	if len(name) > 40 {
-		sum := sha256.Sum256([]byte(name))
-		name = fmt.Sprintf("%s-%x", name[:40], sum[:8])
+	seed := template.Namespace + "-" + template.Name
+	if len(seed) > 40 {
+		sum := sha256.Sum256([]byte(seed))
+		seed = fmt.Sprintf("%s-%x", seed[:40], sum[:8])
 	}
-	return fmt.Sprintf("%s-build-%d", name, template.Generation)
+	return fmt.Sprintf("%s-build-%d", seed, template.Generation)
 }
 
 // templateLabelValue maps a template name onto a Kubernetes label value

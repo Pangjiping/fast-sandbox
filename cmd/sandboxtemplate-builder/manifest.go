@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -76,6 +77,13 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 		"kernel": map[string]any{
 			"name":   filepath.Base(kernel),
 			"digest": kernelDigest,
+		},
+		// Snapshot compatibility tuple (design): consumers match these
+		// against node labels before restoring a snapshot.
+		"compatibility": map[string]any{
+			"firecrackerVersion": firecrackerVersion(),
+			"hostKernel":         hostKernelRelease(),
+			"cpuModel":           hostCPUModel(),
 		},
 		"machine": map[string]any{
 			"vcpu":   spec.Machine.VCPU,
@@ -154,4 +162,46 @@ func sha256FileCached(path string, cache map[string]string) (string, error) {
 	}
 	cache[path] = sum
 	return sum, nil
+}
+
+// firecrackerVersion reads the embedded Firecracker binary's version
+// (e.g. "1.16.1"), falling back to "unknown".
+func firecrackerVersion() string {
+	output, err := exec.Command(firecrackerBin, "--version").CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+	fields := strings.Fields(string(output))
+	for index, field := range fields {
+		if field == "v" && index+1 < len(fields) {
+			return strings.TrimPrefix(fields[index+1], "v")
+		}
+	}
+	return "unknown"
+}
+
+// hostKernelRelease returns the builder host's kernel release (uname -r).
+func hostKernelRelease() string {
+	output, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// hostCPUModel returns the first CPU model name from /proc/cpuinfo.
+func hostCPUModel() string {
+	payload, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(payload), "\n") {
+		if strings.HasPrefix(line, "model name") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return "unknown"
 }

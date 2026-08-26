@@ -113,7 +113,7 @@ func TestSandboxTemplateReconcileCreatesPodAndTracksPhase(t *testing.T) {
 		t.Fatalf("expected one build pod in %s, got %d", builderNamespace, len(pods))
 	}
 	pod := &pods[0]
-	if pod.Name != name+"-build-1" {
+	if pod.Name != buildPodName(&updated) {
 		t.Fatalf("expected deterministic pod name, got %q", pod.Name)
 	}
 	if pod.Labels[sandboxTemplateBuildLabel] != name {
@@ -386,7 +386,7 @@ func TestSandboxTemplateReconcileFailsStuckPendingPod(t *testing.T) {
 	// Preset a build Pod that never got scheduled: old and still Pending.
 	stale := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name + "-build-1",
+			Name:      buildPodName(template),
 			Namespace: builderNamespace,
 			Labels: map[string]string{
 				sandboxTemplateBuildLabel:      name,
@@ -437,7 +437,7 @@ func TestSandboxTemplateReconcileSelfHealsPendingPhase(t *testing.T) {
 	// Building (e.g. controller restarted between create and status update).
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name + "-build-1",
+			Name:      buildPodName(template),
 			Namespace: builderNamespace,
 			Labels: map[string]string{
 				sandboxTemplateBuildLabel:      name,
@@ -465,7 +465,7 @@ func TestSandboxTemplatePendingTimeoutDeletesPod(t *testing.T) {
 	template := newSandboxTemplate(namespace, name)
 	stale := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name + "-build-1",
+			Name:      buildPodName(template),
 			Namespace: builderNamespace,
 			Labels: map[string]string{
 				sandboxTemplateBuildLabel:      name,

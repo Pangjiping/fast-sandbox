@@ -108,8 +108,15 @@ func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint str
 
 	// The guest init is always injected (default path when spec.init is
 	// empty) at the exact path the spec declares; the boot args pass the
-	// same path to the kernel.
-	guestInit := filepath.Join(mountPoint, strings.TrimPrefix(guestInitPath(spec), "/"))
+	// same path to the kernel. The path is validated to stay inside the
+	// mount: a crafted "../.." would otherwise escape the rootfs and
+	// overwrite build artifacts or container files.
+	initPath := guestInitPath(spec)
+	relative := filepath.Clean(strings.TrimPrefix(initPath, "/"))
+	if !strings.HasPrefix(initPath, "/") || relative == ".." || strings.HasPrefix(relative, "../") {
+		return fmt.Errorf("init path %q must be an absolute path inside the rootfs", initPath)
+	}
+	guestInit := filepath.Join(mountPoint, relative)
 	if err := os.MkdirAll(filepath.Dir(guestInit), 0o755); err != nil {
 		return err
 	}

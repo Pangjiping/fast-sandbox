@@ -40,7 +40,7 @@ type SandboxTemplateCondition struct {
 	// Status is the condition status (True/False).
 	// +kubebuilder:validation:Enum=True;False
 	// +kubebuilder:validation:Required
-	Status string `json:"status"`
+	Status corev1.ConditionStatus `json:"status"`
 	// Reason is a brief reason for the condition.
 	// +optional
 	Reason string `json:"reason,omitempty"`

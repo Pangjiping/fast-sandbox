@@ -81,8 +81,14 @@ func uploadWithRetry(ctx context.Context, aws string, args []string, local, targ
 			backoff *= 2
 		}
 		command := exec.CommandContext(ctx, aws, append(args, local, target)...)
-		if output, err := command.CombinedOutput(); err != nil {
+		output, err := command.CombinedOutput()
+		if err != nil {
 			lastErr = fmt.Errorf("publish %s: %w: %s", name, err, output)
+			// 4xx (auth/access denied etc.) will not succeed on retry;
+			// only retry transient/5xx failures.
+			if strings.Contains(string(output), "A client error") {
+				return lastErr
+			}
 			klog.V(2).InfoS("publish attempt failed, retrying", "object", name, "attempt", attempt, "err", err)
 			continue
 		}

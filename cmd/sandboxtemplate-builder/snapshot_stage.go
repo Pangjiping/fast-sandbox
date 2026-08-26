@@ -94,7 +94,11 @@ func runSnapshotStage(args []string) error {
 	vm.stop()
 	snapshotCreateMs := time.Since(snapshotStarted).Milliseconds()
 
-	// Stage B: restore once for validation.
+	// Stage B: restore once for validation. The restore does not re-apply the
+	// machine config / rootfs drive: it relies on the snapshot's embedded
+	// device state and the original paths still existing on this host. This
+	// is verified against firecracker v1.16.1 but is an implicit dependency
+	// on that version's behavior — revisit when bumping the VMM.
 	restoreStarted := time.Now()
 	restoreLog := filepath.Join(workdir, "restore.console.log")
 	restoreSocket := filepath.Join(workdir, "restore.sock")

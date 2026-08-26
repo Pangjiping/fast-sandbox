@@ -116,6 +116,14 @@ Notes and known limits:
   execd image and its `/execd`, `bootstrap.sh`, `prepare.sh`, `bwrap`
   entries are a fast-sandbox-internal artifact); the local-tarball input
   path likewise has no registry-credential flow
+- private-registry images: the builder Pod has no imagePullSecrets and the
+  CRD has no credential field — pulls are anonymous. For private source or
+  execd images, the platform operator must bind registry pull secrets to
+  the `sandbox-template-builder` ServiceAccount (cluster-level secret +
+  SA imagePullSecrets), which is a documented platform responsibility
+- supply chain: the kernel (S3), oci2rootfs and overlaybd (GitHub) are
+  downloaded at builder-image build time at pinned revisions but without
+  checksum verification; upgrades should pin and verify checksums
 
 ## Running
 

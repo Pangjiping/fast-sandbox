@@ -143,6 +143,12 @@ func run(ctx context.Context) error {
 			return err
 		}
 		publishMs = time.Since(publishStarted).Milliseconds()
+	} else if os.Getenv("SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH") == "" {
+		// The CRD makes publish required, but the builder can run without
+		// admission (E2E, local): without a publish target the artifacts
+		// only exist in the ephemeral workspace, so fail loudly instead of
+		// letting the controller mark a hollow build Succeeded.
+		return errors.New("output.publish is required (set SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1 to skip publishing)")
 	}
 
 	klog.InfoS("sandbox template build stages",

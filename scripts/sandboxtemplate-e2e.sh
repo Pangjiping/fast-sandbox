@@ -98,6 +98,7 @@ if [[ "$LOCAL_MODE" -eq 1 ]]; then
         env SANDBOX_TEMPLATE_SPEC="$(cat "$fmt_dir/spec.json")" \
             SANDBOX_TEMPLATE_WORKDIR="$fmt_dir/build" \
             SANDBOX_TEMPLATE_IMAGE_TAR="$IMAGE_TAR" \
+            SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1 \
             POD_NAME=e2e-pod POD_NAMESPACE=default \
             "$WORK/sandboxtemplate-builder"
     }
@@ -116,6 +117,7 @@ else
             -e SANDBOX_TEMPLATE_SPEC="$(cat "$fmt_dir/spec.json")" \
             -e SANDBOX_TEMPLATE_WORKDIR=/build \
             -e SANDBOX_TEMPLATE_IMAGE_TAR=/input/image.tar \
+            -e SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1 \
             -e POD_NAME=e2e-pod -e POD_NAMESPACE=default \
             "$BUILDER_IMAGE"
     }
