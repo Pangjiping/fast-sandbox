@@ -1,0 +1,406 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: sandboxtemplates.sandbox.fast.io
+spec:
+  group: sandbox.fast.io
+  names:
+    kind: SandboxTemplate
+    listKind: SandboxTemplateList
+    plural: sandboxtemplates
+    singular: sandboxtemplate
+  scope: Namespaced
+  versions:
+  - name: v1alpha2
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SandboxTemplate is a declarative golden-image build (OSEP-0023 design,
+          fast-sandbox flavor): an OCI source image, runtime injection, guest init,
+          readiness, and output artifacts. The build is executed by a controller
+          (Phase 2) or locally by the CLI (Phase 1).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SandboxTemplateSpec defines the desired golden-image build.
+            properties:
+              entrypoint:
+                description: |-
+                  Entrypoint is the guest business command as an argv list; empty
+                  defaults to ["tail","-f","/dev/null"].
+                items:
+                  type: string
+                type: array
+              envs:
+                description: |-
+                  Envs is injected as /etc/sandbox-init.env in the guest (literal
+                  values only; valueFrom is not supported). The source image's own
+                  Config.Env is not merged.
+                items:
+                  description: EnvVar represents an environment variable present in
+                    a Container.
+                  properties:
+                    name:
+                      description: |-
+                        Name of the environment variable.
+                        May consist of any printable ASCII characters except '='.
+                      type: string
+                    value:
+                      description: |-
+                        Variable references $(VAR_NAME) are expanded
+                        using the previously defined environment variables in the container and
+                        any service environment variables. If a variable cannot be resolved,
+                        the reference in the input string will be unchanged. Double $$ are reduced
+                        to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                        "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                        Escaped references will never be expanded, regardless of whether the variable
+                        exists or not.
+                        Defaults to "".
+                      type: string
+                    valueFrom:
+                      description: Source for the environment variable's value. Cannot
+                        be used if value is not empty.
+                      properties:
+                        configMapKeyRef:
+                          description: Selects a key of a ConfigMap.
+                          properties:
+                            key:
+                              description: The key to select.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap or its key
+                                must be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        fieldRef:
+                          description: |-
+                            Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                            spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                          properties:
+                            apiVersion:
+                              description: Version of the schema the FieldPath is
+                                written in terms of, defaults to "v1".
+                              type: string
+                            fieldPath:
+                              description: Path of the field to select in the specified
+                                API version.
+                              type: string
+                          required:
+                          - fieldPath
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        fileKeyRef:
+                          description: |-
+                            FileKeyRef selects a key of the env file.
+                            Requires the EnvFiles feature gate to be enabled.
+                          properties:
+                            key:
+                              description: |-
+                                The key within the env file. An invalid key will prevent the pod from starting.
+                                The keys defined within a source may consist of any printable ASCII characters except '='.
+                                During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                              type: string
+                            optional:
+                              default: false
+                              description: |-
+                                Specify whether the file or its key must be defined. If the file or key
+                                does not exist, then the env var is not published.
+                                If optional is set to true and the specified key does not exist,
+                                the environment variable will not be set in the Pod's containers.
+
+                                If optional is set to false and the specified key does not exist,
+                                an error will be returned during Pod creation.
+                              type: boolean
+                            path:
+                              description: |-
+                                The path within the volume from which to select the file.
+                                Must be relative and may not contain the '..' path or start with '..'.
+                              type: string
+                            volumeName:
+                              description: The name of the volume mount containing
+                                the env file.
+                              type: string
+                          required:
+                          - key
+                          - path
+                          - volumeName
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        resourceFieldRef:
+                          description: |-
+                            Selects a resource of the container: only resources limits and requests
+                            (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                          properties:
+                            containerName:
+                              description: 'Container name: required for volumes,
+                                optional for env vars'
+                              type: string
+                            divisor:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: Specifies the output format of the exposed
+                                resources, defaults to "1"
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            resource:
+                              description: 'Required: resource to select'
+                              type: string
+                          required:
+                          - resource
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        secretKeyRef:
+                          description: Selects a key of a secret in the pod's namespace
+                          properties:
+                            key:
+                              description: The key of the secret to select from.  Must
+                                be a valid secret key.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the Secret or its key must
+                                be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                  required:
+                  - name
+                  type: object
+                type: array
+              execd:
+                description: Execd is the OpenSandbox execd image whose runtime files
+                  are injected.
+                type: string
+              image:
+                description: Image is the OCI image reference to convert.
+                type: string
+              init:
+                description: |-
+                  Init is the injected PID 1 path inside the rootfs. The init script
+                  carries the readiness marker and heartbeat the build depends on, so it
+                  is always injected: empty defaults to /usr/local/sbin/sandbox-init.
+                type: string
+              kernel:
+                description: |-
+                  Kernel is the guest kernel to embed; it must be present in the builder
+                  image under this name (the builder image embeds one kernel at build
+                  time via the KERNEL_NAME build arg).
+                type: string
+              machine:
+                description: Machine describes the reference machine of the golden
+                  image.
+                properties:
+                  memory:
+                    default: 2Gi
+                    type: string
+                  vcpu:
+                    default: "1"
+                    type: string
+                required:
+                - memory
+                - vcpu
+                type: object
+              output:
+                description: Output describes the artifacts to produce and where to
+                  publish them.
+                properties:
+                  format:
+                    default: overlaybd
+                    description: Format selects the storage encoding of the snapshot
+                      set.
+                    enum:
+                    - native
+                    - overlaybd
+                    type: string
+                  prime:
+                    description: |-
+                      Prime optionally selects seed nodes (by label selector) whose agent
+                      warms the local cache after a successful build.
+                      Not yet implemented: reserved — the controller currently ignores it.
+                    properties:
+                      nodeSelector:
+                        additionalProperties:
+                          type: string
+                        minProperties: 1
+                        type: object
+                    required:
+                    - nodeSelector
+                    type: object
+                  publish:
+                    description: |-
+                      Publish is the S3-compatible object store target, e.g.
+                      s3://bucket/sandbox-images/ (digest-addressed publication). Required:
+                      without a publish target the build has no durable artifacts (they only
+                      live in the build Pod's workspace).
+                    type: string
+                  publishSecretRef:
+                    description: |-
+                      PublishSecretRef references (imagePullSecrets-style) the secret holding
+                      the object-store credentials. The secret MUST live in the platform
+                      namespace (fast-sandbox-system), where the build Pod runs — a
+                      SecretKeyRef cannot cross namespaces. It is created and maintained out
+                      of band by the platform operator; the template only names it. Expected
+                      keys: accessKeyId, secretAccessKey, endpoint, region (all required
+                      when the reference is set). Secret contents are never copied into the
+                      CR status or the artifact manifest.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  rootfsSize:
+                    default: 30Gi
+                    description: |-
+                      RootfsSize is the logical size of the converted rootfs.ext4 — the
+                      capacity the guest sees as its root drive. A Kubernetes resource
+                      quantity; the file is sparse. It must be large enough to hold the
+                      expanded OCI image content.
+                    type: string
+                required:
+                - format
+                - publish
+                - rootfsSize
+                type: object
+              readiness:
+                description: Readiness defines when the guest is considered ready.
+                properties:
+                  healthCheck:
+                    description: |-
+                      HealthCheck is polled as the fallback; empty uses the source image
+                      CMD-SHELL.
+                    type: string
+                  probe:
+                    description: 'Probe is checked first: tcp://host:port or cmd://<command>.'
+                    type: string
+                  warmupSeconds:
+                    default: 60
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - warmupSeconds
+                type: object
+            required:
+            - image
+            - kernel
+            - machine
+            - output
+            - readiness
+            type: object
+          status:
+            description: SandboxTemplateStatus reports the latest build outcome.
+            properties:
+              artifactDigest:
+                description: ArtifactDigest is the sha256 of the manifest document
+                  itself.
+                type: string
+              conditions:
+                description: Conditions detail progress.
+                items:
+                  description: SandboxTemplateCondition represents one condition of
+                    a SandboxTemplate.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time the condition
+                        transitioned.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable message about the condition.
+                      type: string
+                    reason:
+                      description: Reason is a brief reason for the condition.
+                      type: string
+                    status:
+                      description: Status is the condition status (True/False).
+                      enum:
+                      - "True"
+                      - "False"
+                      type: string
+                    type:
+                      description: Type is the condition type.
+                      enum:
+                      - BuildSucceeded
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastBuildTime:
+                description: LastBuildTime is when the last build completed.
+                format: date-time
+                type: string
+              manifestRef:
+                description: ManifestRef points at the published manifest in the object
+                  store.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the generation of the last applied
+                  build.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is the overall build phase.
+                enum:
+                - Pending
+                - Building
+                - Succeeded
+                - Failed
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

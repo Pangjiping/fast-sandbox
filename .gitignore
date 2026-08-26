@@ -273,3 +273,7 @@ generated/
 **/generated/**
 
 .sisyphus
+
+# Local build artifacts
+/sandboxtemplate-builder
+/sandboxtemplate-snapshot-stage
