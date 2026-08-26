@@ -1,0 +1,109 @@
+# sandboxtemplate-builder — golden-image build pipeline (SandboxTemplate).
+#
+# Contains the platform toolchain (oci2rootfs, firecracker, e2fsprogs,
+# overlaybd-import-raw, aws CLI) plus the embedded guest kernel, and executes
+# the convert → validate-boot → snapshot → package pipeline driven by
+# cmd/sandboxtemplate-builder. The snapshot stage entry is the same binary
+# under a symlinked name. OverlayBD packaging is always built in from source
+# (overlaybd-import-raw, see the overlaybd-build stage below).
+
+ARG OCI2ROOTFS_REV=76d3f4648a591066a4419f972e4118f2d1d68a35
+ARG FIRECRACKER_VERSION=v1.16.1
+
+# --- oci2rootfs (OCI layers → ext4) ---------------------------------------
+FROM rust:1.88-bookworm AS oci2rootfs-build
+
+ARG OCI2ROOTFS_REV
+
+RUN git clone https://github.com/arcboxlabs/oci2rootfs.git /src/oci2rootfs \
+    && cd /src/oci2rootfs \
+    && git checkout --detach "$OCI2ROOTFS_REV" \
+    && cargo build --release --locked -p oci2rootfs-cli
+
+# --- overlaybd-import-raw (raw image → LSMT commit layer) ------------------
+FROM ubuntu:22.04 AS overlaybd-build
+
+ARG OVERLAYBD_REV=063821fc8cfaf06f4496b1bb523c6d59563ed1bd
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        autoconf automake build-essential ca-certificates cmake git \
+        libaio-dev libcurl4-openssl-dev libext2fs-dev libgflags-dev \
+        libnl-3-dev libnl-genl-3-dev libssl-dev libtool libzstd-dev \
+        pkg-config uuid-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/containerd/overlaybd.git /src/overlaybd \
+    && cd /src/overlaybd \
+    && git checkout --detach "$OVERLAYBD_REV" \
+    && git submodule update --init src/overlaybd/cache/ocf_cache/ocf
+
+COPY build/sandboxtemplate-builder/overlaybd-import-raw.cpp /tmp/overlaybd-import-raw.cpp
+RUN cd /src/overlaybd \
+    && install -m 0644 /tmp/overlaybd-import-raw.cpp src/tools/overlaybd-import-raw.cpp \
+    && sed -i '/add_executable(overlaybd-create/i add_executable(overlaybd-import-raw overlaybd-import-raw.cpp)\ntarget_include_directories(overlaybd-import-raw PUBLIC ${PHOTON_INCLUDE_DIR})\ntarget_link_libraries(overlaybd-import-raw photon_static overlaybd_lib)\n' src/tools/CMakeLists.txt \
+    && cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=0 \
+        -DBUILD_STREAM_CONVERTOR=0 \
+        -DORIGIN_EXT2FS=1 \
+    && cmake --build build --target overlaybd-import-raw --parallel "$(nproc)"
+
+# --- sandboxtemplate-builder binary ----------------------------------------
+FROM golang:1.25 AS builder-build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY api ./api
+COPY cmd/sandboxtemplate-builder ./cmd/sandboxtemplate-builder
+RUN CGO_ENABLED=0 go build -o /out/sandboxtemplate-builder ./cmd/sandboxtemplate-builder
+
+# --- runtime image ---------------------------------------------------------
+FROM ubuntu:22.04
+
+ARG FIRECRACKER_VERSION
+ARG OCI2ROOTFS_REV
+# The default pins the firecracker quickstart kernel under its real name;
+# override both together to embed a different kernel.
+ARG KERNEL_NAME=vmlinux.bin
+ARG KERNEL_URL=https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin
+
+ENV OCI2ROOTFS_REV=${OCI2ROOTFS_REV}
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates coreutils curl e2fsprogs jq libaio1 libzstd1 \
+        mount procps tar unzip util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# awscli v2: the ubuntu package is v1 whose botocore ignores the
+# AWS_ENDPOINT_URL env var (S3-compatible targets would silently fall back
+# to real AWS S3 with the tenant's credentials).
+RUN set -eux; \
+    curl -fsSL --retry 5 https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+
+# Firecracker release binary.
+RUN set -eux; \
+    archive="firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"; \
+    curl -fsSL --retry 5 "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/${archive}" -o "/tmp/${archive}"; \
+    tar -xzf "/tmp/${archive}" -C /tmp; \
+    install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64" /usr/local/bin/firecracker; \
+    rm -rf "/tmp/${archive}" "/tmp/release-${FIRECRACKER_VERSION}-x86_64"
+
+COPY --from=oci2rootfs-build /src/oci2rootfs/target/release/oci2rootfs /usr/local/bin/oci2rootfs
+COPY --from=overlaybd-build /src/overlaybd/build/output/overlaybd-import-raw /usr/local/bin/overlaybd-import-raw
+COPY --from=builder-build /out/sandboxtemplate-builder /usr/local/bin/sandboxtemplate-builder
+
+# Guest kernel, embedded in the builder image so builds do not download a
+# kernel at build time. Override KERNEL_URL to pin a specific build.
+RUN mkdir -p /usr/local/share/firecracker \
+    && curl -fsSL --retry 5 "${KERNEL_URL}" -o "/usr/local/share/firecracker/${KERNEL_NAME}" \
+    && chmod 0644 "/usr/local/share/firecracker/${KERNEL_NAME}" \
+    && ln -s /usr/local/bin/sandboxtemplate-builder /usr/local/bin/sandbox-snapshot-stage
+
+WORKDIR /build
+ENTRYPOINT ["/usr/local/bin/sandboxtemplate-builder"]
