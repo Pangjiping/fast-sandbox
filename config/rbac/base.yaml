@@ -40,7 +40,7 @@ rules:
   resources: ["runtimeclasses"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["sandbox.fast.io"]
-  resources: ["sandboxes", "sandboxpools", "sandboxes/status", "sandboxpools/status"]
+  resources: ["sandboxes", "sandboxpools", "sandboxtemplates", "sandboxes/status", "sandboxpools/status", "sandboxtemplates/status", "sandboxtemplates/finalizers"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
@@ -108,6 +108,33 @@ metadata:
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fast-sandbox-proxy}
 subjects:
 - {kind: ServiceAccount, name: fast-sandbox-proxy, namespace: fast-sandbox-system}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-template-builder
+  namespace: fast-sandbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-template-builder
+  namespace: fast-sandbox-system
+rules:
+# The builder Pod reports the build outcome by merge-patching its own
+# annotations; build Pods run only in this (platform) namespace.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-template-builder
+  namespace: fast-sandbox-system
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-template-builder}
+subjects:
+- {kind: ServiceAccount, name: sandbox-template-builder, namespace: fast-sandbox-system}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

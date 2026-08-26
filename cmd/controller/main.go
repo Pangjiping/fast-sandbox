@@ -55,6 +55,7 @@ func main() {
 	var fastletDrainTimeout time.Duration
 	var fastletProxyImage string
 	var boxLiteRuntimeImage string
+	var sandboxTemplateBuilderImage string
 	var routeVerifyPublicKey string
 	var routeSigningPrivateKey string
 	var routeCredentialTTL time.Duration
@@ -73,6 +74,7 @@ func main() {
 	flag.DurationVar(&fastletDrainTimeout, "fastlet-drain-timeout", 5*time.Minute, "Maximum time to wait for a draining Fastlet Pod to become empty before applying Sandbox failure policies.")
 	flag.StringVar(&fastletProxyImage, "fastlet-proxy-image", envOrDefault("FASTLET_PROXY_IMAGE", "fast-sandbox/fastlet-proxy:dev"), "Image injected as the platform-owned Fastlet Proxy sidecar.")
 	flag.StringVar(&boxLiteRuntimeImage, "boxlite-runtime-image", envOrDefault("BOXLITE_RUNTIME_IMAGE", "fast-sandbox/boxlite-runtime:dev"), "Image injected as the platform-owned BoxLite runtime sidecar.")
+	flag.StringVar(&sandboxTemplateBuilderImage, "sandboxtemplate-builder-image", envOrDefault("SANDBOXTEMPLATE_BUILDER_IMAGE", "fast-sandbox/sandboxtemplate-builder:dev"), "Image that executes SandboxTemplate golden-image builds.")
 	flag.StringVar(&routeVerifyPublicKey, "route-verify-public-key", os.Getenv("FAST_SANDBOX_ROUTE_VERIFY_PUBLIC_KEY"), "Comma-separated base64 Ed25519 public keys injected into data-plane proxies.")
 	flag.StringVar(&routeSigningPrivateKey, "route-signing-private-key", os.Getenv("FAST_SANDBOX_ROUTE_SIGNING_PRIVATE_KEY"), "Base64 Ed25519 seed/private key used only by FastPath.")
 	flag.DurationVar(&routeCredentialTTL, "route-credential-ttl", 5*time.Minute, "Lifetime of a Sandbox route credential.")
@@ -169,6 +171,13 @@ func main() {
 			RuntimeEnvironmentNamespace: runtimeEnvironmentNamespace, RuntimeEnvironmentConfigMap: runtimeEnvironmentConfigMap,
 		}).SetupWithManager(manager); err != nil {
 			klog.ErrorS(err, "Register SandboxPool controller")
+			os.Exit(1)
+		}
+		if err := (&reconciler.SandboxTemplateReconciler{
+			Client: manager.GetClient(), Scheme: manager.GetScheme(),
+			BuilderImage: sandboxTemplateBuilderImage, BuildTTL: 24 * time.Hour,
+		}).SetupWithManager(manager); err != nil {
+			klog.ErrorS(err, "Register SandboxTemplate controller")
 			os.Exit(1)
 		}
 	}
