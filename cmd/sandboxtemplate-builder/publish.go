@@ -21,8 +21,10 @@ import (
 )
 
 // publish uploads the artifacts under a digest namespace and returns the
-// manifest URI. The manifest is uploaded last so consumers never observe a
-// half-published artifact set. OverlayBD layers keep their relative paths
+// manifest URI. Upload order guarantees consumers never observe a
+// half-published artifact set: artifacts and SHA256SUMS first, then the
+// manifest, and finally the image index that points at this build.
+// OverlayBD layers keep their relative paths
 // (overlaybd/rootfs/layer.lsmt, overlaybd/memory/layer.lsmt) — a flat
 // basename would collide on the same S3 key.
 func publish(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir string, manifestBytes []byte) (string, error) {
@@ -35,6 +37,9 @@ func publish(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir 
 		{filepath.Join(workdir, "rootfs.ext4"), "rootfs.ext4"},
 		{filepath.Join(workdir, "vmstate.snap"), "vmstate.snap"},
 		{filepath.Join(workdir, "memory.snap"), "memory.snap"},
+		// SHA256SUMS covers only the published artifact set; it belongs to
+		// the immutable build directory and goes up with the artifacts.
+		{filepath.Join(workdir, "SHA256SUMS"), "SHA256SUMS"},
 	}
 	if layers, err := filepath.Glob(filepath.Join(workdir, "overlaybd", "*", "layer.lsmt")); err == nil {
 		for _, layer := range layers {
@@ -60,7 +65,78 @@ func publish(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir 
 	if err := uploadWithRetry(ctx, aws, args, filepath.Join(workdir, "manifest.json"), manifestURI, "manifest.json"); err != nil {
 		return "", err
 	}
+	// The image index is uploaded last: a consumer that can resolve the
+	// index is guaranteed a complete artifact set (artifacts, checksums,
+	// and manifest are all already in place).
+	if err := publishImageIndex(ctx, aws, args, spec.Image, manifestURI, sha256Of(manifestBytes), spec.Output.Publish); err != nil {
+		return "", err
+	}
 	return manifestURI, nil
+}
+
+// imageIndexKey derives the content-addressed index key of an image
+// reference. It matches the consumer-side cache key, so a consumer can
+// resolve the latest published manifest for an image reference without any
+// control-plane coordination.
+func imageIndexKey(image string) string {
+	return sha256Of([]byte(image))
+}
+
+// imageIndexPayload builds the image index document pointing at the latest
+// published manifest. The manifest reference is content-addressed, so an
+// older build of the same image reference stays intact and only the index
+// pointer moves.
+func imageIndexPayload(image, manifestURI, artifactDigest string) ([]byte, error) {
+	document := struct {
+		Image          string `json:"image"`
+		ManifestRef    string `json:"manifestRef"`
+		ArtifactDigest string `json:"artifactDigest"`
+		UpdatedAt      string `json:"updatedAt"`
+	}{
+		Image:          image,
+		ManifestRef:    manifestURI,
+		ArtifactDigest: artifactDigest,
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	return json.MarshalIndent(document, "", "  ")
+}
+
+// publishImageIndex uploads the image index object under the store root so
+// consumers can resolve the published artifact set from the image reference
+// alone. The index lives outside the per-build digest namespace, so a
+// rebuild of the same image reference atomically moves the pointer.
+//
+// The index key is derived from the raw image reference string and must be
+// byte-identical to the consumer-side reference (SandboxSpec.Image): no
+// normalization, no default tags, no whitespace trimming. Any divergence
+// breaks the addressing chain.
+//
+// Concurrent builds of the same image reference against the same store
+// root are last-writer-wins: every build is complete before its index is
+// written, so no half-published state is ever observable, but the winner
+// is not deterministic (publishers should serialize per image).
+func publishImageIndex(ctx context.Context, aws string, args []string, image, manifestURI, artifactDigest, storeRoot string) error {
+	if strings.TrimSpace(image) == "" {
+		return fmt.Errorf("publish image index: image reference is required (empty image would collide on the empty-hash index key)")
+	}
+	payload, err := imageIndexPayload(image, manifestURI, artifactDigest)
+	if err != nil {
+		return err
+	}
+	local, err := os.CreateTemp("", "fc-image-index-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(local.Name())
+	if _, err := local.Write(payload); err != nil {
+		return err
+	}
+	if err := local.Close(); err != nil {
+		return err
+	}
+	key := "index/" + imageIndexKey(image) + ".json"
+	target := strings.TrimRight(storeRoot, "/") + "/" + key
+	return uploadWithRetry(ctx, aws, args, local.Name(), target, key)
 }
 
 // publishRetries is how many times a transient upload failure is retried.
