@@ -44,6 +44,11 @@ func imageDir(stateRoot, image string) string {
 // cacheComplete reports whether the image directory holds a committed pull:
 // the local manifest plus a native file set whose digests match. It is the
 // idempotency check: a complete cache is never touched again.
+//
+// Deliberate trade-off: a committed cache is never refreshed for the same
+// image reference, even when the publisher rebuilds it. Picking up a new
+// build requires clearing the cache directory or using a new tag. Warm-image
+// preheating relies on this "pull once per reference" behavior.
 func cacheComplete(dir string) (bool, error) {
 	payload, err := os.ReadFile(filepath.Join(dir, manifestName))
 	if err != nil {
@@ -61,7 +66,7 @@ func cacheComplete(dir string) (bool, error) {
 		return false, nil
 	}
 	for _, file := range files {
-		match, err := fileMatches(filepath.Join(dir, file.cache), file.sha256)
+		match, err := fileMatches(filepath.Join(dir, file.cache), file)
 		if err != nil || !match {
 			return false, nil
 		}
@@ -69,13 +74,14 @@ func cacheComplete(dir string) (bool, error) {
 	return true, nil
 }
 
-// stageFile ensures the artifact is in the cache with the expected digest:
-// an existing matching file is skipped (resume semantics), a mismatching
-// file is deleted and re-pulled, and the download lands in a temporary file
-// that is renamed into place only after the whole content verifies.
+// stageFile ensures the artifact is in the cache with the expected size and
+// digest: an existing matching file is skipped (resume semantics), a
+// mismatching file is deleted and re-pulled, and the download lands in a
+// temporary file that is renamed into place only after the whole content
+// verifies.
 func stageFile(ctx context.Context, s3 *s3Client, dir, storeKey string, file nativeFile) error {
 	target := filepath.Join(dir, file.cache)
-	match, err := fileMatches(target, file.sha256)
+	match, err := fileMatches(target, file)
 	if err == nil && match {
 		return nil
 	}
@@ -108,8 +114,12 @@ func stageFile(ctx context.Context, s3 *s3Client, dir, storeKey string, file nat
 		}
 	}()
 	digest := sha256.New()
-	if _, err := io.Copy(tmp, io.TeeReader(body, digest)); err != nil {
+	written, err := io.Copy(tmp, io.TeeReader(body, digest))
+	if err != nil {
 		return fmt.Errorf("download %s: %w", file.publish, err)
+	}
+	if written != file.sizeBytes {
+		return fmt.Errorf("artifact %s size mismatch: got %d bytes, want %d", file.publish, written, file.sizeBytes)
 	}
 	sum := hex.EncodeToString(digest.Sum(nil))
 	if sum != file.sha256 {
@@ -152,8 +162,18 @@ func commitManifest(dir string, payload []byte) error {
 	return os.Rename(tmp.Name(), filepath.Join(dir, manifestName))
 }
 
-// fileMatches reports whether the file exists and its sha256 matches.
-func fileMatches(path, want string) (bool, error) {
+// fileMatches reports whether the file exists with the expected size and
+// sha256. The size is compared first via stat: hashing a multi-GiB rootfs
+// on every idempotency check would defeat the point of the warm cache, so
+// the full digest is only computed when the size matches.
+func fileMatches(path string, file nativeFile) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if info.Size() != file.sizeBytes {
+		return false, nil
+	}
 	input, err := os.Open(path)
 	if err != nil {
 		return false, err
@@ -163,5 +183,5 @@ func fileMatches(path, want string) (bool, error) {
 	if _, err := io.Copy(digest, input); err != nil {
 		return false, err
 	}
-	return hex.EncodeToString(digest.Sum(nil)) == want, nil
+	return hex.EncodeToString(digest.Sum(nil)) == file.sha256, nil
 }

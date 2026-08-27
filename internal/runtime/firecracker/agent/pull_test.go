@@ -224,10 +224,14 @@ func TestPullImageRepairsCorruptCache(t *testing.T) {
 	store, client, manifestPayload, artifacts := publishFixture(t)
 	root := t.TempDir()
 
-	// rootfs.img exists with the wrong content; the manifest was committed.
+	// rootfs.img exists with the same size but different content (silent
+	// corruption passes the stat fast path and must be caught by the
+	// digest); the manifest was committed.
 	dir := imageDir(root, testImage)
 	require.NoError(t, os.MkdirAll(dir, cacheDirMode))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "rootfs.img"), []byte("corrupt"), cacheFileMode))
+	corrupt := bytes.Repeat([]byte{0x00}, len(artifacts["rootfs.ext4"]))
+	require.NotEqual(t, artifacts["rootfs.ext4"], corrupt)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "rootfs.img"), corrupt, cacheFileMode))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, manifestName), manifestPayload, cacheFileMode))
 
 	require.NoError(t, (&Client{s3: client}).PullImage(context.Background(), root, testImage))

@@ -82,6 +82,12 @@ func WithHTTPClient(client *http.Client) Option {
 // The call is safe to race with a concurrent PullImage of the same image:
 // every write lands in a temporary file and renames into place only after
 // full verification, so no half-published state is ever observable.
+//
+// Idempotency semantics: a committed cache is returned without any network
+// request and is never refreshed for the same image reference. A publisher
+// rebuild of the same reference (last-writer-wins index) is therefore only
+// picked up after clearing the cache directory or switching to a new tag —
+// the intended trade-off for warm-image preheating.
 func (c *Client) PullImage(ctx context.Context, stateRoot, image string) error {
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("%w: image reference is required", runtimecontract.ErrInvalidConfig)
