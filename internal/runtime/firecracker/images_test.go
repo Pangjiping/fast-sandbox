@@ -161,7 +161,10 @@ func TestImageGCLoopRunsIndependently(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
 		require.NoError(t, os.WriteFile(path, []byte("rootfs"), 0o640))
 		digest := imageKey(image)
+		// The GC loop reads the map concurrently; mutate under the lock.
+		driver.mu.Lock()
 		driver.imageUseCount[digest] = 1
+		driver.mu.Unlock()
 		return digest
 	}
 	waitFor := func(image string, gone bool) {
@@ -180,15 +183,21 @@ func TestImageGCLoopRunsIndependently(t *testing.T) {
 
 	// The cache is over its limit, so the loop evicts the unreferenced
 	// low-frequency image without any Sandbox event.
+	driver.mu.Lock()
 	driver.imageCacheLimitBytes = 1
+	driver.mu.Unlock()
 	unused := seedImage("example.com/unused:v1")
 	waitFor(unused, true)
 
 	// Under its limit again, the loop leaves images alone even when
 	// unreferenced.
+	driver.mu.Lock()
 	driver.imageCacheLimitBytes = 6
+	driver.mu.Unlock()
 	hot := seedImage("example.com/hot:v1")
+	driver.mu.Lock()
 	driver.imageUseCount[hot] = 100
+	driver.mu.Unlock()
 	time.Sleep(3 * driver.imageGCInterval)
 	_, err = os.Stat(filepath.Join(root, imageCacheDir, hot))
 	require.NoError(t, err, "image under the cache limit must survive the loop")

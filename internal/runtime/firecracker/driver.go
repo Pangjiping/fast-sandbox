@@ -170,7 +170,13 @@ func (d *Driver) imageGCLoop(interval time.Duration, stop <-chan struct{}) {
 func (d *Driver) gcImageCache() {
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
-	useCount := d.imageUseCount
+	// Snapshot the use counts under the lock: garbageCollectImages runs
+	// outside it while PullImage and boot (touchImage) keep writing the
+	// map, so the iteration must not touch the live map.
+	useCount := make(map[string]int64, len(d.imageUseCount))
+	for digest, uses := range d.imageUseCount {
+		useCount[digest] = uses
+	}
 	limitBytes := d.imageCacheLimitBytes
 	d.mu.RUnlock()
 	if limitBytes <= 0 {

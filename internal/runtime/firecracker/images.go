@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 // imageCacheDir holds content-addressed rootfs images:
@@ -27,7 +29,9 @@ const rootfsImageName = "rootfs.img"
 
 // ErrImageNotReady reports that a rootfs image has not been converted and
 // cached yet; the conversion build job must run before the Sandbox can boot.
-var ErrImageNotReady = errors.New("rootfs image is not ready in the local cache")
+// The sentinel lives in the runtime contract so the firecracker runtime-agent
+// pull layer can reuse it; this alias keeps the driver's exported identity.
+var ErrImageNotReady = runtimecontract.ErrImageNotReady
 
 // imageKey derives the content-addressed cache key of an image reference.
 func imageKey(image string) string {
