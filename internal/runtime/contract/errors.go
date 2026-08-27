@@ -12,4 +12,9 @@ var (
 	ErrInfraUnavailable             = errors.New("sandbox Infra Components unavailable")
 	ErrSandboxProfileMismatch       = errors.New("sandbox profile mismatch")
 	ErrInvalidConfig                = errors.New("invalid sandbox config")
+	// ErrImageNotReady reports that a rootfs image has not been converted
+	// and cached yet. It is shared between the driver's local cache and the
+	// firecracker runtime-agent pull layer so both can fail a create with
+	// the same sentinel.
+	ErrImageNotReady = errors.New("rootfs image is not ready in the local cache")
 )
