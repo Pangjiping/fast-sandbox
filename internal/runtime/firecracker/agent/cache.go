@@ -107,8 +107,11 @@ func stageFile(ctx context.Context, s3 *s3Client, dir, storeKey string, file nat
 		return err
 	}
 	keep := false
+	closed := false
 	defer func() {
-		_ = tmp.Close()
+		if !closed {
+			_ = tmp.Close()
+		}
 		if !keep {
 			_ = os.Remove(tmp.Name())
 		}
@@ -128,9 +131,12 @@ func stageFile(ctx context.Context, s3 *s3Client, dir, storeKey string, file nat
 	if err := tmp.Chmod(cacheFileMode); err != nil {
 		return err
 	}
+	// Flush before the rename so the committed name never points at a
+	// half-written file; the deferred cleanup skips the already-closed file.
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	closed = true
 	if err := os.Rename(tmp.Name(), target); err != nil {
 		return err
 	}
@@ -146,8 +152,11 @@ func commitManifest(dir string, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	closed := false
 	defer func() {
-		_ = tmp.Close()
+		if !closed {
+			_ = tmp.Close()
+		}
 		_ = os.Remove(tmp.Name())
 	}()
 	if _, err := tmp.Write(payload); err != nil {
@@ -156,9 +165,12 @@ func commitManifest(dir string, payload []byte) error {
 	if err := tmp.Chmod(cacheFileMode); err != nil {
 		return err
 	}
+	// Flush before the rename so the committed name never points at a
+	// half-written file; the deferred cleanup skips the already-closed file.
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	closed = true
 	return os.Rename(tmp.Name(), filepath.Join(dir, manifestName))
 }
 

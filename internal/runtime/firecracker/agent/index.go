@@ -26,6 +26,11 @@ func indexKey(image string) string {
 	return "index/" + imageKey(image) + ".json"
 }
 
+// maxIndexBytes caps the downloaded image index document. Indexes are tiny
+// (four fields); a larger document is never legitimate, so it is rejected
+// instead of being read unbounded.
+const maxIndexBytes = 1 << 20
+
 // fetchIndex downloads and validates the image reference index. A missing
 // index surfaces as ErrObjectNotFound so the caller can map it to
 // ErrImageNotReady.
@@ -35,9 +40,12 @@ func fetchIndex(ctx context.Context, s3 *s3Client, image string) (imageIndex, er
 		return imageIndex{}, err
 	}
 	defer body.Close()
-	payload, err := io.ReadAll(body)
+	payload, err := io.ReadAll(io.LimitReader(body, maxIndexBytes+1))
 	if err != nil {
 		return imageIndex{}, fmt.Errorf("read image index for %q: %w", image, err)
+	}
+	if len(payload) > maxIndexBytes {
+		return imageIndex{}, fmt.Errorf("image index for %q exceeds the %d-byte limit", image, maxIndexBytes)
 	}
 	var index imageIndex
 	if err := json.Unmarshal(payload, &index); err != nil {

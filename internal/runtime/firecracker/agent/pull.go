@@ -143,6 +143,11 @@ func (c *Client) PullImage(ctx context.Context, stateRoot, image string) error {
 	return commitManifest(dir, payload)
 }
 
+// maxManifestBytes caps the downloaded manifest document. Manifests are
+// small metadata (file list + compatibility tuple); a larger document is
+// never legitimate, so it is rejected instead of being read unbounded.
+const maxManifestBytes = 1 << 20
+
 // fetchManifest downloads the manifest and verifies its content against the
 // index artifactDigest, binding the whole artifact set to the index.
 func (c *Client) fetchManifest(ctx context.Context, manifestKey, artifactDigest string) ([]byte, error) {
@@ -154,9 +159,12 @@ func (c *Client) fetchManifest(ctx context.Context, manifestKey, artifactDigest 
 		return nil, fmt.Errorf("fetch published manifest: %w", err)
 	}
 	defer body.Close()
-	payload, err := io.ReadAll(body)
+	payload, err := io.ReadAll(io.LimitReader(body, maxManifestBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read published manifest: %w", err)
+	}
+	if len(payload) > maxManifestBytes {
+		return nil, fmt.Errorf("published manifest exceeds the %d-byte limit", maxManifestBytes)
 	}
 	if sum := sha256Hex(payload); sum != artifactDigest {
 		return nil, fmt.Errorf("published manifest digest mismatch: got %s, want %s", sum, artifactDigest)

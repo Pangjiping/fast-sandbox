@@ -370,6 +370,34 @@ func TestPullImageManifestMissingFile(t *testing.T) {
 	require.Contains(t, err.Error(), "missing the vmstate.snap artifact")
 }
 
+func TestPullImageRejectsOversizedManifest(t *testing.T) {
+	// A manifest larger than the read limit must be rejected instead of
+	// being read into memory unbounded.
+	document := map[string]any{}
+	require.NoError(t, json.Unmarshal(testManifest(map[string][]byte{"rootfs.ext4": []byte("rootfs")}), &document))
+	document["padding"] = strings.Repeat("x", maxManifestBytes+1024)
+	manifestPayload, err := json.Marshal(document)
+	require.NoError(t, err)
+	buildDir := sha256Hex(manifestPayload)[:16]
+	store := &fakeStore{bucket: testBucket, prefix: testPrefix, objects: map[string][]byte{}, flaky: map[string]int{}}
+	store.objects[buildDir+"/manifest.json"] = manifestPayload
+	store.objects[buildDir+"/rootfs.ext4"] = []byte("rootfs")
+	index := imageIndex{
+		Image:          testImage,
+		ManifestRef:    "s3://" + testBucket + "/" + testPrefix + "/" + buildDir + "/manifest.json",
+		ArtifactDigest: sha256Hex(manifestPayload),
+		UpdatedAt:      "2026-08-27T00:00:00Z",
+	}
+	indexPayload, err := json.Marshal(index)
+	require.NoError(t, err)
+	store.objects["index/"+imageKey(testImage)+".json"] = indexPayload
+	client := testS3Client(t, store)
+
+	err = (&Client{s3: client}).PullImage(context.Background(), t.TempDir(), testImage)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds the")
+}
+
 func TestPullImageConcurrent(t *testing.T) {
 	_, client, _, _ := publishFixture(t)
 	root := t.TempDir()
