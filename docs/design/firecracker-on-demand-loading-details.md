@@ -331,18 +331,21 @@ guest fs quiesce（execd sync/fsfreeze）
   → driver: FC pause
   → driver: state-only snapshot → vmstate.snap
   → agent: seal rootfs writable upper layer → 内容寻址 layer（rootfs 增量）
-  → agent: 捕获 memory 增量（机制取决于写穿验证结果，见下）
+  → agent: 捕获 memory 增量（dirty-range 导出，已验证定案，见下）
   → agent: 上传 layers + vmstate → 最后 commit 快照 manifest
   → 控制面: 快照资源标记 Ready
   → source VM: 继续运行（resume-on-error）或按策略删除
 ```
 
-- **memory 捕获机制（依赖待办 1 验证结果）**：
-  - 验证为写穿（MAP_SHARED）：dirty 块已在 agent 的 memory upper layer，
-    快照 = 同步/flush + seal upper layer，**零 ptrace**；
-  - 验证为 COW（MAP_PRIVATE）：需要 dirty-range 导出（`process_vm_readv`），
-    采用"driver 代读"（firecracker 父进程，默认 ptrace_scope 下合法）或
-    agent 提权治理（见主文档待决策项 1）。
+- **memory 捕获机制（已验证定案，`scripts/firecracker-mem-backend-check.sh`）**：
+  v1.16.1 的 file-backed memory restore 为 **MAP_PRIVATE（COW）**——guest
+  写落在进程匿名内存，文件只保留干净页。因此快照的 memory 增量**必须**
+  dirty-range 导出（`process_vm_readv`）：
+  - 优先"driver 代读"：driver 是 firecracker 的父进程，默认
+    ptrace_scope=1 下读取子进程内存合法，无需节点 sysctl 或提权；
+    读取的 dirty ranges 经 UDS 流式交给 agent 打包 layer；
+  - 备选：agent 提权治理（节点 ptrace_scope / CAP_SYS_PTRACE），仅在
+    driver 代读不可行时评估。
 - 一致性约束：rootfs 增量与 memory 增量必须对应**同一个 pause epoch**；
   source VM 继续运行的前提是快照失败时可完整回滚（resume-on-error）；
 - 快照创建 API 超时不得取消已进入 commit 阶段的上传，控制面通过快照资源

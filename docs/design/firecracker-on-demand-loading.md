@@ -175,6 +175,7 @@ guest 读 block
 | 运行态快照与 API 保存/恢复 | **阶段 4 实施**（当前焦点为启动流程） | 仅用户显式触发；需修订 architecture.md non-goal 对应条款；启动流程不依赖 |
 | 快照资源模型 | **控制面 `SandboxSnapshot` CRD**（阶段 4） | owner/租户/TTL/配额/引用计数/状态机 |
 | 增量链策略 | **链式增量 + 定期 flatten**（阶段 4） | 链深阈值触发后台 compact；共享层引用计数保护 |
+| memory 捕获机制 | **dirty-range 导出（`process_vm_readv`），driver 代读优先** | 已验证（`scripts/firecracker-mem-backend-check.sh`，v1.16.1）：file-backed memory restore 为 **MAP_PRIVATE（COW）**，guest 写不落文件——seal upper layer 方案排除；driver 是 firecracker 父进程，默认 ptrace_scope 下代读合法 |
 | overlaybd/ublk 依赖方式 | **vendor 集成**（AgentENV `storage/` 子图 + `libublk-rs-sys` pin） | 不 cgo；Rust daemon 独立进程；上游风险与 fork 触发见细节文档 §2.5 |
 | 节点内核基线 | **Linux 6.8+（部署环境要求）** | 无 5.10/NBD 降级路径；自检 fail-closed |
 | P2P 载体 | **集成 [DART](https://github.com/data-accelerator/dart)**（同容器独立进程，零代码集成） | 无 tracker/leader（HRW）、零依赖 Go、HTTP 前缀模式对接 overlaybd（上游官方用法）；自研 seed 方案废弃；AgentENV iroh P2P（实验性）不采用 |
@@ -231,27 +232,24 @@ P2P 载体采用 DART（未生产就绪、无社区），主要风险：
 
 1. **阶段 1 agent 部署载体**：独立 DaemonSet（推荐，阶段 2/3 原地扩展）
    vs 临时并置容器（与 fastlet 同 Pod，阶段 2 再拆）。
-2. **memory 脏数据导出机制**（阶段 4 前置，当前挂起）：写穿验证（MAP_SHARED
-   → seal upper layer，零 ptrace）；仅当 COW 时评估 dirty-range 导出——
-   优先"driver 代读"（firecracker 父进程），其次 agent 提权治理。
-   见[待办 1](#待办事项)。
-3. **快照 CRD 语义细节**（阶段 4）：TTL 默认值/上限、每租户配额、引用计数
+2. **快照 CRD 语义细节**（阶段 4）：TTL 默认值/上限、每租户配额、引用计数
    控制面 vs agent 分界。
-4. **恢复失败 fallback 策略**（阶段 4）：增量层损坏时是否允许显式接受的
+3. **恢复失败 fallback 策略**（阶段 4）：增量层损坏时是否允许显式接受的
    冷启动 fallback，及重试调度语义。
+
+> 已定案：memory 捕获机制 = dirty-range 导出 + driver 代读（写穿验证完成，
+> 见决策记录）；待办 1 已完成（`scripts/firecracker-mem-backend-check.sh`）。
 
 > 后续演进（本期明确不做）：运行态快照保存/恢复（snapshot/resume，阶段 4
 > 实施）、被动迁移（drain/failover 批量快照）与跨主机恢复的增量层拉取优化。
 
 ### 待办事项
 
-1. **验证 Firecracker file-backed memory 写穿语义**（阶段 4 前置，当前挂起，
-   启动流程不依赖）
-   - 方法：restore 快照，memory 文件指向可观测文件/设备 → guest 写内存
-     → 对比 upper layer/文件对应块是否出现脏数据
-   - 判断：出现脏块 → 写穿（seal upper layer，零 ptrace）；无变化 → COW
-     （dirty-range 导出路径）
-   - 产出：验证脚本 + 结论记录；决定增量快照数据路径与 ptrace 是否需要
+1. ~~**验证 Firecracker file-backed memory 写穿语义**~~ **已完成**
+   （v1.16.1）：结果为 **MAP_PRIVATE（COW）**——判定 1 maps 标志 `rw-p`；
+   判定 2 Shared_Dirty=0；判定 3 restore-mem.bin 与 memory.snap 一致。
+   memory 捕获机制定案：dirty-range 导出（`process_vm_readv`），driver
+   代读优先（父进程，默认 ptrace_scope 下合法），agent 提权为备选。
 2. **修订 docs/concepts/architecture.md non-goal**（阶段 4 随快照能力一起）：
    快照/保存/恢复改为 API 触发能力（跨 Fastlet 实例生存仍维持 non-goal）。
 
