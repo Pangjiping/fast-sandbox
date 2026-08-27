@@ -1,0 +1,58 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+// TestImageIndexKeyMatchesConsumerCacheKey verifies the index key derivation
+// matches the consumer-side cache key (sha256 of the image reference string),
+// so the addressing chain Image -> index works without control-plane help.
+func TestImageIndexKeyMatchesConsumerCacheKey(t *testing.T) {
+	const image = "registry.example.com/sandbox:v1.0.21"
+	digest := sha256.Sum256([]byte(image))
+	if got, want := imageIndexKey(image), hex.EncodeToString(digest[:]); got != want {
+		t.Fatalf("imageIndexKey(%q) = %s, want %s", image, got, want)
+	}
+	if got := imageIndexKey(image); len(got) != sha256.Size*2 {
+		t.Fatalf("imageIndexKey length = %d, want %d", len(got), sha256.Size*2)
+	}
+}
+
+// TestImageIndexPayload verifies the index document shape: manifestRef,
+// artifactDigest, and an RFC3339 updatedAt timestamp.
+func TestImageIndexPayload(t *testing.T) {
+	const (
+		image          = "registry.example.com/sandbox:v1.0.21"
+		manifestURI    = "s3://bucket/sandbox-images/0123456789abcdef/manifest.json"
+		artifactDigest = "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+	)
+	payload, err := imageIndexPayload(image, manifestURI, artifactDigest)
+	if err != nil {
+		t.Fatalf("imageIndexPayload: %v", err)
+	}
+	var document struct {
+		Image          string `json:"image"`
+		ManifestRef    string `json:"manifestRef"`
+		ArtifactDigest string `json:"artifactDigest"`
+		UpdatedAt      string `json:"updatedAt"`
+	}
+	if err := json.Unmarshal(payload, &document); err != nil {
+		t.Fatalf("unmarshal index: %v", err)
+	}
+	if document.Image != image {
+		t.Fatalf("image = %q, want %q", document.Image, image)
+	}
+	if document.ManifestRef != manifestURI {
+		t.Fatalf("manifestRef = %q, want %q", document.ManifestRef, manifestURI)
+	}
+	if document.ArtifactDigest != artifactDigest {
+		t.Fatalf("artifactDigest = %q, want %q", document.ArtifactDigest, artifactDigest)
+	}
+	if _, err := time.Parse(time.RFC3339, document.UpdatedAt); err != nil {
+		t.Fatalf("updatedAt %q is not RFC3339: %v", document.UpdatedAt, err)
+	}
+}
