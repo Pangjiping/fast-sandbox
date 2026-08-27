@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,5 +56,22 @@ func TestImageIndexPayload(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, document.UpdatedAt); err != nil {
 		t.Fatalf("updatedAt %q is not RFC3339: %v", document.UpdatedAt, err)
+	}
+}
+
+// TestPublishImageIndexRejectsEmptyImage verifies the empty-reference guard:
+// an empty image must not silently hash into a valid index key (the
+// consumer side rejects empty images the same way).
+func TestPublishImageIndexRejectsEmptyImage(t *testing.T) {
+	for _, image := range []string{"", "   ", "\t\n"} {
+		err := publishImageIndex(context.Background(), "aws", []string{"s3", "cp"}, image,
+			"s3://bucket/sandbox-images/0123456789abcdef/manifest.json",
+			"deadbeef", "s3://bucket/sandbox-images")
+		if err == nil {
+			t.Fatalf("expected an error for empty image reference %q", image)
+		}
+		if !strings.Contains(err.Error(), "image reference is required") {
+			t.Fatalf("error %q does not mention the required guard", err)
+		}
 	}
 }

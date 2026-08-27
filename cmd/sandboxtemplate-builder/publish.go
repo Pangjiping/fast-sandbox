@@ -105,7 +105,20 @@ func imageIndexPayload(image, manifestURI, artifactDigest string) ([]byte, error
 // consumers can resolve the published artifact set from the image reference
 // alone. The index lives outside the per-build digest namespace, so a
 // rebuild of the same image reference atomically moves the pointer.
+//
+// The index key is derived from the raw image reference string and must be
+// byte-identical to the consumer-side reference (SandboxSpec.Image): no
+// normalization, no default tags, no whitespace trimming. Any divergence
+// breaks the addressing chain.
+//
+// Concurrent builds of the same image reference against the same store
+// root are last-writer-wins: every build is complete before its index is
+// written, so no half-published state is ever observable, but the winner
+// is not deterministic (publishers should serialize per image).
 func publishImageIndex(ctx context.Context, aws string, args []string, image, manifestURI, artifactDigest, storeRoot string) error {
+	if strings.TrimSpace(image) == "" {
+		return fmt.Errorf("publish image index: image reference is required (empty image would collide on the empty-hash index key)")
+	}
 	payload, err := imageIndexPayload(image, manifestURI, artifactDigest)
 	if err != nil {
 		return err
