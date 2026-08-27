@@ -43,6 +43,19 @@ SandboxSpec.Image (fastlet 协议，唯一请求引用)
 1. publish 成功后，额外上传 `index/<sha256(spec.Image)>.json`（manifest 之后）；
 2. 补传 `SHA256SUMS`（消费端以 manifest.files 校验为准，该文件供审计）。
 
+**index 语义约束（评审定案）**：
+
+- **image 引用必须逐字节一致**：index key 由原始 image 字符串推导，与
+  消费端 `SandboxSpec.Image` 必须完全一致——**不做任何规范化**（不加默认
+  tag、不 pin digest、不 trim 空白）。发布端与消费端对空/空白 image
+  均显式拒绝（空串会 hash 出合法 key，静默覆盖 `index/<空串hash>.json`）；
+- **last-writer-wins**：同一 store root 下同 image 并发发布时 index 指针
+  覆盖。每次写入前构建已完整（artifacts → manifest → index 顺序），
+  因此不存在半成品可见状态，但赢家不确定——发布方按 image 串行化；
+- **manifestRef 命名空间**：build 目录前缀为 `sha256(manifest)[:16]`
+  （64 位）。index 使该前缀进入公开寻址链，碰撞即两构建共享命名空间——
+  概率可接受（content-addressed 的既有语义），**不得进一步缩短前缀**。
+
 ### 1.3 manifest 增强
 
 在现有 `compatibility` 基础上按 aone 方案结构化为可机器匹配的元组：
