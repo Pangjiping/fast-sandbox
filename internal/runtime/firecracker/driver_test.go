@@ -33,12 +33,21 @@ func firecrackerConfigForTest(t *testing.T, root string) runtimecatalog.Firecrac
 	return *profile.Firecracker
 }
 
-// fakeNetworkDriver no-ops the host netns preparation steps.
+// fakeNetworkDriver no-ops the host netns preparation steps but assigns the
+// guest tap name, which the restore path's network_overrides requires.
 type fakeNetworkDriver struct{}
 
-func (fakeNetworkDriver) Prepare(context.Context, *fastletnetwork.Slot) error  { return nil }
-func (fakeNetworkDriver) Validate(context.Context, *fastletnetwork.Slot) error { return nil }
-func (fakeNetworkDriver) Destroy(context.Context, *fastletnetwork.Slot) error  { return nil }
+func (fakeNetworkDriver) Prepare(_ context.Context, slot *fastletnetwork.Slot) error {
+	slot.GuestTap = "fc-tap"
+	return nil
+}
+func (fakeNetworkDriver) Validate(_ context.Context, slot *fastletnetwork.Slot) error {
+	if slot.GuestTap == "" {
+		return errors.New("no guest tap")
+	}
+	return nil
+}
+func (fakeNetworkDriver) Destroy(context.Context, *fastletnetwork.Slot) error { return nil }
 
 // memoryStateStore keeps slots in memory for the manager fixture.
 type memoryStateStore struct {
@@ -370,12 +379,10 @@ func TestEnsureSandboxBootsVM(t *testing.T) {
 	require.Contains(t, fixture.launcher.started[0], "--api-sock")
 
 	calls := fixture.server.recordedCalls()
-	require.Contains(t, calls, "PUT /machine-config")
-	require.NotContains(t, calls, "PUT /boot-source")
-	require.Contains(t, calls, "PUT /drives/root")
-	require.Contains(t, calls, "PUT /network-interfaces/eth0")
-	require.Contains(t, calls, "PUT /snapshot/load")
-	require.Contains(t, calls, "PUT /actions")
+	// v1.16 restore: LoadSnapshot is the first (and only pre-boot) API call;
+	// machine/drive/network configuration is restored from the vmstate and
+	// is rejected by Firecracker before load. The boot source is never set.
+	require.Equal(t, []string{"PUT /snapshot/load", "PUT /actions", "GET /"}, calls)
 
 	directory, err := sandboxDir(fixture.stateRoot, "sandbox-1")
 	require.NoError(t, err)
@@ -398,20 +405,15 @@ func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(PhaseRunning), metadata.Phase)
 
-	// Restore sequence: machine-config -> drive -> nic -> snapshot/load ->
-	// InstanceStart; the kernel boot source is never configured.
+	// v1.16 restore: LoadSnapshot is the first (and only pre-boot) API call;
+	// the kernel boot source is never configured, and the machine/drive/nic
+	// configuration comes from the vmstate.
 	calls := fixture.server.recordedCalls()
-	require.Equal(t, []string{
-		"PUT /machine-config",
-		"PUT /drives/root",
-		"PUT /network-interfaces/eth0",
-		"PUT /snapshot/load",
-		"PUT /actions",
-		"GET /",
-	}, calls)
+	require.Equal(t, []string{"PUT /snapshot/load", "PUT /actions", "GET /"}, calls)
 
-	// The snapshot/load payload references the cached golden artifacts and
-	// leaves the VM paused for the explicit InstanceStart resume.
+	// The snapshot/load payload references the cached golden artifacts, the
+	// per-instance NIC tap override, and leaves the VM paused for the
+	// explicit InstanceStart resume.
 	loads := fixture.server.recordedSnapshotLoads()
 	require.Len(t, loads, 1)
 	imageDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image))
@@ -419,6 +421,9 @@ func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 	require.Equal(t, "File", loads[0].MemBackend.BackendType)
 	require.Equal(t, filepath.Join(imageDir, memorySnapshotName), loads[0].MemBackend.BackendPath)
 	require.False(t, loads[0].ResumeVM)
+	require.Len(t, loads[0].NetworkOverrides, 1)
+	require.Equal(t, "eth0", loads[0].NetworkOverrides[0].IfaceID)
+	require.Equal(t, "fc-tap", loads[0].NetworkOverrides[0].HostDevName)
 }
 
 func TestEnsureSandboxRestoreMachineConfigFromManifest(t *testing.T) {

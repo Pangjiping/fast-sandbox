@@ -2,10 +2,14 @@ package firecracker
 
 // restore.go implements the golden snapshot restore startup path
 // (implementation plan §3.3): restore is the only startup path, the cold
-// boot branch is removed. EnsureSandbox configures the machine from the
-// cached manifest machine tuple (the snapshot was created with it),
-// attaches the per-instance rootfs copy and the NIC, then loads the golden
-// snapshot (vmstate + file-backed memory) and starts the instance.
+// boot branch is removed. EnsureSandbox launches the Firecracker process
+// with the state directory as its working directory (so the relative
+// rootfs.img path baked in the vmstate resolves to this instance's reflink
+// copy), validates the request memory against the manifest machine tuple,
+// then loads the golden snapshot (vmstate + file-backed memory) as the
+// FIRST API call and starts the instance. Devices (root drive, NIC) are
+// restored from the snapshot; only the NIC host tap is replaced per
+// instance via network_overrides.
 
 import (
 	"context"
@@ -13,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/netip"
 	"os"
 	"path/filepath"
 
@@ -156,131 +159,34 @@ func resolveRestoreSnapshotFiles(stateRoot, image string) (vmstate, memory strin
 	return vmstate, memory, nil
 }
 
-// configureRestoreVM drives the Firecracker API for a snapshot restore:
-// machine config (from the manifest machine tuple), the root drive (the
-// per-instance reflink copy), the guest network interface, and
-// PUT /snapshot/load with the golden vmstate + file-backed memory. The
-// boot source is deliberately absent: the snapshot already contains the
-// guest state, no kernel is booted.
-func configureRestoreVM(ctx context.Context, client *Client, spec fastletapi.SandboxSpec, machine MachineConfigRequest, instanceRootfs, vmstatePath, memoryPath string, slot *fastletnetwork.Slot) error {
-	if err := client.ConfigureMachine(ctx, machine); err != nil {
-		return fmt.Errorf("configure Firecracker machine: %w", err)
-	}
-	if err := client.AttachDrive(ctx, DriveRequest{
-		DriveID: "root", PathOnHost: instanceRootfs, IsRootDevice: true, IsReadOnly: false,
-	}); err != nil {
-		return fmt.Errorf("attach Firecracker root drive: %w", err)
-	}
+// configureRestoreVM drives the Firecracker API for a snapshot restore.
+// v1.16 requires LoadSnapshot to be the FIRST configuration call: any
+// machine/drive/network API call before it sets the boot path and is
+// rejected ("Loading a microVM snapshot not allowed after configuring
+// boot-specific resources"). All devices (root drive, NIC) are restored
+// from the vmstate; only the NIC host tap can be replaced via
+// network_overrides. The boot source is deliberately absent: the snapshot
+// already contains the guest state, no kernel is booted.
+//
+// The root drive path is baked in the vmstate as a relative path
+// ("rootfs.img") so each instance resolves it to its own reflink copy in
+// its state directory (the Firecracker process cwd).
+func configureRestoreVM(ctx context.Context, client *Client, slot *fastletnetwork.Slot, vmstatePath, memoryPath string) error {
 	tapDevice := slot.GuestTap
 	if tapDevice == "" {
 		return fmt.Errorf("%w: slot %s has no pre-provisioned guest tap", ErrNetworkUnavailable, slot.ID)
-	}
-	if err := client.AttachNetworkInterface(ctx, NetworkInterfaceRequest{
-		IfaceID: "eth0", HostDevName: tapDevice, GuestMAC: guestMAC(spec.SandboxID),
-	}); err != nil {
-		return fmt.Errorf("attach Firecracker network interface: %w", err)
 	}
 	if err := client.LoadSnapshot(ctx, SnapshotLoadRequest{
 		SnapshotPath: vmstatePath,
 		MemBackend: SnapshotMemBackend{
 			BackendType: "File", BackendPath: memoryPath,
 		},
-		ResumeVM: false,
+		ResumeVM:     false,
+		NetworkOverrides: []SnapshotNetworkOverride{{
+			IfaceID: "eth0", HostDevName: tapDevice,
+		}},
 	}); err != nil {
 		return fmt.Errorf("load Firecracker snapshot: %w", err)
 	}
-	return nil
-}
-
-// guest network config injection (design §4.2, "guest 内配置注入"): a
-// restored guest never boots a kernel, so the boot-arg ip= static network
-// configuration never applies. The golden rootfs carries a udev hook
-// (fast-sandbox/net-up.sh) that runs when the virtio-net device is
-// hot-added at restore time and applies the per-instance config written
-// here.
-const (
-	// guestNetConfigDir is the guest-side directory of the injected config
-	// and the golden network hook.
-	guestNetConfigDir = "/etc/fast-sandbox"
-	// guestNetConfigName is the per-instance config file the driver writes.
-	guestNetConfigName = "net.conf"
-	// guestNetHookPath is the golden rootfs hook that applies the config.
-	guestNetHookPath = guestNetConfigDir + "/net-up.sh"
-	// guestNetHookMarker marks a cache image whose golden rootfs carries the
-	// network hook (baked by the snapshot preparation path). The driver
-	// only injects the per-instance config for such images; without the
-	// marker the config would be inert.
-	guestNetHookMarker = ".net-hook"
-)
-
-// deliverGuestNetworkConfig injects the per-instance static guest network
-// configuration into the instance rootfs before snapshot restore. The
-// golden base's udev hook (baked at snapshot preparation time, marked by
-// <images>/<key>/.net-hook) applies it when the restored NIC is hot-added;
-// without the hook the config is inert, so a missing marker is not an
-// error. The write is a plain loop mount: the instance rootfs is a fresh
-// reflink copy that only the driver has mounted before the VM starts.
-func deliverGuestNetworkConfig(ctx context.Context, runner fastletnetwork.CommandRunner, stateRoot, image, instanceRootfs string, slot *fastletnetwork.Slot) error {
-	if runner == nil || slot == nil {
-		return nil
-	}
-	if _, err := os.Stat(filepath.Join(stateRoot, imageCacheDir, imageKey(image), guestNetHookMarker)); err != nil {
-		// The golden base carries no network hook; the config would be inert.
-		return nil
-	}
-	guestIP, err := fastletnetwork.GuestVMIP(slot)
-	if err != nil {
-		return err
-	}
-	prefix, err := netip.ParsePrefix(slot.PrivateCIDR)
-	if err != nil {
-		return fmt.Errorf("%w: invalid private CIDR %q", ErrInvalidConfig, slot.PrivateCIDR)
-	}
-	mountpoint, err := os.MkdirTemp("", "fc-guestnet")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(mountpoint)
-	if _, err := runner.Run(ctx, "mount", "-o", "loop", instanceRootfs, mountpoint); err != nil {
-		return fmt.Errorf("mount instance rootfs for guest network config: %w", err)
-	}
-	mounted := true
-	defer func() {
-		if mounted {
-			_, _ = runner.Run(context.Background(), "umount", mountpoint)
-		}
-	}()
-
-	configFile := filepath.Join(mountpoint, guestNetConfigDir, guestNetConfigName)
-	dir := filepath.Dir(configFile)
-	if _, err := runner.Run(ctx, "mkdir", "-p", dir); err != nil {
-		return err
-	}
-	// Write the config via a host temp file + cp, mirroring the GuestCopy
-	// delivery pattern so the runner records the write in tests.
-	source, err := os.CreateTemp("", "fc-netconf")
-	if err != nil {
-		return err
-	}
-	sourcePath := source.Name()
-	defer os.Remove(sourcePath)
-	if _, err := source.WriteString(fmt.Sprintf("GUEST_IP=%s\nGUEST_PREFIX=%d\nGATEWAY=%s\n", guestIP, prefix.Bits(), slot.Gateway)); err != nil {
-		_ = source.Close()
-		return err
-	}
-	if err := source.Chmod(0o600); err != nil {
-		_ = source.Close()
-		return err
-	}
-	if err := source.Close(); err != nil {
-		return err
-	}
-	if _, err := runner.Run(ctx, "cp", "-a", sourcePath, configFile); err != nil {
-		return err
-	}
-	if _, err := runner.Run(ctx, "umount", mountpoint); err != nil {
-		return err
-	}
-	mounted = false
 	return nil
 }

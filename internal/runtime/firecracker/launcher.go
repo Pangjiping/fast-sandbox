@@ -28,6 +28,13 @@ type ProcessRunner interface {
 	Start(ctx context.Context, name string, args []string, logPath string) (Process, error)
 }
 
+// WorkingDirRunner starts Firecracker processes with a fixed working
+// directory, so relative device paths baked in a snapshot vmstate resolve
+// per instance.
+type WorkingDirRunner interface {
+	StartInDir(ctx context.Context, workingDir, name string, args []string, logPath string) (Process, error)
+}
+
 // ExecProcessRunner starts Firecracker with exec.Command. The VM deliberately
 // outlives the caller context: only Kill terminates it. The process stdout
 // and stderr are appended to logPath so a failed boot is diagnosable.
@@ -35,7 +42,15 @@ type ExecProcessRunner struct{}
 
 // Start launches the process without binding its lifetime to ctx.
 func (ExecProcessRunner) Start(_ context.Context, name string, args []string, logPath string) (Process, error) {
+	return ExecProcessRunner{}.StartInDir(context.Background(), "", name, args, logPath)
+}
+
+// StartInDir launches the process with the given working directory.
+func (ExecProcessRunner) StartInDir(_ context.Context, workingDir, name string, args []string, logPath string) (Process, error) {
 	command := exec.Command(name, args...)
+	if workingDir != "" {
+		command.Dir = workingDir
+	}
 	if logPath != "" {
 		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 		if err != nil {
@@ -83,6 +98,11 @@ type launchConfig struct {
 	SandboxID string
 	// APIAddress is the host path of the per-Sandbox API Unix socket.
 	APIAddress string
+	// WorkingDir is the process working directory. Snapshot restore opens
+	// the block device paths baked in the vmstate relative to the
+	// Firecracker process cwd (design: each instance resolves "rootfs.img"
+	// to its own reflink copy in its state directory).
+	WorkingDir string
 	// ChrootBase is the optional jailer working root. Empty disables the jailer.
 	ChrootBase string
 	// LogPath receives the firecracker stdout/stderr (empty discards output).
@@ -117,6 +137,9 @@ func launch(ctx context.Context, runner ProcessRunner, config launchConfig) (Pro
 	}
 	if !filepath.IsAbs(config.APIAddress) {
 		return nil, fmt.Errorf("%w: firecracker API address must be an absolute path", ErrInvalidConfig)
+	}
+	if runnerInDir, ok := runner.(WorkingDirRunner); ok && config.WorkingDir != "" {
+		return runnerInDir.StartInDir(ctx, config.WorkingDir, config.BinaryPath, config.buildArgv(), config.LogPath)
 	}
 	return runner.Start(ctx, config.BinaryPath, config.buildArgv(), config.LogPath)
 }

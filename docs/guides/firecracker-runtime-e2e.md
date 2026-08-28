@@ -68,13 +68,15 @@ rootfs copies are CoW instead of paying the full dirty writeback:
 - A host-side tap (`fc<13 hex>`) per slot is attached to the bridge; the VM
   runs in the host netns and attaches to its tap
 - The guest owns the next address (slot IP + 1), configured statically
-- **Restore 后网络恢复**: the restored guest never boots a kernel, so the
-  kernel `ip=` boot arg does not apply. The golden rootfs carries a udev
-  hook (`/etc/fast-sandbox/net-up.sh`) baked at snapshot-prep time; the
-  driver injects the per-instance static config
-  (`/etc/fast-sandbox/net.conf`, guest IP/gateway/prefix) into the instance
-  rootfs before restore, and the hook applies it when the virtio-net device
-  is hot-added at resume (设计 §4.2, "guest 内配置注入" 路径)
+- **Restore 后网络恢复**: v1.16 restores the guest network stack from the
+  snapshot — the preparation VM's static eth0 config (guest IP 172.30.0.3,
+  MAC 02:00:00:00:00:01) is baked into the vmstate, and every restored
+  instance resumes with it (the v1.16 clone networking model, see
+  firecracker `docs/snapshotting/network-for-clones.md`). The driver only
+  replaces the NIC host tap per instance via the load request's
+  `network_overrides`. Per-instance distinct guest addresses would require
+  per-clone netns isolation + NAT (upstream clone model) and are out of
+  scope for the native stage-1 E2E
 - Host `PREROUTING` DNAT maps the slot IP to the guest IP; `FORWARD` ACCEPT
   rules allow ingress/egress; the slot netns MASQUERADEs egress
 - Sandbox-to-sandbox isolation: the slot netns rejects direct traffic to the
@@ -90,7 +92,7 @@ same golden snapshot set (方式 B 自举, produced once per StateRoot):
 |------|------------------|
 | `TestFirecrackerDriverE2E` | Full lifecycle with real Infra Components delivery (loop-mount GuestCopy of sandbox-init + execd), guest files asserted with debugfs, real guest reachability |
 | `TestFirecrackerDriverE2ENoInfra` | Same lifecycle without infra delivery |
-| `TestFirecrackerDriverE2EConcurrent` | 5 pre-provisioned slots, 5 VMs restored concurrently from the same snapshot set; per-sandbox trace correlation, distinct processes, memory.snap shared (COW), guest reachability for every instance |
+| `TestFirecrackerDriverE2EConcurrent` | 5 pre-provisioned slots, 5 VMs restored concurrently from the same snapshot set; per-sandbox trace correlation, distinct processes, memory.snap shared (COW). v1.16 clone networking shares the baked guest MAC/IP, so per-instance reachability is not asserted here (single-VM cases cover it) |
 | `TestFirecrackerDriverE2EImageGC` | Independent LFU image-cache GC: unreferenced low-frequency image evicted, live Sandbox pins its image, deletion releases it |
 
 ## Observed performance

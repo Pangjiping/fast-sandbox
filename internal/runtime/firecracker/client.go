@@ -35,12 +35,23 @@ type SnapshotMemBackend struct {
 	BackendPath string `json:"backend_path"`
 }
 
+// SnapshotNetworkOverride replaces the host tap of one restored network
+// interface. Only the tap name can be overridden: the guest MAC and the
+// interface identity are baked into the snapshot state (v1.16).
+type SnapshotNetworkOverride struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
+}
+
 // SnapshotLoadRequest mirrors PUT /snapshot/load (v1.16): restore a Full
-// snapshot from a vmstate file and a file-backed memory snapshot.
+// snapshot from a vmstate file and a file-backed memory snapshot. Load
+// must be the first configuration call: any machine/drive/network setup
+// before it is rejected by Firecracker.
 type SnapshotLoadRequest struct {
-	SnapshotPath string             `json:"snapshot_path"`
-	MemBackend   SnapshotMemBackend `json:"mem_backend"`
-	ResumeVM     bool               `json:"resume_vm"`
+	SnapshotPath      string                    `json:"snapshot_path"`
+	MemBackend        SnapshotMemBackend        `json:"mem_backend"`
+	ResumeVM          bool                      `json:"resume_vm"`
+	NetworkOverrides  []SnapshotNetworkOverride `json:"network_overrides,omitempty"`
 }
 
 // SnapshotCreateRequest mirrors PUT /snapshot/create (v1.16). It is used by

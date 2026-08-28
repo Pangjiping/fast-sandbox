@@ -365,12 +365,19 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
 	vmstatePath, memoryPath, err := resolveRestoreSnapshotFiles(stateRoot, config.Image)
-	var machine MachineConfigRequest
+	// The machine tuple of the golden snapshot is baked in the vmstate
+	// (v1.16 restores it from the snapshot); the manifest values are only
+	// validated here, not applied via the API (any machine-config call
+	// before snapshot/load is rejected).
 	if err == nil {
-		machine, err = resolveRestoreMachineConfig(*config, d.config, stateRoot, config.Image)
+		_, err = resolveRestoreMachineConfig(*config, d.config, stateRoot, config.Image)
 	}
 	var instanceRootfs string
 	if err == nil {
+		// The instance copy is placed at <stateDir>/rootfs.img, the same
+		// relative path baked in the vmstate, so the Firecracker process
+		// (started with cwd=<stateDir>) resolves it to this instance's own
+		// reflink copy instead of the shared cache base.
 		instanceRootfs, err = prepareInstanceRootfs(stateRoot, config.Image, directory)
 	}
 	observability.End(rootfsSpan, err)
@@ -410,21 +417,10 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		klog.V(4).InfoS("firecracker Infra Components delivered", "sandboxId", config.SandboxID, "services", len(instance.Services), "duration", infraDur.String())
 	}
 
-	// Restore-only startup: the golden snapshot was created without external
-	// connectivity, and a restored guest never boots a kernel (no ip= boot
-	// arg). Inject the per-instance static network config into the rootfs;
-	// the golden base's udev hook applies it when the NIC is hot-added.
-	netStarted := time.Now()
-	netCtx, netSpan := observability.Start(ctx, "fastlet.firecracker.guestnet")
-	netErr := deliverGuestNetworkConfig(netCtx, d.runner, stateRoot, config.Image, instanceRootfs, slot)
-	observability.End(netSpan, netErr)
-	netDur := time.Since(netStarted)
-	if netErr != nil {
-		releaseSlot()
-		return nil, fmt.Errorf("%w: inject guest network config: %v", ErrNetworkUnavailable, netErr)
-	}
-	klog.V(4).InfoS("firecracker guest network config injected", "sandboxId", config.SandboxID, "duration", netDur.String())
-
+	// Restore-only startup: the golden snapshot carries the guest network
+	// configuration (the preparation VM's static IP is baked into the guest
+	// state), and the NIC host tap is replaced per instance via the load
+	// request's network_overrides. Nothing else is injected into the rootfs.
 	state := &SandboxState{
 		Spec: *config, Phase: PhaseStarting,
 		APIAddress: filepath.Join(directory, "api.sock"), CreatedAt: time.Now().Unix(),
@@ -472,7 +468,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	defer client.Close()
 	configureStarted := time.Now()
 	configureCtx, configureSpan := observability.Start(ctx, "fastlet.firecracker.configure")
-	err = configureRestoreVM(configureCtx, client, *config, machine, instanceRootfs, vmstatePath, memoryPath, slot)
+	err = configureRestoreVM(configureCtx, client, slot, vmstatePath, memoryPath)
 	observability.End(configureSpan, err)
 	if err != nil {
 		d.killAndForget(config.SandboxID, process.PID())
@@ -701,7 +697,10 @@ func (d *Driver) launchVM(ctx context.Context, sandboxID, apiAddress, stateDir s
 	d.mu.RUnlock()
 	return launch(ctx, launcher, launchConfig{
 		BinaryPath: config.BinaryPath, SandboxID: sandboxID, APIAddress: apiAddress,
-		LogPath: filepath.Join(stateDir, processLogName),
+		// The vmstate bakes the root drive as the relative path "rootfs.img";
+		// the process cwd selects this instance's own reflink copy.
+		WorkingDir: stateDir,
+		LogPath:    filepath.Join(stateDir, processLogName),
 	})
 }
 
