@@ -674,7 +674,7 @@ func TestResolveMachineConfig(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-func TestResolveRestoreMachineConfigUsesManifest(t *testing.T) {
+func TestValidateRestoreMachineConfigUsesManifest(t *testing.T) {
 	stateRoot := t.TempDir()
 	image := "example.com/app:v1"
 	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(image))
@@ -686,28 +686,23 @@ func TestResolveRestoreMachineConfigUsesManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), manifest, 0o640))
 	config := firecrackerConfigForTest(t, stateRoot)
 
-	// The manifest machine tuple is authoritative for the restore machine
-	// config; the request profile is not mapped into it.
-	request, err := resolveRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "4", Memory: "1Gi"}, config, stateRoot, image)
-	require.NoError(t, err)
-	require.Equal(t, 1, request.VCPUs)
-	require.Equal(t, 512, request.MemSizeMiB)
+	// The manifest machine tuple is authoritative: a request profile that
+	// differs (more cpu/mem) still validates.
+	require.NoError(t, validateRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "4", Memory: "1Gi"}, config, stateRoot, image))
 
 	// A request memory below the snapshot memory is rejected.
-	_, err = resolveRestoreMachineConfig(fastletapi.SandboxSpec{Memory: "256Mi"}, config, stateRoot, image)
+	err = validateRestoreMachineConfig(fastletapi.SandboxSpec{Memory: "256Mi"}, config, stateRoot, image)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 	require.Contains(t, err.Error(), "below the template snapshot memory")
 }
 
-func TestResolveRestoreMachineConfigFallsBackWithoutManifest(t *testing.T) {
+func TestValidateRestoreMachineConfigFallsBackWithoutManifest(t *testing.T) {
 	stateRoot := t.TempDir()
 	image := "example.com/app:v1"
 	config := firecrackerConfigForTest(t, stateRoot)
 
-	request, err := resolveRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "2", Memory: "1Gi"}, config, stateRoot, image)
-	require.NoError(t, err)
-	require.Equal(t, 2, request.VCPUs)
-	require.Equal(t, 1024, request.MemSizeMiB)
+	require.NoError(t, validateRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "2", Memory: "1Gi"}, config, stateRoot, image))
+	require.ErrorIs(t, validateRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "not-a-quantity"}, config, stateRoot, image), ErrInvalidConfig)
 }
 
 func TestResolveRestoreSnapshotFilesRequiresBothArtifacts(t *testing.T) {

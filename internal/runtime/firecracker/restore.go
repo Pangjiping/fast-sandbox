@@ -62,40 +62,42 @@ func readCachedManifestMachine(stateRoot, image string) (manifestMachine, bool, 
 	return document.Machine, true, nil
 }
 
-// resolveRestoreMachineConfig returns the machine configuration of a
-// snapshot restore. Restore requires the machine tuple of the golden
-// snapshot (Firecracker rejects a mem_size_mib different from the one the
-// vmstate was created with), so the manifest machine is authoritative. The
-// request cpu/mem only validate: a request memory below the snapshot memory
-// is rejected with an explicit error. When the cached manifest carries no
-// machine tuple (hand-seeded local cache), the request profile falls back
-// to the previous request-based resolution.
-func resolveRestoreMachineConfig(spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig, stateRoot, image string) (MachineConfigRequest, error) {
+// validateRestoreMachineConfig validates the Sandbox request against the
+// machine tuple of the golden snapshot, it does not produce a machine
+// configuration. Restore requires the machine tuple of the golden snapshot
+// (Firecracker rejects a mem_size_mib different from the one the vmstate
+// was created with), so the manifest machine is authoritative AND the
+// machine-config API must not be called before snapshot/load (v1.16
+// rejects it). The request cpu/mem only validate: a request memory below
+// the snapshot memory is rejected with an explicit error. When the cached
+// manifest carries no machine tuple (hand-seeded local cache), the request
+// profile is validated as the fallback.
+func validateRestoreMachineConfig(spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig, stateRoot, image string) error {
 	machine, ok, err := readCachedManifestMachine(stateRoot, image)
 	if err != nil {
-		return MachineConfigRequest{}, err
+		return err
 	}
 	if !ok {
-		return resolveMachineConfig(spec, config)
+		_, err := resolveMachineConfig(spec, config)
+		return err
 	}
-	vcpus, err := machineVCPUs(machine.VCPU)
-	if err != nil {
-		return MachineConfigRequest{}, err
+	if _, err := machineVCPUs(machine.VCPU); err != nil {
+		return err
 	}
 	snapshotMiB, err := machineMemMiB(machine.Memory)
 	if err != nil {
-		return MachineConfigRequest{}, err
+		return err
 	}
 	if spec.Memory != "" {
 		requestMiB, err := parseMemMiB(spec.Memory)
 		if err != nil {
-			return MachineConfigRequest{}, err
+			return err
 		}
 		if requestMiB < snapshotMiB {
-			return MachineConfigRequest{}, fmt.Errorf("%w: requested memory %d MiB is below the template snapshot memory %d MiB", ErrInvalidConfig, requestMiB, snapshotMiB)
+			return fmt.Errorf("%w: requested memory %d MiB is below the template snapshot memory %d MiB", ErrInvalidConfig, requestMiB, snapshotMiB)
 		}
 	}
-	return MachineConfigRequest{VCPUs: vcpus, MemSizeMiB: snapshotMiB}, nil
+	return nil
 }
 
 // machineVCPUs parses the manifest vcpu quantity into a vCPU count.

@@ -365,7 +365,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	// validated here, not applied via the API (any machine-config call
 	// before snapshot/load is rejected).
 	if err == nil {
-		_, err = resolveRestoreMachineConfig(*config, d.config, stateRoot, config.Image)
+		err = validateRestoreMachineConfig(*config, d.config, stateRoot, config.Image)
 	}
 	var instanceRootfs string
 	if err == nil {
