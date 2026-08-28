@@ -727,19 +727,6 @@ func TestResolveRestoreSnapshotFilesRequiresBothArtifacts(t *testing.T) {
 	require.Equal(t, filepath.Join(dir, memorySnapshotName), memory)
 }
 
-func TestGuestBootArgs(t *testing.T) {
-	config := firecrackerConfigForTest(t, t.TempDir())
-	slot := &fastletnetwork.Slot{IP: "172.30.0.2", Gateway: "172.30.0.1", PrivateCIDR: "172.30.0.0/24"}
-	args, err := guestBootArgs(config, slot)
-	require.NoError(t, err)
-	require.Equal(t, "console=ttyS0 reboot=k panic=1 pci=off ip=172.30.0.3::172.30.0.1:255.255.255.0::eth0:off", args)
-
-	config.BootArgs = "console=ttyS0 console=tty1"
-	args, err = guestBootArgs(config, slot)
-	require.NoError(t, err)
-	require.Equal(t, "console=ttyS0 console=tty1 ip=172.30.0.3::172.30.0.1:255.255.255.0::eth0:off", args)
-}
-
 func TestCloseResetsDriver(t *testing.T) {
 	fixture := newDriverFixture(t)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))

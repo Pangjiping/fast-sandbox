@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,10 +26,6 @@ import (
 
 // bootPollInterval is the VM state polling interval after InstanceStart.
 const bootPollInterval = 250 * time.Millisecond
-
-// defaultBootArgs is the minimal Firecracker guest kernel command line. The
-// guest network ip= argument is appended per Sandbox by buildBootArgs.
-const defaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off"
 
 // Driver boots one Firecracker microVM on demand per Sandbox create request.
 // The VM runs in the Fastlet Pod; nothing is pre-warmed.
@@ -734,32 +729,6 @@ func readProcessLog(stateDir string) string {
 		tail = tail[len(tail)-4096:]
 	}
 	return "\nfirecracker process log:\n" + string(tail)
-}
-
-// guestBootArgs composes the guest kernel command line with the static
-// network configuration derived from the network slot. The driver no longer
-// boots a kernel (restore is the only startup path), so this is used only
-// by the golden snapshot preparation path (E2E self-bootstrap).
-func guestBootArgs(config runtimecatalog.FirecrackerConfig, slot *fastletnetwork.Slot) (string, error) {
-	base := config.BootArgs
-	if base == "" {
-		base = defaultBootArgs
-	}
-	guestIP, err := fastletnetwork.GuestVMIP(slot)
-	if err != nil {
-		return "", err
-	}
-	prefix, err := netip.ParsePrefix(slot.PrivateCIDR)
-	if err != nil {
-		return "", fmt.Errorf("%w: invalid private CIDR %q", ErrInvalidConfig, slot.PrivateCIDR)
-	}
-	// The kernel ip= parameter expects a dotted-quad netmask, not a prefix
-	// length; a bare "24" is parsed as 24.0.0.0 and rejected with EINVAL.
-	mask, err := prefixMask(prefix.Bits())
-	if err != nil {
-		return "", err
-	}
-	return buildBootArgs(base, guestIP, slot.Gateway, mask), nil
 }
 
 // bootVM starts the microVM and waits until the machine state is Running.
