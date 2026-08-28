@@ -91,13 +91,12 @@ func (s *Service) LeaseDevices(ctx context.Context, request agentprotocol.LeaseD
 		request.Identity, request.SandboxID, request.Image,
 		request.MemSizeMiB, request.RootfsWritable,
 		func(leaseID string) (agentprotocol.Lease, error) {
+			// ensureImage verifies a committed pull (cacheComplete checks
+			// the manifest and every artifact digest), so the manifest is
+			// known to exist here; the response reads its digest once
+			// below.
 			if err := s.ensureImage(ctx, request.Image); err != nil {
 				return agentprotocol.Lease{}, err
-			}
-			if _, ok, err := agentpull.CachedManifestDigest(s.stateRoot, request.Image); err != nil {
-				return agentprotocol.Lease{}, err
-			} else if !ok {
-				return agentprotocol.Lease{}, fmt.Errorf("image %q committed without a local manifest", request.Image)
 			}
 			return agentprotocol.Lease{
 				LeaseID: leaseID, SandboxID: request.SandboxID, Image: request.Image,

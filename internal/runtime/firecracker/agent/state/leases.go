@@ -319,6 +319,14 @@ func (s *State) GetLease(leaseID string) (agentprotocol.Lease, bool) {
 // run is the generic two-phase journaled execution shared by the mutating
 // RPCs: completed-request replay, in-flight dedup, intent journal, side
 // effect, in-memory apply, result journal, completion record.
+//
+// Self-healing window: the in-memory apply runs before the result line is
+// durable. If that result write fails (disk failure), the process memory is
+// changed but the journal holds only the intent — after a crash the op is
+// dropped, its idempotency key with it, and a replay re-executes the side
+// effect. Re-execution is safe: pulls are idempotent, leases are rebuilt
+// under a fresh lease id, and the in-memory counts die with the process.
+// The failed caller still sees an error and can retry.
 func (s *State) run(id agentprotocol.Identity, op Op, args any, do func() (any, error), apply func(result any)) (any, error) {
 	s.mu.Lock()
 	if entry, ok := s.completed[id.RequestID]; ok {
