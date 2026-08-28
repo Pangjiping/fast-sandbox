@@ -5,7 +5,10 @@ package firecracker
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,10 +48,14 @@ func TestFirecrackerDriverE2ENoInfra(t *testing.T) {
 	runE2EOnce(t, false)
 }
 
-// TestFirecrackerDriverE2EConcurrent pre-provisions 5 network slots and boots
-// 5 microVMs in parallel through the same driver and slot manager, verifying
-// per-sandbox trace correlation, distinct processes, Infra delivery, and
-// guest reachability for every instance.
+// TestFirecrackerDriverE2EConcurrent pre-provisions 5 network slots and
+// restores 5 microVMs in parallel through the same driver and slot manager,
+// verifying per-sandbox trace correlation, distinct processes, Infra
+// delivery, and the shared-snapshot isolation contract (memory.snap COW).
+// v1.16 clone networking: every clone resumes with the snapshot's baked
+// guest MAC/IP, so per-instance distinct reachability on a shared bridge is
+// not asserted (the upstream clone model uses per-clone netns isolation +
+// NAT); reachability is verified once by the single-VM cases.
 func TestFirecrackerDriverE2EConcurrent(t *testing.T) {
 	const vmCount = 5
 	env := newE2EEnvironment(t, vmCount, true)
@@ -79,7 +86,7 @@ func TestFirecrackerDriverE2EConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	t.Logf("%d VMs booted concurrently in %s", vmCount, time.Since(started))
+	t.Logf("%d VMs restored concurrently in %s", vmCount, time.Since(started))
 
 	snapshot = env.manager.Snapshot()
 	require.Zero(t, snapshot.Clean, "all pre-provisioned slots must be bound")
@@ -96,7 +103,6 @@ func TestFirecrackerDriverE2EConcurrent(t *testing.T) {
 		}
 		pids[result.metadata.PID] = spec.SandboxID
 		env.assertInfra(result.metadata, spec.SandboxID)
-		env.assertGuestReachable(spec.SandboxID)
 	}
 }
 
@@ -196,6 +202,200 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 	env.delete(spec.SandboxID)
 }
 
+// e2ePrepVersion marks the golden snapshot set format. It must be bumped
+// whenever the preparation recipe changes (NIC baking, drive path, boot
+// args, machine tuple): a cached set from an older recipe is incompatible
+// with the current restore driver (e.g. it lacks the baked NIC that
+// network_overrides expects), so the reuse check must reject it.
+const e2ePrepVersion = 2
+
+// prepareE2EGoldenSnapshot produces (or reuses) the golden snapshot set of
+// the E2E image (方式 B self-bootstrap, golden-restore plan §5): a
+// preparation VM cold-boots the kernel once with a NIC and a static guest
+// IP, pauses, and dumps a Full snapshot; the golden set is assembled into
+// the driver cache layout:
+//
+//	<StateRoot>/images/<sha256(image)>/{rootfs.img, vmstate.snap, memory.snap, manifest.json}
+//
+// v1.16 restore semantics: the vmstate bakes the root drive path, the NIC
+// (iface id, guest MAC, virtio state) and the guest network configuration.
+// The prep drive is attached with the RELATIVE path "rootfs.img" and the
+// prep Firecracker runs with cwd = the cache image dir, so instances
+// (started with cwd = their state dir) resolve the same baked path to
+// their own reflink copy. The guest IP baked by the prep boot args must
+// match the first slot's guest address for reachability assertions.
+func prepareE2EGoldenSnapshot(t *testing.T, binary, kernel, rootfs, stateRoot, imageRef, bootArgs string) {
+	t.Helper()
+	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(imageRef))
+	rootfsImg := filepath.Join(dir, rootfsImageName)
+	vmstate := filepath.Join(dir, vmstateSnapshotName)
+	memory := filepath.Join(dir, memorySnapshotName)
+	manifestPath := filepath.Join(dir, "manifest.json")
+	versionMarker := filepath.Join(dir, ".prep-version")
+	complete := func() bool {
+		for _, path := range []string{rootfsImg, vmstate, memory, manifestPath} {
+			if info, err := os.Stat(path); err != nil || info.IsDir() {
+				return false
+			}
+		}
+		// Reject snapshot sets prepared by an older recipe: the restore
+		// driver depends on the baked NIC and the relative drive path.
+		payload, err := os.ReadFile(versionMarker)
+		return err == nil && strings.TrimSpace(string(payload)) == fmt.Sprint(e2ePrepVersion)
+	}
+	if complete() {
+		t.Logf("reusing prepared golden snapshot set %s", dir)
+		return
+	}
+	if _, err := os.Stat(vmstate); err == nil {
+		t.Logf("discarding incompatible cached golden snapshot set %s (prep version mismatch)", dir)
+		require.NoError(t, os.RemoveAll(dir))
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+	}
+
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, copyFile(rootfs, rootfsImg))
+	require.NoError(t, os.WriteFile(versionMarker, []byte(fmt.Sprint(e2ePrepVersion)), 0o640))
+
+	// The prep VM needs a host tap so the baked NIC has a backing device.
+	prepTap := "fc-prep-tap"
+	if output, err := exec.Command("ip", "tuntap", "add", "dev", prepTap, "mode", "tap").CombinedOutput(); err != nil {
+		require.Failf(t, "create prep tap %s: %v\n%s", prepTap, err.Error(), output)
+	}
+	defer func() {
+		_, _ = exec.Command("ip", "link", "del", prepTap).CombinedOutput()
+	}()
+
+	prepDir := t.TempDir()
+	apiSock := filepath.Join(prepDir, "api.sock")
+	logPath := filepath.Join(prepDir, "firecracker.log")
+	process, err := launch(context.Background(), ExecProcessRunner{}, launchConfig{
+		BinaryPath: binary, SandboxID: "e2e-prep", APIAddress: apiSock,
+		// cwd = cache image dir so the relative "rootfs.img" drive path
+		// baked in the vmstate resolves to the golden rootfs here and to
+		// each instance's reflink copy on restore.
+		WorkingDir: dir, LogPath: logPath,
+	})
+	require.NoError(t, err)
+	defer process.Kill()
+
+	client := NewClient(apiSock)
+	defer client.Close()
+	require.NoError(t, waitForAPISocket(context.Background(), apiSock, firecrackerSocketWaitTimeout))
+
+	// The preparation machine must match the manifest machine tuple that
+	// restore validates (vmstate pins mem_size_mib): 1 vCPU / 512 MiB, the
+	// same as the e2e Sandbox spec.
+	require.NoError(t, client.ConfigureMachine(context.Background(), MachineConfigRequest{VCPUs: 1, MemSizeMiB: 512}))
+	// The static guest network is baked into the snapshot via the boot
+	// args: the restored guest resumes with eth0 = 172.30.0.3 (the first
+	// slot's guest address), which is the v1.16 clone networking model.
+	require.NoError(t, client.ConfigureBootSource(context.Background(), BootSourceRequest{
+		KernelImagePath: kernel, BootArgs: e2ePrepBootArgs(bootArgs),
+	}))
+	require.NoError(t, client.AttachDrive(context.Background(), DriveRequest{
+		// Relative path baked in the vmstate; instances resolve it via
+		// their process cwd. Booted read-write exactly like a restored
+		// instance so the snapshot's filesystem state matches the golden
+		// rootfs the instances reflink-copy from.
+		DriveID: "root", PathOnHost: "rootfs.img", IsRootDevice: true, IsReadOnly: false,
+	}))
+	require.NoError(t, client.AttachNetworkInterface(context.Background(), NetworkInterfaceRequest{
+		// The NIC (iface id + MAC + state) is baked in the vmstate; each
+		// restored instance overrides only the host tap name.
+		IfaceID: "eth0", HostDevName: prepTap, GuestMAC: e2ePrepMAC,
+	}))
+	// bootVM performs the InstanceStart and the Running poll; the VM must
+	// not be started before it (a second InstanceStart is rejected).
+	_, err = bootVM(context.Background(), client, 90)
+	require.NoError(t, err)
+	require.NoError(t, client.Pause(context.Background()))
+	require.NoError(t, waitVMState(context.Background(), client, "Paused", 30*time.Second))
+
+	require.NoError(t, client.CreateSnapshot(context.Background(), SnapshotCreateRequest{
+		SnapshotType: "Full", SnapshotPath: vmstate, MemFilePath: memory,
+	}))
+	require.NoError(t, process.Kill())
+
+	// The manifest records the machine tuple restore validates and the
+	// artifact digests of the golden set (commit point: manifest last).
+	rootfsDigest, err := fileSHA256(rootfsImg)
+	require.NoError(t, err)
+	vmstateDigest, err := fileSHA256(vmstate)
+	require.NoError(t, err)
+	memoryDigest, err := fileSHA256(memory)
+	require.NoError(t, err)
+	manifest, err := json.Marshal(map[string]any{
+		"machine": map[string]any{"vcpu": "1", "memory": "512Mi"},
+		"files": map[string]any{
+			"rootfs.ext4":  map[string]any{"sha256": rootfsDigest, "sizeBytes": fileSize(t, rootfsImg)},
+			"vmstate.snap": map[string]any{"sha256": vmstateDigest, "sizeBytes": fileSize(t, vmstate)},
+			"memory.snap":  map[string]any{"sha256": memoryDigest, "sizeBytes": fileSize(t, memory)},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifestPath, manifest, 0o640))
+	t.Logf("prepared golden snapshot set %s (rootfs=%s)", dir, filepath.Base(rootfs))
+}
+
+// e2ePrepMAC is the guest MAC baked into the golden snapshot NIC. Every
+// restored instance resumes with it (v1.16 restores the NIC config); the
+// single-slot tests are unaffected and the concurrent case is documented
+// in the PR as the clone networking limitation.
+const e2ePrepMAC = "02:00:00:00:00:01"
+
+// e2ePrepBootArgs appends the static guest network of the preparation VM
+// (baked into the snapshot): eth0 = 172.30.0.3 (slot 1's guest address),
+// gateway 172.30.0.1, /24.
+func e2ePrepBootArgs(base string) string {
+	if !strings.Contains(base, " ip=") {
+		return base + " ip=172.30.0.3::172.30.0.1:255.255.255.0::eth0:off"
+	}
+	return base
+}
+
+// waitVMState polls the Firecracker machine state until it matches want.
+func waitVMState(ctx context.Context, client *Client, want string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := client.VMState(ctx)
+		if err != nil {
+			return err
+		}
+		if state == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Firecracker VM did not reach %s within %s (state %q)", want, timeout, state)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(bootPollInterval):
+		}
+	}
+}
+
+func fileSHA256(path string) (string, error) {
+	input, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer input.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, input); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	return info.Size()
+}
+
 // e2eEnvironment bundles the host checks, StateRoot, slot manager, driver,
 // and per-sandbox helpers shared by the E2E tests.
 type e2eEnvironment struct {
@@ -210,9 +410,9 @@ type e2eEnvironment struct {
 	created      []string
 }
 
-// newE2EEnvironment validates the host, seeds the image cache, pre-provisions
-// capacity network slots, and wires the driver (with a real Infra plan when
-// infraEnabled).
+// newE2EEnvironment validates the host, prepares the golden snapshot set,
+// pre-provisions capacity network slots, and wires the driver (with a real
+// Infra plan when infraEnabled).
 func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnvironment {
 	t.Helper()
 	if os.Geteuid() != 0 {
@@ -240,10 +440,12 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	} else {
 		require.NoError(t, os.MkdirAll(stateRoot, 0o750))
 	}
-	imagePath, err := imageCachePath(stateRoot, imageRef)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Dir(imagePath), 0o750))
-	require.NoError(t, copyFile(rootfs, imagePath))
+	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off net.ifnames=0 biosdevname=0"
+	// The golden snapshot set is the runtime asset: a preparation VM boots
+	// the kernel once, pauses, and dumps vmstate + memory; subsequent
+	// Sandboxes restore from it (no kernel at runtime). A complete set is
+	// reused, so a persistent FC_STATE_ROOT skips the prep boot on reruns.
+	prepareE2EGoldenSnapshot(t, binary, kernel, rootfs, stateRoot, imageRef, bootArgs)
 
 	// Unique Pod UID per run keeps the resourceName-derived netns/bridge names
 	// from colliding with leftovers of earlier runs.
@@ -278,9 +480,9 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	profile := runtimecatalog.RuntimeProfile{
 		Name: apiv1alpha2.RuntimeFirecracker, ProfileHash: "e2e-profile",
 		Firecracker: &runtimecatalog.FirecrackerConfig{
-			BinaryPath: binary, KernelPath: kernel, RootfsPath: imagePath, StateRoot: stateRoot,
+			BinaryPath: binary, KernelPath: kernel, RootfsPath: rootfs, StateRoot: stateRoot,
 			DefaultVCPUs: 1, DefaultMemory: "512Mi", BootTimeoutSeconds: 90,
-			BootArgs: "console=ttyS0 reboot=k panic=1 pci=off net.ifnames=0 biosdevname=0",
+			BootArgs: bootArgs,
 		},
 		Capabilities: runtimecatalog.Capabilities{DefaultState: runtimecatalog.CapabilityReady},
 	}
@@ -310,7 +512,7 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	otel.SetTracerProvider(provider)
 	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
 
-	t.Logf("booting Firecracker microVM (kernel=%s)", kernel)
+	t.Logf("restoring Firecracker microVMs from golden snapshot set (kernel=%s)", kernel)
 	for index := 1; index <= capacity; index++ {
 		env.created = append(env.created, fmt.Sprintf("e2e-sandbox-%d", index))
 	}
