@@ -202,6 +202,13 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 	env.delete(spec.SandboxID)
 }
 
+// e2ePrepVersion marks the golden snapshot set format. It must be bumped
+// whenever the preparation recipe changes (NIC baking, drive path, boot
+// args, machine tuple): a cached set from an older recipe is incompatible
+// with the current restore driver (e.g. it lacks the baked NIC that
+// network_overrides expects), so the reuse check must reject it.
+const e2ePrepVersion = 2
+
 // prepareE2EGoldenSnapshot produces (or reuses) the golden snapshot set of
 // the E2E image (方式 B self-bootstrap, golden-restore plan §5): a
 // preparation VM cold-boots the kernel once with a NIC and a static guest
@@ -224,21 +231,31 @@ func prepareE2EGoldenSnapshot(t *testing.T, binary, kernel, rootfs, stateRoot, i
 	vmstate := filepath.Join(dir, vmstateSnapshotName)
 	memory := filepath.Join(dir, memorySnapshotName)
 	manifestPath := filepath.Join(dir, "manifest.json")
+	versionMarker := filepath.Join(dir, ".prep-version")
 	complete := func() bool {
 		for _, path := range []string{rootfsImg, vmstate, memory, manifestPath} {
 			if info, err := os.Stat(path); err != nil || info.IsDir() {
 				return false
 			}
 		}
-		return true
+		// Reject snapshot sets prepared by an older recipe: the restore
+		// driver depends on the baked NIC and the relative drive path.
+		payload, err := os.ReadFile(versionMarker)
+		return err == nil && strings.TrimSpace(string(payload)) == fmt.Sprint(e2ePrepVersion)
 	}
 	if complete() {
 		t.Logf("reusing prepared golden snapshot set %s", dir)
 		return
 	}
+	if _, err := os.Stat(vmstate); err == nil {
+		t.Logf("discarding incompatible cached golden snapshot set %s (prep version mismatch)", dir)
+		require.NoError(t, os.RemoveAll(dir))
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+	}
 
 	require.NoError(t, os.MkdirAll(dir, 0o750))
 	require.NoError(t, copyFile(rootfs, rootfsImg))
+	require.NoError(t, os.WriteFile(versionMarker, []byte(fmt.Sprint(e2ePrepVersion)), 0o640))
 
 	// The prep VM needs a host tap so the baked NIC has a backing device.
 	prepTap := "fc-prep-tap"
