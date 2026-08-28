@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -85,6 +86,81 @@ func TestClientMapsErrors(t *testing.T) {
 	err := client.ConfigureMachine(context.Background(), MachineConfigRequest{VCPUs: 0})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid machine configuration")
+}
+
+func TestClientLoadSnapshot(t *testing.T) {
+	var received SnapshotLoadRequest
+	socketPath := startFakeFirecracker(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPut, r.Method)
+		require.Equal(t, "/snapshot/load", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	client := NewClient(socketPath)
+	t.Cleanup(client.Close)
+
+	err := client.LoadSnapshot(context.Background(), SnapshotLoadRequest{
+		SnapshotPath: "/cache/images/abc/vmstate.snap",
+		MemBackend:   SnapshotMemBackend{BackendType: "File", BackendPath: "/cache/images/abc/memory.snap"},
+		ResumeVM:     false,
+	})
+	require.NoError(t, err)
+	require.Equal(t, SnapshotLoadRequest{
+		SnapshotPath: "/cache/images/abc/vmstate.snap",
+		MemBackend:   SnapshotMemBackend{BackendType: "File", BackendPath: "/cache/images/abc/memory.snap"},
+		ResumeVM:     false,
+	}, received)
+}
+
+func TestClientPauseAndCreateSnapshot(t *testing.T) {
+	var calls []string
+	var createRequest SnapshotCreateRequest
+	socketPath := startFakeFirecracker(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/vm":
+			require.Equal(t, http.MethodPatch, r.Method)
+			var payload map[string]string
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+			require.Equal(t, "Paused", payload["state"])
+			w.WriteHeader(http.StatusNoContent)
+		case "/snapshot/create":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&createRequest))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	client := NewClient(socketPath)
+	t.Cleanup(client.Close)
+	ctx := context.Background()
+
+	require.NoError(t, client.Pause(ctx))
+	require.NoError(t, client.CreateSnapshot(ctx, SnapshotCreateRequest{
+		SnapshotType: "Full", SnapshotPath: "/tmp/vmstate.snap", MemFilePath: "/tmp/memory.snap",
+	}))
+	require.Equal(t, []string{"PATCH /vm", "PUT /snapshot/create"}, calls)
+	require.Equal(t, "Full", createRequest.SnapshotType)
+	require.Equal(t, "/tmp/vmstate.snap", createRequest.SnapshotPath)
+	require.Equal(t, "/tmp/memory.snap", createRequest.MemFilePath)
+}
+
+func TestClientResumeAfterLoad(t *testing.T) {
+	var calls []string
+	socketPath := startFakeFirecracker(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		require.Equal(t, http.MethodPatch, r.Method)
+		require.Equal(t, "/vm", r.URL.Path)
+		var payload map[string]string
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		require.Equal(t, "Resumed", payload["state"])
+		w.WriteHeader(http.StatusNoContent)
+	})
+	client := NewClient(socketPath)
+	t.Cleanup(client.Close)
+
+	require.NoError(t, client.Resume(context.Background()))
+	require.Equal(t, []string{"PATCH /vm"}, calls)
 }
 
 func TestClientNotReady(t *testing.T) {

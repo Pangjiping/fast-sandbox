@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,10 +26,6 @@ import (
 
 // bootPollInterval is the VM state polling interval after InstanceStart.
 const bootPollInterval = 250 * time.Millisecond
-
-// defaultBootArgs is the minimal Firecracker guest kernel command line. The
-// guest network ip= argument is appended per Sandbox by buildBootArgs.
-const defaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off"
 
 // Driver boots one Firecracker microVM on demand per Sandbox create request.
 // The VM runs in the Fastlet Pod; nothing is pre-warmed.
@@ -364,9 +359,20 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
-	rootfsPath, err := resolveRootfsImage(stateRoot, config.Image)
+	vmstatePath, memoryPath, err := resolveRestoreSnapshotFiles(stateRoot, config.Image)
+	// The machine tuple of the golden snapshot is baked in the vmstate
+	// (v1.16 restores it from the snapshot); the manifest values are only
+	// validated here, not applied via the API (any machine-config call
+	// before snapshot/load is rejected).
+	if err == nil {
+		err = validateRestoreMachineConfig(*config, d.config, stateRoot, config.Image)
+	}
 	var instanceRootfs string
 	if err == nil {
+		// The instance copy is placed at <stateDir>/rootfs.img, the same
+		// relative path baked in the vmstate, so the Firecracker process
+		// (started with cwd=<stateDir>) resolves it to this instance's own
+		// reflink copy instead of the shared cache base.
 		instanceRootfs, err = prepareInstanceRootfs(stateRoot, config.Image, directory)
 	}
 	observability.End(rootfsSpan, err)
@@ -406,6 +412,10 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		klog.V(4).InfoS("firecracker Infra Components delivered", "sandboxId", config.SandboxID, "services", len(instance.Services), "duration", infraDur.String())
 	}
 
+	// Restore-only startup: the golden snapshot carries the guest network
+	// configuration (the preparation VM's static IP is baked into the guest
+	// state), and the NIC host tap is replaced per instance via the load
+	// request's network_overrides. Nothing else is injected into the rootfs.
 	state := &SandboxState{
 		Spec: *config, Phase: PhaseStarting,
 		APIAddress: filepath.Join(directory, "api.sock"), CreatedAt: time.Now().Unix(),
@@ -453,7 +463,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	defer client.Close()
 	configureStarted := time.Now()
 	configureCtx, configureSpan := observability.Start(ctx, "fastlet.firecracker.configure")
-	err = configureVM(configureCtx, client, *config, d.config, rootfsPath, instanceRootfs, slot)
+	err = configureRestoreVM(configureCtx, client, slot, vmstatePath, memoryPath)
 	observability.End(configureSpan, err)
 	if err != nil {
 		d.killAndForget(config.SandboxID, process.PID())
@@ -463,8 +473,8 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	configureDur := time.Since(configureStarted)
 
 	bootStarted := time.Now()
-	bootCtx, bootSpan := observability.Start(ctx, "fastlet.firecracker.boot")
-	polls, err := bootVM(bootCtx, client, d.config.BootTimeoutSeconds)
+	bootCtx, bootSpan := observability.Start(ctx, "fastlet.firecracker.resume")
+	polls, err := resumeVM(bootCtx, client, d.config.BootTimeoutSeconds)
 	observability.End(bootSpan, err)
 	if err != nil {
 		d.killAndForget(config.SandboxID, process.PID())
@@ -682,7 +692,10 @@ func (d *Driver) launchVM(ctx context.Context, sandboxID, apiAddress, stateDir s
 	d.mu.RUnlock()
 	return launch(ctx, launcher, launchConfig{
 		BinaryPath: config.BinaryPath, SandboxID: sandboxID, APIAddress: apiAddress,
-		LogPath: filepath.Join(stateDir, processLogName),
+		// The vmstate bakes the root drive as the relative path "rootfs.img";
+		// the process cwd selects this instance's own reflink copy.
+		WorkingDir: stateDir,
+		LogPath:    filepath.Join(stateDir, processLogName),
 	})
 }
 
@@ -718,72 +731,28 @@ func readProcessLog(stateDir string) string {
 	return "\nfirecracker process log:\n" + string(tail)
 }
 
-// configureVM drives the Firecracker API: machine config, boot source, root
-// drive, and the guest network interface backed by the pod-side tap.
-func configureVM(ctx context.Context, client *Client, spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig, rootfsPath, instanceRootfs string, slot *fastletnetwork.Slot) error {
-	machine, err := resolveMachineConfig(spec, config)
-	if err != nil {
-		return err
-	}
-	if err := client.ConfigureMachine(ctx, machine); err != nil {
-		return fmt.Errorf("configure Firecracker machine: %w", err)
-	}
-	bootArgs, err := guestBootArgs(config, slot)
-	if err != nil {
-		return err
-	}
-	if err := client.ConfigureBootSource(ctx, BootSourceRequest{KernelImagePath: config.KernelPath, BootArgs: bootArgs}); err != nil {
-		return fmt.Errorf("configure Firecracker boot source: %w", err)
-	}
-	if err := client.AttachDrive(ctx, DriveRequest{
-		DriveID: "root", PathOnHost: instanceRootfs, IsRootDevice: true, IsReadOnly: false,
-	}); err != nil {
-		return fmt.Errorf("attach Firecracker root drive: %w", err)
-	}
-	tapDevice := slot.GuestTap
-	if tapDevice == "" {
-		return fmt.Errorf("%w: slot %s has no pre-provisioned guest tap", ErrNetworkUnavailable, slot.ID)
-	}
-	if err := client.AttachNetworkInterface(ctx, NetworkInterfaceRequest{
-		IfaceID: "eth0", HostDevName: tapDevice, GuestMAC: guestMAC(spec.SandboxID),
-	}); err != nil {
-		return fmt.Errorf("attach Firecracker network interface: %w", err)
-	}
-	_ = rootfsPath
-	return nil
-}
-
-// guestBootArgs composes the guest kernel command line with the static
-// network configuration derived from the network slot.
-func guestBootArgs(config runtimecatalog.FirecrackerConfig, slot *fastletnetwork.Slot) (string, error) {
-	base := config.BootArgs
-	if base == "" {
-		base = defaultBootArgs
-	}
-	guestIP, err := fastletnetwork.GuestVMIP(slot)
-	if err != nil {
-		return "", err
-	}
-	prefix, err := netip.ParsePrefix(slot.PrivateCIDR)
-	if err != nil {
-		return "", fmt.Errorf("%w: invalid private CIDR %q", ErrInvalidConfig, slot.PrivateCIDR)
-	}
-	// The kernel ip= parameter expects a dotted-quad netmask, not a prefix
-	// length; a bare "24" is parsed as 24.0.0.0 and rejected with EINVAL.
-	mask, err := prefixMask(prefix.Bits())
-	if err != nil {
-		return "", err
-	}
-	return buildBootArgs(base, guestIP, slot.Gateway, mask), nil
-}
-
 // bootVM starts the microVM and waits until the machine state is Running.
-// bootVM starts the microVM, waits until the machine state is Running, and
-// returns the number of VM state polls performed.
+// It is used by the snapshot preparation path (cold boot: InstanceStart).
 func bootVM(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
 	if err := client.Start(ctx); err != nil {
 		return 0, fmt.Errorf("start Firecracker instance: %w", err)
 	}
+	return waitVMRunning(ctx, client, timeoutSeconds)
+}
+
+// resumeVM resumes a microVM restored from a snapshot and waits until it is
+// Running. v1.16 does not allow InstanceStart after snapshot/load ("the
+// requested operation is not supported after starting the microVM"); the
+// restore leaves the VM Paused and PATCH /vm {"state":"Resumed"} resumes it.
+func resumeVM(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
+	if err := client.Resume(ctx); err != nil {
+		return 0, fmt.Errorf("resume Firecracker instance: %w", err)
+	}
+	return waitVMRunning(ctx, client, timeoutSeconds)
+}
+
+// waitVMRunning polls the VM state until it reports Running.
+func waitVMRunning(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
 	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
 	polls := 0
 	for {

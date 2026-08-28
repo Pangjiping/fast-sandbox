@@ -29,6 +29,40 @@ type BootSourceRequest struct {
 	InitrdPath      string `json:"initrd_path,omitempty"`
 }
 
+// SnapshotMemBackend mirrors the mem_backend object of PUT /snapshot/load.
+type SnapshotMemBackend struct {
+	BackendType string `json:"backend_type"` // "File"
+	BackendPath string `json:"backend_path"`
+}
+
+// SnapshotNetworkOverride replaces the host tap of one restored network
+// interface. Only the tap name can be overridden: the guest MAC and the
+// interface identity are baked into the snapshot state (v1.16).
+type SnapshotNetworkOverride struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
+}
+
+// SnapshotLoadRequest mirrors PUT /snapshot/load (v1.16): restore a Full
+// snapshot from a vmstate file and a file-backed memory snapshot. Load
+// must be the first configuration call: any machine/drive/network setup
+// before it is rejected by Firecracker.
+type SnapshotLoadRequest struct {
+	SnapshotPath      string                    `json:"snapshot_path"`
+	MemBackend        SnapshotMemBackend        `json:"mem_backend"`
+	ResumeVM          bool                      `json:"resume_vm"`
+	NetworkOverrides  []SnapshotNetworkOverride `json:"network_overrides,omitempty"`
+}
+
+// SnapshotCreateRequest mirrors PUT /snapshot/create (v1.16). It is used by
+// the golden snapshot preparation path (E2E self-bootstrap): cold-boot a
+// preparation VM, pause it, and dump vmstate + memory.
+type SnapshotCreateRequest struct {
+	SnapshotType string `json:"snapshot_type"` // "Full"
+	SnapshotPath string `json:"snapshot_path"`
+	MemFilePath  string `json:"mem_file_path"`
+}
+
 // DriveRequest mirrors PUT /drives/{drive_id}.
 type DriveRequest struct {
 	DriveID      string `json:"drive_id"`
@@ -116,6 +150,33 @@ func (c *Client) AttachNetworkInterface(ctx context.Context, request NetworkInte
 // Start boots the microVM (InstanceStart action).
 func (c *Client) Start(ctx context.Context) error {
 	return c.do(ctx, http.MethodPut, "/actions", actionRequest{ActionType: "InstanceStart"}, nil)
+}
+
+// Pause pauses the microVM (PATCH /vm). It is part of the snapshot
+// preparation surface (golden snapshot self-bootstrap).
+func (c *Client) Pause(ctx context.Context) error {
+	return c.do(ctx, http.MethodPatch, "/vm", map[string]string{"state": "Paused"}, nil)
+}
+
+// Resume resumes a paused microVM (PATCH /vm). After snapshot/load with
+// resume_vm=false the restored VM is Paused; v1.16 rejects InstanceStart
+// post-load, so Resume is the restore resume path.
+func (c *Client) Resume(ctx context.Context) error {
+	return c.do(ctx, http.MethodPatch, "/vm", map[string]string{"state": "Resumed"}, nil)
+}
+
+// LoadSnapshot restores the microVM from a Full snapshot (vmstate + memory
+// file). resume_vm=false leaves the VM paused after load; the driver then
+// starts it with InstanceStart so the boot/start/poll lifecycle stays
+// uniform between cold boot and restore.
+func (c *Client) LoadSnapshot(ctx context.Context, request SnapshotLoadRequest) error {
+	return c.do(ctx, http.MethodPut, "/snapshot/load", request, nil)
+}
+
+// CreateSnapshot writes a Full snapshot (vmstate + memory) of the paused
+// microVM. It is part of the snapshot preparation surface.
+func (c *Client) CreateSnapshot(ctx context.Context, request SnapshotCreateRequest) error {
+	return c.do(ctx, http.MethodPut, "/snapshot/create", request, nil)
 }
 
 // VMState returns the current machine state (NotStarted, Running, Paused).

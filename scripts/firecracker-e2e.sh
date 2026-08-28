@@ -10,6 +10,13 @@
 # kernel/rootfs, then runs:
 #   go test -tags firecracker -run TestFirecrackerDriverE2E ./internal/runtime/firecracker/
 #
+# Restore is the only startup path: the kernel and rootfs are snapshot-prep
+# assets — the test cold-boots one preparation VM to produce the golden
+# snapshot set (rootfs.img + vmstate.snap + memory.snap + manifest.json)
+# under FC_STATE_ROOT, and every Sandbox restores from it (no kernel at
+# runtime). The prepared set is cached under the StateRoot, so reruns with a
+# persistent FC_STATE_ROOT skip the prep boot.
+#
 # Host impact: the test uses a private 172.30.0.0/24 bridge and sets host-wide
 # ip_forward plus one MASQUERADE rule; these are restored automatically on
 # exit (only when they did not exist before the run). --cleanup is available
@@ -18,16 +25,17 @@
 # Overrides (environment):
 #   FC_VERSION    firecracker release tag, default v1.16.1 (latest upstream stable)
 #   FC_BINARY     firecracker binary path (skips download when set)
-#   FC_KERNEL     kernel image path (skips download when set)
-#   FC_ROOTFS     converted rootfs ext4 image (skips download when set)
-#   FC_STATE_ROOT driver StateRoot (defaults to a temp dir; use a reflink-
-#                 capable filesystem to avoid the first-fsync writeback cost)
+#   FC_KERNEL     kernel image path, snapshot-prep asset (skips download when set)
+#   FC_ROOTFS     converted rootfs ext4 image, snapshot-prep input (skips download when set)
+#   FC_STATE_ROOT driver StateRoot; defaults to $WORK/state-root so the
+#                 prepared golden snapshot set is reused across runs (use a
+#                 reflink-capable filesystem to avoid the first-fsync
+#                 writeback cost)
 #   WORK          workspace dir, default $PWD/.firecracker-e2e
 #
 # Version baseline: latest upstream stable firecracker (vanilla). The driver
-# client only uses the stable v1.x API surface, so any v1.x >= 1.0 works for
-# cold boot; the version only matters once snapshot ABI compatibility is
-# pinned per the runtime manifest.
+# client only uses the stable v1.x snapshot API surface; the version matters
+# once snapshot ABI compatibility is pinned per the runtime manifest.
 
 set -euo pipefail
 
@@ -39,6 +47,7 @@ FC_VERSION="${FC_VERSION:-v1.16.1}"
 FC_BINARY="${FC_BINARY:-$BIN_DIR/firecracker}"
 FC_KERNEL="${FC_KERNEL:-$ART_DIR/vmlinux.bin}"
 FC_ROOTFS="${FC_ROOTFS:-$ART_DIR/bionic.rootfs.ext4}"
+FC_STATE_ROOT="${FC_STATE_ROOT:-$WORK/state-root}"
 
 PRIVATE_CIDR="172.30.0.0/24"
 BRIDGE_NAME="fsb0"
@@ -139,7 +148,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
         log "re-invoking as root (sudo -E)"
         exec sudo -E env "PATH=$PATH" "WORK=$WORK" "FC_VERSION=$FC_VERSION" \
             "FC_BINARY=$FC_BINARY" "FC_KERNEL=$FC_KERNEL" "FC_ROOTFS=$FC_ROOTFS" \
-            "FC_STATE_ROOT=${FC_STATE_ROOT:-}" \
+            "FC_STATE_ROOT=$FC_STATE_ROOT" \
             "$0" "$@"
     fi
     die "must run as root (or install sudo)"
@@ -187,15 +196,20 @@ fi
 "$FC_BINARY" --version >/dev/null || die "firecracker binary does not run (needs recent glibc)"
 
 if [[ ! -f "$FC_KERNEL" ]]; then
+    # Snapshot-prep asset: the kernel only boots the one preparation VM that
+    # produces the golden snapshot set; restored Sandboxes never boot a kernel.
     download "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin" "$FC_KERNEL"
 fi
 if [[ ! -f "$FC_ROOTFS" ]]; then
+    # Snapshot-prep input: the preparation VM's root drive; the golden
+    # rootfs.img in the StateRoot is derived from it.
     download "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4" "$FC_ROOTFS"
 fi
 
 log "firecracker: $FC_BINARY ($("$FC_BINARY" --version | head -1))"
-log "kernel:     $FC_KERNEL"
-log "rootfs:     $FC_ROOTFS"
+log "kernel:     $FC_KERNEL (snapshot-prep asset)"
+log "rootfs:     $FC_ROOTFS (snapshot-prep input)"
+log "state root: $FC_STATE_ROOT (golden snapshot set cached here)"
 
 # --- run the test ------------------------------------------------------------
 record_host_state
@@ -210,7 +224,7 @@ trap 'cleanup_leftovers; cleanup_host_state' EXIT
 log "running TestFirecrackerDriverE2E (+TestFirecrackerDriverE2ENoInfra, root)"
 cd "$REPO_ROOT"
 env FC_BINARY="$FC_BINARY" FC_KERNEL="$FC_KERNEL" FC_ROOTFS="$FC_ROOTFS" \
-    FC_STATE_ROOT="${FC_STATE_ROOT:-}" \
+    FC_STATE_ROOT="$FC_STATE_ROOT" \
     go test -tags firecracker -count=1 -v -run '^TestFirecrackerDriverE2E' \
     ./internal/runtime/firecracker/
 
