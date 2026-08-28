@@ -158,6 +158,13 @@ func (c *Client) Pause(ctx context.Context) error {
 	return c.do(ctx, http.MethodPatch, "/vm", map[string]string{"state": "Paused"}, nil)
 }
 
+// Resume resumes a paused microVM (PATCH /vm). After snapshot/load with
+// resume_vm=false the restored VM is Paused; v1.16 rejects InstanceStart
+// post-load, so Resume is the restore resume path.
+func (c *Client) Resume(ctx context.Context) error {
+	return c.do(ctx, http.MethodPatch, "/vm", map[string]string{"state": "Resumed"}, nil)
+}
+
 // LoadSnapshot restores the microVM from a Full snapshot (vmstate + memory
 // file). resume_vm=false leaves the VM paused after load; the driver then
 // starts it with InstanceStart so the boot/start/poll lifecycle stays

@@ -138,6 +138,15 @@ func (s *statefulFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		s.running = action.ActionType == "InstanceStart"
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
+	case "/vm":
+		var payload map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		s.mu.Lock()
+		if payload["state"] == "Resumed" {
+			s.running = true
+		}
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 	case "/":
 		s.mu.Lock()
 		state := "NotStarted"
@@ -382,7 +391,7 @@ func TestEnsureSandboxBootsVM(t *testing.T) {
 	// v1.16 restore: LoadSnapshot is the first (and only pre-boot) API call;
 	// machine/drive/network configuration is restored from the vmstate and
 	// is rejected by Firecracker before load. The boot source is never set.
-	require.Equal(t, []string{"PUT /snapshot/load", "PUT /actions", "GET /"}, calls)
+	require.Equal(t, []string{"PUT /snapshot/load", "PATCH /vm", "GET /"}, calls)
 
 	directory, err := sandboxDir(fixture.stateRoot, "sandbox-1")
 	require.NoError(t, err)
@@ -409,7 +418,7 @@ func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 	// the kernel boot source is never configured, and the machine/drive/nic
 	// configuration comes from the vmstate.
 	calls := fixture.server.recordedCalls()
-	require.Equal(t, []string{"PUT /snapshot/load", "PUT /actions", "GET /"}, calls)
+	require.Equal(t, []string{"PUT /snapshot/load", "PATCH /vm", "GET /"}, calls)
 
 	// The snapshot/load payload references the cached golden artifacts, the
 	// per-instance NIC tap override, and leaves the VM paused for the

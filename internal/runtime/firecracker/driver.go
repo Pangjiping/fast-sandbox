@@ -478,8 +478,8 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	configureDur := time.Since(configureStarted)
 
 	bootStarted := time.Now()
-	bootCtx, bootSpan := observability.Start(ctx, "fastlet.firecracker.boot")
-	polls, err := bootVM(bootCtx, client, d.config.BootTimeoutSeconds)
+	bootCtx, bootSpan := observability.Start(ctx, "fastlet.firecracker.resume")
+	polls, err := resumeVM(bootCtx, client, d.config.BootTimeoutSeconds)
 	observability.End(bootSpan, err)
 	if err != nil {
 		d.killAndForget(config.SandboxID, process.PID())
@@ -763,12 +763,27 @@ func guestBootArgs(config runtimecatalog.FirecrackerConfig, slot *fastletnetwork
 }
 
 // bootVM starts the microVM and waits until the machine state is Running.
-// bootVM starts the microVM, waits until the machine state is Running, and
-// returns the number of VM state polls performed.
+// It is used by the snapshot preparation path (cold boot: InstanceStart).
 func bootVM(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
 	if err := client.Start(ctx); err != nil {
 		return 0, fmt.Errorf("start Firecracker instance: %w", err)
 	}
+	return waitVMRunning(ctx, client, timeoutSeconds)
+}
+
+// resumeVM resumes a microVM restored from a snapshot and waits until it is
+// Running. v1.16 does not allow InstanceStart after snapshot/load ("the
+// requested operation is not supported after starting the microVM"); the
+// restore leaves the VM Paused and PATCH /vm {"state":"Resumed"} resumes it.
+func resumeVM(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
+	if err := client.Resume(ctx); err != nil {
+		return 0, fmt.Errorf("resume Firecracker instance: %w", err)
+	}
+	return waitVMRunning(ctx, client, timeoutSeconds)
+}
+
+// waitVMRunning polls the VM state until it reports Running.
+func waitVMRunning(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
 	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
 	polls := 0
 	for {

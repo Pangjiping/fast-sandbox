@@ -145,6 +145,24 @@ func TestClientPauseAndCreateSnapshot(t *testing.T) {
 	require.Equal(t, "/tmp/memory.snap", createRequest.MemFilePath)
 }
 
+func TestClientResumeAfterLoad(t *testing.T) {
+	var calls []string
+	socketPath := startFakeFirecracker(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		require.Equal(t, http.MethodPatch, r.Method)
+		require.Equal(t, "/vm", r.URL.Path)
+		var payload map[string]string
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		require.Equal(t, "Resumed", payload["state"])
+		w.WriteHeader(http.StatusNoContent)
+	})
+	client := NewClient(socketPath)
+	t.Cleanup(client.Close)
+
+	require.NoError(t, client.Resume(context.Background()))
+	require.Equal(t, []string{"PATCH /vm"}, calls)
+}
+
 func TestClientNotReady(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "missing.sock")
 	client := NewClient(socketPath)
