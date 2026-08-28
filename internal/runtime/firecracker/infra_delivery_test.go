@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
+	fastletnetwork "fast-sandbox/internal/fastlet/network"
 
 	"github.com/stretchr/testify/require"
 )
@@ -75,4 +76,42 @@ func TestDeliverGuestInfraUnmountsOnFailure(t *testing.T) {
 func TestDeliverGuestInfraRequiresRunner(t *testing.T) {
 	err := deliverGuestInfra(context.Background(), nil, "img", fastletinfra.PreparedInstance{Mounts: infraMounts(t)})
 	require.ErrorIs(t, err, ErrInvalidConfig)
+}
+
+func TestDeliverGuestNetworkConfigWritesStaticConfig(t *testing.T) {
+	runner := &infraRunner{}
+	stateRoot := t.TempDir()
+	image := "example.com/app:v1"
+	require.NoError(t, os.MkdirAll(filepath.Join(stateRoot, imageCacheDir, imageKey(image)), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(stateRoot, imageCacheDir, imageKey(image), guestNetHookMarker), nil, 0o640))
+	slot := &fastletnetwork.Slot{IP: "172.30.0.2", Gateway: "172.30.0.1", PrivateCIDR: "172.30.0.0/24"}
+	err := deliverGuestNetworkConfig(context.Background(), runner, stateRoot, image, "/var/lib/fast-sandbox/rootfs.img", slot)
+	require.NoError(t, err)
+
+	joined := strings.Join(runner.commands, "\n")
+	require.Contains(t, joined, "mount -o loop /var/lib/fast-sandbox/rootfs.img")
+	require.Contains(t, joined, "mkdir -p ")
+	require.Contains(t, joined, "/etc/fast-sandbox")
+	require.Contains(t, joined, "cp -a ")
+	require.Equal(t, 1, strings.Count(joined, "umount "))
+}
+
+func TestDeliverGuestNetworkConfigSkipsWithoutHook(t *testing.T) {
+	runner := &infraRunner{}
+	stateRoot := t.TempDir()
+	image := "example.com/app:v1"
+	slot := &fastletnetwork.Slot{IP: "172.30.0.2", Gateway: "172.30.0.1", PrivateCIDR: "172.30.0.0/24"}
+	require.NoError(t, deliverGuestNetworkConfig(context.Background(), runner, stateRoot, image, "img", slot))
+	require.Empty(t, runner.commands)
+}
+
+func TestDeliverGuestNetworkConfigSkipsNilSlot(t *testing.T) {
+	runner := &infraRunner{}
+	require.NoError(t, deliverGuestNetworkConfig(context.Background(), runner, t.TempDir(), "img", "img", nil))
+	require.Empty(t, runner.commands)
+}
+
+func TestDeliverGuestNetworkConfigRequiresRunner(t *testing.T) {
+	slot := &fastletnetwork.Slot{IP: "172.30.0.2", Gateway: "172.30.0.1", PrivateCIDR: "172.30.0.0/24"}
+	require.NoError(t, deliverGuestNetworkConfig(context.Background(), nil, t.TempDir(), "img", "img", slot))
 }

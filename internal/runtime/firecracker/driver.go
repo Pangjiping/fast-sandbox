@@ -364,7 +364,11 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
-	rootfsPath, err := resolveRootfsImage(stateRoot, config.Image)
+	vmstatePath, memoryPath, err := resolveRestoreSnapshotFiles(stateRoot, config.Image)
+	var machine MachineConfigRequest
+	if err == nil {
+		machine, err = resolveRestoreMachineConfig(*config, d.config, stateRoot, config.Image)
+	}
 	var instanceRootfs string
 	if err == nil {
 		instanceRootfs, err = prepareInstanceRootfs(stateRoot, config.Image, directory)
@@ -405,6 +409,21 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		infraDur = time.Since(infraStarted)
 		klog.V(4).InfoS("firecracker Infra Components delivered", "sandboxId", config.SandboxID, "services", len(instance.Services), "duration", infraDur.String())
 	}
+
+	// Restore-only startup: the golden snapshot was created without external
+	// connectivity, and a restored guest never boots a kernel (no ip= boot
+	// arg). Inject the per-instance static network config into the rootfs;
+	// the golden base's udev hook applies it when the NIC is hot-added.
+	netStarted := time.Now()
+	netCtx, netSpan := observability.Start(ctx, "fastlet.firecracker.guestnet")
+	netErr := deliverGuestNetworkConfig(netCtx, d.runner, stateRoot, config.Image, instanceRootfs, slot)
+	observability.End(netSpan, netErr)
+	netDur := time.Since(netStarted)
+	if netErr != nil {
+		releaseSlot()
+		return nil, fmt.Errorf("%w: inject guest network config: %v", ErrNetworkUnavailable, netErr)
+	}
+	klog.V(4).InfoS("firecracker guest network config injected", "sandboxId", config.SandboxID, "duration", netDur.String())
 
 	state := &SandboxState{
 		Spec: *config, Phase: PhaseStarting,
@@ -453,7 +472,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	defer client.Close()
 	configureStarted := time.Now()
 	configureCtx, configureSpan := observability.Start(ctx, "fastlet.firecracker.configure")
-	err = configureVM(configureCtx, client, *config, d.config, rootfsPath, instanceRootfs, slot)
+	err = configureRestoreVM(configureCtx, client, *config, machine, instanceRootfs, vmstatePath, memoryPath, slot)
 	observability.End(configureSpan, err)
 	if err != nil {
 		d.killAndForget(config.SandboxID, process.PID())
@@ -718,43 +737,10 @@ func readProcessLog(stateDir string) string {
 	return "\nfirecracker process log:\n" + string(tail)
 }
 
-// configureVM drives the Firecracker API: machine config, boot source, root
-// drive, and the guest network interface backed by the pod-side tap.
-func configureVM(ctx context.Context, client *Client, spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig, rootfsPath, instanceRootfs string, slot *fastletnetwork.Slot) error {
-	machine, err := resolveMachineConfig(spec, config)
-	if err != nil {
-		return err
-	}
-	if err := client.ConfigureMachine(ctx, machine); err != nil {
-		return fmt.Errorf("configure Firecracker machine: %w", err)
-	}
-	bootArgs, err := guestBootArgs(config, slot)
-	if err != nil {
-		return err
-	}
-	if err := client.ConfigureBootSource(ctx, BootSourceRequest{KernelImagePath: config.KernelPath, BootArgs: bootArgs}); err != nil {
-		return fmt.Errorf("configure Firecracker boot source: %w", err)
-	}
-	if err := client.AttachDrive(ctx, DriveRequest{
-		DriveID: "root", PathOnHost: instanceRootfs, IsRootDevice: true, IsReadOnly: false,
-	}); err != nil {
-		return fmt.Errorf("attach Firecracker root drive: %w", err)
-	}
-	tapDevice := slot.GuestTap
-	if tapDevice == "" {
-		return fmt.Errorf("%w: slot %s has no pre-provisioned guest tap", ErrNetworkUnavailable, slot.ID)
-	}
-	if err := client.AttachNetworkInterface(ctx, NetworkInterfaceRequest{
-		IfaceID: "eth0", HostDevName: tapDevice, GuestMAC: guestMAC(spec.SandboxID),
-	}); err != nil {
-		return fmt.Errorf("attach Firecracker network interface: %w", err)
-	}
-	_ = rootfsPath
-	return nil
-}
-
 // guestBootArgs composes the guest kernel command line with the static
-// network configuration derived from the network slot.
+// network configuration derived from the network slot. The driver no longer
+// boots a kernel (restore is the only startup path), so this is used only
+// by the golden snapshot preparation path (E2E self-bootstrap).
 func guestBootArgs(config runtimecatalog.FirecrackerConfig, slot *fastletnetwork.Slot) (string, error) {
 	base := config.BootArgs
 	if base == "" {

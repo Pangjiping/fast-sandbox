@@ -95,10 +95,11 @@ func newNetworkManagerForTest(t *testing.T) *fastletnetwork.Manager {
 
 // statefulFakeServer scripts the Firecracker API and records calls.
 type statefulFakeServer struct {
-	mu      sync.Mutex
-	calls   []string
-	running bool
-	socket  string
+	mu            sync.Mutex
+	calls         []string
+	snapshotLoads []SnapshotLoadRequest
+	running       bool
+	socket        string
 }
 
 func newStatefulFakeServer(t *testing.T) *statefulFakeServer {
@@ -110,6 +111,12 @@ func newStatefulFakeServer(t *testing.T) *statefulFakeServer {
 func (s *statefulFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.calls = append(s.calls, r.Method+" "+r.URL.Path)
+	if r.URL.Path == "/snapshot/load" {
+		var request SnapshotLoadRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err == nil {
+			s.snapshotLoads = append(s.snapshotLoads, request)
+		}
+	}
 	s.mu.Unlock()
 	switch r.URL.Path {
 	case "/version":
@@ -139,6 +146,12 @@ func (s *statefulFakeServer) recordedCalls() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.calls...)
+}
+
+func (s *statefulFakeServer) recordedSnapshotLoads() []SnapshotLoadRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]SnapshotLoadRequest(nil), s.snapshotLoads...)
 }
 
 // driverFixture wires a Driver with fake Firecracker, process, and network
@@ -198,10 +211,16 @@ func newDriverFixture(t *testing.T) *driverFixture {
 
 func (f *driverFixture) prepareCachedImage(t *testing.T, image string) {
 	t.Helper()
-	path, err := imageCachePath(f.stateRoot, image)
+	dir := filepath.Join(f.stateRoot, imageCacheDir, imageKey(image))
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, rootfsImageName), []byte("rootfs-image-data"), 0o640))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, vmstateSnapshotName), []byte("vmstate-snapshot-data"), 0o640))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, memorySnapshotName), []byte("memory-snapshot-data"), 0o640))
+	manifest, err := json.Marshal(map[string]any{
+		"machine": map[string]any{"vcpu": "2", "memory": "1Gi"},
+	})
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
-	require.NoError(t, os.WriteFile(path, []byte("rootfs-image-data"), 0o640))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), manifest, 0o640))
 }
 
 func TestNewRequiresProfileConfig(t *testing.T) {
@@ -352,9 +371,10 @@ func TestEnsureSandboxBootsVM(t *testing.T) {
 
 	calls := fixture.server.recordedCalls()
 	require.Contains(t, calls, "PUT /machine-config")
-	require.Contains(t, calls, "PUT /boot-source")
+	require.NotContains(t, calls, "PUT /boot-source")
 	require.Contains(t, calls, "PUT /drives/root")
 	require.Contains(t, calls, "PUT /network-interfaces/eth0")
+	require.Contains(t, calls, "PUT /snapshot/load")
 	require.Contains(t, calls, "PUT /actions")
 
 	directory, err := sandboxDir(fixture.stateRoot, "sandbox-1")
@@ -367,6 +387,72 @@ func TestEnsureSandboxBootsVM(t *testing.T) {
 	content, err := os.ReadFile(instanceRootfs)
 	require.NoError(t, err)
 	require.Equal(t, "rootfs-image-data", string(content))
+}
+
+func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	metadata, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	require.NoError(t, err)
+	require.Equal(t, string(PhaseRunning), metadata.Phase)
+
+	// Restore sequence: machine-config -> drive -> nic -> snapshot/load ->
+	// InstanceStart; the kernel boot source is never configured.
+	calls := fixture.server.recordedCalls()
+	require.Equal(t, []string{
+		"PUT /machine-config",
+		"PUT /drives/root",
+		"PUT /network-interfaces/eth0",
+		"PUT /snapshot/load",
+		"PUT /actions",
+		"GET /",
+	}, calls)
+
+	// The snapshot/load payload references the cached golden artifacts and
+	// leaves the VM paused for the explicit InstanceStart resume.
+	loads := fixture.server.recordedSnapshotLoads()
+	require.Len(t, loads, 1)
+	imageDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image))
+	require.Equal(t, filepath.Join(imageDir, vmstateSnapshotName), loads[0].SnapshotPath)
+	require.Equal(t, "File", loads[0].MemBackend.BackendType)
+	require.Equal(t, filepath.Join(imageDir, memorySnapshotName), loads[0].MemBackend.BackendPath)
+	require.False(t, loads[0].ResumeVM)
+}
+
+func TestEnsureSandboxRestoreMachineConfigFromManifest(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	// The fixture manifest records {vcpu: 2, memory: 1Gi}; the fixture spec
+	// requests the same so restore succeeds with the manifest machine.
+	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	require.NoError(t, err)
+
+	// A request memory below the snapshot memory fails restore explicitly.
+	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), fixture.sandboxSpec.SandboxID))
+	small := fixture.sandboxSpec
+	small.Memory = "256Mi"
+	_, err = fixture.driver.EnsureSandbox(context.Background(), &small)
+	require.ErrorIs(t, err, ErrInvalidConfig)
+	require.Contains(t, err.Error(), "below the template snapshot memory")
+}
+
+func TestEnsureSandboxMissingSnapshotFilesReleasesSlot(t *testing.T) {
+	fixture := newDriverFixture(t)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	// Only the rootfs exists; the golden snapshot set is incomplete.
+	dir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image))
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, rootfsImageName), []byte("rootfs-image-data"), 0o640))
+
+	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	require.ErrorIs(t, err, ErrImageNotReady)
+	require.Empty(t, fixture.launcher.started)
+	require.Equal(t, 0, fixture.manager.Snapshot().Bound)
 }
 
 func TestEnsureSandboxIsIdempotent(t *testing.T) {
@@ -572,6 +658,59 @@ func TestResolveMachineConfig(t *testing.T) {
 
 	_, err = resolveMachineConfig(fastletapi.SandboxSpec{CPU: "not-a-quantity"}, config)
 	require.ErrorIs(t, err, ErrInvalidConfig)
+}
+
+func TestResolveRestoreMachineConfigUsesManifest(t *testing.T) {
+	stateRoot := t.TempDir()
+	image := "example.com/app:v1"
+	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(image))
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	manifest, err := json.Marshal(map[string]any{
+		"machine": map[string]any{"vcpu": "1", "memory": "512Mi"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), manifest, 0o640))
+	config := firecrackerConfigForTest(t, stateRoot)
+
+	// The manifest machine tuple is authoritative for the restore machine
+	// config; the request profile is not mapped into it.
+	request, err := resolveRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "4", Memory: "1Gi"}, config, stateRoot, image)
+	require.NoError(t, err)
+	require.Equal(t, 1, request.VCPUs)
+	require.Equal(t, 512, request.MemSizeMiB)
+
+	// A request memory below the snapshot memory is rejected.
+	_, err = resolveRestoreMachineConfig(fastletapi.SandboxSpec{Memory: "256Mi"}, config, stateRoot, image)
+	require.ErrorIs(t, err, ErrInvalidConfig)
+	require.Contains(t, err.Error(), "below the template snapshot memory")
+}
+
+func TestResolveRestoreMachineConfigFallsBackWithoutManifest(t *testing.T) {
+	stateRoot := t.TempDir()
+	image := "example.com/app:v1"
+	config := firecrackerConfigForTest(t, stateRoot)
+
+	request, err := resolveRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "2", Memory: "1Gi"}, config, stateRoot, image)
+	require.NoError(t, err)
+	require.Equal(t, 2, request.VCPUs)
+	require.Equal(t, 1024, request.MemSizeMiB)
+}
+
+func TestResolveRestoreSnapshotFilesRequiresBothArtifacts(t *testing.T) {
+	stateRoot := t.TempDir()
+	image := "example.com/app:v1"
+	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(image))
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, vmstateSnapshotName), []byte("vmstate"), 0o640))
+
+	_, _, err := resolveRestoreSnapshotFiles(stateRoot, image)
+	require.ErrorIs(t, err, ErrImageNotReady)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, memorySnapshotName), []byte("memory"), 0o640))
+	vmstate, memory, err := resolveRestoreSnapshotFiles(stateRoot, image)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(dir, vmstateSnapshotName), vmstate)
+	require.Equal(t, filepath.Join(dir, memorySnapshotName), memory)
 }
 
 func TestGuestBootArgs(t *testing.T) {
