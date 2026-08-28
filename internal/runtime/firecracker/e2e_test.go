@@ -264,7 +264,8 @@ func prepareE2EGoldenSnapshot(t *testing.T, binary, kernel, rootfs, stateRoot, i
 		// match the rootfs the instances reflink-copy from.
 		DriveID: "root", PathOnHost: rootfsImg, IsRootDevice: true, IsReadOnly: false,
 	}))
-	require.NoError(t, client.Start(context.Background()))
+	// bootVM performs the InstanceStart and the Running poll; the VM must
+	// not be started before it (a second InstanceStart is rejected).
 	_, err = bootVM(context.Background(), client, 90)
 	require.NoError(t, err)
 	require.NoError(t, client.Pause(context.Background()))
