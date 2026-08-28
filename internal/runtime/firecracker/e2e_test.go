@@ -5,7 +5,10 @@ package firecracker
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -196,6 +199,194 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 	env.delete(spec.SandboxID)
 }
 
+// prepareE2EGoldenSnapshot produces (or reuses) the golden snapshot set of
+// the E2E image (方式 B self-bootstrap, golden-restore plan §5): a
+// preparation VM cold-boots the kernel once, pauses, and dumps a Full
+// snapshot; the golden set is assembled into the driver cache layout:
+//
+//	<StateRoot>/images/<sha256(image)>/{rootfs.img, vmstate.snap, memory.snap, manifest.json}
+//
+// A complete set is reused so a persistent FC_STATE_ROOT skips the prep
+// boot on reruns. The golden rootfs also carries a udev hook
+// (fast-sandbox/net-up.sh) that applies the per-instance static network
+// config the driver injects at restore time: a restored guest never boots
+// a kernel, so the boot-arg ip= configuration does not apply (design §4.2).
+func prepareE2EGoldenSnapshot(t *testing.T, binary, kernel, rootfs, stateRoot, imageRef, bootArgs string) {
+	t.Helper()
+	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(imageRef))
+	rootfsImg := filepath.Join(dir, rootfsImageName)
+	vmstate := filepath.Join(dir, vmstateSnapshotName)
+	memory := filepath.Join(dir, memorySnapshotName)
+	manifestPath := filepath.Join(dir, "manifest.json")
+	complete := func() bool {
+		for _, path := range []string{rootfsImg, vmstate, memory, manifestPath} {
+			if info, err := os.Stat(path); err != nil || info.IsDir() {
+				return false
+			}
+		}
+		return true
+	}
+	if complete() {
+		t.Logf("reusing prepared golden snapshot set %s", dir)
+		return
+	}
+
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, copyFile(rootfs, rootfsImg))
+	bakeE2EGuestNetworkHook(t, rootfsImg)
+	// Mark the image so the driver injects the per-instance network config
+	// for it (restore.go: deliverGuestNetworkConfig).
+	require.NoError(t, os.WriteFile(filepath.Join(dir, guestNetHookMarker), nil, 0o640))
+
+	prepDir := t.TempDir()
+	apiSock := filepath.Join(prepDir, "api.sock")
+	logPath := filepath.Join(prepDir, "firecracker.log")
+	process, err := launch(context.Background(), ExecProcessRunner{}, launchConfig{
+		BinaryPath: binary, SandboxID: "e2e-prep", APIAddress: apiSock, LogPath: logPath,
+	})
+	require.NoError(t, err)
+	defer process.Kill()
+
+	client := NewClient(apiSock)
+	defer client.Close()
+	require.NoError(t, waitForAPISocket(context.Background(), apiSock, firecrackerSocketWaitTimeout))
+
+	// The preparation machine must match the manifest machine tuple that
+	// restore uses (vmstate pins mem_size_mib): 1 vCPU / 512 MiB, the same
+	// as the e2e Sandbox spec.
+	require.NoError(t, client.ConfigureMachine(context.Background(), MachineConfigRequest{VCPUs: 1, MemSizeMiB: 512}))
+	require.NoError(t, client.ConfigureBootSource(context.Background(), BootSourceRequest{
+		KernelImagePath: kernel, BootArgs: bootArgs,
+	}))
+	require.NoError(t, client.AttachDrive(context.Background(), DriveRequest{
+		// The prep VM boots the golden rootfs read-write exactly like a
+		// restored instance: the memory snapshot's filesystem state must
+		// match the rootfs the instances reflink-copy from.
+		DriveID: "root", PathOnHost: rootfsImg, IsRootDevice: true, IsReadOnly: false,
+	}))
+	require.NoError(t, client.Start(context.Background()))
+	_, err = bootVM(context.Background(), client, 90)
+	require.NoError(t, err)
+	require.NoError(t, client.Pause(context.Background()))
+	require.NoError(t, waitVMState(context.Background(), client, "Paused", 30*time.Second))
+
+	require.NoError(t, client.CreateSnapshot(context.Background(), SnapshotCreateRequest{
+		SnapshotType: "Full", SnapshotPath: vmstate, MemFilePath: memory,
+	}))
+	require.NoError(t, process.Kill())
+
+	// The manifest records the machine tuple restore reads and the artifact
+	// digests of the golden set (commit point: manifest last).
+	rootfsDigest, err := fileSHA256(rootfsImg)
+	require.NoError(t, err)
+	vmstateDigest, err := fileSHA256(vmstate)
+	require.NoError(t, err)
+	memoryDigest, err := fileSHA256(memory)
+	require.NoError(t, err)
+	manifest, err := json.Marshal(map[string]any{
+		"machine": map[string]any{"vcpu": "1", "memory": "512Mi"},
+		"files": map[string]any{
+			"rootfs.ext4":  map[string]any{"sha256": rootfsDigest, "sizeBytes": fileSize(t, rootfsImg)},
+			"vmstate.snap": map[string]any{"sha256": vmstateDigest, "sizeBytes": fileSize(t, vmstate)},
+			"memory.snap":  map[string]any{"sha256": memoryDigest, "sizeBytes": fileSize(t, memory)},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifestPath, manifest, 0o640))
+	t.Logf("prepared golden snapshot set %s (rootfs=%s)", dir, filepath.Base(rootfs))
+}
+
+// bakeE2EGuestNetworkHook writes the restore network hook into the golden
+// rootfs: a udev rule that runs fast-sandbox/net-up.sh when eth0 is
+// hot-added. The rule is loaded by the preparation VM's udev at prep boot,
+// so the snapshot's running udev can apply the driver-injected
+// net.conf (design §4.2, "guest 内配置注入"). Baked before the prep VM
+// boots so the running guest already carries the rule.
+func bakeE2EGuestNetworkHook(t *testing.T, rootfsImg string) {
+	t.Helper()
+	if _, err := exec.LookPath("mount"); err != nil {
+		t.Log("mount unavailable; skipping guest network hook bake")
+		return
+	}
+	mountpoint, err := os.MkdirTemp("", "fc-e2e-hook")
+	require.NoError(t, err)
+	defer os.RemoveAll(mountpoint)
+	if output, err := exec.Command("mount", "-o", "loop", rootfsImg, mountpoint).CombinedOutput(); err != nil {
+		require.Failf(t, "mount golden rootfs for network hook: %v\n%s", err.Error(), output)
+	}
+	mounted := true
+	defer func() {
+		if mounted {
+			_, _ = exec.Command("umount", mountpoint).CombinedOutput()
+		}
+	}()
+	hookDir := filepath.Join(mountpoint, strings.TrimPrefix(guestNetConfigDir, "/"))
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+	script := `#!/bin/sh
+# Fast-sandbox restore network hook: apply the per-instance static config
+# injected by the runtime driver before snapshot restore.
+[ -r /etc/fast-sandbox/net.conf ] || exit 0
+. /etc/fast-sandbox/net.conf
+ip link set eth0 up 2>/dev/null
+ip addr flush dev eth0 2>/dev/null
+[ -n "$GUEST_IP" ] && ip addr add "$GUEST_IP/$GUEST_PREFIX" dev eth0 2>/dev/null
+[ -n "$GATEWAY" ] && ip route add default via "$GATEWAY" 2>/dev/null
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "net-up.sh"), []byte(script), 0o755))
+	udevDir := filepath.Join(mountpoint, "etc", "udev", "rules.d")
+	require.NoError(t, os.MkdirAll(udevDir, 0o755))
+	rule := `SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth0", RUN+="/bin/sh /etc/fast-sandbox/net-up.sh"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(udevDir, "99-fast-sandbox-net.rules"), []byte(rule), 0o644))
+	if output, err := exec.Command("umount", mountpoint).CombinedOutput(); err != nil {
+		require.Failf(t, "unmount golden rootfs after network hook: %v\n%s", err.Error(), output)
+	}
+	mounted = false
+}
+
+// waitVMState polls the Firecracker machine state until it matches want.
+func waitVMState(ctx context.Context, client *Client, want string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := client.VMState(ctx)
+		if err != nil {
+			return err
+		}
+		if state == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Firecracker VM did not reach %s within %s (state %q)", want, timeout, state)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(bootPollInterval):
+		}
+	}
+}
+
+func fileSHA256(path string) (string, error) {
+	input, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer input.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, input); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	return info.Size()
+}
+
 // e2eEnvironment bundles the host checks, StateRoot, slot manager, driver,
 // and per-sandbox helpers shared by the E2E tests.
 type e2eEnvironment struct {
@@ -210,9 +401,9 @@ type e2eEnvironment struct {
 	created      []string
 }
 
-// newE2EEnvironment validates the host, seeds the image cache, pre-provisions
-// capacity network slots, and wires the driver (with a real Infra plan when
-// infraEnabled).
+// newE2EEnvironment validates the host, prepares the golden snapshot set,
+// pre-provisions capacity network slots, and wires the driver (with a real
+// Infra plan when infraEnabled).
 func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnvironment {
 	t.Helper()
 	if os.Geteuid() != 0 {
@@ -240,10 +431,12 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	} else {
 		require.NoError(t, os.MkdirAll(stateRoot, 0o750))
 	}
-	imagePath, err := imageCachePath(stateRoot, imageRef)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Dir(imagePath), 0o750))
-	require.NoError(t, copyFile(rootfs, imagePath))
+	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off net.ifnames=0 biosdevname=0"
+	// The golden snapshot set is the runtime asset: a preparation VM boots
+	// the kernel once, pauses, and dumps vmstate + memory; subsequent
+	// Sandboxes restore from it (no kernel at runtime). A complete set is
+	// reused, so a persistent FC_STATE_ROOT skips the prep boot on reruns.
+	prepareE2EGoldenSnapshot(t, binary, kernel, rootfs, stateRoot, imageRef, bootArgs)
 
 	// Unique Pod UID per run keeps the resourceName-derived netns/bridge names
 	// from colliding with leftovers of earlier runs.
@@ -278,9 +471,9 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	profile := runtimecatalog.RuntimeProfile{
 		Name: apiv1alpha2.RuntimeFirecracker, ProfileHash: "e2e-profile",
 		Firecracker: &runtimecatalog.FirecrackerConfig{
-			BinaryPath: binary, KernelPath: kernel, RootfsPath: imagePath, StateRoot: stateRoot,
+			BinaryPath: binary, KernelPath: kernel, RootfsPath: rootfs, StateRoot: stateRoot,
 			DefaultVCPUs: 1, DefaultMemory: "512Mi", BootTimeoutSeconds: 90,
-			BootArgs: "console=ttyS0 reboot=k panic=1 pci=off net.ifnames=0 biosdevname=0",
+			BootArgs: bootArgs,
 		},
 		Capabilities: runtimecatalog.Capabilities{DefaultState: runtimecatalog.CapabilityReady},
 	}
@@ -310,7 +503,7 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	otel.SetTracerProvider(provider)
 	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
 
-	t.Logf("booting Firecracker microVM (kernel=%s)", kernel)
+	t.Logf("restoring Firecracker microVMs from golden snapshot set (kernel=%s)", kernel)
 	for index := 1; index <= capacity; index++ {
 		env.created = append(env.created, fmt.Sprintf("e2e-sandbox-%d", index))
 	}

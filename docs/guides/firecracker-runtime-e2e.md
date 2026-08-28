@@ -25,18 +25,28 @@ only touches resources it creates (`fsb*` netns, `fc*`/`fh*` devices, the
 
 ## VM baseline
 
+Restore is the only startup path: the runtime asset is the **golden
+snapshot set**, and the kernel/rootfs are **snapshot-prep assets** (the
+preparation VM uses them once to produce the snapshot set; restored
+Sandboxes never boot a kernel).
+
 | Item | Value |
 |------|-------|
 | Firecracker | v1.16.1, vanilla upstream release binary |
-| Kernel | `vmlinux.bin`, 4.14.174 (firecracker quickstart image) |
-| Rootfs | `bionic.rootfs.ext4`, Ubuntu 18.04.5 LTS minimized, ~300 MiB |
-| Guest spec | 1 vCPU, 512 MiB, static network via kernel `ip=` boot arg |
+| Snapshot-prep kernel | `vmlinux.bin`, 4.14.174 (firecracker quickstart image) |
+| Snapshot-prep rootfs | `bionic.rootfs.ext4`, Ubuntu 18.04.5 LTS minimized, ~300 MiB |
+| Golden snapshot set | `<StateRoot>/images/<sha256(image)>/{rootfs.img, vmstate.snap, memory.snap, manifest.json}` |
+| Guest spec | 1 vCPU, 512 MiB (manifest machine tuple, restore machine-config) |
 
 Artifacts are downloaded on first run:
 
 - `https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.1/firecracker-v1.16.1-x86_64.tgz`
-- `https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin`
-- `https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4`
+- `https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin` (snapshot-prep only)
+- `https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4` (snapshot-prep input)
+
+The golden snapshot set is produced once per StateRoot (`方式 B` self-
+bootstrap: cold boot the prep VM -> Pause -> `PUT /snapshot/create`) and
+cached; a rerun with the same `FC_STATE_ROOT` skips the prep boot.
 
 ## StateRoot and reflink
 
@@ -57,8 +67,14 @@ rootfs copies are CoW instead of paying the full dirty writeback:
   (172.30.0.2 onwards), default route via the bridge gateway
 - A host-side tap (`fc<13 hex>`) per slot is attached to the bridge; the VM
   runs in the host netns and attaches to its tap
-- The guest owns the next address (slot IP + 1), configured statically via
-  the kernel `ip=` boot arg (dotted-quad netmask)
+- The guest owns the next address (slot IP + 1), configured statically
+- **Restore 后网络恢复**: the restored guest never boots a kernel, so the
+  kernel `ip=` boot arg does not apply. The golden rootfs carries a udev
+  hook (`/etc/fast-sandbox/net-up.sh`) baked at snapshot-prep time; the
+  driver injects the per-instance static config
+  (`/etc/fast-sandbox/net.conf`, guest IP/gateway/prefix) into the instance
+  rootfs before restore, and the hook applies it when the virtio-net device
+  is hot-added at resume (设计 §4.2, "guest 内配置注入" 路径)
 - Host `PREROUTING` DNAT maps the slot IP to the guest IP; `FORWARD` ACCEPT
   rules allow ingress/egress; the slot netns MASQUERADEs egress
 - Sandbox-to-sandbox isolation: the slot netns rejects direct traffic to the
@@ -67,29 +83,35 @@ rootfs copies are CoW instead of paying the full dirty writeback:
 ## E2E suites
 
 All four cases run under the `firecracker` build tag in one script
-invocation (`-run '^TestFirecrackerDriverE2E'`):
+invocation (`-run '^TestFirecrackerDriverE2E'`). Every case restores from the
+same golden snapshot set (方式 B 自举, produced once per StateRoot):
 
 | Test | What it verifies |
 |------|------------------|
 | `TestFirecrackerDriverE2E` | Full lifecycle with real Infra Components delivery (loop-mount GuestCopy of sandbox-init + execd), guest files asserted with debugfs, real guest reachability |
 | `TestFirecrackerDriverE2ENoInfra` | Same lifecycle without infra delivery |
-| `TestFirecrackerDriverE2EConcurrent` | 5 pre-provisioned slots, 5 VMs booted concurrently; per-sandbox trace correlation, distinct processes, guest reachability for every instance |
+| `TestFirecrackerDriverE2EConcurrent` | 5 pre-provisioned slots, 5 VMs restored concurrently from the same snapshot set; per-sandbox trace correlation, distinct processes, memory.snap shared (COW), guest reachability for every instance |
 | `TestFirecrackerDriverE2EImageGC` | Independent LFU image-cache GC: unreferenced low-frequency image evicted, live Sandbox pins its image, deletion releases it |
 
 ## Observed performance
 
-Steady state (reflink StateRoot, warm cache):
+Restore is the only startup path. The snapshot-set preparation is a one-time
+cost per StateRoot (cold boot + pause + snapshot dump, reused across runs and
+across the four cases); steady-state Sandbox create is a restore:
 
 | Case | Total | Phase breakdown |
 |------|-------|-----------------|
-| Single VM with infra | ~317 ms | acquire ~30 µs, rootfs ~1 ms, infra ~200 ms, launch ~100 ms, configure ~1 ms, boot ~10 ms |
-| Single VM without infra | ~113 ms | infra 0, rest identical |
-| 5 VMs concurrently | ~470-515 ms | 5 x infra ~280-400 ms in parallel, launch ~100 ms each |
+| Single VM with infra | restore + infra delivery | prep (one-time) + acquire ~30 µs, rootfs ~1 ms, infra ~200 ms, launch ~100 ms, configure (incl. `snapshot/load`) ~10 ms, boot ~10 ms |
+| Single VM without infra | restore | infra 0, rest identical |
+| 5 VMs concurrently | 5 x restore from shared set | 5 x infra ~280-400 ms in parallel, launch ~100 ms each |
 
 Notes:
 
 - `launch` (~100 ms) is the firecracker process spawn constant; `boot`
-  (~10 ms) is the VM reaching `Running` (1 state poll)
+  (~10 ms) is the VM reaching `Running` (1 state poll) after `snapshot/load`
+  + `InstanceStart`
+- `snapshot/load` itself is part of the `configure` phase (machine-config,
+  drive, nic, load)
 - Without reflink (ext4 StateRoot) a create costs ~3.0 s (first-fsync dirty
   writeback); with xfs reflink it drops to ~282 ms (rootfs copy ~1 ms)
 - The suite has been run back-to-back many times with all green; stale
@@ -106,6 +128,7 @@ FC_STATE_ROOT=/var/lib/fast-sandbox/e2e ./scripts/firecracker-e2e.sh
 ```
 
 Overrides: `FC_VERSION`, `FC_BINARY`, `FC_KERNEL`, `FC_ROOTFS`,
-`FC_STATE_ROOT`, `WORK`. `--cleanup` removes leftovers of an interrupted run.
-Host resources created by a run (bridge, MASQUERADE, ip_forward, netns, taps)
-are restored automatically on exit.
+`FC_STATE_ROOT` (defaults to `$WORK/state-root`; keep it persistent to reuse
+the prepared golden snapshot set), `WORK`. `--cleanup` removes leftovers of
+an interrupted run. Host resources created by a run (bridge, MASQUERADE,
+ip_forward, netns, taps) are restored automatically on exit.
