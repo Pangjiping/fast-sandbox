@@ -49,7 +49,7 @@ type nativeFile struct {
 // their published names. OverlayBD layers are deliberately absent: they
 // arrive with the overlaybd stage.
 var nativeArtifactNames = []struct{ publish, cache string }{
-	{"rootfs.ext4", "rootfs.img"},
+	{"rootfs.ext4", nativeRootfsCacheName},
 	{"vmstate.snap", "vmstate.snap"},
 	{"memory.snap", "memory.snap"},
 }

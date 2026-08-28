@@ -239,13 +239,30 @@ func (d *Driver) ListImages(_ context.Context) ([]string, error) {
 	return listCachedImages(d.config.StateRoot)
 }
 
-// PullImage ensures the converted rootfs image is present in the local cache.
-// Conversion is out of band; an unconverted reference is reported as
-// ErrImageNotReady instead of blocking the create path.
-func (d *Driver) PullImage(_ context.Context, image string) error {
+// PullImage ensures the rootfs image is present in the local cache. With a
+// runtime-agent configured, the pull proxies to the agent's PinImage (the
+// node-level pull chain image -> index -> manifest -> digest-verified
+// cache); an unreachable agent degrades to the local cache check so warm
+// images and cold boots never depend on agent availability. Conversion is
+// out of band; an unconverted reference is reported as ErrImageNotReady
+// instead of blocking the create path.
+func (d *Driver) PullImage(ctx context.Context, image string) error {
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
 	d.mu.RUnlock()
+	client, err := d.agentClientOrNil()
+	if err == nil && client != nil {
+		if _, err := client.PinImage(ctx, warmPullRequestID(image), image); err != nil {
+			if errors.Is(err, errAgentUnreachable) {
+				// The agent is absent: fall through to the local cache.
+			} else {
+				return err
+			}
+		} else {
+			d.touchImage(image)
+			return nil
+		}
+	}
 	if _, err := resolveRootfsImage(stateRoot, image); err != nil {
 		return err
 	}

@@ -28,6 +28,12 @@ const (
 	manifestName  = "manifest.json"
 	cacheFileMode = 0o640
 	cacheDirMode  = 0o750
+
+	// nativeRootfsCacheName is the cache name of the published rootfs
+	// artifact (rootfs.ext4), kept byte-identical to the driver's
+	// rootfsImageName so the existing resolveRootfsImage consumer works
+	// on pulled artifacts unchanged.
+	nativeRootfsCacheName = "rootfs.img"
 )
 
 // imageKey derives the content-addressed cache key of an image reference.
@@ -39,6 +45,40 @@ func imageKey(image string) string {
 // imageDir returns the cache directory of an image reference.
 func imageDir(stateRoot, image string) string {
 	return filepath.Join(stateRoot, imageCacheDir, imageKey(image))
+}
+
+// ImageRootfsPath returns the cached native rootfs path of an image
+// reference. The derivation is byte-identical to the driver's image cache
+// key (internal/runtime/firecracker/images.go), so the runtime-agent server
+// and the driver resolve the same file.
+func ImageRootfsPath(stateRoot, image string) string {
+	return filepath.Join(imageDir(stateRoot, image), nativeRootfsCacheName)
+}
+
+// ImageReady reports whether the image reference has a committed pull in the
+// local cache: the commit-point manifest plus a native file set whose
+// digests match.
+func ImageReady(stateRoot, image string) (bool, error) {
+	return cacheComplete(imageDir(stateRoot, image))
+}
+
+// CachedManifestDigest returns the sha256 digest of the committed local
+// manifest of an image reference. The digest matches the index
+// artifactDigest the pull verified, so callers can trust it without a
+// network request. An image without a committed manifest reports false.
+func CachedManifestDigest(stateRoot, image string) (string, bool, error) {
+	dir := imageDir(stateRoot, image)
+	payload, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if _, err := parseManifest(payload); err != nil {
+		return "", false, nil
+	}
+	return sha256Hex(payload), true, nil
 }
 
 // cacheComplete reports whether the image directory holds a committed pull:

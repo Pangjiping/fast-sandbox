@@ -96,6 +96,15 @@ func main() {
 		}
 		configurable.SetNodeCleanupClient(nodecleanup.NewClient(getEnv("FAST_SANDBOX_NODE_CLEANUP_SOCKET", nodecleanup.DefaultSocketPath)))
 	}
+	// The firecracker driver optionally talks to the node-level
+	// firecracker-runtime-agent over its UDS socket (empty env = local
+	// mode: no remote pull, warm images and cold boots unchanged). The
+	// agent's deployment carrier is a pending decision, so the env is
+	// only injected by the deployer, never by the control plane.
+	if configurable, ok := rt.(agentClientConfigurable); ok {
+		configurable.SetFastletPodUID(podUID)
+		configurable.SetAgentSocket(getEnv("FAST_SANDBOX_RUNTIME_AGENT_SOCKET", ""))
+	}
 	registryProvider := registryconfig.NewFileProvider(getEnv("FAST_SANDBOX_REGISTRY_CONFIG_PATH", registryconfig.MountPath))
 	if revision, err := registryProvider.Refresh(); err != nil {
 		klog.ErrorS(err, "Failed to load Registry configuration")
@@ -208,6 +217,13 @@ type registryConfigurable interface {
 
 type nodeCleanupConfigurable interface {
 	SetNodeCleanupClient(nodecleanup.RuntimeProcessCleaner)
+}
+
+// agentClientConfigurable wires the optional firecracker runtime-agent
+// client into the driver (empty socket = local mode).
+type agentClientConfigurable interface {
+	SetFastletPodUID(podUID string)
+	SetAgentSocket(socketPath string)
 }
 
 func recoverUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager, proxyClient *fastletproxy.ControlClient) {

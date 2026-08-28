@@ -39,6 +39,7 @@ type Driver struct {
 	profile        runtimecatalog.RuntimeProfile
 	config         runtimecatalog.FirecrackerConfig
 	namespace      string
+	podUID         string
 	initialized    bool
 	runner         fastletnetwork.CommandRunner
 	launcher       ProcessRunner
@@ -51,6 +52,16 @@ type Driver struct {
 	infraMgr       *fastletinfra.Manager
 	prepareInfra   func(ctx context.Context, spec *fastletapi.SandboxSpec) (fastletinfra.PreparedInstance, error)
 	processes      map[string]Process
+	// agentSocket, newAgentClient, and agentClient wire the node-level
+	// runtime-agent (agent_wiring.go): an empty socket means local mode, a
+	// nil newAgentClient disables the agent client, and agentClient is the
+	// lazily built cached client.
+	agentSocket    string
+	newAgentClient func(socketPath string) (AgentClient, error)
+	agentClient    AgentClient
+	// sandboxLeases records the runtime-agent lease of each Sandbox that
+	// requested one (populated by LeaseDevices; empty in the native stage).
+	sandboxLeases map[string]string
 	// imageGCInterval is the period of the independent cache GC loop; it is a
 	// field (not a constant) so tests can shorten it.
 	imageGCInterval time.Duration
@@ -227,9 +238,9 @@ func (d *Driver) SetInfraManager(manager *fastletinfra.Manager) {
 }
 
 // ProbeCapabilities reports host dependencies (KVM, tap device, binary,
-// kernel). The profile gate keeps the runtime fail-closed until the KVM E2E
-// suite passes.
-func (d *Driver) ProbeCapabilities(_ context.Context) CapabilityReport {
+// kernel) and the runtime-agent health when one is configured. The profile
+// gate keeps the runtime fail-closed until the KVM E2E suite passes.
+func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 	d.mu.RLock()
 	profile := d.profile
 	config := d.config
@@ -264,6 +275,23 @@ func (d *Driver) ProbeCapabilities(_ context.Context) CapabilityReport {
 		report.State = runtimecatalog.CapabilityDegraded
 		report.Message = fmt.Sprintf("firecracker runtime dependencies are unavailable: %v", report.Missing)
 		return report
+	}
+	agent, err := d.agentClientOrNil()
+	if err != nil {
+		report.State = runtimecatalog.CapabilityDegraded
+		report.Reason = "AgentUnavailable"
+		report.Message = fmt.Sprintf("firecracker runtime-agent client error: %v", err)
+		return report
+	}
+	if agent != nil {
+		healthCtx, cancel := context.WithTimeout(ctx, agentHealthTimeout)
+		defer cancel()
+		if err := agent.Health(healthCtx); err != nil {
+			report.State = runtimecatalog.CapabilityDegraded
+			report.Reason = "AgentUnavailable"
+			report.Message = err.Error()
+			return report
+		}
 	}
 	report.Reason = "RuntimeDriverReady"
 	report.Message = "firecracker runtime host dependencies are ready"
@@ -524,6 +552,7 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 	if infraMgr != nil {
 		_ = infraMgr.RemoveSandboxInstances(sandboxID)
 	}
+	d.releaseAgentSandbox(ctx, sandboxID, state.Spec.Image)
 	_ = removeSandboxDir(directory)
 	klog.Infof("firecracker sandbox %s deleted", sandboxID)
 	return nil
@@ -613,6 +642,8 @@ func (d *Driver) Close() error {
 		close(d.gcStop)
 		d.gcStop = nil
 	}
+	d.agentClient = nil
+	d.sandboxLeases = nil
 	d.initialized = false
 	return nil
 }
