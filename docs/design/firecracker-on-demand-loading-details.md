@@ -515,7 +515,7 @@ agent ──GET 127.0.0.1:8145/dart/<presigned-s3-url>──▶ DART
                                                      │ peer miss → 回源 S3
 agent ◀────── HTTP 流（cut-through 中继，边收边缓存）─┘
 agent 组装 → <cache>/<digest>/rootfs.img   （只读共享 base，所有 Pod 共用）
-每实例写层：reflink 拷贝（现状）或 qcow2 overlay（backing=共享 base）
+每实例写层：reflink 拷贝（现状，唯一 raw 文件路径；见下）
 
 [运行（firecracker）]
 guest I/O ──▶ virtio-blk / File memory backend
@@ -525,6 +525,17 @@ guest I/O ──▶ virtio-blk / File memory backend
 
 - 节点上两份数据：DART block arena（P2P 共享）+ agent 完整文件（firecracker
   文件语义所需）；多 Pod 共享后者，每实例只有薄写层
+- **写层实现约束（阶段 1-2 定案）**：Firecracker 的 virtio-blk 只支持
+  **raw 文件**（drive 无格式参数，无 qemu block layer），因此 qcow2
+  overlay（backing=共享 base）不能直接作为 drive attach——实例写层
+  只有 reflink 拷贝一条路：
+  - reflink 依赖文件系统支持（xfs/btrfs；`cp --reflink=always`），COW
+    语义下拷贝是 O(metadata)；**ext4 等不支持 reflink 的文件系统静默
+    回退为全量拷贝**（3GiB rootfs 实测 ~1.8s/实例，即 chain E2E
+    NoInfra create 的全部耗时）——StateRoot 所在文件系统是部署要求
+    （`scripts/firecracker-xfs-stateroot.sh`）；
+  - 彻底消除实例拷贝（数据面换设备语义）是阶段 3 overlaybd/ublk 的
+    目标，不在阶段 1-2 引入格式转换层
 - 拉取收益：N 节点拉同一对象 origin 只出 ~1 份；本节点二次拉取走 DART
   本地缓存，不重复回源
 
@@ -558,7 +569,7 @@ guest I/O ──▶ virtio-blk（rootfs ublk）/ file-backed memory（memory ubl
 | firecracker 数据来源 | 完整文件（agent 组装落盘） | ublk 设备（OverlayBD range read） |
 | 节点数据份数 | 2 份（DART arena + 完整文件） | 1 份（DART 块缓存） |
 | 共享单元 | 只读 base 文件（多 Pod 共用） | 只读 lower 设备（多 lease 共用 page cache） |
-| 写层 | 实例文件（reflink/qcow2） | per-lease upper layer |
+| 写层 | 实例文件（reflink 拷贝；qcow2 不适用，见上文） | per-lease upper layer |
 | 拉取语义 | 全量组装（整对象 sha256 校验） | 按需 range read（block 粒度） |
 | 到 DART 的入口 | agent 拉流 | Rust daemon 配 repoBlobUrl = DART |
 
