@@ -72,6 +72,10 @@ overlaybd layer），但**消费端与发布端尚未对齐**（寻址键不同�
 
 ### 范围边界（本期明确不做）
 
+- **cold boot 降级路径**：restore 为唯一启动路径（golden snapshot），
+  删除冷启动分支与恢复失败的冷启动 fallback；kernel（vmlinux.bin）从
+  节点运行时资产移除（仅构建期需要）；compat 匹配升级为调度硬约束
+  （不匹配拒绝调度，不"尽力而为"）；
 - **运行态快照保存/恢复（snapshot/resume）**：阶段 4 实施；启动流程
   （阶段 1-3）不依赖快照设计；相关协议增量（`SnapshotRef` 字段、
   `CreateSandboxSnapshot` RPC、`SandboxSnapshot` CRD）随之推迟；
@@ -176,6 +180,7 @@ guest 读 block
 | 快照资源模型 | **控制面 `SandboxSnapshot` CRD**（阶段 4） | owner/租户/TTL/配额/引用计数/状态机 |
 | 增量链策略 | **链式增量 + 定期 flatten**（阶段 4） | 链深阈值触发后台 compact；共享层引用计数保护 |
 | memory 捕获机制 | **dirty-range 导出（`process_vm_readv`），driver 代读优先** | 已验证（`scripts/firecracker-mem-backend-check.sh`，v1.16.1）：file-backed memory restore 为 **MAP_PRIVATE（COW）**，guest 写不落文件——seal upper layer 方案排除；driver 是 firecracker 父进程，默认 ptrace_scope 下代读合法 |
+| 启动路径 | **restore 为唯一路径（golden snapshot），cold boot 降级删除** | 产物永远完整 + 调度强制 compat 匹配 → cold boot 无触发场景（死代码）；节点不再预装 kernel；恢复失败 = 显式 Failed + 重试调度 |
 | overlaybd/ublk 依赖方式 | **vendor 集成**（AgentENV `storage/` 子图 + `libublk-rs-sys` pin） | 不 cgo；Rust daemon 独立进程；上游风险与 fork 触发见细节文档 §2.5 |
 | 节点内核基线 | **Linux 6.8+（部署环境要求）** | 无 5.10/NBD 降级路径；自检 fail-closed |
 | P2P 载体 | **集成 [DART](https://github.com/data-accelerator/dart)**（同容器独立进程，零代码集成） | 无 tracker/leader（HRW）、零依赖 Go、HTTP 前缀模式对接 overlaybd（上游官方用法）；自研 seed 方案废弃；AgentENV iroh P2P（实验性）不采用 |
@@ -188,7 +193,7 @@ guest 读 block
 |------|------|------|
 | Artifact 契约 | `Image → index → manifest → layers`；builder 补 index + SHA256SUMS；manifest 增强 compatibility 元组与 layers 字段；凭据读写分离 | §1 |
 | runtime-agent | DaemonSet **三进程**（Go 编排 + vendored Rust 块设备进程 + DART）；UDS v1（Pin/Lease/Seal/Health）；设备租约生命周期；上游依赖维护策略（fork 触发条件）；6.8+ 部署环境要求 | §2 |
-| driver 改造 | 保留生命周期骨架；替换 rootfs 拷贝为设备租约、PullImage 为 PinImage；restore 分支（cold boot / snapshot load） | §3 |
+| driver 改造 | 保留生命周期骨架；替换 rootfs 拷贝为设备租约、PullImage 为 PinImage；**restore 为唯一启动路径**（golden snapshot，cold boot 已移除） | §3 |
 | 运行态快照 | 阶段 4 实施（不阻塞启动流程）；两阶段可见性（本地 seal → 远端 commit）；guest quiesce；memory 捕获机制依赖写穿验证（待办 1）；增量链 + flatten；恢复失败不静默降级 | §4 |
 | 设备/缓存/GC | 只读设备节点级共享、writable 层 per-lease；引用来源 = pin + lease；LFU GC 保留快照引用豁免 | §5 |
 | P2P | 集成 DART（同容器独立进程，HTTP 前缀模式）；agent 保留源选择链与租户边界（公共对象走 dart、增量层直连 S3）；无自研 seed/placement registry | §6 |
@@ -208,7 +213,7 @@ guest 读 block
 | 双控制面状态漂移（fastlet↔agent） | 泄漏或错误状态 | agent journal、lease、周期 reconcile |
 | 跨租户 P2P/去重 | 侧信道/权限风险 | 公共层内容寻址 + 节点身份；tenant 层回源 |
 | guest 未 quiesce 的快照 | 恢复后状态不一致 | 快照前 execd quiesce 强校验；未就绪拒绝 |
-| 从快照恢复失败 | 运行状态丢失 | 显式 Failed 不静默降级；显式接受可 fallback 冷启动 |
+| 从快照恢复失败 | 运行状态丢失 | 显式 Failed 不静默降级；重试调度（无冷启动 fallback，restore 为唯一路径） |
 | memory 捕获机制不确定（写穿 vs COW） | 快照数据路径设计翻盘 | 写穿验证（待办 1）前置，验证前不冻结阶段 4 实现 |
 
 ### DART 集成风险（重点问题）
@@ -234,11 +239,11 @@ P2P 载体采用 DART（未生产就绪、无社区），主要风险：
    vs 临时并置容器（与 fastlet 同 Pod，阶段 2 再拆）。
 2. **快照 CRD 语义细节**（阶段 4）：TTL 默认值/上限、每租户配额、引用计数
    控制面 vs agent 分界。
-3. **恢复失败 fallback 策略**（阶段 4）：增量层损坏时是否允许显式接受的
-   冷启动 fallback，及重试调度语义。
 
 > 已定案：memory 捕获机制 = dirty-range 导出 + driver 代读（写穿验证完成，
 > 见决策记录）；待办 1 已完成（`scripts/firecracker-mem-backend-check.sh`）。
+> 已定案：**restore 为唯一启动路径**，cold boot 降级删除（恢复失败不再
+> fallback 冷启动；compat 匹配为调度硬约束）。
 
 > 后续演进（本期明确不做）：运行态快照保存/恢复（snapshot/resume，阶段 4
 > 实施）、被动迁移（drain/failover 批量快照）与跨主机恢复的增量层拉取优化。

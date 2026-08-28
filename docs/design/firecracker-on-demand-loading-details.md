@@ -101,6 +101,9 @@ SandboxSpec.Image (fastlet 协议，唯一请求引用)
 - 节点预检（启动自检 + 周期上报）：`/dev/kvm`、`/dev/ublk-control`、
   内核版本、OverlayBD 版本、P2P 端口、对象存储连通性、CPU/内核与已缓存
   manifest 的 compatibility。
+- **节点不预装 guest kernel（vmlinux.bin）**：restore 为唯一启动路径，
+  不引导内核（快照内已含 guest 状态）；kernel 是构建期资产（builder
+  拍快照时使用），manifest 记录其 digest 仅供 compat 校验。
 
 ### 2.2 UDS 管理 API（版本化，v1）
 
@@ -268,7 +271,11 @@ cmd/firecracker-runtime-agent/             # agent 入口（薄）
 | `PullImage`（查本地） | agent `PinImage`（节点级去重预热） |
 | driver 内 image 缓存目录 + LFU GC（images.go） | 删除；缓存与 GC 归 agent（layer 引用计数） |
 
-### 3.3 restore 流程（native 首期，overlaybd 二期）
+### 3.3 restore 流程（唯一启动路径，native 首期 / overlaybd 二期）
+
+> **restore 是唯一启动路径**：golden snapshot 恢复，cold boot 分支已删除
+> （产物永远完整 + 调度强制 compat 匹配 → 冷启动无触发场景）。恢复失败 =
+> 显式 Failed + 重试调度，不 fallback 冷启动（§8 兼容性硬约束）。
 
 ```text
 EnsureSandbox(image, cpu, mem, ...):
@@ -276,20 +283,22 @@ EnsureSandbox(image, cpu, mem, ...):
   2. agent.LeaseDevices(image, mem)
   3. 网络 slot（不变）
   4. firecracker 进程启动（不变）
-  5. configureVM 分支：
-     cold boot : machine config + boot-source(kernel) + drive(rootfs_dev) + nic
-     restore   : machine config(按请求 cpu/mem) + drive(rootfs_dev) + nic
-                 + PUT /snapshot/load{snapshot_path: vmstate.snap,
-                                      mem_file_path: mem_dev}
+  5. restore 配置：
+     machine config（按请求 cpu/mem）         # mem 不得小于快照 size
+     + drive(rootfs_dev) + nic
+     + PUT /snapshot/load{snapshot_path: vmstate.snap,
+                          mem_file_path: mem_dev}
+     （无 boot-source：快照内已含 guest 状态，不引导 kernel）
   6. InstanceStart + 轮询 Running（不变）
   7. sandbox 删除/失败 → agent.ReleaseDevices + agent.UnpinImage(按引用)
 ```
 
 - `vmstate.snap` 与 manifest 由 agent 在 PinImage 时 eager 拉取并缓存；
-- restore 前 agent 做 compatibility 匹配，不匹配返回稳定错误
-  `SNAPSHOT_INCOMPATIBLE`（可配置 fallback 冷启动，见 §8）；
+- restore 前 agent 做 compatibility 匹配，**不匹配拒绝调度**（稳定错误
+  `SNAPSHOT_INCOMPATIBLE`，见 §8）；
 - 请求级个性化（cpu/mem/entrypoint/env）不受影响：cpu/mem 走
-  `resolveMachineConfig`，entrypoint/env 走既有 Infra/boot args 注入。
+  `resolveMachineConfig`（mem 下限 = 快照 size），entrypoint/env 走既有
+  Infra 注入。
 
 ## 4. 运行态快照细节（阶段 4，后续实施）
 
@@ -384,9 +393,10 @@ guest fs quiesce（execd sync/fsfreeze）
   → execd health 通过 → Running
 ```
 
-- 恢复目标节点：控制面按 compat class 匹配调度（不限定来源节点）；
-- 恢复失败策略：增量层缺失/损坏 → 快照显式 Failed，不静默降级；若
-  manifest 含可冷启动信息且调用方显式接受，可 fallback 冷启动。
+- 恢复目标节点：控制面按 compat class 匹配调度（**硬约束**：不匹配拒绝
+  调度，不限定来源节点）；
+- 恢复失败策略：增量层缺失/损坏 → 快照显式 Failed，不静默降级；无
+  cold boot fallback（restore 为唯一启动路径）——失败走重试调度。
 
 ### 4.7 失败处理
 
@@ -396,7 +406,7 @@ guest fs quiesce（execd sync/fsfreeze）
 | seal/上传中断 | 本地 provisional 保留，远端 commit 未发生 → 快照资源 Failed，重试 |
 | source VM resume 失败 | 强制 teardown 并标记 sandbox lost，不得把 frozen VM 标 Running |
 | 增量层丢失/损坏 | digest 校验失败 → 隔离该层，快照 Failed，恢复方不静默降级 |
-| 从快照恢复失败 | 按策略 fallback 冷启动（显式接受）或失败重调度 |
+| 从快照恢复失败 | 快照显式 Failed + 重试调度（无 cold boot fallback） |
 
 ## 5. 设备共享、缓存与 GC
 
@@ -631,10 +641,11 @@ compatibilityClass = hash(
 ```
 
 - agent 启动自检并上报本节点 class（`Compatibility` RPC）；
-- restore 前 manifest 元组与节点 class 严格匹配，不匹配返回
-  `SNAPSHOT_INCOMPATIBLE`（稳定错误码），或按策略 fallback 冷启动（仅当
-  manifest 含可冷启动信息且调用方显式接受）；
-- 灰度升级：新旧 compatibility pool 并存，先重建模板快照再迁移流量；
+- restore 前 manifest 元组与节点 class 严格匹配，**不匹配拒绝调度**
+  （稳定错误 `SNAPSHOT_INCOMPATIBLE`；restore 为唯一启动路径，无
+  cold boot fallback）；
+- 灰度升级：新旧 compatibility pool 并存，**先重建模板快照再迁移流量**
+  （不依赖"旧快照冷启动过渡"）；
 - 不依赖 Firecracker snapshot 的向后兼容假设。
 
 ## 9. 可观测性

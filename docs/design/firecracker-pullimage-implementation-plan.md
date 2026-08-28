@@ -165,7 +165,7 @@ sentinel（同包可复用；agent 包引用时通过主包导出或迁移到公
    `go vet ./...` 全绿；
 2. 单测覆盖 §7 清单；
 3. `PullImage` 拉取后缓存布局与 §5 一致；`resolveRootfsImage` 能命中
-   （下游 `EnsureSandbox` 冷启动路径可用）；
+   （下游 `EnsureSandbox` restore 路径可用）；
 4. 不引入新三方依赖（方案 A 下 go.mod 零变化）。
 
 ## 9. 参考材料
