@@ -166,6 +166,48 @@ func TestManagerApplyGuestRequiresBoundSlot(t *testing.T) {
 	require.Empty(t, driver.applied)
 }
 
+func TestManagerCloseDestroysRemainingSlots(t *testing.T) {
+	root := t.TempDir()
+	driver := &fakeDriver{}
+	manager := newTestManager(t, 2, root, driver, "slot-a", "slot-b")
+	require.NoError(t, manager.Initialize(context.Background()))
+	require.Equal(t, 2, manager.Snapshot().Clean)
+
+	// A bound slot is destroyed too.
+	_, err := manager.Acquire(context.Background(), owner("sandbox-1", 1))
+	require.NoError(t, err)
+	require.NoError(t, manager.Close(context.Background()))
+	require.Equal(t, 0, manager.Snapshot().Clean)
+	require.Equal(t, 0, manager.Snapshot().Bound)
+	require.ElementsMatch(t, []string{"slot-a", "slot-b"}, driver.destroyed)
+
+	// Idempotent.
+	require.NoError(t, manager.Close(context.Background()))
+
+	// No further slot preparation happens after Close: a Release (which
+	// would normally replenish) must not recreate resources.
+	require.NoError(t, manager.Replenish(context.Background()))
+	require.Equal(t, 0, manager.Snapshot().Clean)
+}
+
+func TestManagerCloseRacingPreparationDiscardsSlot(t *testing.T) {
+	root := t.TempDir()
+	driver := &fakeDriver{}
+	manager := newTestManager(t, 1, root, driver, "slot-a")
+	require.NoError(t, manager.Initialize(context.Background()))
+	require.Equal(t, []string{"slot-a"}, driver.prepared)
+
+	// Close destroys the prepared slot and is idempotent.
+	require.NoError(t, manager.Close(context.Background()))
+	require.Equal(t, 0, manager.Snapshot().Clean)
+	require.Equal(t, []string{"slot-a"}, driver.destroyed)
+
+	// Replenish after Close must not prepare any further slot.
+	require.NoError(t, manager.Replenish(context.Background()))
+	require.Equal(t, []string{"slot-a"}, driver.prepared)
+	require.Equal(t, 0, manager.Snapshot().Clean)
+}
+
 func TestManagerAcquireReleaseDestroysUsedSlot(t *testing.T) {
 	root := t.TempDir()
 	driver := &fakeDriver{}

@@ -54,6 +54,7 @@ type Manager struct {
 	store     StateStore
 	ipam      *IPv4IPAM
 	slots     map[string]*Slot
+	closed    chan struct{} // closed by Close: no more slot preparation
 	hit       atomic.Uint64
 	miss      atomic.Uint64
 }
@@ -97,7 +98,10 @@ func NewManager(config Config, driver Driver, store StateStore) (*Manager, error
 	if err != nil {
 		return nil, err
 	}
-	return &Manager{config: config, driver: driver, store: store, ipam: ipam, slots: make(map[string]*Slot)}, nil
+	return &Manager{
+		config: config, driver: driver, store: store, ipam: ipam,
+		slots: make(map[string]*Slot), closed: make(chan struct{}),
+	}, nil
 }
 
 // Initialize loads and validates durable state, retries interrupted destroys,
@@ -336,6 +340,12 @@ func (m *Manager) Release(ctx context.Context, owner Owner) error {
 func (m *Manager) Replenish(ctx context.Context) error {
 	for {
 		m.mu.RLock()
+		select {
+		case <-m.closed:
+			m.mu.RUnlock()
+			return nil
+		default:
+		}
 		count := len(m.slots)
 		m.mu.RUnlock()
 		if count >= m.config.Capacity {
@@ -343,6 +353,38 @@ func (m *Manager) Replenish(ctx context.Context) error {
 		}
 		if err := m.prepareOne(ctx); err != nil {
 			return err
+		}
+	}
+}
+
+// Close stops slot preparation and destroys every remaining slot (clean
+// pool, bound, and destroying leftovers), leaving the host with no
+// per-slot resources. It is idempotent; a Close racing an in-flight
+// preparation discards the freshly created slot and tears its resources
+// down. Release and Acquire after Close fail with ErrSlotNotFound /
+// ErrNoCleanSlot.
+func (m *Manager) Close(ctx context.Context) error {
+	m.mu.Lock()
+	select {
+	case <-m.closed:
+		m.mu.Unlock()
+		return nil
+	default:
+		close(m.closed)
+	}
+	m.mu.Unlock()
+
+	for {
+		m.mu.RLock()
+		ids := m.sortedSlotIDsLocked()
+		m.mu.RUnlock()
+		if len(ids) == 0 {
+			return nil
+		}
+		for _, id := range ids {
+			if err := m.destroySlot(ctx, id); err != nil {
+				klog.Warningf("network slot %s close-destroy failed: %v", id, err)
+			}
 		}
 	}
 }
@@ -433,7 +475,21 @@ func (m *Manager) prepareOne(ctx context.Context) error {
 		return err
 	}
 	m.mu.Lock()
-	m.slots[id] = slot
+	select {
+	case <-m.closed:
+		// Close raced this preparation: the slot must not surface, and its
+		// freshly created host resources are torn down so Close leaves no
+		// leftovers.
+		m.mu.Unlock()
+		_ = m.driver.Destroy(context.Background(), slot)
+		_ = m.store.Delete(ctx, id)
+		m.mu.Lock()
+		delete(m.slots, id)
+		m.mu.Unlock()
+		return nil
+	default:
+		m.slots[id] = slot
+	}
 	m.recordPhasesLocked()
 	m.mu.Unlock()
 	return nil

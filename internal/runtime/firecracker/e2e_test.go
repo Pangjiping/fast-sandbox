@@ -977,6 +977,13 @@ func (env *e2eEnvironment) teardown() {
 		_ = env.driver.DeleteSandbox(context.Background(), sandboxID)
 	}
 	_ = env.driver.Close()
+	// The manager replenishes released slots asynchronously; Close stops
+	// that and destroys every remaining slot so the next environment starts
+	// on a clean bridge (a leftover Clean netns would otherwise shadow the
+	// slot IPs and be purged by the next environment).
+	if env.manager != nil {
+		_ = env.manager.Close(context.Background())
+	}
 }
 
 // dumpNetworkDiagnostics collects the netns and guest state for failure logs.
