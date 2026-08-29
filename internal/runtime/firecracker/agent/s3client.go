@@ -65,14 +65,18 @@ type s3Client struct {
 }
 
 // newS3Client parses the store root (s3://bucket/prefix) and the read-only
-// credential into a GET client. The credential Host names the store
-// endpoint; Username/Password carry the access key pair.
+// credential into a GET client. The credential Host names the store endpoint
+// (matching key); the optional credential Endpoint overrides the connection
+// address with a scheme/port (e.g. a local MinIO), falling back to Host.
 func newS3Client(storeRoot string, credential registryconfig.Credential, httpClient *http.Client, region, endpointOverride string) (*s3Client, error) {
 	bucket, prefix, err := parseStoreRoot(storeRoot)
 	if err != nil {
 		return nil, err
 	}
 	endpoint := endpointOverride
+	if endpoint == "" {
+		endpoint = credential.Endpoint
+	}
 	if endpoint == "" {
 		endpoint = credential.Host
 	}

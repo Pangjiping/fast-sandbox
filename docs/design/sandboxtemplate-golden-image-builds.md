@@ -16,6 +16,10 @@
 >   `ext4` / `snapshot` 细分已收敛为 `native`）
 > - `output.publish` 在实现中为必填，`publishSecretRef` 由 controller 以
 >   SecretKeyRef 注入 build Pod
+>
+> **使用文档**：字段含义与操作流程以
+> [guides/sandboxtemplate-golden-images.md](../guides/sandboxtemplate-golden-images.md)
+> 与 [reference/api.md](../reference/api.md) 为准。
 
 - [Summary](#summary)
 - [Motivation](#motivation)
@@ -241,9 +245,12 @@ Every build emits a content-addressed `manifest.json`:
   execd is not injected; empty healthcheck uses the image `CMD-SHELL`).
 - **Format tiers are inclusive**: `overlaybd` implies `snapshot` implies
   `ext4`; a single value selects the pipeline depth.
-- **Guest network**: the snapshot stage deliberately does not configure
-  external connectivity so live connections are not captured in the
-  snapshot. Snapshotting workloads with active connections is out of scope.
+- **Guest network**: the snapshot stage bakes a NIC (iface `eth0` with a
+  static guest IP/MAC, recorded in the manifest as `guestNetwork`) so a
+  restored instance owns its address; consumers replace only the host tap
+  via `network_overrides`. The stage deliberately does not configure
+  external connectivity, so no **active connections** are captured in the
+  snapshot — snapshotting workloads with live connections is out of scope.
 - **Source image compatibility**: the converter applies layer ordering,
   compression, hard links, and whiteouts, but may skip device nodes and
   timestamps/xattrs; the boot (and restore, for snapshot formats)

@@ -141,6 +141,82 @@ and `RegistryReady`.
 See the [Infra Components reference](infra-components.md) for the complete
 artifact, process, health, endpoint, validation, and revision contract.
 
+## SandboxTemplate
+
+SandboxTemplate declares a golden-image build for the Firecracker runtime: an
+OCI source image, runtime injection, guest init, readiness, and output
+artifacts published to an S3-compatible store. The build is executed by a
+controller as a privileged Pod on a KVM node.
+
+```yaml
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxTemplate
+metadata:
+  name: ai-office-sandbox
+  namespace: fast-sandbox
+spec:
+  image: registry.example.com/sandbox:v1.0.21
+  kernel: vmlinux.bin
+  machine:
+    vcpu: "2"
+    memory: "2Gi"
+  entrypoint: ["/opt/gem/run.sh"]
+  init: /usr/local/sbin/sandbox-init
+  envs:
+    - name: FOO
+      value: bar
+  readiness:
+    warmupSeconds: 60
+  output:
+    rootfsSize: "30Gi"
+    format: overlaybd
+    publish: s3://sandbox-images/publish
+    publishSecretRef:
+      name: sandbox-images-readwrite
+```
+
+### Spec
+
+| Field | Required | Default | Meaning |
+| --- | ---: | --- | --- |
+| `image` | Yes | — | OCI image reference to convert; becomes the byte-identical consumer-side addressing key |
+| `kernel` | Yes | — | Guest kernel embedded in the builder image (build-time asset, not a node runtime asset) |
+| `machine.vcpu` | Yes | `"1"` | Snapshot VM vCPUs (resource quantity) |
+| `machine.memory` | Yes | `"2Gi"` | Snapshot VM memory (resource quantity); restore requires ≥ this |
+| `entrypoint` | No | `["tail","-f","/dev/null"]` | Guest business command as an argv list |
+| `execd` | No | — | OpenSandbox execd image injected into the guest rootfs |
+| `init` | No | `/usr/local/sbin/sandbox-init` | Injected guest PID 1 (readiness marker + heartbeat) |
+| `envs` | No | — | Literal `EnvVar` array written to `/etc/sandbox-init.env`; `valueFrom` unsupported, image `Config.Env` not merged, published verbatim in the manifest |
+| `readiness.probe` | No | — | Custom gate first: `tcp://host:port` or `cmd://<command>` |
+| `readiness.warmupSeconds` | Yes | `60` | Fallback time-based warmup |
+| `readiness.healthCheck` | No | — | Fallback health command; empty uses image `CMD-SHELL` |
+| `output.rootfsSize` | Yes | `"30Gi"` | Logical rootfs capacity (minimum, rounded up to SI GiB) |
+| `output.format` | Yes | `overlaybd` | `native` or `overlaybd` (both contain the full snapshot set) |
+| `output.publish` | Yes | — | S3-compatible digest-addressed publish target, e.g. `s3://bucket/prefix` |
+| `output.publishSecretRef` | No | — | Write-credential Secret name in the platform namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`) |
+| `output.prime` | No | — | Reserved: seed-node cache priming; not yet implemented |
+
+Readiness precedence: custom `probe` → execd `/ping` → `warmupSeconds` +
+`healthCheck`.
+
+### Status
+
+| Field | Meaning |
+| --- | --- |
+| `phase` | `Pending`, `Building`, `Succeeded`, or `Failed` |
+| `conditions` | `BuildSucceeded` with reason/message on terminal states |
+| `manifestRef` | Published manifest URI (`s3://…/<sha256(manifest)[:16]>/manifest.json`) |
+| `artifactDigest` | sha256 of the manifest document itself |
+| `lastBuildTime` | When the latest build completed |
+| `observedGeneration` | Generation of the last applied build |
+
+Build Pods run in the platform namespace as `<template>-build-<generation>`,
+pinned to `sandbox.fast.io/kvm=true` nodes; editing the spec triggers a
+rebuild (generation bump), and deleting the template reaps its Pods.
+
+See the [SandboxTemplate guide](../guides/sandboxtemplate-golden-images.md)
+for the end-to-end workflow, artifact layout, and consumption contract.
+
 ## FastPath v2
 
 The protobuf contract is
