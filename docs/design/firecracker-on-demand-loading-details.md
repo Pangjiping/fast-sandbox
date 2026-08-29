@@ -83,10 +83,26 @@ SandboxSpec.Image (fastlet 协议，唯一请求引用)
 
 - **builder**：写 AK（`output.publishSecretRef`，现状不变）；
 - **runtime-agent**：只读 AK 或节点 IRSA/实例角色（**不共享 builder 的写
-  凭据**）；schema 统一为 `accessKeyId/secretAccessKey/endpoint/region`；
-- 挂载走既有 `registryconfig` 模式（FileProvider 投影
-  `/etc/fast-sandbox/registry/registry.json`），Credential 按 host 匹配
-  s3 endpoint；agent 持有，**不向 guest 暴露**。
+  凭据**）；agent 持有，**不向 guest 暴露**。
+
+**两端字段映射（实测确认，chain E2E 已真实跑通）**：两端没有共享同一套
+JSON schema，字段名不同，语义一一对应：
+
+| 语义 | builder 侧（`publishSecretRef` Secret keys） | agent 侧（`registryconfig.Credential`） |
+|------|----------------------------------------------|------------------------------------------|
+| AccessKeyId | `accessKeyId` | `Username` |
+| SecretAccessKey | `secretAccessKey` | `Password` |
+| 存储端点（连接地址，可带 scheme/端口） | `endpoint`（注入为 `AWS_ENDPOINT_URL`） | `Endpoint`（新增字段；缺省回退 `Host` 补 `https://`） |
+| 端点 host（匹配键） | — | `Host`（`registry.json` 条目，匹配 store root / `FAST_SANDBOX_ARTIFACT_ENDPOINT` 的 host） |
+| region | `region`（注入为 `AWS_DEFAULT_REGION`；agent 侧默认 `us-east-1`，可用 `WithRegion` 覆盖） | —（Credential 无 region 字段） |
+
+实际注入路径（chain E2E `gen-registry.go` 的手搓映射即此对应关系）：
+`publishSecretRef.{accessKeyId,secretAccessKey,endpoint,region}` 与
+`registry.json` 的 `{host, username, password, endpoint}` 值一致、语义等价。
+`Host` 是 registryconfig 的既有匹配键（镜像仓库语义），agent 场景下承载
+store endpoint host；`Endpoint` 是本设计新增的**连接地址**字段（带
+scheme，不被 `NormalizeHost` 剥掉），两者都要配。部署时由一个值来源
+（Secret）派生两处，避免手抄不一致。
 
 ## 2. runtime-agent 细节
 
