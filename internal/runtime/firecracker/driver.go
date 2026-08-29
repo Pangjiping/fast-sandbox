@@ -699,7 +699,9 @@ func (d *Driver) launchVM(ctx context.Context, sandboxID, apiAddress, stateDir s
 	})
 }
 
-// waitForAPISocket polls until the Firecracker API Unix socket exists.
+// waitForAPISocket polls until the Firecracker API Unix socket exists. The
+// 20 ms poll keeps the launch latency near the VMM's own startup time
+// (firecracker creates the socket within tens of milliseconds).
 func waitForAPISocket(ctx context.Context, socketPath string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -712,7 +714,7 @@ func waitForAPISocket(ctx context.Context, socketPath string, timeout time.Durat
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
 }
