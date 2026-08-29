@@ -83,10 +83,26 @@ SandboxSpec.Image (fastlet 协议，唯一请求引用)
 
 - **builder**：写 AK（`output.publishSecretRef`，现状不变）；
 - **runtime-agent**：只读 AK 或节点 IRSA/实例角色（**不共享 builder 的写
-  凭据**）；schema 统一为 `accessKeyId/secretAccessKey/endpoint/region`；
-- 挂载走既有 `registryconfig` 模式（FileProvider 投影
-  `/etc/fast-sandbox/registry/registry.json`），Credential 按 host 匹配
-  s3 endpoint；agent 持有，**不向 guest 暴露**。
+  凭据**）；agent 持有，**不向 guest 暴露**。
+
+**两端字段映射（实测确认，chain E2E 已真实跑通）**：两端没有共享同一套
+JSON schema，字段名不同，语义一一对应：
+
+| 语义 | builder 侧（`publishSecretRef` Secret keys） | agent 侧（`registryconfig.Credential`） |
+|------|----------------------------------------------|------------------------------------------|
+| AccessKeyId | `accessKeyId` | `Username` |
+| SecretAccessKey | `secretAccessKey` | `Password` |
+| 存储端点（连接地址，可带 scheme/端口） | `endpoint`（注入为 `AWS_ENDPOINT_URL`） | `Endpoint`（新增字段；缺省回退 `Host` 补 `https://`） |
+| 端点 host（匹配键） | — | `Host`（`registry.json` 条目，匹配 store root / `FAST_SANDBOX_ARTIFACT_ENDPOINT` 的 host） |
+| region | `region`（注入为 `AWS_DEFAULT_REGION`；agent 侧默认 `us-east-1`，可用 `WithRegion` 覆盖） | —（Credential 无 region 字段） |
+
+实际注入路径（chain E2E `gen-registry.go` 的手搓映射即此对应关系）：
+`publishSecretRef.{accessKeyId,secretAccessKey,endpoint,region}` 与
+`registry.json` 的 `{host, username, password, endpoint}` 值一致、语义等价。
+`Host` 是 registryconfig 的既有匹配键（镜像仓库语义），agent 场景下承载
+store endpoint host；`Endpoint` 是本设计新增的**连接地址**字段（带
+scheme，不被 `NormalizeHost` 剥掉），两者都要配。部署时由一个值来源
+（Secret）派生两处，避免手抄不一致。
 
 ## 2. runtime-agent 细节
 
@@ -515,7 +531,7 @@ agent ──GET 127.0.0.1:8145/dart/<presigned-s3-url>──▶ DART
                                                      │ peer miss → 回源 S3
 agent ◀────── HTTP 流（cut-through 中继，边收边缓存）─┘
 agent 组装 → <cache>/<digest>/rootfs.img   （只读共享 base，所有 Pod 共用）
-每实例写层：reflink 拷贝（现状）或 qcow2 overlay（backing=共享 base）
+每实例写层：reflink 拷贝（现状，唯一 raw 文件路径；见下）
 
 [运行（firecracker）]
 guest I/O ──▶ virtio-blk / File memory backend
@@ -525,6 +541,17 @@ guest I/O ──▶ virtio-blk / File memory backend
 
 - 节点上两份数据：DART block arena（P2P 共享）+ agent 完整文件（firecracker
   文件语义所需）；多 Pod 共享后者，每实例只有薄写层
+- **写层实现约束（阶段 1-2 定案）**：Firecracker 的 virtio-blk 只支持
+  **raw 文件**（drive 无格式参数，无 qemu block layer），因此 qcow2
+  overlay（backing=共享 base）不能直接作为 drive attach——实例写层
+  只有 reflink 拷贝一条路：
+  - reflink 依赖文件系统支持（xfs/btrfs；`cp --reflink=always`），COW
+    语义下拷贝是 O(metadata)；**ext4 等不支持 reflink 的文件系统静默
+    回退为全量拷贝**（3GiB rootfs 实测 ~1.8s/实例，即 chain E2E
+    NoInfra create 的全部耗时）——StateRoot 所在文件系统是部署要求
+    （`scripts/firecracker-xfs-stateroot.sh`）；
+  - 彻底消除实例拷贝（数据面换设备语义）是阶段 3 overlaybd/ublk 的
+    目标，不在阶段 1-2 引入格式转换层
 - 拉取收益：N 节点拉同一对象 origin 只出 ~1 份；本节点二次拉取走 DART
   本地缓存，不重复回源
 
@@ -558,7 +585,7 @@ guest I/O ──▶ virtio-blk（rootfs ublk）/ file-backed memory（memory ubl
 | firecracker 数据来源 | 完整文件（agent 组装落盘） | ublk 设备（OverlayBD range read） |
 | 节点数据份数 | 2 份（DART arena + 完整文件） | 1 份（DART 块缓存） |
 | 共享单元 | 只读 base 文件（多 Pod 共用） | 只读 lower 设备（多 lease 共用 page cache） |
-| 写层 | 实例文件（reflink/qcow2） | per-lease upper layer |
+| 写层 | 实例文件（reflink 拷贝；qcow2 不适用，见上文） | per-lease upper layer |
 | 拉取语义 | 全量组装（整对象 sha256 校验） | 按需 range read（block 粒度） |
 | 到 DART 的入口 | agent 拉流 | Rust daemon 配 repoBlobUrl = DART |
 
