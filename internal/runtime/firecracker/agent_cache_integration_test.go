@@ -18,7 +18,7 @@ import (
 )
 
 // TestAgentPullFeedsDriverCache wires the runtime-agent pull layer to the
-// driver's existing cache consumer: after PullImage, the cold-boot path
+// driver's existing cache consumer: after PullImage, the restore path
 // (resolveRootfsImage) resolves the pulled artifact without any driver
 // change, and the per-build digest namespace and file mapping
 // (rootfs.ext4 -> rootfs.img) match the published layout.
@@ -76,7 +76,7 @@ func TestAgentPullFeedsDriverCache(t *testing.T) {
 	stateRoot := t.TempDir()
 	require.NoError(t, client.PullImage(context.Background(), stateRoot, image))
 
-	// The driver's existing cold-boot consumer resolves the pulled rootfs
+	// The driver's existing restore consumer resolves the pulled rootfs
 	// image under the shared cache layout.
 	resolved, err := resolveRootfsImage(stateRoot, image)
 	require.NoError(t, err)

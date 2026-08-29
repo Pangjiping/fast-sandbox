@@ -37,7 +37,7 @@
 #   MINIO_AK / MINIO_SK  MinIO root credentials (default chain-test / chain-test-secret)
 #   WORK                 workspace, default $PWD/.firecracker-chain-e2e
 #   SANDBOX_TEMPLATE_BUILDER_IMAGE  builder image name (default sandboxtemplate-builder:chain-e2e)
-#   plus the driver E2E overrides FC_VERSION/FC_BINARY/FC_KERNEL/FC_ROOTFS/FC_STATE_ROOT.
+#   plus the driver E2E overrides FC_VERSION/FC_BINARY/FC_JAILER/FC_KERNEL/FC_ROOTFS/FC_STATE_ROOT.
 
 set -euo pipefail
 
@@ -65,6 +65,7 @@ BUILDER_IMAGE="${SANDBOX_TEMPLATE_BUILDER_IMAGE:-sandboxtemplate-builder:chain-e
 
 FC_VERSION="${FC_VERSION:-v1.16.1}"
 FC_BINARY="${FC_BINARY:-$BIN_DIR/firecracker}"
+FC_JAILER="${FC_JAILER:-$BIN_DIR/jailer}"
 FC_KERNEL="${FC_KERNEL:-$ART_DIR/vmlinux.bin}"
 FC_ROOTFS="${FC_ROOTFS:-$ART_DIR/bionic.rootfs.ext4}"
 FC_STATE_ROOT="${FC_STATE_ROOT:-$WORK/state-root}"
@@ -123,6 +124,17 @@ purge_fsb_resources() {
     done
 }
 
+purge_jail_dirs() {
+    # Jailer chroot roots under the StateRoot: <base>/<exec-basename>/<id>/.
+    local base="${FC_STATE_ROOT}/jails"
+    [[ -d "$base" ]] || return 0
+    for jail in "$base"/firecracker/e2e-*/; do
+        [[ -d "$jail" ]] || continue
+        rm -rf "$jail"
+        log "removed stale jail $jail"
+    done
+}
+
 # Defaults for the pre-run host state, so cleanup is safe even when the
 # failure happened before record_host_state ran.
 _bridge_before="no"
@@ -165,6 +177,7 @@ cleanup() {
     stop_agent
     stop_minio
     purge_fsb_resources
+    purge_jail_dirs
     restore_host_state
 }
 
@@ -178,7 +191,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
             "CHAIN_EXECD=$CHAIN_EXECD" \
             "MINIO_IMAGE=$MINIO_IMAGE" "MINIO_PORT=$MINIO_PORT" "MINIO_AK=$MINIO_AK" \
             "MINIO_SK=$MINIO_SK" "SANDBOX_TEMPLATE_BUILDER_IMAGE=$BUILDER_IMAGE" \
-            "FC_VERSION=$FC_VERSION" "FC_BINARY=$FC_BINARY" "FC_KERNEL=$FC_KERNEL" \
+            "FC_VERSION=$FC_VERSION" "FC_BINARY=$FC_BINARY" "FC_JAILER=$FC_JAILER" \
+            "FC_KERNEL=$FC_KERNEL" \
             "FC_ROOTFS=$FC_ROOTFS" "FC_STATE_ROOT=$FC_STATE_ROOT" \
             "$0" "$@"
     fi
@@ -189,7 +203,7 @@ fi
 if [[ "${1:-}" == "--cleanup" ]]; then
     record_host_state
     cleanup
-    log "host cleanup done (agent, MinIO container, netns, firecracker processes, bridge, MASQUERADE rule)"
+    log "host cleanup done (agent, MinIO container, netns, firecracker/jailer processes, jail dirs, bridge, MASQUERADE rule)"
     exit 0
 fi
 
@@ -223,6 +237,18 @@ if [[ ! -x "$FC_BINARY" ]]; then
     found="$(find "$WORK/extract" -type f -name "firecracker-v${FC_VERSION#v}-x86_64" | head -1)"
     [[ -n "$found" ]] || die "firecracker binary not found in release tarball"
     cp "$found" "$FC_BINARY" && chmod +x "$FC_BINARY"
+    rm -rf "$WORK/extract"
+fi
+if [[ ! -x "$FC_JAILER" ]]; then
+    tarball="$WORK/firecracker-$FC_VERSION-x86_64.tgz"
+    if [[ ! -f "$tarball" ]]; then
+        download "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-x86_64.tgz" "$tarball"
+    fi
+    mkdir -p "$WORK/extract"
+    tar -xzf "$tarball" -C "$WORK/extract"
+    found="$(find "$WORK/extract" -type f -name "jailer-v${FC_VERSION#v}-x86_64" | head -1)"
+    [[ -n "$found" ]] || die "jailer binary not found in release tarball"
+    cp "$found" "$FC_JAILER" && chmod +x "$FC_JAILER"
     rm -rf "$WORK/extract"
 fi
 [[ -f "$FC_KERNEL" ]] || download "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin" "$FC_KERNEL"
@@ -575,16 +601,20 @@ log "scenario B: driver restore from builder artifacts (FC_SKIP_PREP, agent wire
 record_host_state
 purge_fsb_resources
 # The NoInfra case is the control: infra (GuestCopy delivery) dominates the
-# create time when enabled, and the runtime agent wiring is identical.
-log "execd baked ($CHAIN_EXECD); scenario B will probe GET /ping in the guest"
-(cd "$REPO_ROOT" && env FC_BINARY="$FC_BINARY" FC_KERNEL="$FC_KERNEL" FC_ROOTFS="$FC_ROOTFS" \
+# create time when enabled, and the runtime agent wiring is identical. The
+# Concurrent cases (parallel + serial baseline) restore 5 VMs and require
+# every instance's execd to answer through its own slot DNAT (per-clone
+# netns data plane); their stage breakdowns expose the load bottlenecks.
+log "execd baked ($CHAIN_EXECD); scenario B will probe GET /ping in the guest (single + concurrent)"
+(cd "$REPO_ROOT" && env FC_BINARY="$FC_BINARY" FC_JAILER="$FC_JAILER" \
+    FC_KERNEL="$FC_KERNEL" FC_ROOTFS="$FC_ROOTFS" \
     FC_STATE_ROOT="$FC_STATE_ROOT" FC_IMAGE_REF="$CHAIN_IMAGE" \
     FC_SKIP_PREP=1 FC_AGENT_SOCKET="$AGENT_SOCKET" \
     FC_EXECD_PROBE=1 \
     go test -tags firecracker -count=1 -v \
-    -run '^(TestFirecrackerDriverE2E|TestFirecrackerDriverE2ENoInfra)$' \
+    -run '^(TestFirecrackerDriverE2E|TestFirecrackerDriverE2ENoInfra|TestFirecrackerDriverE2EConcurrent|TestFirecrackerDriverE2EConcurrentSerial)$' \
     ./internal/runtime/firecracker/) 2>&1 | tee "$WORK/driver-e2e.log" || fail "driver E2E failed (see output above)"
-pass "verification point 4: builder snapshot <-> driver restore (Running + guest reachable)"
+pass "verification point 4: builder snapshot <-> driver restore (Running + guest reachable + concurrent execd ready)"
 
 # --- scenario C: lease lifecycle + driver delete -> agent unpin --------------
 log "scenario C: lease lifecycle and cleanup semantics"
@@ -634,6 +664,9 @@ pass "verification point 5b: lease release + unpin (state returns to zero)"
 
 # --- performance and artifact summary -----------------------------------------
 log "=== performance summary ==="
+
+GREEN='\033[1;32m'; CYAN='\033[1;36m'; BOLD='\033[1m'; NC='\033[0m'
+
 echo "builder pipeline (from builder.log):"
 grep -h "sandbox template build stages" "$WORK/builder.log" 2>/dev/null \
     | sed -E 's/.*"sandbox template build stages" (.*)/  \1/' || echo "  (builder.log missing)"
@@ -643,23 +676,59 @@ if [[ "${PIN_MS_LOGGED:-}" == "1" ]]; then
     echo "scenario A: cold PinImage (index + manifest + artifacts over MinIO) = ${PIN_MS} ms"
     echo "  cache size: $(du -sh "$STATE_ROOT_DIR/images" 2>/dev/null | cut -f1)"
 fi
-echo "driver restore (from driver-e2e.log):"
-grep -h "firecracker sandbox created" "$WORK/driver-e2e.log" 2>/dev/null \
-    | sed -E 's/^.*driver.go:[0-9]+\] //' || echo "  (create line missing)"
-grep -h "guest reachable" "$WORK/driver-e2e.log" 2>/dev/null \
-    | sed -E 's/^.*(guest reachable.*)$/  \1/' || true
-echo "execd readiness (delta after VM running):"
-grep -h "execd /ping OK" "$WORK/driver-e2e.log" 2>/dev/null \
-    | sed -E 's/^.*(execd \/ping OK.*)$/  \1/' || echo "  (no execd /ping lines in driver-e2e.log)"
+
+# --- aggregated driver restore statistics -------------------------------------
+# Raw per-sandbox lines stay in driver-e2e.log; this section prints the
+# min/avg/max of every create stage and the execd readiness delta.
+LOG="$WORK/driver-e2e.log"
+CREATES=$(grep -c "firecracker sandbox created" "$LOG" 2>/dev/null || echo 0)
+REACHED=$(grep -c "guest reachable via slot" "$LOG" 2>/dev/null || echo 0)
+EXECD_OK=$(grep -c "execd /ping OK" "$LOG" 2>/dev/null || echo 0)
+
+summarize_ms() { # stdin: one ms value per line -> min/avg/max (n)
+    awk '{ sum+=$1; if (NR==1 || $1<min) min=$1; if ($1>max) max=$1 }
+         END { if (NR>0) printf "min %7.2fms  avg %7.2fms  max %7.2fms  (n=%d)\n", min, sum/NR, max, NR; else print "  -" }'
+}
+
+field_ms() { # $1 = klog field name; matches `field="<number><unit>` without quotes
+    grep -o "$1=\"[0-9.]*[a-zµ]*" "$LOG" 2>/dev/null \
+        | sed -E 's/.*="([0-9.]+)([a-zµ]*)$/\1 \2/' \
+        | awk '{ n=$1+0; if ($2=="µs" || $2=="us") n/=1000; else if ($2=="s") n*=1000; print n }'
+}
+
+echo ""
+echo -e "${BOLD}driver restore (${CREATES} creates, aggregated):${NC}"
+echo "  (the single Infra case inflates total/rootfs; NoInfra and batches are pure restore)"
+for stage in total acquire rootfs launch configure boot; do
+    printf "  %-9s " "${stage}:"
+    field_ms "$stage" | summarize_ms
+done
+echo -e "  ${GREEN}reachability: ${REACHED}/${CREATES} slots${NC}   ${GREEN}execd ready: ${EXECD_OK}/${CREATES} probes${NC}"
+
+echo ""
+echo -e "${BOLD}execd readiness (delta after VM running):${NC}"
+printf "  %-9s " "delta:"
+grep -o "after [0-9.]*[a-zµ]*" "$LOG" 2>/dev/null \
+    | sed -E 's/after ([0-9.]+)([a-zµ]*)/\1 \2/' \
+    | awk '{ n=$1+0; if ($2=="µs" || $2=="us") n/=1000; else if ($2=="s") n*=1000; print n }' \
+    | summarize_ms
+
+echo ""
+echo -e "${BOLD}load stage breakdown (serial vs parallel):${NC}"
+grep -hE "load-mode=.*(wall=|stage breakdown)" "$LOG" 2>/dev/null \
+    | sed -E 's/^.*(load-mode.*)$/  \1/' \
+    | sed -E 's/^(  load-mode=.*wall=.*)$/\x1b[1;36m\1\x1b[0m/'
+grep -hE "  (acquire|rootfs|infra|launch|configure|boot) +[0-9]" "$LOG" 2>/dev/null \
+    | sed -E 's/^.*(  (acquire|rootfs|infra|launch|configure|boot) +.*)$/    \1/'
+
+echo ""
 echo "infra delivery breakdown (klog V(4), from driver-e2e.log):"
-if grep -q '"infra delivery:' "$WORK/driver-e2e.log" 2>/dev/null; then
-    grep -h '"infra delivery:' "$WORK/driver-e2e.log" 2>/dev/null \
+if grep -q '"infra delivery:' "$LOG" 2>/dev/null; then
+    grep -h '"infra delivery:' "$LOG" 2>/dev/null \
         | sed -E 's/^.*"(infra delivery[^"]*)" (.*)$/  \1/'
 else
     echo "  (no infra timing lines; klog V(4) requires -v=4)"
 fi
-grep -h "reusing externally pulled golden snapshot set" "$WORK/driver-e2e.log" 2>/dev/null \
-    | sed -E 's/^.*(reusing.*)$/  \1/' || true
 echo "component sizes:"
 echo "  build dir:   $(du -sh "$BUILD_DIR" 2>/dev/null | cut -f1)"
 echo "  MinIO data:  $(du -sh "$MINIO_DATA" 2>/dev/null | cut -f1)"

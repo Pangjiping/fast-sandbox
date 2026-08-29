@@ -157,13 +157,19 @@ func (d *LinuxNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 		return nil
 	}
 	var result error
-	if slot.NetNSName != "" {
-		if err := deleteNetNSWithRetry(ctx, d.runner, d.ipCommand, slot.NetNSName); err != nil && !isMissingNetworkResource(err) {
+	// Delete the host-side veth BEFORE the namespace: its peer lives inside
+	// the netns, and deleting the namespace while the veth pair is still
+	// attached can fail with EBUSY, leaving a stale namespace on the shared
+	// bridge that still owns the slot IP (it then answers ARP/pings for the
+	// slot and shadows the live netns). Removing the host end tears the peer
+	// out of the namespace first.
+	if slot.HostVeth != "" {
+		if _, err := d.runner.Run(ctx, d.ipCommand, "link", "delete", slot.HostVeth); err != nil && !isMissingNetworkResource(err) {
 			result = errors.Join(result, err)
 		}
 	}
-	if slot.HostVeth != "" {
-		if _, err := d.runner.Run(ctx, d.ipCommand, "link", "delete", slot.HostVeth); err != nil && !isMissingNetworkResource(err) {
+	if slot.NetNSName != "" {
+		if err := deleteNetNSWithRetry(ctx, d.runner, d.ipCommand, slot.NetNSName); err != nil && !isMissingNetworkResource(err) {
 			result = errors.Join(result, err)
 		}
 	}
@@ -249,17 +255,20 @@ func isMissingNetworkResource(err error) bool {
 
 // deleteNetNSWithRetry removes a slot network namespace. The deletion races
 // a VMM that is still exiting and returns EBUSY, which would otherwise leak
-// the namespace (and its private addresses) onto the shared bridge.
+// the namespace (and its private addresses) onto the shared bridge — a
+// stale namespace still owning a slot IP answers ARP and shadows the live
+// netns. The retry is patient (5 x 500 ms) so the dying VMM's references
+// drain before the leak is accepted.
 func deleteNetNSWithRetry(ctx context.Context, runner CommandRunner, ipCommand, name string) error {
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		if _, err = runner.Run(ctx, ipCommand, "netns", "delete", name); err == nil {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 	return err

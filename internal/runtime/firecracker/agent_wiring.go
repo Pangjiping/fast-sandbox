@@ -6,7 +6,7 @@ package firecracker
 // releases the lease and unpins the image. When no socket is configured the
 // driver stays in local mode; when the agent is unreachable the driver
 // falls back to the local cache (the agent being absent must not break
-// warmImages or cold boots).
+// warm images).
 
 import (
 	"context"

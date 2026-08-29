@@ -47,6 +47,10 @@ type SandboxState struct {
 	CreatedAt        int64                               `json:"createdAt"`
 	InfraServices    []infracontract.ServiceEndpoint     `json:"infraServices,omitempty"`
 	InfraDiagnostics []infracontract.ComponentDiagnostic `json:"infraDiagnostics,omitempty"`
+	// StageDurations records the per-stage create timing of the Sandbox
+	// (acquire/rootfs/infra/launch/configure/boot) for load bottleneck
+	// analysis (serial vs parallel clone batches).
+	StageDurations map[string]time.Duration `json:"stageDurations,omitempty"`
 }
 
 // validateSandboxID rejects identities that could escape the StateRoot or
