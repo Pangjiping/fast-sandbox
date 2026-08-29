@@ -24,7 +24,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// bootPollInterval is the VM state polling interval after InstanceStart.
+// bootPollInterval is the VM state polling interval after start/resume.
 const bootPollInterval = 250 * time.Millisecond
 
 // Driver boots one Firecracker microVM on demand per Sandbox create request.

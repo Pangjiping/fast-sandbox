@@ -2,14 +2,14 @@ package firecracker
 
 // restore.go implements the golden snapshot restore startup path
 // (implementation plan §3.3): restore is the only startup path, the cold
-// boot branch is removed. EnsureSandbox launches the Firecracker process
-// with the state directory as its working directory (so the relative
-// rootfs.img path baked in the vmstate resolves to this instance's reflink
-// copy), validates the request memory against the manifest machine tuple,
-// then loads the golden snapshot (vmstate + file-backed memory) as the
-// FIRST API call and starts the instance. Devices (root drive, NIC) are
-// restored from the snapshot; only the NIC host tap is replaced per
-// instance via network_overrides.
+// boot branch is removed. EnsureSandbox validates the request memory
+// against the manifest machine tuple, launches the Firecracker process via
+// the jailer (which chroots it and pins it to the slot netns; the jail root
+// holds the instance rootfs reflink copy and hard-linked snapshots), then
+// loads the golden snapshot (vmstate + file-backed memory) as the FIRST API
+// call and resumes the instance. Devices (root drive, NIC) are restored
+// from the snapshot; only the NIC host tap is replaced per instance via
+// network_overrides.
 
 import (
 	"context"

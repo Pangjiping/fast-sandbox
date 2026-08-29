@@ -431,7 +431,7 @@ func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 
 	// The snapshot/load payload references the cached golden artifacts, the
 	// per-instance NIC tap override, and leaves the VM paused for the
-	// explicit InstanceStart resume.
+	// explicit PATCH /vm resume.
 	loads := fixture.server.recordedSnapshotLoads()
 	require.Len(t, loads, 1)
 	imageDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image))

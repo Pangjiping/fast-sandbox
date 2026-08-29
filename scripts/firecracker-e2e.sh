@@ -62,7 +62,8 @@ die() { printf '\033[1;31m[e2e] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 # Every resource this E2E family creates is derived from a per-run Pod UID:
 #   netns      fsb<64 hex>      resourceName("fsb", podUID, slotID, 63)
 #   host veth  fh<13 hex>       resourceName("fh", podUID, slotID, 15)
-#   guest tap  fc<13 hex>       resourceName("fc", podUID, slotID, 15)
+# (the guest tap vmtap0 lives INSIDE the slot netns and vanishes with it;
+# fc* host taps only exist as leftovers of older E2E versions).
 # Stale copies from earlier runs (crashed script, interrupted test) survive
 # `ip netns del` and carry the same private addresses, which corrupts ARP on
 # the shared bridge. purge_fsb_resources removes every fsb netns and every

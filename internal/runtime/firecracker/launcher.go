@@ -178,9 +178,6 @@ func (c launchConfig) buildArgv() []string {
 		"--id", c.truncatedID(),
 		"--api-sock", c.APIAddress,
 	}
-	if c.ChrootBase != "" {
-		arguments = append(arguments, "--chroot-base", c.ChrootBase)
-	}
 	return arguments
 }
 

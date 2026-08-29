@@ -47,9 +47,11 @@ func TestBuildArgvTruncatesID(t *testing.T) {
 }
 
 func TestBuildArgvWithChrootBase(t *testing.T) {
+	// The legacy firecracker --chroot-base flag was removed: chrooting is
+	// the jailer's job (--chroot-base-dir); direct mode has no chroot.
 	argv := (launchConfig{SandboxID: "sandbox-1", APIAddress: "/run/api.sock", ChrootBase: "/var/lib/fast-sandbox/jails"}).buildArgv()
-	require.Contains(t, argv, "--chroot-base")
-	require.Equal(t, "/var/lib/fast-sandbox/jails", argv[argvIndex(argv, "--chroot-base")+1])
+	require.NotContains(t, argv, "--chroot-base")
+	require.Contains(t, argv, "--api-sock")
 }
 
 func TestLaunchValidation(t *testing.T) {
