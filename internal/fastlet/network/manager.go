@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"fast-sandbox/internal/observability"
+
+	"k8s.io/klog/v2"
 )
 
 const currentSlotVersion = 1
@@ -81,7 +83,17 @@ func NewManager(config Config, driver Driver, store StateStore) (*Manager, error
 	if config.ReplenishTimeout <= 0 {
 		config.ReplenishTimeout = time.Minute
 	}
-	ipam, err := NewIPv4IPAM(config.PrivateCIDR)
+	var (
+		ipam *IPv4IPAM
+		err  error
+	)
+	if _, guestDataPlane := driver.(guestDataPlane); guestDataPlane {
+		// Guest-VM runtimes reserve the baked guest address so slot IPs can
+		// never collide with the shared clone address.
+		ipam, err = NewGuestVMIPAM(config.PrivateCIDR)
+	} else {
+		ipam, err = NewIPv4IPAM(config.PrivateCIDR)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +259,51 @@ func (m *Manager) Lookup(sandboxUID string) (*Slot, bool) {
 	return nil, false
 }
 
+// guestDataPlane is the optional interface of network drivers that own a
+// per-restore guest NAT data plane (guest-VM runtimes): slots are prepared
+// before the image (and its baked guest address) is known, so the guest-
+// specific rules are applied when the runtime driver restores a Sandbox.
+type guestDataPlane interface {
+	ApplyGuest(ctx context.Context, slot *Slot, guestIP string) error
+}
+
+// ApplyGuest installs the guest NAT data plane for the baked guest address
+// on the slot bound to owner and persists the applied address for teardown.
+// The netns commands run OUTSIDE the manager lock: parallel restores would
+// otherwise serialize on them (~15 ms of exec per slot). The slot is
+// re-validated under the lock before the result is committed, so a
+// concurrent release cannot be overwritten. Drivers without a guest data
+// plane (container runtimes) record nothing.
+func (m *Manager) ApplyGuest(ctx context.Context, owner Owner, guestIP string) error {
+	m.mu.Lock()
+	var applied *Slot
+	for _, slot := range m.slots {
+		if slot.Phase == SlotPhaseBound && slot.Owner.Equal(owner) {
+			applied = cloneSlot(slot)
+			break
+		}
+	}
+	m.mu.Unlock()
+	if applied == nil {
+		return ErrSlotNotFound
+	}
+	if guestDriver, ok := m.driver.(guestDataPlane); ok {
+		if err := guestDriver.ApplyGuest(ctx, applied, guestIP); err != nil {
+			return err
+		}
+	} else {
+		applied.GuestIP = guestIP
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.slots[applied.ID]
+	if current == nil || current.Phase != SlotPhaseBound || !current.Owner.Equal(owner) {
+		return ErrSlotNotFound
+	}
+	*current = *applied
+	return m.store.Save(ctx, current)
+}
+
 // Release destroys a used slot. It never returns that slot directly to the
 // clean pool; a new slot with a new ID/resources is prepared asynchronously.
 func (m *Manager) Release(ctx context.Context, owner Owner) error {
@@ -348,7 +405,7 @@ func (m *Manager) prepareOne(ctx context.Context) error {
 		NetNSName: netnsName, NetNSPath: filepath.Join(m.config.NetNSRoot, netnsName),
 		HostNetNSPath: filepath.Join(m.config.HostNetNSRoot, netnsName),
 		HostVeth:      hostVeth, PeerVeth: peerVeth, Bridge: m.config.Bridge,
-		GuestTap: resourceName("fc", m.config.PodUID, id, 15),
+		GuestTap: guestVMDefaultTapName,
 		Address:  address, IP: ip, Gateway: m.ipam.Gateway(), PrivateCIDR: m.ipam.CIDR(),
 		DNSPath: filepath.Join(m.config.StateRoot, m.config.PodUID, id+".resolv.conf"),
 		MTU:     m.config.MTU, EgressDevice: m.config.EgressDevice, CreatedAt: m.config.Now(),
@@ -411,6 +468,9 @@ func (m *Manager) destroySlot(ctx context.Context, slotID string) error {
 		return nil
 	}
 	if err := m.driver.Destroy(ctx, slot); err != nil {
+		// A leaked namespace keeps owning its slot IP on the shared bridge
+		// and shadows the next slot with the same address; log the reason.
+		klog.Warningf("network slot %s destroy failed: %v", slotID, err)
 		return fmt.Errorf("destroy network slot %s: %w", slotID, err)
 	}
 	if err := m.store.Delete(ctx, slotID); err != nil {

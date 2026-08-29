@@ -62,6 +62,32 @@ func readCachedManifestMachine(stateRoot, image string) (manifestMachine, bool, 
 	return document.Machine, true, nil
 }
 
+// readCachedManifestGuestNetwork loads the baked guest address from the
+// cached manifest (builder records guestNetwork.ip). It reports false when
+// the manifest is absent or carries no guest network (hand-seeded local
+// cache); the caller falls back to the BakedGuestIP convention.
+func readCachedManifestGuestNetwork(stateRoot, image string) (string, bool, error) {
+	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var document struct {
+		GuestNetwork struct {
+			IP string `json:"ip"`
+		} `json:"guestNetwork"`
+	}
+	if err := json.Unmarshal(payload, &document); err != nil {
+		return "", false, fmt.Errorf("decode cached manifest: %w", err)
+	}
+	if document.GuestNetwork.IP == "" {
+		return "", false, nil
+	}
+	return document.GuestNetwork.IP, true, nil
+}
+
 // validateRestoreMachineConfig validates the Sandbox request against the
 // machine tuple of the golden snapshot, it does not produce a machine
 // configuration. Restore requires the machine tuple of the golden snapshot
@@ -171,19 +197,27 @@ func resolveRestoreSnapshotFiles(stateRoot, image string) (vmstate, memory strin
 // already contains the guest state, no kernel is booted.
 //
 // The root drive path is baked in the vmstate as a relative path
-// ("rootfs.img") so each instance resolves it to its own reflink copy in
-// its state directory (the Firecracker process cwd).
-func configureRestoreVM(ctx context.Context, client *Client, slot *fastletnetwork.Slot, vmstatePath, memoryPath string) error {
+// ("rootfs.img"); in direct mode each instance resolves it to its own
+// reflink copy via the process cwd (the Firecracker process working
+// directory). In jailer mode the chroot fixes the working directory to the
+// jail root, so the snapshot files prepared under snapshots/ are addressed
+// with their chroot-relative paths.
+func configureRestoreVM(ctx context.Context, client *Client, slot *fastletnetwork.Slot, vmstatePath, memoryPath string, jailed bool) error {
 	tapDevice := slot.GuestTap
 	if tapDevice == "" {
 		return fmt.Errorf("%w: slot %s has no pre-provisioned guest tap", ErrNetworkUnavailable, slot.ID)
 	}
+	snapshotPath, memPath := vmstatePath, memoryPath
+	if jailed {
+		snapshotPath = filepath.ToSlash(filepath.Join("/", jailerChrootSnapshotsDir, vmstateSnapshotName))
+		memPath = filepath.ToSlash(filepath.Join("/", jailerChrootSnapshotsDir, memorySnapshotName))
+	}
 	if err := client.LoadSnapshot(ctx, SnapshotLoadRequest{
-		SnapshotPath: vmstatePath,
+		SnapshotPath: snapshotPath,
 		MemBackend: SnapshotMemBackend{
-			BackendType: "File", BackendPath: memoryPath,
+			BackendType: "File", BackendPath: memPath,
 		},
-		ResumeVM:     false,
+		ResumeVM: false,
 		NetworkOverrides: []SnapshotNetworkOverride{{
 			IfaceID: "eth0", HostDevName: tapDevice,
 		}},

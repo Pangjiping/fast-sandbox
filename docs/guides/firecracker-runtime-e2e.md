@@ -41,6 +41,7 @@ Sandboxes never boot a kernel).
 Artifacts are downloaded on first run:
 
 - `https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.1/firecracker-v1.16.1-x86_64.tgz`
+  (contains both the firecracker and the jailer binaries)
 - `https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin` (snapshot-prep only)
 - `https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4` (snapshot-prep input)
 
@@ -71,39 +72,67 @@ configuration call: any machine-config/drive/network API call before it is
 rejected ("Loading a microVM snapshot not allowed after configuring
 boot-specific resources"). The driver therefore:
 
-1. launches the Firecracker process with `cwd = <sandbox state dir>` — the
-   vmstate bakes the root drive as the relative path `rootfs.img`, so the
-   cwd resolves it to this instance's own reflink copy;
-2. calls `PUT /snapshot/load` (snapshot_path, mem_backend `File`, the
-   per-instance NIC tap via `network_overrides`) — devices (root drive, NIC)
-   are restored from the vmstate, only the host tap is replaced;
+1. in **jailer mode** (`FC_JAILER`, default) prepares the jail root
+   `<StateRoot>/jails/firecracker/<id[:32]>/root/` — the instance rootfs
+   reflink copy (relative `rootfs.img` baked in the vmstate resolves to it
+   inside the chroot) and hard links of `vmstate.snap`/`memory.snap` under
+   `snapshots/` (memory.snap is COW-read, sharing the cached file is safe) —
+   and launches `jailer --id <id> --netns <slot netns> --uid 0 --gid 0
+   --exec-file <firecracker> --chroot-base-dir <StateRoot>/jails -- ...`;
+   the firecracker process enters the per-clone slot netns and its chroot
+   (direct mode without a jailer binary keeps `cwd = <sandbox state dir>`);
+2. calls `PUT /snapshot/load` (snapshot_path `/snapshots/vmstate.snap` in
+   jailer mode, mem_backend `File` `/snapshots/memory.snap`, the in-netns
+   tap `vmtap0` via `network_overrides`) — devices (root drive, NIC) are
+   restored from the vmstate, only the NIC tap is replaced;
 3. calls `PATCH /vm {"state":"Resumed"}` — `InstanceStart` is rejected after
    load; the restored VM is left Paused and resumes via the vm PATCH;
 4. polls the VM state until `Running`.
 
-## Network topology
+## Network topology (per-clone netns)
 
 - Shared bridge `fsb0` in the host netns: `172.30.0.1/24`
 - Each slot gets its own netns (`fsb<64 hex>`): veth `eth0` owns the slot IP
-  (172.30.0.2 onwards), default route via the bridge gateway
-- A host-side tap (`fc<13 hex>`) per slot is attached to the bridge; the VM
-  runs in the host netns and attaches to its tap
+  (172.30.0.2 onwards, **skipping the baked guest address 172.30.0.3** so a
+  slot can never shadow the guest), default route via the bridge gateway
+- The VM (jailer `--netns`) and its tap `vmtap0` (fixed name) live
+  **inside the slot netns** — no host-side tap, no shared-bridge ARP domain.
+  The baked guest address is NOT assigned to the tap (a local address would
+  shadow the guest: the netns kernel would answer for the guest IP and
+  refuse TCP with no listener); ingress is delivered via a `/32` route
+  (`guest IP/32 dev vmtap0`) and proxy ARP makes the netns answer the
+  guest's baked gateway (the host bridge address) on the tap segment
 - **Restore 后网络恢复**: v1.16 restores the guest network stack from the
   snapshot — the preparation VM's static eth0 config (guest IP 172.30.0.3,
   MAC 02:00:00:00:00:01) is baked into the vmstate, and every restored
-  instance resumes with it (the v1.16 clone networking model, see
-  firecracker `docs/snapshotting/network-for-clones.md`). The driver only
-  replaces the NIC host tap per instance via the load request's
-  `network_overrides`. Per-instance distinct guest addresses would require
-  per-clone netns isolation + NAT (upstream clone model); tracked as
-  opensandbox-group/fast-sandbox#26
-- Host `PREROUTING` DNAT maps the slot IP to the guest IP; `FORWARD` ACCEPT
-  rules allow ingress/egress; the slot netns MASQUERADEs egress. Note the
-  DNAT target is still derived per slot (`slot IP + 1`), which coincides
-  with the baked guest IP only for the first slot; non-first-slot instances
-  are not ingress-reachable in the current native stage (see #26)
-- Sandbox-to-sandbox isolation: the slot netns rejects direct traffic to the
-  private CIDR (except the gateway)
+  instance resumes with it. The per-clone netns data plane makes the shared
+  baked MAC/IP safe: ARP is namespace-isolated (firecracker upstream clone
+  model, `docs/snapshotting/network-for-clones.md`). The driver only
+  replaces the NIC tap per instance via `network_overrides` (`vmtap0`)
+- In-namespace rules (static, installed by `GuestVMNetNSDriver` at slot
+  preparation):
+  - `FORWARD`: gateway ACCEPT, sibling REJECT (guest -> private CIDR),
+    guest egress ACCEPT (`vmtap0 -> eth0`), ingress ACCEPT (`eth0 ->
+    vmtap0`), conntrack ESTABLISHED,RELATED ACCEPT
+  - proxy ARP on `vmtap0` (guest gateway resolution) + netns
+    `net.ipv4.ip_forward=1`
+- Per-restore guest data plane (installed by the driver after reading the
+  cached manifest `guestNetwork` — every slot translates its slot IP to the
+  **same** baked guest address, e.g. 172.30.0.3; `slot IP + 1` is NOT the
+  guest address except for the first slot):
+  - `PREROUTING DNAT` maps the slot IP to the baked guest IP (ingress)
+  - `POSTROUTING SNAT` maps the baked guest IP to the slot IP (egress
+    source-IP dispatch, OSEP-0022)
+  - `/32` guest route via `vmtap0` (ingress delivery, not a local address)
+- Ingress contract: dial the **slot IP** (DNATed to the guest; this is the
+  AccessDescriptor address fastlet-proxy uses). Each instance is uniquely
+  reachable, including concurrent clones from the same snapshot set (issue
+  #26 closed)
+- Sandbox-to-sandbox isolation: the slot netns rejects guest traffic to the
+  private CIDR (except the gateway) before any forward accept
+- Cleanup: sandbox delete -> kill (jailer PID; jailer execs firecracker) ->
+  remove the jail directory -> slot Destroy removes the netns (rules and
+  `vmtap0` vanish with it)
 
 ## E2E suites
 
@@ -113,9 +142,10 @@ same golden snapshot set (方式 B 自举, produced once per StateRoot):
 
 | Test | What it verifies |
 |------|------------------|
-| `TestFirecrackerDriverE2E` | Full lifecycle with real Infra Components delivery (loop-mount GuestCopy of sandbox-init + execd), guest files asserted with debugfs, real guest reachability (172.30.0.3) |
+| `TestFirecrackerDriverE2E` | Full lifecycle with real Infra Components delivery (loop-mount GuestCopy of sandbox-init + execd), guest files asserted with debugfs, real guest reachability (via the slot IP DNAT) |
 | `TestFirecrackerDriverE2ENoInfra` | Same lifecycle without infra delivery |
-| `TestFirecrackerDriverE2EConcurrent` | 5 pre-provisioned slots, 5 VMs restored concurrently from the same snapshot set; per-sandbox trace correlation, distinct processes, memory.snap shared (COW). v1.16 clone networking shares the baked guest MAC/IP, so per-instance reachability is not asserted here (single-VM cases cover it) |
+| `TestFirecrackerDriverE2EConcurrent` | 5 pre-provisioned slots, 5 VMs restored **in parallel** from the same snapshot set; per-sandbox trace correlation, distinct processes, memory.snap shared (COW), and **per-instance reachability + execd ready asserted on every slot** (per-clone netns + NAT makes the shared baked guest MAC/IP safe) |
+| `TestFirecrackerDriverE2EConcurrentSerial` | Same 5-VM batch **sequentially** (the production default path: creates arrive one by one) — the serial baseline for the load stage breakdown (per-stage min/avg/max printed by both batch tests) |
 | `TestFirecrackerDriverE2EImageGC` | Independent LFU image-cache GC: unreferenced low-frequency image evicted, live Sandbox pins its image, deletion releases it |
 
 ## Observed performance
@@ -153,8 +183,8 @@ git pull origin feature/firecracker-golden-restore
 FC_STATE_ROOT=/var/lib/fast-sandbox/e2e ./scripts/firecracker-e2e.sh
 ```
 
-Overrides: `FC_VERSION`, `FC_BINARY`, `FC_KERNEL`, `FC_ROOTFS`,
+Overrides: `FC_VERSION`, `FC_BINARY`, `FC_JAILER`, `FC_KERNEL`, `FC_ROOTFS`,
 `FC_STATE_ROOT` (defaults to `$WORK/state-root`; keep it persistent to reuse
 the prepared golden snapshot set), `WORK`. `--cleanup` removes leftovers of
 an interrupted run. Host resources created by a run (bridge, MASQUERADE,
-ip_forward, netns, taps) are restored automatically on exit.
+ip_forward, netns, jail dirs) are restored automatically on exit.

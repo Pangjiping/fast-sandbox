@@ -39,7 +39,7 @@ Same bare-metal host as
 | 1 | builder real publish layout | `index/<sha256(image)>.json` + `digest16/{rootfs.ext4,vmstate.snap,memory.snap,SHA256SUMS,manifest.json}`; `index.artifactDigest` == sha256(manifest); every `files[]` digest matches the uploaded object |
 | 2 | SigV4 against MinIO | agent pull succeeds over the wire (signature correctness proven by digest-verified commit) |
 | 3 | credential mapping | registry configuration (read-only AK/SK + endpoint) resolves via `FAST_SANDBOX_ARTIFACT_ENDPOINT`; the agent connects to MinIO |
-| 4 | builder snapshot ↔ driver restore | driver E2E restores from the pulled artifacts (`FC_SKIP_PREP`: no self-bootstrap); VM `Running`; guest reachable at the baked address |
+| 4 | builder snapshot ↔ driver restore | driver E2E restores from the pulled artifacts (`FC_SKIP_PREP`: no self-bootstrap); VM `Running`; guest reachable through the slot IP DNAT; single + **concurrent** cases with **execd `/ping` ready on every instance** |
 | 5 | idempotency + cleanup | re-PinImage makes zero re-pull (committed cache); driver delete releases the pin through the UDS API; lease lifecycle returns state to zero |
 
 The three scenarios (A: pull chain, B: restore, C: full chain) map to these
@@ -66,9 +66,15 @@ The script:
 5. builds and starts the real `firecracker-runtime-agent` (UDS socket, state
    root, registry file) and pulls the image twice through `PinImage`
    (points 2/3 + idempotency);
-6. runs `TestFirecrackerDriverE2E` with `FC_SKIP_PREP=1` and
+6. runs `TestFirecrackerDriverE2E`, `TestFirecrackerDriverE2ENoInfra`,
+   `TestFirecrackerDriverE2EConcurrent` and
+   `TestFirecrackerDriverE2EConcurrentSerial` with `FC_SKIP_PREP=1` and
    `FC_AGENT_SOCKET` wired, so the driver restores from the builder artifacts
-   and its delete path unpins through the agent (point 4);
+   and its delete path unpins through the agent (point 4; the Concurrent
+   cases are **NoInfra**: 5 VMs restored from the same snapshot set, in
+   parallel and sequentially, every instance's execd answers through its own
+   slot DNAT — per-clone netns data plane; both print the per-stage load
+   breakdown);
 7. exercises the lease lifecycle (`LeaseDevices`/`ListLeases`/
    `ReleaseDevices`/`UnpinImage`) and asserts pin/lease state returns to zero
    (point 5);
@@ -120,18 +126,48 @@ boot + ~1 s execd readiness).
 **Scenario A — cold pull** (first PinImage over MinIO, 3.6 GiB cache):
 **~39.5 s**; committed-cache re-pin makes zero requests (verification 5a).
 
-**Scenario B — driver restore** (same snapshot set, both cases):
+**Scenario B — driver restore** (same snapshot set, all three cases; per-clone
+netns data plane, jailer carrier):
 
 | Segment | Infra | NoInfra |
 |---------|-------|---------|
-| create total | 117-125 ms | **24.6-25.6 ms** |
+| create total | 75-177 ms | 25-39 ms |
 | rootfs (reflink copy) | ~1 ms | ~1 ms |
-| infra (GuestCopy) | 92-100 ms | — |
-| launch (spawn + API socket) | 20.4-21 ms | 20.4-21 ms |
-| configure (LoadSnapshot) | ~2.9 ms | ~2.9 ms |
-| boot (InstanceStart) | ~0.3 ms | ~0.3 ms |
-| guest reachable (ICMP) | immediate | immediate |
-| **execd /ping (VM running + delta)** | **+5.4 ms** | **+5.3 ms** |
+| infra (GuestCopy) | 36-138 ms | — |
+| launch (jailer spawn + API socket) | 20.4-21 ms | 20.4-21 ms |
+| configure (LoadSnapshot) | 2.3-2.9 ms | 2.3-2.9 ms |
+| boot (PATCH /vm resume) | ~0.3 ms | ~0.3 ms |
+| guest reachable (ICMP via slot DNAT) | immediate | immediate |
+| **execd /ping (VM running + delta)** | **+5.1 ms** | **+5.0 ms** |
+
+The Concurrent case restores 5 VMs in parallel from the same snapshot set
+(~106 ms total) without GuestCopy delivery (**NoInfra**: execd is baked into
+the snapshot by the builder) and asserts **per-instance reachability +
+execd `/ping` ready for every slot** (+4.0-4.5 ms each; per-clone netns +
+slot DNAT, the shared baked guest IP/MAC 172.30.0.3 is namespace-isolated,
+slot IPs skip the baked address: .2/.4/.5/.6/.7).
+
+The serial baseline (`TestFirecrackerDriverE2EConcurrentSerial`, the
+production default path) runs the same batch sequentially and prints the
+**per-stage min/avg/max breakdown** for both modes (`load-mode=...` lines in
+the driver E2E log). Measured (2026-08-29):
+
+| Stage | serial (avg) | parallel (avg) | Note |
+|-------|--------------|----------------|------|
+| wall (5 VMs) | **207 ms** | **108 ms** | parallel overlaps VM work (~1.9x) |
+| acquire | 22 µs | **16.5 ms** (max 49.9 ms) | **the manager write lock was held by ApplyGuest's netns commands** (~15 ms of `ip netns exec iptables/route` per slot) — ~77% of the parallel wall; fixed by running the guest data plane outside the lock |
+| rootfs | 1.03 ms | 1.08 ms | reflink copy |
+| launch | 20.4 ms | 20.8 ms | jailer spawn, the largest fixed per-VM cost |
+| configure | 2.47 ms | 2.61 ms | LoadSnapshot |
+| boot | 321 µs | 304 µs | PATCH /vm resume |
+
+Bottlenecks in order: ① the guest data plane ran under the manager lock
+(parallel; fixed — `Manager.ApplyGuest` now clones under the lock, runs the
+netns commands outside, and re-validates before committing); ② jailer spawn
+~20 ms (per-VM, both modes); ③ ~17 ms/VM of unstaged overhead (ApplyGuest
+commands + state persists + idempotency checks). Next optimization
+directions: pre-warm the firecracker process (AgentENV warm-pool idea) and
+fold the guest data plane into the agent (overlaybd stage).
 
 End-to-end delivery (create → business-ready): **~30 ms** on the driver
 layer (VM Running ~25 ms + execd readiness ~5 ms).
@@ -150,6 +186,18 @@ unavailable.
 
 ## Known gaps
 
+- **~~execd restore flake~~ / stale-netns shadowing (resolved)**: the
+  intermittent serial-batch execd failures had two stacked causes. First
+  `net.ipv4.conf.all.proxy_arp=1` made every slot netns proxy-answer the
+  whole private CIDR (fixed: tap-only proxy ARP). The failure persisted
+  with all netns iptables counters at 0 pkts — the probes never entered
+  the live netns because a STALE netns from an earlier test still owned
+  the slot IP on the shared bridge (its `ip netns del` had failed with
+  EBUSY): it answered ARP/pings locally and refused TCP, shadowing the
+  new VM. Fixed by deleting the host-side veth before the namespace
+  (its peer would otherwise keep the netns busy), a longer delete retry
+  (5 x 500 ms), and purging stale fsb netns/bridge devices at the start
+  of every E2E environment.
 - **OSS vs MinIO**: SigV4 is verified against MinIO here; Aliyun OSS region
   normalization and endpoint-style differences are covered in production
   validation (design details §6.8).
@@ -157,5 +205,6 @@ unavailable.
   baked NIC (builder `snapshot_stage`); without it, `network_overrides` has
   no iface to replace and the guest is unreachable.
 - **Clone networking**: every restored instance resumes with the baked
-  guest IP/MAC (172.30.0.3); multi-slot reachability needs per-clone netns
-  isolation + NAT (upstream clone model), out of scope for this E2E.
+  guest IP/MAC (172.30.0.3); multi-slot reachability uses the per-clone netns
+  data plane (jailer `--netns` + slot DNAT/SNAT), exercised by the
+  Concurrent case.

@@ -6,13 +6,23 @@ import (
 	"net/netip"
 )
 
-// GuestVMNetNSDriver extends LinuxNetNSDriver with a host-side tap and DNAT
-// rules for guest-VM runtimes (Firecracker). The tap lives in the Fastlet
-// (firecracker) network namespace and is bridged to the shared bridge; the
-// pod-side slot IP is DNATed to the guest address at the host so Ingress
-// keeps dialing the pod IP and reply traffic is reverse-NATed by the host
-// conntrack. Container runtimes keep using LinuxNetNSDriver and never see
-// the tap or the rules.
+// guestVMDefaultTapName is the fixed tap name of the guest-VM (Firecracker)
+// data plane. The tap lives inside the slot network namespace (the VMM
+// enters it via the jailer --netns), so the name is unique per namespace
+// and carries no Pod identity. Slot.GuestTap keeps the field with this
+// value so the runtime driver can reference the tap in the restore
+// network_overrides without coupling to the network driver.
+const guestVMDefaultTapName = "vmtap0"
+
+// GuestVMNetNSDriver extends LinuxNetNSDriver with the per-clone netns data
+// plane for guest-VM runtimes (Firecracker). The VMM process enters the slot
+// network namespace via the jailer; the tap (vmtap0, fixed name) is created
+// inside the namespace and carries the baked guest address; ingress DNAT
+// (slot IP -> guest IP), egress source NAT (guest IP -> slot IP), reply
+// acceptance, and sibling isolation all live inside the namespace. Clones
+// sharing the snapshot's baked guest MAC/IP therefore never collide on ARP
+// and every instance is uniquely addressed by its slot IP. Container
+// runtimes keep using LinuxNetNSDriver and never see the tap or the rules.
 type GuestVMNetNSDriver struct {
 	LinuxNetNSDriver
 }
@@ -22,50 +32,139 @@ func NewGuestVMNetNSDriver(config LinuxDriverConfig) *GuestVMNetNSDriver {
 	return &GuestVMNetNSDriver{LinuxNetNSDriver: *NewLinuxNetNSDriver(config)}
 }
 
-// Prepare runs the standard Linux preparation, then creates the host-side
-// tap on the shared bridge and installs the pod-IP DNAT and forward rules.
+// Prepare runs the standard Linux preparation, then builds the static
+// in-namespace data plane: the guest tap (fixed name), the forward rules,
+// proxy ARP and netns ip_forward. The guest-specific NAT rules (DNAT/SNAT
+// and the delivery route) are NOT installed here: slots are prepared before
+// the image (and its baked guest address) is known, so they are applied per
+// restore by ApplyGuest.
 func (d *GuestVMNetNSDriver) Prepare(ctx context.Context, slot *Slot) error {
 	if err := d.LinuxNetNSDriver.Prepare(ctx, slot); err != nil {
 		return err
 	}
-	guestIP, err := GuestVMIP(slot)
-	if err != nil {
-		return err
+	if slot.GuestTap == "" {
+		slot.GuestTap = guestVMDefaultTapName
+	}
+	nsTap := func(arguments ...string) []string {
+		return append([]string{"netns", "exec", slot.NetNSName, d.ipCommand}, arguments...)
+	}
+	nsIPTables := func(arguments ...string) []string {
+		return append([]string{"netns", "exec", slot.NetNSName, d.iptablesCommand}, arguments...)
 	}
 	commands := [][]string{
-		{"tuntap", "add", "dev", slot.GuestTap, "mode", "tap"},
-		{"link", "set", slot.GuestTap, "master", slot.Bridge},
-		{"link", "set", slot.GuestTap, "mtu", fmt.Sprint(slot.MTU)},
-		{"link", "set", slot.GuestTap, "up"},
+		nsTap("tuntap", "add", "dev", guestVMDefaultTapName, "mode", "tap"),
+		nsTap("link", "set", guestVMDefaultTapName, "mtu", fmt.Sprint(slot.MTU)),
+		nsTap("link", "set", guestVMDefaultTapName, "up"),
+		// Proxy ARP on the TAP only, so the guest can resolve its baked
+		// gateway (the host bridge address, absent on the tap segment).
+		// The all-interfaces knob MUST NOT be set: it would make eth0
+		// proxy-answer the whole private CIDR, so every slot netns answers
+		// the host's ARP for every slot IP with its own veth MAC — the host
+		// neighbour cache then points slot IPs at random netns and packets
+		// never reach the right one.
+		{"netns", "exec", slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.conf." + guestVMDefaultTapName + ".proxy_arp=1"},
+		{"netns", "exec", slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.ip_forward=1"},
 	}
 	for _, arguments := range commands {
-		if _, err := d.runner.Run(ctx, "ip", arguments...); err != nil {
-			return fmt.Errorf("prepare guest tap %s: %w", slot.GuestTap, err)
+		if _, err := d.runner.Run(ctx, d.ipCommand, arguments...); err != nil {
+			return fmt.Errorf("prepare guest-VM namespace tap: %w", err)
 		}
 	}
 	rules := [][]string{
-		{"-t", "nat", "-A", "PREROUTING", "-d", slot.IP + "/32", "-j", "DNAT", "--to-destination", guestIP},
-		{"-A", "FORWARD", "-d", guestIP + "/32", "-j", "ACCEPT"},
-		{"-A", "FORWARD", "-s", guestIP + "/32", "-j", "ACCEPT"},
+		// The namespace gateway (bridge address) stays reachable (DNS proxy
+		// and gateway traffic); siblings are isolated before any generic
+		// forward accept.
+		nsIPTables("-A", "FORWARD", "-d", slot.Gateway+"/32", "-j", "ACCEPT"),
+		// Sibling isolation: only traffic ORIGINATING from the guest and
+		// destined to the private CIDR is rejected. Ingress and reply
+		// packets arrive from eth0 (out vmtap0) and are not affected.
+		nsIPTables("-A", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-d", slot.PrivateCIDR, "-j", "REJECT"),
+		// Guest egress through the namespace veth.
+		nsIPTables("-A", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-j", "ACCEPT"),
+		// Ingress and replies (DNATed or direct guest address).
+		nsIPTables("-A", "FORWARD", "-i", "eth0", "-o", guestVMDefaultTapName, "-j", "ACCEPT"),
+		// Established connections (reply path).
+		nsIPTables("-A", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
 	}
 	for _, arguments := range rules {
-		check := append([]string(nil), arguments...)
-		for index, argument := range check {
-			if argument == "-A" {
-				check[index] = "-C"
-				break
-			}
-		}
-		if _, err := d.runner.Run(ctx, "iptables", check...); err != nil {
-			if _, err := d.runner.Run(ctx, "iptables", arguments...); err != nil {
-				return fmt.Errorf("prepare guest DNAT rules: %w", err)
-			}
+		if err := checkThenAdd(ctx, d.runner, d.ipCommand, arguments); err != nil {
+			return fmt.Errorf("prepare guest-VM namespace rules: %w", err)
 		}
 	}
 	return nil
 }
 
-// Validate extends the Linux validation with a guest tap existence check.
+// ApplyGuest installs the per-restore guest data plane for the baked guest
+// address (manifest guestNetwork): the /32 delivery route via the tap and
+// the ingress DNAT (slot IP -> guest IP) / egress source NAT (guest IP ->
+// slot IP) rules. Every slot translates its slot IP to the SAME baked guest
+// address (per-clone clone model); slot.IP+1 is NOT the guest address
+// except for the first slot. Idempotent (check-then-add).
+func (d *GuestVMNetNSDriver) ApplyGuest(ctx context.Context, slot *Slot, guestIP string) error {
+	if slot == nil || slot.NetNSName == "" || slot.IP == "" {
+		return fmt.Errorf("incomplete guest-VM slot")
+	}
+	address, err := netip.ParseAddr(guestIP)
+	if err != nil || !address.Is4() {
+		return fmt.Errorf("invalid baked guest IP %q", guestIP)
+	}
+	if slot.IP == guestIP {
+		// The slot netns eth0 owns the slot IP; if it equals the guest
+		// address the netns kernel would shadow the guest (answer for it
+		// locally and refuse TCP). The guest-VM IPAM reserves the baked
+		// address, so this indicates a misconfigured template or CIDR.
+		return fmt.Errorf("baked guest IP %q collides with the slot IP", guestIP)
+	}
+	slot.GuestIP = guestIP
+	nsTap := func(arguments ...string) []string {
+		return append([]string{"netns", "exec", slot.NetNSName, d.ipCommand}, arguments...)
+	}
+	nsIPTables := func(arguments ...string) []string {
+		return append([]string{"netns", "exec", slot.NetNSName, d.iptablesCommand}, arguments...)
+	}
+	// Ingress delivery: the baked guest address is routed via the tap. The
+	// address is deliberately NOT assigned to the tap: a local address
+	// would shadow the guest (the netns kernel would answer for the guest
+	// IP itself and refuse TCP with no listener).
+	if _, err := d.runner.Run(ctx, d.ipCommand, nsTap("route", "replace", guestIP+"/32", "dev", guestVMDefaultTapName)...); err != nil {
+		return fmt.Errorf("apply guest delivery route: %w", err)
+	}
+	rules := [][]string{
+		// Ingress: the uniquely addressed slot IP is DNATed to the baked
+		// guest address before the namespace routing decision.
+		nsIPTables("-t", "nat", "-A", "PREROUTING", "-d", slot.IP+"/32", "-j", "DNAT", "--to-destination", guestIP),
+		// Egress source address: the shared baked guest IP becomes the
+		// unique slot IP so upstream source-IP dispatch keeps working.
+		nsIPTables("-t", "nat", "-A", "POSTROUTING", "-s", guestIP+"/32", "-j", "SNAT", "--to-source", slot.IP),
+	}
+	for _, arguments := range rules {
+		if err := checkThenAdd(ctx, d.runner, d.ipCommand, arguments); err != nil {
+			return fmt.Errorf("apply guest NAT rules: %w", err)
+		}
+	}
+	return nil
+}
+
+// BakedGuestIP returns the baked guest address convention of the templates:
+// the address directly after the first slot (gateway + 2). The builder and
+// the E2E prep bake this static address into the snapshot; the authoritative
+// per-template value is the manifest guestNetwork (applied via ApplyGuest).
+func BakedGuestIP(slot *Slot) (string, error) {
+	if slot == nil || slot.Gateway == "" {
+		return "", fmt.Errorf("slot gateway is required")
+	}
+	gateway, err := netip.ParseAddr(slot.Gateway)
+	if err != nil || !gateway.Is4() {
+		return "", fmt.Errorf("invalid slot gateway %q", slot.Gateway)
+	}
+	guest := gateway.Next().Next()
+	if !guest.IsValid() || !guest.Is4() || guest == gateway {
+		return "", fmt.Errorf("no guest address after gateway %q", slot.Gateway)
+	}
+	return guest.String(), nil
+}
+
+// Validate extends the Linux validation with the in-namespace tap check.
 func (d *GuestVMNetNSDriver) Validate(ctx context.Context, slot *Slot) error {
 	if err := d.LinuxNetNSDriver.Validate(ctx, slot); err != nil {
 		return err
@@ -73,37 +172,65 @@ func (d *GuestVMNetNSDriver) Validate(ctx context.Context, slot *Slot) error {
 	if slot.GuestTap == "" {
 		return fmt.Errorf("guest-VM slot has no tap name")
 	}
-	if _, err := d.runner.Run(ctx, "ip", "link", "show", "dev", slot.GuestTap); err != nil {
-		return fmt.Errorf("guest tap %s: %w", slot.GuestTap, err)
+	if _, err := d.runner.Run(ctx, d.ipCommand, "-n", slot.NetNSName, "link", "show", "dev", guestVMDefaultTapName); err != nil {
+		return fmt.Errorf("guest tap %s: %w", guestVMDefaultTapName, err)
 	}
 	return nil
 }
 
-// Destroy removes the guest tap and rules, then runs the Linux destruction.
+// Destroy removes the in-namespace rules (guest-specific NAT rules first
+// when a baked guest address was applied, then the static forward rules),
+// then runs the Linux destruction (which deletes the namespace; the tap
+// vanishes with it).
 func (d *GuestVMNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 	if slot == nil {
 		return nil
 	}
 	var result error
-	if slot.GuestTap != "" {
-		if _, err := d.runner.Run(ctx, "ip", "link", "del", slot.GuestTap); err != nil && !isMissingNetworkResource(err) {
-			result = fmt.Errorf("delete guest tap %s: %w", slot.GuestTap, err)
+	if slot.NetNSName != "" {
+		nsIPTables := func(arguments ...string) []string {
+			return append([]string{"netns", "exec", slot.NetNSName, d.iptablesCommand}, arguments...)
 		}
-	}
-	if guestIP, err := GuestVMIP(slot); err == nil {
-		rules := [][]string{
-			{"-t", "nat", "-D", "PREROUTING", "-d", slot.IP + "/32", "-j", "DNAT", "--to-destination", guestIP},
-			{"-D", "FORWARD", "-d", guestIP + "/32", "-j", "ACCEPT"},
-			{"-D", "FORWARD", "-s", guestIP + "/32", "-j", "ACCEPT"},
+		var rules [][]string
+		if slot.GuestIP != "" {
+			rules = append(rules,
+				nsIPTables("-t", "nat", "-D", "PREROUTING", "-d", slot.IP+"/32", "-j", "DNAT", "--to-destination", slot.GuestIP),
+				nsIPTables("-t", "nat", "-D", "POSTROUTING", "-s", slot.GuestIP+"/32", "-j", "SNAT", "--to-source", slot.IP),
+			)
 		}
+		rules = append(rules,
+			nsIPTables("-D", "FORWARD", "-d", slot.Gateway+"/32", "-j", "ACCEPT"),
+			nsIPTables("-D", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-d", slot.PrivateCIDR, "-j", "REJECT"),
+			nsIPTables("-D", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-j", "ACCEPT"),
+			nsIPTables("-D", "FORWARD", "-i", "eth0", "-o", guestVMDefaultTapName, "-j", "ACCEPT"),
+			nsIPTables("-D", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
+		)
 		for _, arguments := range rules {
-			_, _ = d.runner.Run(ctx, "iptables", arguments...)
+			// Best-effort: the rules disappear with the namespace, and
+			// a missing namespace or rule must not fail the destroy.
+			_, _ = d.runner.Run(ctx, d.ipCommand, arguments...)
 		}
 	}
 	if err := d.LinuxNetNSDriver.Destroy(ctx, slot); err != nil {
 		result = errorsJoin(result, err)
 	}
 	return result
+}
+
+// checkThenAdd installs an iptables rule only when it is not present yet.
+func checkThenAdd(ctx context.Context, runner CommandRunner, command string, add []string) error {
+	check := append([]string(nil), add...)
+	for index, argument := range check {
+		if argument == "-A" {
+			check[index] = "-C"
+			break
+		}
+	}
+	if _, err := runner.Run(ctx, command, check...); err == nil {
+		return nil
+	}
+	_, err := runner.Run(ctx, command, add...)
+	return err
 }
 
 // GuestVMIP returns the guest address directly after the slot IP.

@@ -25,6 +25,8 @@
 # Overrides (environment):
 #   FC_VERSION    firecracker release tag, default v1.16.1 (latest upstream stable)
 #   FC_BINARY     firecracker binary path (skips download when set)
+#   FC_JAILER     jailer binary path (skips download when set); empty disables
+#                 the jailer (direct launch, no per-clone netns/chroot)
 #   FC_KERNEL     kernel image path, snapshot-prep asset (skips download when set)
 #   FC_ROOTFS     converted rootfs ext4 image, snapshot-prep input (skips download when set)
 #   FC_STATE_ROOT driver StateRoot; defaults to $WORK/state-root so the
@@ -45,6 +47,7 @@ BIN_DIR="$WORK/bin"
 ART_DIR="$WORK/artifacts"
 FC_VERSION="${FC_VERSION:-v1.16.1}"
 FC_BINARY="${FC_BINARY:-$BIN_DIR/firecracker}"
+FC_JAILER="${FC_JAILER:-$BIN_DIR/jailer}"
 FC_KERNEL="${FC_KERNEL:-$ART_DIR/vmlinux.bin}"
 FC_ROOTFS="${FC_ROOTFS:-$ART_DIR/bionic.rootfs.ext4}"
 FC_STATE_ROOT="${FC_STATE_ROOT:-$WORK/state-root}"
@@ -74,12 +77,25 @@ is_live_netns() { ip netns list 2>/dev/null | awk '{print $1}' | grep -qx "$1"; 
 
 kill_firecracker_vms() {
     # Firecracker processes this E2E family launched carry --id e2e-sandbox-*.
+    # The jailer execs firecracker (same PID), so matching the firecracker
+    # argv covers both launch modes.
     for pid in $(pgrep -f "firecracker .*--id e2e-sandbox-" 2>/dev/null || true); do
         kill "$pid" 2>/dev/null || true
     done
     # Netns deletion races the dying VMM holding the namespace (EBUSY), so
     # wait a moment for the processes to exit before tearing devices down.
     sleep 1
+}
+
+purge_jail_dirs() {
+    # Jailer chroot roots under the StateRoot: <base>/<exec-basename>/<id>/.
+    local base="${FC_STATE_ROOT}/jails"
+    [[ -d "$base" ]] || return 0
+    for jail in "$base"/firecracker/e2e-*/; do
+        [[ -d "$jail" ]] || continue
+        rm -rf "$jail"
+        log "removed stale jail $jail"
+    done
 }
 
 purge_fsb_resources() {
@@ -124,9 +140,11 @@ record_host_state() {
 }
 
 cleanup_leftovers() {
-    # Per-slot resources of this and earlier runs: netns, taps, and veths.
-    # The bridge and host-wide rules are restored by cleanup_host_state.
+    # Per-slot resources of this and earlier runs: netns, taps, veths, and
+    # jailer chroot dirs. The bridge and host-wide rules are restored by
+    # cleanup_host_state.
     purge_fsb_resources
+    purge_jail_dirs
 }
 
 cleanup_host_state() {
@@ -147,7 +165,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null; then
         log "re-invoking as root (sudo -E)"
         exec sudo -E env "PATH=$PATH" "WORK=$WORK" "FC_VERSION=$FC_VERSION" \
-            "FC_BINARY=$FC_BINARY" "FC_KERNEL=$FC_KERNEL" "FC_ROOTFS=$FC_ROOTFS" \
+            "FC_BINARY=$FC_BINARY" "FC_JAILER=$FC_JAILER" "FC_KERNEL=$FC_KERNEL" \
+            "FC_ROOTFS=$FC_ROOTFS" \
             "FC_STATE_ROOT=$FC_STATE_ROOT" \
             "$0" "$@"
     fi
@@ -159,7 +178,7 @@ if [[ "${1:-}" == "--cleanup" ]]; then
     record_host_state
     cleanup_leftovers
     cleanup_host_state
-    log "host cleanup done (netns, firecracker processes, $BRIDGE_NAME bridge, MASQUERADE rule)"
+    log "host cleanup done (netns, firecracker/jailer processes, jail dirs, $BRIDGE_NAME bridge, MASQUERADE rule)"
     exit 0
 fi
 
@@ -195,6 +214,21 @@ if [[ ! -x "$FC_BINARY" ]]; then
 fi
 "$FC_BINARY" --version >/dev/null || die "firecracker binary does not run (needs recent glibc)"
 
+if [[ ! -x "$FC_JAILER" ]]; then
+    tarball="$WORK/firecracker-$FC_VERSION-x86_64.tgz"
+    if [[ ! -f "$tarball" ]]; then
+        download "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-x86_64.tgz" "$tarball"
+    fi
+    mkdir -p "$WORK/extract"
+    tar -xzf "$tarball" -C "$WORK/extract"
+    found="$(find "$WORK/extract" -type f -name "jailer-v${FC_VERSION#v}-x86_64" | head -1)"
+    [[ -n "$found" ]] || die "jailer binary not found in release tarball"
+    cp "$found" "$FC_JAILER"
+    chmod +x "$FC_JAILER"
+    rm -rf "$WORK/extract"
+fi
+"$FC_JAILER" --version >/dev/null || die "jailer binary does not run"
+
 if [[ ! -f "$FC_KERNEL" ]]; then
     # Snapshot-prep asset: the kernel only boots the one preparation VM that
     # produces the golden snapshot set; restored Sandboxes never boot a kernel.
@@ -207,6 +241,7 @@ if [[ ! -f "$FC_ROOTFS" ]]; then
 fi
 
 log "firecracker: $FC_BINARY ($("$FC_BINARY" --version | head -1))"
+log "jailer:      $FC_JAILER (per-clone netns + chroot)"
 log "kernel:     $FC_KERNEL (snapshot-prep asset)"
 log "rootfs:     $FC_ROOTFS (snapshot-prep input)"
 log "state root: $FC_STATE_ROOT (golden snapshot set cached here)"
@@ -223,11 +258,13 @@ record_pre_run_netns
 trap 'cleanup_leftovers; cleanup_host_state' EXIT
 log "running TestFirecrackerDriverE2E (+TestFirecrackerDriverE2ENoInfra, root)"
 cd "$REPO_ROOT"
-env FC_BINARY="$FC_BINARY" FC_KERNEL="$FC_KERNEL" FC_ROOTFS="$FC_ROOTFS" \
+env FC_BINARY="$FC_BINARY" FC_JAILER="$FC_JAILER" FC_KERNEL="$FC_KERNEL" \
+    FC_ROOTFS="$FC_ROOTFS" \
     FC_STATE_ROOT="$FC_STATE_ROOT" \
     go test -tags firecracker -count=1 -v -run '^TestFirecrackerDriverE2E' \
     ./internal/runtime/firecracker/
 
 log "E2E passed"
 log "host resources created by this run (netns, taps, rules) are restored automatically on exit"
+log "per-sandbox stage timing is printed by the driver above (acquire/rootfs/launch/configure/boot)"
 log "run the same command with --cleanup after an interrupted run"
