@@ -210,6 +210,98 @@ func (env *e2eEnvironment) logLoadStageSummary(t *testing.T, mode string, vmCoun
 	}
 }
 
+// TestFirecrackerDriverE2ELeak repeatedly creates and deletes a sandbox and
+// asserts no host resource accumulates across rounds:
+//
+//   - per-sandbox resources release immediately on delete (jail dir, VMM
+//     process);
+//   - the slot pool never exceeds capacity (netns/veth count is bounded by
+//     Replenish, not growing);
+//   - draining the manager (Close) leaves zero per-slot resources.
+//
+// Round count: FC_LEAK_ROUNDS (default 10); a few hundred rounds make a
+// soak run (create+delete ≈ 1 s per round).
+func TestFirecrackerDriverE2ELeak(t *testing.T) {
+	rounds := 10
+	if value := os.Getenv("FC_LEAK_ROUNDS"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			rounds = parsed
+		}
+	}
+	capacity := 1
+	env := newE2EEnvironment(t, capacity, false)
+	defer env.teardown()
+
+	baseline := hostLeakSnapshot(t, env.stateRoot)
+	for round := 1; round <= rounds; round++ {
+		spec := env.spec(1)
+		ctx, end := env.traceContext(spec.SandboxID)
+		metadata, err := env.driver.EnsureSandbox(ctx, spec)
+		end()
+		require.NoErrorf(t, err, "round %d: create", round)
+		env.assertBooted(metadata, spec, trace.SpanContextFromContext(ctx).TraceID())
+		env.assertGuestReachable(spec.SandboxID)
+		if os.Getenv("FC_EXECD_PROBE") == "1" {
+			env.assertGuestExecd(spec.SandboxID)
+		}
+		env.delete(spec.SandboxID)
+
+		now := hostLeakSnapshot(t, env.stateRoot)
+		// Per-sandbox resources must be gone immediately after delete.
+		require.Equalf(t, baseline["jailDirs"], now["jailDirs"], "round %d: jail dirs leaked", round)
+		require.Equalf(t, baseline["fcProcs"], now["fcProcs"], "round %d: VMM processes leaked", round)
+		// The slot pool stays at capacity (Replenish replaces, never grows).
+		require.LessOrEqualf(t, now["netns"], capacity, "round %d: netns pool overflowed", round)
+		require.LessOrEqualf(t, now["bridgeDevs"], capacity, "round %d: bridge device pool overflowed", round)
+	}
+	t.Logf("leak soak: %d create/delete rounds, no accumulation (netns=%d bridgeDevs=%d jailDirs=%d fcProcs=%d)",
+		rounds, baseline["netns"], baseline["bridgeDevs"], baseline["jailDirs"], baseline["fcProcs"])
+
+	// Draining the manager leaves zero per-slot resources on the host.
+	require.NoError(t, env.manager.Close(context.Background()))
+	after := hostLeakSnapshot(t, env.stateRoot)
+	require.Zerof(t, after["netns"], "netns left after Manager.Close")
+	require.Zerof(t, after["bridgeDevs"], "bridge devices left after Manager.Close")
+	require.Zerof(t, after["jailDirs"], "jail dirs left after Manager.Close")
+	require.Zerof(t, after["fcProcs"], "VMM processes left after Manager.Close")
+}
+
+// hostLeakSnapshot counts the per-run host resources of the E2E: fsb* netns,
+// fsb0-attached fh* veths, jail roots, and live e2e firecracker processes.
+func hostLeakSnapshot(t *testing.T, stateRoot string) map[string]int {
+	t.Helper()
+	snapshot := map[string]int{"netns": 0, "bridgeDevs": 0, "jailDirs": 0, "fcProcs": 0}
+	if out, err := exec.Command("ip", "netns", "list").CombinedOutput(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "fsb") {
+				snapshot["netns"]++
+			}
+		}
+	}
+	if out, err := exec.Command("ip", "-o", "link", "show", "master", "fsb0").CombinedOutput(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSuffix(fields[1], ":"), "fh") {
+				snapshot["bridgeDevs"]++
+			}
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(stateRoot, jailerChrootBaseDir, "firecracker")); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				snapshot["jailDirs"]++
+			}
+		}
+	}
+	if out, err := exec.Command("pgrep", "-f", "firecracker .*--id e2e-").CombinedOutput(); err == nil {
+		snapshot["fcProcs"] = strings.Count(string(out), "\n")
+	}
+	return snapshot
+}
+
 // TestFirecrackerDriverE2EImageGC verifies the independent LFU image cache
 // GC on a real StateRoot: unreferenced low-frequency images are evicted when
 // the cache is over its limit, a running Sandbox pins its image, and deleting

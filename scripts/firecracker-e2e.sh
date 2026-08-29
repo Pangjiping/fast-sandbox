@@ -257,11 +257,12 @@ record_pre_run_netns
 # restore host resources (bridge, MASQUERADE, ip_forward) that did not exist
 # before the run. --cleanup remains available for interrupted runs.
 trap 'cleanup_leftovers; cleanup_host_state' EXIT
-log "running TestFirecrackerDriverE2E (+TestFirecrackerDriverE2ENoInfra, root)"
+log "running TestFirecrackerDriverE2E (+NoInfra/Concurrent/Serial/ImageGC/Leak, root)"
 cd "$REPO_ROOT"
 env FC_BINARY="$FC_BINARY" FC_JAILER="$FC_JAILER" FC_KERNEL="$FC_KERNEL" \
     FC_ROOTFS="$FC_ROOTFS" \
     FC_STATE_ROOT="$FC_STATE_ROOT" \
+    FC_LEAK_ROUNDS="${FC_LEAK_ROUNDS:-}" \
     go test -tags firecracker -count=1 -v -run '^TestFirecrackerDriverE2E' \
     ./internal/runtime/firecracker/
 
