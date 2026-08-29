@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,6 +193,12 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 	}
 
 	env.assertGuestReachable(spec.SandboxID)
+	// The chain E2E builder bakes execd into the golden snapshot when
+	// CHAIN_EXECD is set; probing its /ping endpoint proves the template's
+	// runtime bootstrap survived the restore (not just ICMP reachability).
+	if os.Getenv("FC_EXECD_PROBE") == "1" {
+		env.assertGuestExecd(spec.SandboxID)
+	}
 
 	// Inspect reports the running VM.
 	inspected, err := env.driver.InspectSandbox(ctx, spec.SandboxID)
@@ -224,6 +231,12 @@ const e2ePrepVersion = 2
 // (started with cwd = their state dir) resolve the same baked path to
 // their own reflink copy. The guest IP baked by the prep boot args must
 // match the first slot's guest address for reachability assertions.
+//
+// External-artifact mode (FC_SKIP_PREP=1): the chain E2E
+// (scripts/firecracker-chain-e2e.sh) pulls the golden set through the real
+// runtime-agent from the builder's published output, so the prep would
+// overwrite the very artifacts under test. The cache layout is validated
+// instead of bootstrapped.
 func prepareE2EGoldenSnapshot(t *testing.T, binary, kernel, rootfs, stateRoot, imageRef, bootArgs string) {
 	t.Helper()
 	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(imageRef))
@@ -232,6 +245,20 @@ func prepareE2EGoldenSnapshot(t *testing.T, binary, kernel, rootfs, stateRoot, i
 	memory := filepath.Join(dir, memorySnapshotName)
 	manifestPath := filepath.Join(dir, "manifest.json")
 	versionMarker := filepath.Join(dir, ".prep-version")
+	if os.Getenv("FC_SKIP_PREP") == "1" {
+		// The golden set must be complete (the agent's pull commits the
+		// manifest last) and carry the machine tuple restore validates.
+		for _, path := range []string{rootfsImg, vmstate, memory, manifestPath} {
+			require.FileExists(t, path, "external golden set is incomplete (FC_SKIP_PREP)")
+		}
+		require.FileExists(t, kernel, "FC_KERNEL")
+		require.FileExists(t, rootfs, "FC_ROOTFS")
+		_, ok, err := readCachedManifestMachine(stateRoot, imageRef)
+		require.NoError(t, err)
+		require.True(t, ok, "external manifest carries no machine tuple (machine=1/512Mi required for the E2E spec)")
+		t.Logf("reusing externally pulled golden snapshot set %s (FC_SKIP_PREP)", dir)
+		return
+	}
 	complete := func() bool {
 		for _, path := range []string{rootfsImg, vmstate, memory, manifestPath} {
 			if info, err := os.Stat(path); err != nil || info.IsDir() {
@@ -489,6 +516,13 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	driver, err := New(profile)
 	require.NoError(t, err)
 	driver.SetNetworkManager(manager)
+	// When the chain E2E runs a real runtime-agent (FC_AGENT_SOCKET), wire
+	// the driver to it: DeleteSandbox then releases/unpins through the UDS
+	// API instead of staying in local mode.
+	if agentSocket := os.Getenv("FC_AGENT_SOCKET"); agentSocket != "" {
+		driver.SetFastletPodUID(podUID)
+		driver.SetAgentSocket(agentSocket)
+	}
 
 	env := &e2eEnvironment{
 		t: t, manager: manager, driver: driver, imageRef: imageRef,
@@ -623,6 +657,48 @@ func (env *e2eEnvironment) assertGuestReachable(sandboxID string) {
 		require.NoErrorf(t, err, "guest %s not reachable: %s", guestIP, output)
 	}
 	t.Logf("guest reachable at %s (slot %s, tap %s)", guestIP, slot.IP, slot.GuestTap)
+}
+
+// assertGuestExecd verifies the execd baked into the golden snapshot (by
+// the chain E2E builder, CHAIN_EXECD) answers its /ping endpoint inside
+// the restored guest. The guest IP is derived from the slot (baked static
+// address), so the probe travels the real host -> bridge -> tap -> guest
+// data path and lands on the execd process that survived restore.
+//
+// VM Running (firecracker state) does NOT imply execd readiness: the guest
+// resumes, its virtio-net reconnects, and execd's listener re-readies, so
+// the probe retries for a short window and reports the delta between the
+// VM delivery and the business-runtime readiness (the sandbox-usable SLO).
+func (env *e2eEnvironment) assertGuestExecd(sandboxID string) {
+	t := env.t
+	t.Helper()
+	slot, ok := env.manager.Lookup(sandboxID)
+	require.True(t, ok)
+	guestIP, err := fastletnetwork.GuestVMIP(slot)
+	require.NoError(t, err)
+	endpoint := fmt.Sprintf("http://%s:44772/ping", guestIP)
+	client := &http.Client{Timeout: 2 * time.Second}
+	probeStarted := time.Now()
+	deadline := probeStarted.Add(15 * time.Second)
+	var lastErr error
+	for {
+		response, err := client.Get(endpoint)
+		if err == nil && response.StatusCode == http.StatusOK {
+			response.Body.Close()
+			t.Logf("execd /ping OK at %s after %s (VM running + %s)", endpoint, time.Since(probeStarted), time.Since(probeStarted))
+			return
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("status %d", response.StatusCode)
+			response.Body.Close()
+		}
+		if time.Now().After(deadline) {
+			require.NoErrorf(t, lastErr, "execd /ping unreachable at %s within 15s", endpoint)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // delete stops the VM, releases the slot, and removes the state.
