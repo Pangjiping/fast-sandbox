@@ -72,10 +72,18 @@ type Slot struct {
 	HostVeth       string    `json:"hostVeth"`
 	PeerVeth       string    `json:"peerVeth"`
 	Bridge         string    `json:"bridge"`
-	// GuestTap is the host-side tap device for guest-VM runtimes (Firecracker).
-	// It is prepared by GuestVMNetNSDriver and consumed by the runtime driver
-	// as the VM's host_dev_name; container runtimes leave it unused.
-	GuestTap     string           `json:"guestTap,omitempty"`
+	// GuestTap is the tap name of the guest-VM data plane (Firecracker). It
+	// is the fixed in-namespace name guestVMDefaultTapName, prepared by
+	// GuestVMNetNSDriver inside the slot netns and consumed by the runtime
+	// driver as the VM's network_overrides host_dev_name; container runtimes
+	// leave it unused.
+	GuestTap string `json:"guestTap,omitempty"`
+	// GuestIP is the shared baked guest address of the restored template
+	// (manifest guestNetwork). Every slot netns translates its slot IP to
+	// this single address (per-clone clone model); it is applied per restore
+	// by the runtime driver (ApplyGuest) because slots are prepared before
+	// the image is known. The persisted value drives teardown.
+	GuestIP string `json:"guestIP,omitempty"`
 	Address      string           `json:"address"`
 	IP           string           `json:"ip"`
 	Gateway      string           `json:"gateway"`

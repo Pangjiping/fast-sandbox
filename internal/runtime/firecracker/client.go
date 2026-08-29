@@ -167,8 +167,7 @@ func (c *Client) Resume(ctx context.Context) error {
 
 // LoadSnapshot restores the microVM from a Full snapshot (vmstate + memory
 // file). resume_vm=false leaves the VM paused after load; the driver then
-// starts it with InstanceStart so the boot/start/poll lifecycle stays
-// uniform between cold boot and restore.
+// resumes it via PATCH /vm (Resume).
 func (c *Client) LoadSnapshot(ctx context.Context, request SnapshotLoadRequest) error {
 	return c.do(ctx, http.MethodPut, "/snapshot/load", request, nil)
 }

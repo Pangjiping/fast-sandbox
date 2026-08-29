@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 
@@ -77,6 +78,134 @@ func TestOwnerEqualIgnoresCleanupHint(t *testing.T) {
 
 	require.True(t, legacy.Equal(current))
 	require.True(t, current.Equal(legacy))
+}
+
+// guestDataPlaneDriver records ApplyGuest calls. Its ApplyGuest takes the
+// manager read lock while "working": if the manager held its write lock
+// during the guest data plane, this would deadlock.
+type guestDataPlaneDriver struct {
+	fakeDriver
+	manager *Manager
+	applied []string
+}
+
+func (d *guestDataPlaneDriver) ApplyGuest(_ context.Context, slot *Slot, guestIP string) error {
+	if d.manager != nil {
+		_ = d.manager.Snapshot()
+	}
+	slot.GuestIP = guestIP
+	d.applied = append(d.applied, slot.ID)
+	return nil
+}
+
+func TestManagerApplyGuestRecordsAndPersists(t *testing.T) {
+	root := t.TempDir()
+	driver := &guestDataPlaneDriver{}
+	manager := newTestManager(t, 1, root, driver, "slot-a")
+	driver.manager = manager
+	require.NoError(t, manager.Initialize(context.Background()))
+
+	owner := owner("sandbox-1", 1)
+	_, err := manager.Acquire(context.Background(), owner)
+	require.NoError(t, err)
+	require.NoError(t, manager.ApplyGuest(context.Background(), owner, "10.17.0.9"))
+	require.Equal(t, []string{"slot-a"}, driver.applied)
+
+	slot, exists := manager.Lookup("sandbox-1")
+	require.True(t, exists)
+	require.Equal(t, "10.17.0.9", slot.GuestIP)
+
+	// The applied address is persisted: a reloaded manager sees it.
+	reloaded, err := NewManager(DefaultConfig(1, "pod-uid-1"), &guestDataPlaneDriver{}, NewFileStateStore(filepath.Join(root, "pod-uid-1")))
+	require.NoError(t, err)
+	require.NoError(t, reloaded.Initialize(context.Background()))
+	slot, exists = reloaded.Lookup("sandbox-1")
+	require.True(t, exists)
+	require.Equal(t, "10.17.0.9", slot.GuestIP)
+}
+
+func TestManagerApplyGuestDoesNotHoldLockDuringExec(t *testing.T) {
+	// The guest data plane fake takes the manager read lock inside its
+	// ApplyGuest; with the write lock held this deadlocks (and the timeout
+	// fails the test).
+	driver := &guestDataPlaneDriver{}
+	manager := newTestManager(t, 1, t.TempDir(), driver, "slot-a")
+	driver.manager = manager
+	require.NoError(t, manager.Initialize(context.Background()))
+
+	owner := owner("sandbox-1", 1)
+	_, err := manager.Acquire(context.Background(), owner)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- manager.ApplyGuest(context.Background(), owner, "10.17.0.9") }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ApplyGuest held the manager write lock while executing the guest data plane")
+	}
+}
+
+func TestManagerApplyGuestRequiresBoundSlot(t *testing.T) {
+	root := t.TempDir()
+	driver := &guestDataPlaneDriver{}
+	manager := newTestManager(t, 1, root, driver, "slot-a")
+	driver.manager = manager
+	require.NoError(t, manager.Initialize(context.Background()))
+
+	// No bound slot for the owner.
+	require.ErrorIs(t, manager.ApplyGuest(context.Background(), owner("nobody", 1), "10.17.0.9"), ErrSlotNotFound)
+
+	// A released slot is no longer applicable.
+	bound := owner("sandbox-1", 1)
+	_, err := manager.Acquire(context.Background(), bound)
+	require.NoError(t, err)
+	require.NoError(t, manager.Release(context.Background(), bound))
+	require.ErrorIs(t, manager.ApplyGuest(context.Background(), bound, "10.17.0.9"), ErrSlotNotFound)
+	require.Empty(t, driver.applied)
+}
+
+func TestManagerCloseDestroysRemainingSlots(t *testing.T) {
+	root := t.TempDir()
+	driver := &fakeDriver{}
+	manager := newTestManager(t, 2, root, driver, "slot-a", "slot-b")
+	require.NoError(t, manager.Initialize(context.Background()))
+	require.Equal(t, 2, manager.Snapshot().Clean)
+
+	// A bound slot is destroyed too.
+	_, err := manager.Acquire(context.Background(), owner("sandbox-1", 1))
+	require.NoError(t, err)
+	require.NoError(t, manager.Close(context.Background()))
+	require.Equal(t, 0, manager.Snapshot().Clean)
+	require.Equal(t, 0, manager.Snapshot().Bound)
+	require.ElementsMatch(t, []string{"slot-a", "slot-b"}, driver.destroyed)
+
+	// Idempotent.
+	require.NoError(t, manager.Close(context.Background()))
+
+	// No further slot preparation happens after Close: a Release (which
+	// would normally replenish) must not recreate resources.
+	require.NoError(t, manager.Replenish(context.Background()))
+	require.Equal(t, 0, manager.Snapshot().Clean)
+}
+
+func TestManagerCloseRacingPreparationDiscardsSlot(t *testing.T) {
+	root := t.TempDir()
+	driver := &fakeDriver{}
+	manager := newTestManager(t, 1, root, driver, "slot-a")
+	require.NoError(t, manager.Initialize(context.Background()))
+	require.Equal(t, []string{"slot-a"}, driver.prepared)
+
+	// Close destroys the prepared slot and is idempotent.
+	require.NoError(t, manager.Close(context.Background()))
+	require.Equal(t, 0, manager.Snapshot().Clean)
+	require.Equal(t, []string{"slot-a"}, driver.destroyed)
+
+	// Replenish after Close must not prepare any further slot.
+	require.NoError(t, manager.Replenish(context.Background()))
+	require.Equal(t, []string{"slot-a"}, driver.prepared)
+	require.Equal(t, 0, manager.Snapshot().Clean)
 }
 
 func TestManagerAcquireReleaseDestroysUsedSlot(t *testing.T) {

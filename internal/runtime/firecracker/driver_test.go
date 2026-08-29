@@ -236,6 +236,9 @@ func (f *driverFixture) prepareCachedImage(t *testing.T, image string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, memorySnapshotName), []byte("memory-snapshot-data"), 0o640))
 	manifest, err := json.Marshal(map[string]any{
 		"machine": map[string]any{"vcpu": "2", "memory": "1Gi"},
+		// The baked guest address every slot netns translates its slot IP
+		// to (per-clone clone model).
+		"guestNetwork": map[string]any{"iface": "eth0", "mac": "02:00:00:00:00:01", "ip": "172.30.0.9", "gateway": "172.30.0.1", "netmask": "255.255.255.0"},
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), manifest, 0o640))
@@ -387,6 +390,12 @@ func TestEnsureSandboxBootsVM(t *testing.T) {
 	require.Equal(t, "/usr/local/bin/firecracker", fixture.launcher.started[0][0])
 	require.Contains(t, fixture.launcher.started[0], "--api-sock")
 
+	// The guest data plane is applied from the manifest guestNetwork: the
+	// bound slot records the baked guest address all slots translate to.
+	slot, exists := fixture.manager.Lookup("sandbox-1")
+	require.True(t, exists)
+	require.Equal(t, "172.30.0.9", slot.GuestIP)
+
 	calls := fixture.server.recordedCalls()
 	// v1.16 restore: LoadSnapshot is the first (and only pre-boot) API call;
 	// machine/drive/network configuration is restored from the vmstate and
@@ -422,7 +431,7 @@ func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 
 	// The snapshot/load payload references the cached golden artifacts, the
 	// per-instance NIC tap override, and leaves the VM paused for the
-	// explicit InstanceStart resume.
+	// explicit PATCH /vm resume.
 	loads := fixture.server.recordedSnapshotLoads()
 	require.Len(t, loads, 1)
 	imageDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image))
@@ -632,6 +641,19 @@ func TestGetAccessDescriptor(t *testing.T) {
 	require.ErrorIs(t, err, ErrSandboxNotFound)
 }
 
+func TestRuntimeResourceAvailable(t *testing.T) {
+	fixture := newDriverFixture(t)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+	// A prepared clean slot admits.
+	require.True(t, fixture.driver.RuntimeResourceAvailable())
+
+	// No manager: the gate fails closed.
+	fixture.driver.mu.Lock()
+	fixture.driver.networkManager = nil
+	fixture.driver.mu.Unlock()
+	require.False(t, fixture.driver.RuntimeResourceAvailable())
+}
+
 func TestCloseKillsManagedProcesses(t *testing.T) {
 	fixture := newDriverFixture(t)
 	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
@@ -722,9 +744,128 @@ func TestResolveRestoreSnapshotFilesRequiresBothArtifacts(t *testing.T) {
 	require.Equal(t, filepath.Join(dir, memorySnapshotName), memory)
 }
 
+func TestResolveBakedGuestIPFallsBackWithoutManifest(t *testing.T) {
+	stateRoot := t.TempDir()
+	image := "example.com/app:v1"
+	dir := filepath.Join(stateRoot, imageCacheDir, imageKey(image))
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, rootfsImageName), []byte("rootfs"), 0o640))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, vmstateSnapshotName), []byte("vmstate"), 0o640))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, memorySnapshotName), []byte("memory"), 0o640))
+
+	// No manifest: the BakedGuestIP convention (gateway + 2, the baked
+	// address of the builder/E2E prep) is the fallback.
+	guestIP, err := resolveBakedGuestIP(stateRoot, image, &fastletnetwork.Slot{Gateway: "172.30.0.1"})
+	require.NoError(t, err)
+	require.Equal(t, "172.30.0.3", guestIP)
+
+	// A corrupt manifest fails explicitly instead of silently guessing.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), []byte("{"), 0o640))
+	_, err = resolveBakedGuestIP(stateRoot, image, &fastletnetwork.Slot{Gateway: "172.30.0.1"})
+	require.Error(t, err)
+}
+
 func TestCloseResetsDriver(t *testing.T) {
 	fixture := newDriverFixture(t)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 	require.NoError(t, fixture.driver.Close())
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+}
+
+// enableJailer activates the jailer mode on a fixture (the fake launcher
+// records the jailer argv; the jail root is prepared on the real StateRoot).
+func (f *driverFixture) enableJailer() {
+	f.driver.config.JailerPath = "/usr/local/bin/jailer"
+}
+
+func TestEnsureSandboxJailerMode(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.enableJailer()
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	metadata, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	require.NoError(t, err)
+	require.Equal(t, string(PhaseRunning), metadata.Phase)
+
+	// The jailer launches firecracker inside the slot netns and its chroot.
+	require.Len(t, fixture.launcher.started, 1)
+	require.Equal(t, "/usr/local/bin/jailer", fixture.launcher.started[0][0])
+	started := fixture.launcher.started[0]
+	require.Equal(t, "--id", started[argvIndex(started, "--id")])
+	require.Equal(t, "--netns", started[argvIndex(started, "--netns")])
+	require.Equal(t, "--chroot-base-dir", started[argvIndex(started, "--chroot-base-dir")])
+	require.Equal(t, filepath.Join(fixture.stateRoot, jailerChrootBaseDir), started[argvIndex(started, "--chroot-base-dir")+1])
+	// The slot netns is the manager's NetNSPath.
+	slot, exists := fixture.manager.Lookup("sandbox-1")
+	require.True(t, exists)
+	require.Equal(t, slot.NetNSPath, started[argvIndex(started, "--netns")+1])
+	// The post--- firecracker args use the chroot-relative socket path.
+	require.Contains(t, started, jailerChrootAPISock)
+
+	// The jail root holds the instance rootfs copy and the hard-linked
+	// snapshot files; the persisted API address points at the jail socket.
+	jailRoot := jailerRoot(filepath.Join(fixture.stateRoot, jailerChrootBaseDir), "firecracker", "sandbox-1")
+	content, err := os.ReadFile(filepath.Join(jailRoot, rootfsImageName))
+	require.NoError(t, err)
+	require.Equal(t, "rootfs-image-data", string(content))
+	for _, name := range []string{vmstateSnapshotName, memorySnapshotName} {
+		inJail, statErr := os.Stat(filepath.Join(jailRoot, jailerChrootSnapshotsDir, name))
+		require.NoError(t, statErr)
+		inCache, statErr := os.Stat(filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image), name))
+		require.NoError(t, statErr)
+		require.True(t, os.SameFile(inJail, inCache), "%s must be hard-linked into the jail root", name)
+	}
+	directory, err := sandboxDir(fixture.stateRoot, "sandbox-1")
+	require.NoError(t, err)
+	state, err := loadState(directory)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(jailRoot, "api.sock"), state.APIAddress)
+
+	// The restore payload addresses the snapshots via the chroot-relative
+	// paths and overrides the NIC tap with the in-namespace tap name.
+	loads := fixture.server.recordedSnapshotLoads()
+	require.Len(t, loads, 1)
+	require.Equal(t, "/snapshots/"+vmstateSnapshotName, loads[0].SnapshotPath)
+	require.Equal(t, "File", loads[0].MemBackend.BackendType)
+	require.Equal(t, "/snapshots/"+memorySnapshotName, loads[0].MemBackend.BackendPath)
+	require.Len(t, loads[0].NetworkOverrides, 1)
+	require.Equal(t, "eth0", loads[0].NetworkOverrides[0].IfaceID)
+	require.Equal(t, slot.GuestTap, loads[0].NetworkOverrides[0].HostDevName)
+}
+
+func TestDeleteSandboxRemovesJailRoot(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.enableJailer()
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	require.NoError(t, err)
+	jailDir := filepath.Dir(jailerRoot(filepath.Join(fixture.stateRoot, jailerChrootBaseDir), "firecracker", "sandbox-1"))
+	_, err = os.Stat(jailDir)
+	require.NoError(t, err)
+
+	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), "sandbox-1"))
+	_, err = os.Stat(jailDir)
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestRecoverRuntimeResourcesRemovesJailRoot(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.enableJailer()
+	fixture.driver.probeProcess = func(int) error { return os.ErrNotExist }
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	directory, err := ensureSandboxDir(fixture.stateRoot, "sandbox-1")
+	require.NoError(t, err)
+	require.NoError(t, saveState(directory, &SandboxState{
+		Spec: fixture.sandboxSpec, Phase: PhaseRunning, PID: 777, APIAddress: filepath.Join(directory, "dead.sock"),
+	}))
+	jailDir := filepath.Dir(jailerRoot(filepath.Join(fixture.stateRoot, jailerChrootBaseDir), "firecracker", "sandbox-1"))
+	require.NoError(t, os.MkdirAll(filepath.Join(jailDir, "root"), 0o750))
+
+	require.NoError(t, fixture.driver.RecoverRuntimeResources(context.Background(), nil))
+	_, err = os.Stat(jailDir)
+	require.True(t, os.IsNotExist(err))
 }
