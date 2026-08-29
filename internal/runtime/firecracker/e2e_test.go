@@ -234,6 +234,11 @@ func TestFirecrackerDriverE2ELeak(t *testing.T) {
 
 	baseline := hostLeakSnapshot(t, env.stateRoot)
 	for round := 1; round <= rounds; round++ {
+		// Deleting the sandbox releases the slot; Replenish replaces it
+		// asynchronously (netns + rules take ~15 ms), so wait for the clean
+		// slot before the next create (Acquire does not block on an empty
+		// pool).
+		waitForCleanSlot(t, env.manager, capacity)
 		spec := env.spec(1)
 		ctx, end := env.traceContext(spec.SandboxID)
 		metadata, err := env.driver.EnsureSandbox(ctx, spec)
@@ -264,6 +269,20 @@ func TestFirecrackerDriverE2ELeak(t *testing.T) {
 	require.Zerof(t, after["bridgeDevs"], "bridge devices left after Manager.Close")
 	require.Zerof(t, after["jailDirs"], "jail dirs left after Manager.Close")
 	require.Zerof(t, after["fcProcs"], "VMM processes left after Manager.Close")
+}
+
+// waitForCleanSlot polls until the manager has a clean slot (Replenish
+// replaces released slots asynchronously). Fails the test on timeout.
+func waitForCleanSlot(t *testing.T, manager *fastletnetwork.Manager, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if manager.Snapshot().Clean >= want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Failf(t, "no clean network slot within 5s", "Clean=%d want>=%d", manager.Snapshot().Clean, want)
 }
 
 // hostLeakSnapshot counts the per-run host resources of the E2E: fsb* netns,
