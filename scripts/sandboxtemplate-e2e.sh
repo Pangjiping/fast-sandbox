@@ -169,6 +169,8 @@ for fmt in "${FORMATS[@]}"; do
     assert "SHA256SUMS exists" test -s "$BUILD/SHA256SUMS"
     assert "guest reached readiness" grep -q "SANDBOX_READY" "$BUILD/boot.console.log"
     assert "snapshot restore produced a guest heartbeat" grep -q "SANDBOX_HEARTBEAT" "$BUILD/restore.console.log"
+    assert "manifest records the baked guest network" jq -e '.guestNetwork.iface == "eth0" and .guestNetwork.ip == "172.30.0.3" and .guestNetwork.mac == "02:00:00:00:00:01" and .guestNetwork.gateway == "172.30.0.1"' "$BUILD/manifest.json"
+    assert "boot args bake the static guest IP" grep -q "ip=172.30.0.3::172.30.0.1:255.255.255.0::eth0:off" "$BUILD/boot.console.log"
     if [[ "$fmt" == "overlaybd" ]]; then
         assert "overlaybd rootfs layer exists" test -s "$BUILD/overlaybd/rootfs/layer.lsmt"
         assert "overlaybd memory layer exists" test -s "$BUILD/overlaybd/memory/layer.lsmt"

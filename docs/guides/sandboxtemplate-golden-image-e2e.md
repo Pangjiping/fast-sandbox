@@ -44,12 +44,19 @@ injected — an empty `spec.init` defaults to
 
 1. **convert** — pull the OCI image into an OCI layout, run oci2rootfs, loop
    mount, inject guest-init / envs / hosts, verify with e2fsck
-2. **boot + snapshot** — cold boot the VM, wait for the guest `SANDBOX_READY`
-   marker, pause, create a full snapshot (vmstate + memory), restore once and
-   wait for `SANDBOX_HEARTBEAT` (the guest init does not re-run after resume)
+2. **boot + snapshot** — create a transient host tap (`fc-build-tap`), cold
+   boot the VM with the baked static guest network in the boot args
+   (`ip=172.30.0.3::172.30.0.1:255.255.255.0::eth0:off`) and a NIC attached
+   (iface `eth0`, MAC `02:00:00:00:00:01`), wait for the guest
+   `SANDBOX_READY` marker, pause, create a full snapshot (vmstate + memory),
+   restore once and wait for `SANDBOX_HEARTBEAT` (the guest init does not
+   re-run after resume), then remove the tap. The restored instance owns the
+   baked address; consumers replace only the host tap via
+   `network_overrides`
 3. **package** (overlaybd only) — import rootfs and memory into LSMT layers
-4. **manifest** — assemble `manifest.json` (content-addressed) and SHA256SUMS
-   (covering only the published artifact set)
+4. **manifest** — assemble `manifest.json` (content-addressed, includes the
+   `guestNetwork` record) and SHA256SUMS (covering only the published artifact
+   set)
 
 After each run the script cross-checks every manifest digest against
 `sha256sum` on the produced files, so a hasher regression (e.g. the sparse
@@ -76,6 +83,9 @@ Notes:
 - The declared `rootfsSize` (e.g. "10Gi") is a minimum: oci2rootfs takes SI
   units, so the builder rounds UP (`10Gi` → `--size 11G` → 11 GiB file), and
   the produced rootfs always has at least the declared capacity
+- The snapshot bakes a NIC with a static guest IP/MAC (recorded in
+  `manifest.guestNetwork`); it carries no active connections, matching the
+  restore-only runtime contract
 - The rootfs is sparse: `ls -lh` shows the 11 GiB logical size while ~1.1 GiB
   is actually allocated (ext4 metadata, journal, and the expanded OCI content)
 
