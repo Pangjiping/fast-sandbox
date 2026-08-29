@@ -238,14 +238,14 @@ clone 同样工作。
 
 1. ~~firecracker `--netns` 可用性~~ **已验证（v1.16.1）：不支持**——载体现
    状为 jailer `--netns`（上游官方路径）；
-2. **jailer `--netns` 完整行为**（施工前必做）：`jailer --id x --netns
-   /var/run/netns/fctest --uid 0 --gid 0 --chroot-base <dir> --exec-file
-   <firecracker> -- --api-sock /api.sock ...` 启动后断言：
-   - 进程 netns inode == 目标 netns；
-   - 宿主侧 socket 出现在 `<chroot-base>/x/root/api.sock`；
-   - netns 内 tap（先创建）能被 firecracker 打开（`network_overrides`
-     或启动参数引用）；
-   - NodeJanitor 参数匹配（`--id` 可见性）。
+2. **jailer `--netns` 完整行为** **已验证（参考机）**：
+   - 进程进入目标 netns：firecracker 进程 ns/net inode ==
+     `/var/run/netns/<ns>` inode（4026536959 一致）；
+   - chroot 目录结构：`<chroot-base>/<exec-basename>/<id>/root/`；
+   - API socket 可用（`/version` 200）；
+   - 启动形态：非 daemonize 时 jailer **exec** firecracker（PID 不变）；
+   - tap 打开与 network_overrides 引用随施工 E2E 一并验证（netns 内
+     tap 已确认可创建）。
 
 ## 待决策项
 
