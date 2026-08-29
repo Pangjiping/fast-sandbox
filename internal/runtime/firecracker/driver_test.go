@@ -641,6 +641,19 @@ func TestGetAccessDescriptor(t *testing.T) {
 	require.ErrorIs(t, err, ErrSandboxNotFound)
 }
 
+func TestRuntimeResourceAvailable(t *testing.T) {
+	fixture := newDriverFixture(t)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+	// A prepared clean slot admits.
+	require.True(t, fixture.driver.RuntimeResourceAvailable())
+
+	// No manager: the gate fails closed.
+	fixture.driver.mu.Lock()
+	fixture.driver.networkManager = nil
+	fixture.driver.mu.Unlock()
+	require.False(t, fixture.driver.RuntimeResourceAvailable())
+}
+
 func TestCloseKillsManagedProcesses(t *testing.T) {
 	fixture := newDriverFixture(t)
 	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)

@@ -223,6 +223,18 @@ func (d *Driver) SetNetworkManager(manager *fastletnetwork.Manager) {
 	d.mu.Unlock()
 }
 
+// RuntimeResourceAvailable implements runtimecontract.ResourceAdmission:
+// admission is gated on a clean network slot. Released slots are replaced by
+// Replenish asynchronously (netns + rules take ~15 ms), so burst creates
+// during that window are rejected BEFORE side effects (the control plane
+// retries) instead of failing mid-EnsureSandbox with ErrNoCleanSlot.
+func (d *Driver) RuntimeResourceAvailable() bool {
+	d.mu.RLock()
+	manager := d.networkManager
+	d.mu.RUnlock()
+	return manager != nil && manager.Snapshot().Clean > 0
+}
+
 // SetInfraManager wires the prepared Infra Component plan. Artifacts are
 // copied into the per-instance guest rootfs before boot (GuestCopy delivery).
 func (d *Driver) SetInfraManager(manager *fastletinfra.Manager) {
