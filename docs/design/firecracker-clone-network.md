@@ -102,13 +102,15 @@ v1.16.1）是**唯一被验证的路径**：
 ### jailer 适配（新）
 
 - **启动**：launcher 改为 `jailer --id <id> --netns <slotNetNSPath>
-  --uid 0 --gid 0 --chroot-base <StateRoot>/jails --exec-file
-  <firecracker> -- <firecracker 参数>`（参数含 `--api-sock`、日志、`--id`
-  与 jailer 一致）；
-- **chroot 内路径**：jailer chroot 后 firecracker 创建的 API socket /
-  日志文件在 chroot 内（如 `/api.sock`、`/fc.log`），宿主侧为
-  `<chroot-base>/<id>/root/<path>`——driver 的 `state.APIAddress` 需按
-  此转换（等待 socket 用宿主路径，firecracker 内部用 chroot 路径）；
+  --uid 0 --gid 0 --exec-file <firecracker> --chroot-base-dir
+  <StateRoot>/jails -- <firecracker 参数>`（参数含 `--api-sock`；`--id`
+  由 jailer 自动传递，**不得重复传入**）；
+- **chroot 目录结构（真机验证，v1.16.1）**：
+  `<chroot-base-dir>/<exec-file basename>/<id>/root/<路径>`——即
+  `<StateRoot>/jails/firecracker/<id>/root/`。firecracker 在 chroot 内
+  创建的 API socket/日志文件，宿主侧为上述路径前缀——driver 的
+  `state.APIAddress` 按此转换（`firecracker/` 中间目录来自 exec-file
+  basename，不是固定值）；
 - **cwd 语义**：jailer chroot 后进程 cwd 在 chroot 内（`/`）——restore
   依赖的"相对 rootfs.img 经 cwd 解析"需要改为**绝对路径**（jailer 下
   相对路径语义不可靠）：快照 bake 的驱动路径改为 `<chroot>/rootfs.img`
