@@ -169,6 +169,65 @@
 
 ---
 
+## 日志收集要求（重要，贯穿全部任务）
+
+> 集成环境的调试价值取决于日志完整性——每步失败都要能从日志还原现场。
+
+- [ ] **统一日志目录**：`$WORK/logs/`（默认 `.integration-env/logs/`），
+  按组件分文件：
+  ```
+  logs/
+  ├── kind-create.log / kind-delete.log
+  ├── minio.log（docker logs 落盘）
+  ├── controller.log（kubectl logs -f 落盘）
+  ├── agent.log（DaemonSet pod 日志，启动即收集）
+  ├── fastlet.log（pod 日志，含 firecracker 启动/restore 阶段输出）
+  ├── builder-job.log（builder Job pod 日志 + boot/restore console 尾部）
+  ├── sandbox-create.log / sandbox-delete.log（断言链原始输出）
+  ├── verify.log（execd /ping、clone 验证原始输出）
+  └── environment.txt（版本快照：kind/go/firecracker/jailer/minio 版本、
+      kind kubeconfig server IP、Docker 桥 IP、镜像 tag 列表）
+  ```
+- [ ] **失败即落盘**：任何任务失败时，脚本必须把相关组件日志
+  （`kubectl logs`、`docker logs`、`mc ls`、节点容器 `dmesg`/`ls /dev/kvm`）
+  追加到 `logs/failure-<task>-<ts>.txt` 后再退出——不得静默失败；
+- [ ] 关键日志采集点（对齐 chain-e2e 的既有实践）：
+  - builder Job：`boot.console.log`/`restore.console.log` 尾部（KVM 失败
+    的现场在串口日志）；
+  - fastlet：`firecracker sandbox created`（restore 阶段耗时）、
+    firecracker 进程日志；
+  - agent：PinImage/LeaseDevices 的 RPC 与拉取错误；
+  - MinIO：`docker logs`（请求路径可见，用于回源/幂等判断）；
+- [ ] 环境版本快照（`environment.txt`）在 `up` 开头生成；
+- [ ] `status`/`verify` 也写日志（不只 stdout）。
+
+## 资源回收要求（重要，贯穿全部任务）
+
+> `down` 之后宿主必须干净，二次 `up` 不因残留失败。
+
+- [ ] **`down` 的回收清单**（逐项执行 + 每项断言）：
+  - [ ] `kind delete cluster`（确认集群不存在：`kind get clusters` 空）
+  - [ ] MinIO 容器 `docker rm -f`（确认：`docker ps` 无残留）
+  - [ ] 临时凭据/Secret 文件删除（`$WORK` 下凭据、registry.json——如保留
+    需 0600 并说明）
+  - [ ] 宿主 sysctl 恢复（`fs.inotify.max_user_instances` 记录原值并还原）
+  - [ ] 节点容器残留：`docker ps -a` 无 kind 容器；kind 网络删除
+    （`docker network ls` 无 kind 残留）
+  - [ ] 防火墙/iptables 残留：集成环境不改宿主 iptables（Kind/容器内
+    隔离），若发现改动需还原（记录）
+  - [ ] `$WORK` 大文件：日志保留、缓存/产物目录可删（`down --purge`）
+- [ ] **中断恢复**：`--cleanup` 模式执行与 `down` 相同的回收（对齐
+  chain-e2e 的 `--cleanup` 实践）；
+- [ ] **失败路径也回收**：`up` 中任一步失败 → 默认不自动 `down`（保留
+  现场供调试），但脚本提示 `integration-env.sh down` 命令；`--auto-clean`
+  选项可自动回收；
+- [ ] 二次 `up` 前置自检：检测残留（kind 集群存在/端口占用/MinIO 容器
+  在跑）并明确提示或自动清理；
+- [ ] 回收断言：`down` 结束时打印"宿主无残留"清单核对（集群/容器/
+  端口/文件）。
+
+---
+
 ## 交付物汇总
 
 | 产出 | 路径 |
@@ -188,8 +247,11 @@
    Running → execd /ping 可达 → 第二个 sandbox clone 网络可达 →
    删除清理无残留；
 3. `integration-env.sh up/status/verify` 一键全绿；
-4. 环境可重制：`down` 后二次 `up` 成功（Kind 可重制性证明）；
-5. 方案文档的待实测项（MinIO 通路地址、installer 方式）记录结论。
+4. **日志完整**：`$WORK/logs/` 覆盖全部组件（含失败现场与版本快照），
+   任一步失败可从日志还原现场；
+5. **资源回收**：`down` 后宿主无残留（集群/容器/端口/文件逐项核对），
+   `--cleanup` 可处理中断残留，二次 `up` 成功（Kind 可重制性证明）；
+6. 方案文档的待实测项（MinIO 通路地址、installer 方式）记录结论。
 
 ## 参考
 
