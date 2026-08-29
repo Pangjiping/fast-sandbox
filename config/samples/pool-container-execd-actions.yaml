@@ -1,0 +1,63 @@
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxPool
+metadata:
+  name: quickstart-execd-actions-pool
+  namespace: fast-sandbox
+spec:
+  runtime: container
+  infraComponents:
+  - name: execd
+    artifact:
+      source:
+        image:
+          reference: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd@sha256:1dc98c7de10b9a73450ac75aa0f200ad7972f2c40f5225f6a8998e166b45d6dd
+      mappings:
+      - sourcePath: /execd
+        targetPath: /.fast/components/execd/execd
+    process:
+      command: ["/.fast/components/execd/execd"]
+      restartPolicy: OnFailure
+      healthCheck:
+        httpGet:
+          path: /ping
+        timeoutSeconds: 10
+    endpoint:
+      protocol: HTTP
+      port: 44772
+  actionHandlers:
+  - name: egress
+    targetHTTPPort: 18080
+    hooks:
+    - sandbox.runtime-ready
+    - sandbox.data-plane-ready
+  sandboxResources:
+    cpu: 250m
+    memory: 256Mi
+    pids: 128
+  capacity:
+    poolMin: 1
+    poolMax: 1
+    bufferMin: 0
+    bufferMax: 0
+  maxSandboxesPerPod: 5
+  warmImages:
+  - docker.io/library/alpine:latest
+  fastletTemplate:
+    spec:
+      containers:
+      - name: fastlet
+        image: fast-sandbox/fastlet:dev
+        imagePullPolicy: IfNotPresent
+      - name: sandbox-action-fixture
+        image: fast-sandbox/sandbox-action-fixture:dev
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SANDBOX_ACTION_FIXTURE_ADDRESSES
+          value: 127.0.0.1:18080
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 10m
+            memory: 16Mi

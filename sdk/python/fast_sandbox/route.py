@@ -38,19 +38,13 @@ class EndpointResolver:
         sandbox_name: str,
         component_name: str,
         namespace: str = "",
-        *,
-        wait_timeout_seconds: float = 30,
     ) -> ResolvedRoute:
         if not component_name:
             raise ValueError("component_name is required")
-        if not 0 < wait_timeout_seconds <= 300:
-            raise ValueError("wait_timeout_seconds must be in (0, 300]")
         return self._resolve(
             sandbox_name,
             fastpath_pb2.EndpointTarget(component_name=component_name),
             namespace,
-            wait_until_ready=True,
-            wait_timeout_millis=int(wait_timeout_seconds * 1000),
         )
 
     def resolve_port(self, sandbox_name: str, target_port: int, namespace: str = "") -> ResolvedRoute:
@@ -60,8 +54,6 @@ class EndpointResolver:
             sandbox_name,
             fastpath_pb2.EndpointTarget(port=target_port),
             namespace,
-            wait_until_ready=False,
-            wait_timeout_millis=0,
         )
 
     def _resolve(
@@ -69,9 +61,6 @@ class EndpointResolver:
         sandbox_name: str,
         target,
         namespace: str,
-        *,
-        wait_until_ready: bool,
-        wait_timeout_millis: int,
     ) -> ResolvedRoute:
         if not sandbox_name:
             raise ValueError("sandbox_name is required")
@@ -86,8 +75,6 @@ class EndpointResolver:
                 ),
                 target=target,
                 access_mode=fastpath_pb2.CENTRAL_PROXY,
-                wait_until_ready=wait_until_ready,
-                wait_timeout_millis=wait_timeout_millis,
             ),
             metadata=grpc_metadata(),
         )

@@ -144,6 +144,7 @@ func (m *MockRuntime) Close() error {
 
 func ensureSandboxForTest(ctx context.Context, manager *SandboxManager, spec *fastletapi.SandboxSpec) (*fastletapi.CreateSandboxResponse, error) {
 	return manager.CreateSandbox(ctx, &fastletapi.CreateSandboxRequest{
+		SpecGeneration: 1,
 		Identity: fastletapi.SandboxIdentity{
 			RequestID: "test-" + spec.SandboxID, SandboxUID: spec.SandboxID,
 			InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + spec.SandboxID,
@@ -153,8 +154,8 @@ func ensureSandboxForTest(ctx context.Context, manager *SandboxManager, spec *fa
 	})
 }
 
-func deleteSandboxForTest(manager *SandboxManager, sandboxID string) (*fastletapi.DeleteSandboxV2Response, error) {
-	return manager.DeleteSandboxV2(&fastletapi.DeleteSandboxV2Request{Identity: fastletapi.SandboxIdentity{
+func deleteSandboxForTest(manager *SandboxManager, sandboxID string) (*fastletapi.DeleteSandboxResponse, error) {
+	return manager.DeleteSandbox(&fastletapi.DeleteSandboxRequest{Identity: fastletapi.SandboxIdentity{
 		SandboxUID: sandboxID, InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + sandboxID,
 		AssignmentAttempt: 1, FastletPodUID: manager.fastletPodUID,
 	}})
@@ -395,7 +396,8 @@ func TestSandboxManager_CreateSandbox_Success(t *testing.T) {
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1, "Should have one sandbox status")
 	assert.Equal(t, spec.SandboxID, statuses[0].SandboxID)
-	assert.Equal(t, "running", statuses[0].Phase)
+	assert.Equal(t, fastletapi.RuntimeStateReady, statuses[0].Runtime.State)
+	assert.Equal(t, fastletapi.DataPlaneStateReady, statuses[0].DataPlane.State)
 	assert.Equal(t, spec.ClaimUID, statuses[0].ClaimUID)
 }
 
@@ -515,7 +517,8 @@ func TestSandboxManager_CreateSandbox_MultipleSandboxes(t *testing.T) {
 		status, exists := statusMap[spec.SandboxID]
 		assert.True(t, exists, "Sandbox %s should exist in statuses", spec.SandboxID)
 		assert.Equal(t, spec.ClaimUID, status.ClaimUID)
-		assert.Equal(t, "running", status.Phase)
+		assert.Equal(t, fastletapi.RuntimeStateReady, status.Runtime.State)
+		assert.Equal(t, fastletapi.DataPlaneStateReady, status.DataPlane.State)
 	}
 }
 
@@ -550,7 +553,8 @@ func TestSandboxManager_DeleteSandbox_Success(t *testing.T) {
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1, "Should have one status")
 	assert.Equal(t, spec.SandboxID, statuses[0].SandboxID)
-	assert.Equal(t, "terminating", statuses[0].Phase)
+	assert.Equal(t, fastletapi.RuntimeStateStopping, statuses[0].Runtime.State)
+	assert.Equal(t, fastletapi.DataPlaneStateDraining, statuses[0].DataPlane.State)
 
 	// Wait for async deletion to complete
 	time.Sleep(100 * time.Millisecond)
@@ -688,7 +692,7 @@ func TestSandboxManager_GetSandboxStatuses(t *testing.T) {
 	// Check active sandbox is still running
 	activeStatus := statuses[0]
 	assert.Equal(t, spec2.SandboxID, activeStatus.SandboxID)
-	assert.Equal(t, "running", activeStatus.Phase, "Active sandbox should be running")
+	assert.Equal(t, fastletapi.RuntimeStateReady, activeStatus.Runtime.State, "Active sandbox should be running")
 	assert.Equal(t, spec2.ClaimUID, activeStatus.ClaimUID)
 }
 
@@ -723,8 +727,9 @@ func TestSandboxManager_GetSandboxStatuses_RuntimeStatus(t *testing.T) {
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1)
 
-	// Message should contain runtime status
-	assert.NotEmpty(t, statuses[0].Message, "Message should contain runtime status")
+	// Runtime observation carries the driver's diagnostic without flattening it
+	// into an ambiguous top-level message.
+	assert.NotEmpty(t, statuses[0].Runtime.Message, "runtime message should contain driver status")
 
 	// Verify GetSandboxStatus was called on runtime
 	callCount := mockRuntime.GetStatusCallCount(spec.SandboxID)
@@ -767,13 +772,13 @@ func TestSandboxManager_GetSandboxStatuses_MultiplePhases(t *testing.T) {
 
 	// First sandbox might be terminating or gone (async may have completed)
 	if firstStatus, exists := statusMap[specs[0].SandboxID]; exists {
-		assert.Equal(t, "terminating", firstStatus.Phase, "First sandbox should be terminating if still present")
+		assert.Equal(t, fastletapi.RuntimeStateStopping, firstStatus.Runtime.State, "First sandbox should be terminating if still present")
 	}
 
 	// Other sandboxes should be running
 	for i := 1; i < 3; i++ {
 		status := statusMap[specs[i].SandboxID]
-		assert.Equal(t, "running", status.Phase, "Sandbox %s should be running", specs[i].SandboxID)
+		assert.Equal(t, fastletapi.RuntimeStateReady, status.Runtime.State, "Sandbox %s should be running", specs[i].SandboxID)
 	}
 }
 
@@ -938,7 +943,8 @@ func TestSandboxManager_AsyncDelete_RuntimeError(t *testing.T) {
 	// retry cannot over-admit while an orphan may still exist.
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1)
-	assert.Equal(t, "delete-failed", statuses[0].Phase)
+	assert.Equal(t, fastletapi.RuntimeStateFailed, statuses[0].Runtime.State)
+	assert.Equal(t, fastletapi.DataPlaneStateFailed, statuses[0].DataPlane.State)
 	admission, _, _ := manager.State()
 	assert.Equal(t, 1, admission.Used)
 

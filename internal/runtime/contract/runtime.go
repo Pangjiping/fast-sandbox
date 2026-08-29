@@ -25,6 +25,9 @@ type Metadata struct {
 	UserProcessStartSource fastletapi.UserProcessStartSource
 	InfraServices          []infracontract.ServiceEndpoint
 	InfraDiagnostics       []infracontract.ComponentDiagnostic
+	AcceptedGeneration     int64
+	AppliedGeneration      int64
+	ActionBindingStatuses  []fastletapi.ActionBindingStatus
 }
 
 type Driver interface {

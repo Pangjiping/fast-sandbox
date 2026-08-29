@@ -52,7 +52,7 @@ func TestBasicLifecycleRecreateSameName(t *testing.T) {
 
 				runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 				assignedSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-					return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+					return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 				})
 				cancelRunWait()
 				if err != nil {
@@ -121,7 +121,7 @@ func TestDeleteSelfExitedWorkloadIsIdempotent(t *testing.T) {
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+				return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 			})
 			cancelRunWait()
 			if err != nil {
@@ -154,7 +154,7 @@ func TestDeleteSelfExitedWorkloadIsIdempotent(t *testing.T) {
 			}
 			replacementCtx, cancelReplacementWait := context.WithTimeout(ctx, 60*time.Second)
 			_, err = fixture.WaitForSandbox(replacementCtx, types.NamespacedName{Name: replacement.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+				return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 			})
 			cancelReplacementWait()
 			if err != nil {

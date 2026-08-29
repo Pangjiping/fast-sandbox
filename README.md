@@ -27,6 +27,8 @@ without rebuilding that image.
   placement intent before runtime creation, with request-level idempotency.
 - **Composable Infra Components** inject immutable artifacts and supervised
   processes directly from the Pool contract.
+- **Sandbox Actions** reconcile opaque per-Sandbox state through Pod-local,
+  generation-fenced lifecycle handlers.
 - **Private Sandbox networking** gives every instance a private address space
   and NAT egress without global host-port allocation.
 - **Named, protocol-transparent routes** expose component-native HTTP, SSE, and
@@ -178,14 +180,18 @@ state, health, Fast-Path resolution, proxies, SDK adapters, and fastctl all use
 the same name. A Pool update creates a new immutable component revision;
 existing Sandboxes are not hot-patched.
 
-`RuntimeReady` means the runtime, private network, component processes, and user
-process were created. `ComponentReady` means one component passed health and
-its local route was published. `DataPlaneReady` means every Pool component is
-ready. Create returns at `RuntimeReady`; callers may wait directly through
-Fast-Path for a component without waiting for CRD status propagation.
+`RuntimeReady` means the concrete runtime and its private network identity are
+available. `ComponentReady` means one component passed health.
+`DataPlaneReady` means Infra Components are ready and the interaction route is
+published. Aggregate `Ready` additionally requires every Action Binding to
+have applied its input and reached subscribed lifecycle Hooks. Create defaults
+to this aggregate boundary; callers may explicitly request `RuntimeReady` for
+an earlier return without waiting for CRD status propagation.
 
 See [Infra Components](docs/concepts/infra-components.md) for artifact mapping,
 process supervision, health, and named-routing semantics.
+See [Sandbox Actions](docs/guides/sandbox-actions.md) for generic Pod-local
+lifecycle handlers and opaque desired input.
 
 ## OpenSandbox integration
 
@@ -245,9 +251,10 @@ This is an architectural comparison, not a performance claim.
 
 ## Performance semantics
 
-Create latency ends at `RuntimeReady`. Component health and route publication
-continue independently until `DataPlaneReady`; OpenSandbox's user-visible
-creation boundary may therefore be later than the runtime-only boundary.
+The default Create latency ends at aggregate `Ready`. Performance experiments
+may explicitly request the earlier `RuntimeReady` boundary; component health,
+route publication and Action convergence then continue independently. Reports
+must always name the selected completion boundary.
 
 Fast Sandbox does not publish an unqualified headline latency. Results must
 record the commit, environment, runtime, cache state, concurrency, measurement

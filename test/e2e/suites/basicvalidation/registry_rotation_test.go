@@ -56,19 +56,20 @@ registries:
 				t.Fatalf("wait for Registry rotation Fastlet: %v", err)
 			}
 			podUID := onlyPoolPodUID(t, ctx, k8sClient, namespace, pool.Name)
-			initialGeneration := waitForRegistryApplied(t, waitCtx, k8sClient, namespace, pool.Name, 0)
+			initialRevision := waitForRegistryApplied(t, waitCtx, k8sClient, namespace, pool.Name, "", time.Time{})
 
 			var credential corev1.Secret
 			if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "registry-reader"}, &credential); err != nil {
 				t.Fatalf("get Registry credential Secret: %v", err)
 			}
 			credential.Data[corev1.DockerConfigJsonKey] = registryCredentialPayload("rotated")
+			rotatedAt := time.Now()
 			if err := k8sClient.Update(ctx, &credential); err != nil {
 				t.Fatalf("rotate Registry credential Secret: %v", err)
 			}
-			rotatedGeneration := waitForRegistryApplied(t, waitCtx, k8sClient, namespace, pool.Name, initialGeneration)
-			if rotatedGeneration == initialGeneration {
-				t.Fatalf("Registry target generation did not change after credential rotation")
+			rotatedRevision := waitForRegistryApplied(t, waitCtx, k8sClient, namespace, pool.Name, initialRevision, rotatedAt)
+			if rotatedRevision == initialRevision {
+				t.Fatalf("Registry revision did not change after credential rotation")
 			}
 			if current := onlyPoolPodUID(t, ctx, k8sClient, namespace, pool.Name); current != podUID {
 				t.Fatalf("Registry rotation replaced Fastlet Pod: before=%s after=%s", podUID, current)
@@ -118,21 +119,30 @@ func waitForRegistryApplied(
 	k8sClient client.Client,
 	namespace string,
 	poolName string,
-	previousGeneration int64,
-) int64 {
+	previousRevision string,
+	transitionedAfter time.Time,
+) string {
 	t.Helper()
 	for {
-		var pool apiv1alpha2.SandboxPool
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: poolName}, &pool); err == nil {
-			status := pool.Status.Registry
-			if status.TargetGeneration != 0 && status.TargetGeneration != previousGeneration &&
-				status.TotalFastlets == 1 && status.AppliedFastlets == 1 && status.LastError == "" {
-				return status.TargetGeneration
+		var compiledSecret corev1.Secret
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: poolName + "-registry"}, &compiledSecret); err == nil {
+			compiled, parseErr := registryconfig.ParseCompiled(compiledSecret.Data[registryconfig.SecretKey])
+			if parseErr == nil && compiled.Revision != "" && compiled.Revision != previousRevision {
+				var pool apiv1alpha2.SandboxPool
+				if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: poolName}, &pool); err == nil {
+					for _, condition := range pool.Status.Conditions {
+						transitioned := transitionedAfter.IsZero() || condition.LastTransitionTime.Time.After(transitionedAfter)
+						if condition.Type == apiv1alpha2.PoolConditionRegistryReady && condition.Status == metav1.ConditionTrue &&
+							condition.Reason == apiv1alpha2.ReasonRegistryAvailable && transitioned {
+							return compiled.Revision
+						}
+					}
+				}
 			}
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("wait for Registry generation after %d: %v", previousGeneration, ctx.Err())
+			t.Fatalf("wait for Registry revision after %q: %v", previousRevision, ctx.Err())
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

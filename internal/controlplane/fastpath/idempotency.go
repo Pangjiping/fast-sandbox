@@ -25,14 +25,25 @@ func ValidateRequestID(requestID string) error {
 
 // CreateSpecHash returns a deterministic digest of the immutable Create
 // intent. The transport-only request_id is excluded from the identity.
-func CreateSpecHash(req *fastpathv2.CreateRequest) (string, error) {
+func CreateSpecHash(req *fastpathv2.CreateSandboxRequest) (string, error) {
 	if req == nil {
 		return "", errors.New("create request is required")
 	}
-	normalized := proto.Clone(req).(*fastpathv2.CreateRequest)
+	normalized := proto.Clone(req).(*fastpathv2.CreateSandboxRequest)
 	normalized.RequestId = ""
+	normalized.Completion = fastpathv2.CreateCompletion_CREATE_COMPLETION_UNSPECIFIED
 	if normalized.Namespace == "" {
 		normalized.Namespace = "fast-sandbox"
+	}
+	seen := make(map[string]struct{}, len(normalized.ActionBindings))
+	for _, binding := range normalized.ActionBindings {
+		if binding == nil || binding.Handler == "" {
+			return "", errors.New("Action Binding Handler is required")
+		}
+		if _, found := seen[binding.Handler]; found {
+			return "", errors.New("duplicate Action Binding Handler: " + binding.Handler)
+		}
+		seen[binding.Handler] = struct{}{}
 	}
 
 	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(normalized)

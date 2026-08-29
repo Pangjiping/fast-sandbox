@@ -88,8 +88,8 @@ func (a AssignmentEnvelope) Validate() error {
 	if a.Version != AssignmentEnvelopeVersion {
 		return fmt.Errorf("unsupported assignment version %q", a.Version)
 	}
-	statusAssignment := a.StatusAssignment()
-	if err := statusAssignment.Validate(); err != nil {
+	statusPlacement := a.StatusPlacement()
+	if err := statusPlacement.Validate(); err != nil {
 		return err
 	}
 	if a.InstanceGeneration < apiv1alpha2.InitialInstanceGeneration {
@@ -113,10 +113,10 @@ func (a AssignmentEnvelope) Validate() error {
 	return nil
 }
 
-func (a AssignmentEnvelope) StatusAssignment() apiv1alpha2.SandboxAssignment {
-	return apiv1alpha2.SandboxAssignment{
-		FastletName: a.FastletName, FastletPodUID: a.FastletPodUID,
-		NodeName: a.NodeName, Attempt: a.Attempt, InfraRevision: a.InfraRevision,
+func (a AssignmentEnvelope) StatusPlacement() apiv1alpha2.PlacementStatus {
+	return apiv1alpha2.PlacementStatus{
+		FastletName: a.FastletName, FastletPodUID: types.UID(a.FastletPodUID),
+		Attempt: a.Attempt,
 	}
 }
 
@@ -183,19 +183,18 @@ func EffectiveAssignment(sandbox *apiv1alpha2.Sandbox) (*AssignmentEnvelope, err
 		return nil, err
 	}
 	if envelope == nil {
-		if sandbox.Status.Assignment != nil {
+		if sandbox.Status.Placement.FastletName != "" {
 			return nil, ErrAssignmentAnnotationMissing
 		}
 		return nil, nil
 	}
-	if sandbox.Status.Assignment == nil {
+	if sandbox.Status.Placement.FastletName == "" {
 		return envelope, nil
 	}
-	want := envelope.StatusAssignment()
-	if !assignmentsEqual(*sandbox.Status.Assignment, want) ||
-		sandbox.Status.AssignmentAttempt != envelope.Attempt ||
-		sandbox.Status.InstanceGeneration != envelope.InstanceGeneration ||
-		sandbox.Status.RouteGeneration != envelope.RouteGeneration {
+	want := envelope.StatusPlacement()
+	if !placementsEqual(sandbox.Status.Placement, want) ||
+		sandbox.Status.Runtime.Generation != envelope.InstanceGeneration ||
+		sandbox.Status.DataPlane.RouteGeneration != envelope.RouteGeneration {
 		return nil, ErrAssignmentProjectionConflict
 	}
 	return envelope, nil

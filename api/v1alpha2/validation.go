@@ -13,11 +13,59 @@ import (
 
 const InitialInstanceGeneration int64 = 1
 
+const (
+	MaxActionBindingInputBytes        = 64 << 10
+	MaxSandboxActionBindingInputBytes = 256 << 10
+)
+
 var (
 	ErrRuntimeImmutable       = errors.New("spec.runtime is immutable")
 	ErrResourcesImmutable     = errors.New("spec.sandboxResources is immutable")
 	ErrInfraComponentsInvalid = errors.New("spec.infraComponents is invalid")
+	ErrActionHandlersInvalid  = errors.New("spec.actionHandlers is invalid")
+	ErrActionHandlersRemoved  = errors.New("existing spec.actionHandlers names cannot be removed or renamed")
+	ErrActionBindingsInvalid  = errors.New("spec.actionBindings is invalid")
 )
+
+var reservedActionHandlerPorts = map[int32]string{
+	5758: "Fastlet control",
+	5780: "Fastlet Proxy data",
+	9093: "Fastlet Proxy metrics",
+}
+
+// ValidateActionBindings verifies the ordered per-Sandbox inputs against the
+// Handler names declared by its Pool.
+func (s *SandboxSpec) ValidateActionBindings(handlers []ActionHandler) error {
+	if s == nil {
+		return fmt.Errorf("%w: Sandbox spec is required", ErrActionBindingsInvalid)
+	}
+	if len(s.ActionBindings) > 16 {
+		return fmt.Errorf("%w: at most 16 Action Bindings are allowed", ErrActionBindingsInvalid)
+	}
+	declared := make(map[string]struct{}, len(handlers))
+	for _, handler := range handlers {
+		declared[handler.Name] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(s.ActionBindings))
+	totalInputBytes := 0
+	for index, binding := range s.ActionBindings {
+		if _, found := declared[binding.Handler]; !found {
+			return fmt.Errorf("%w: Handler %q is not declared by the Pool", ErrActionBindingsInvalid, binding.Handler)
+		}
+		if _, found := seen[binding.Handler]; found {
+			return fmt.Errorf("%w: duplicate Handler %q at index %d", ErrActionBindingsInvalid, binding.Handler, index)
+		}
+		seen[binding.Handler] = struct{}{}
+		if len(binding.Input) > MaxActionBindingInputBytes {
+			return fmt.Errorf("%w: Handler %q input exceeds %d bytes", ErrActionBindingsInvalid, binding.Handler, MaxActionBindingInputBytes)
+		}
+		totalInputBytes += len(binding.Input)
+		if totalInputBytes > MaxSandboxActionBindingInputBytes {
+			return fmt.Errorf("%w: Action Binding inputs exceed %d bytes", ErrActionBindingsInvalid, MaxSandboxActionBindingInputBytes)
+		}
+	}
+	return nil
+}
 
 var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
@@ -29,6 +77,52 @@ func IsRuntimeName(name RuntimeName) bool {
 	default:
 		return false
 	}
+}
+
+// ValidateActionHandlers verifies names and Pod-loopback target ports.
+func (s *SandboxPoolSpec) ValidateActionHandlers() error {
+	if s == nil {
+		return fmt.Errorf("%w: pool spec is required", ErrActionHandlersInvalid)
+	}
+	if len(s.ActionHandlers) > 16 {
+		return fmt.Errorf("%w: at most 16 Action Handlers are allowed", ErrActionHandlersInvalid)
+	}
+	names := make(map[string]struct{}, len(s.ActionHandlers))
+	ports := make(map[int32]string, len(s.ActionHandlers))
+	supportedHooks := map[LifecycleHook]struct{}{
+		LifecycleHookRuntimeReady: {}, LifecycleHookDataPlaneReady: {},
+	}
+	for index := range s.ActionHandlers {
+		handler := &s.ActionHandlers[index]
+		if problems := k8svalidation.IsDNS1123Label(handler.Name); len(problems) != 0 || strings.HasPrefix(handler.Name, "fast-sandbox-") {
+			return fmt.Errorf("%w: Handler %d has invalid or reserved name %q", ErrActionHandlersInvalid, index, handler.Name)
+		}
+		if _, found := names[handler.Name]; found {
+			return fmt.Errorf("%w: duplicate Handler name %q", ErrActionHandlersInvalid, handler.Name)
+		}
+		names[handler.Name] = struct{}{}
+		if handler.TargetHTTPPort < 1 || handler.TargetHTTPPort > 65535 {
+			return fmt.Errorf("%w: Handler %s targetHTTPPort is invalid", ErrActionHandlersInvalid, handler.Name)
+		}
+		if owner, reserved := reservedActionHandlerPorts[handler.TargetHTTPPort]; reserved {
+			return fmt.Errorf("%w: Handler %s targetHTTPPort %d is reserved by %s", ErrActionHandlersInvalid, handler.Name, handler.TargetHTTPPort, owner)
+		}
+		if owner, found := ports[handler.TargetHTTPPort]; found {
+			return fmt.Errorf("%w: Handlers %s and %s use duplicate targetHTTPPort %d", ErrActionHandlersInvalid, owner, handler.Name, handler.TargetHTTPPort)
+		}
+		ports[handler.TargetHTTPPort] = handler.Name
+		hooks := make(map[LifecycleHook]struct{}, len(handler.Hooks))
+		for _, hook := range handler.Hooks {
+			if _, supported := supportedHooks[hook]; !supported {
+				return fmt.Errorf("%w: Handler %s declares unsupported lifecycle Hook %q", ErrActionHandlersInvalid, handler.Name, hook)
+			}
+			if _, duplicate := hooks[hook]; duplicate {
+				return fmt.Errorf("%w: Handler %s declares duplicate lifecycle Hook %q", ErrActionHandlersInvalid, handler.Name, hook)
+			}
+			hooks[hook] = struct{}{}
+		}
+	}
+	return nil
 }
 
 // ValidateRuntime verifies that the Pool selects one built-in runtime profile.
@@ -160,6 +254,12 @@ func ValidateSandboxPoolUpdate(oldSpec, newSpec *SandboxPoolSpec) error {
 	if err := newSpec.ValidateInfraComponents(); err != nil {
 		return fmt.Errorf("new pool Infra Components: %w", err)
 	}
+	if err := oldSpec.ValidateActionHandlers(); err != nil {
+		return fmt.Errorf("old pool Action Handlers: %w", err)
+	}
+	if err := newSpec.ValidateActionHandlers(); err != nil {
+		return fmt.Errorf("new pool Action Handlers: %w", err)
+	}
 	if oldSpec.Runtime != newSpec.Runtime {
 		return ErrRuntimeImmutable
 	}
@@ -167,6 +267,15 @@ func ValidateSandboxPoolUpdate(oldSpec, newSpec *SandboxPoolSpec) error {
 		oldSpec.SandboxResources.Memory.Cmp(newSpec.SandboxResources.Memory) != 0 ||
 		oldSpec.SandboxResources.PIDs != newSpec.SandboxResources.PIDs {
 		return ErrResourcesImmutable
+	}
+	newNames := make(map[string]struct{}, len(newSpec.ActionHandlers))
+	for _, handler := range newSpec.ActionHandlers {
+		newNames[handler.Name] = struct{}{}
+	}
+	for _, handler := range oldSpec.ActionHandlers {
+		if _, found := newNames[handler.Name]; !found {
+			return fmt.Errorf("%w: %s", ErrActionHandlersRemoved, handler.Name)
+		}
 	}
 	return nil
 }
@@ -180,22 +289,19 @@ func NextInstanceGeneration(current int64) int64 {
 	return current + 1
 }
 
-// Validate verifies the assignment identity required for fencing.
-func (a *SandboxAssignment) Validate() error {
-	if a == nil {
-		return errors.New("assignment is required")
+// Validate verifies the active placement projection required for fencing.
+func (p *PlacementStatus) Validate() error {
+	if p == nil {
+		return errors.New("placement is required")
 	}
-	if a.FastletName == "" {
+	if p.FastletName == "" {
 		return errors.New("fastletName is required")
 	}
-	if a.FastletPodUID == "" {
+	if p.FastletPodUID == "" {
 		return errors.New("fastletPodUID is required")
 	}
-	if a.Attempt < 1 {
+	if p.Attempt < 1 {
 		return errors.New("attempt must be at least 1")
-	}
-	if a.InfraRevision == "" {
-		return errors.New("infraRevision is required")
 	}
 	return nil
 }

@@ -752,11 +752,13 @@ func (m *Manager) deployFastSandbox(ctx context.Context) error {
 		action func(context.Context) error
 	}{
 		{label: "Building core development images", name: "make", args: []string{"images", "COMPONENT=core"}},
+		{label: "Building Sandbox Action fixture image", name: "make", args: []string{"images", "COMPONENT=sandbox-action-fixture"}},
 		{label: "Loading controller image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/controller:dev", "--name", m.settings.ClusterName}},
 		{label: "Loading Fastlet image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/fastlet:dev", "--name", m.settings.ClusterName}},
 		{label: "Loading Fastlet Proxy image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/fastlet-proxy:dev", "--name", m.settings.ClusterName}},
 		{label: "Loading Sandbox Proxy image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/sandbox-proxy:dev", "--name", m.settings.ClusterName}},
 		{label: "Loading NodeJanitor image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/janitor:dev", "--name", m.settings.ClusterName}},
+		{label: "Loading Sandbox Action fixture image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/sandbox-action-fixture:dev", "--name", m.settings.ClusterName}},
 		{label: "Applying Fast Sandbox namespaces", name: "kubectl", args: []string{"apply", "-k", "config/namespaces"}},
 		{label: "Removing legacy default-namespace components", action: m.removeLegacyDefaultComponents},
 		{label: "Checking alpha CRD compatibility", action: m.resetIncompatibleAlphaCRDs},

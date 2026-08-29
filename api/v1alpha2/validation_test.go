@@ -37,16 +37,39 @@ func TestValidateSandboxPoolUpdate(t *testing.T) {
 	require.ErrorIs(t, ValidateSandboxPoolUpdate(&base, &resourcesChanged), ErrResourcesImmutable)
 }
 
+func TestValidateActionHandlersAndRejectRemoval(t *testing.T) {
+	handler := ActionHandler{Name: "egress", TargetHTTPPort: 18080}
+	base := SandboxPoolSpec{Runtime: RuntimeContainer, ActionHandlers: []ActionHandler{handler}}
+	require.NoError(t, base.ValidateActionHandlers())
+
+	duplicate := base
+	duplicate.ActionHandlers = append(duplicate.ActionHandlers, handler)
+	require.ErrorIs(t, duplicate.ValidateActionHandlers(), ErrActionHandlersInvalid)
+
+	for _, port := range []int32{5758, 5780, 9093} {
+		reserved := base
+		reserved.ActionHandlers = append([]ActionHandler(nil), base.ActionHandlers...)
+		reserved.ActionHandlers[0].TargetHTTPPort = port
+		require.ErrorIs(t, reserved.ValidateActionHandlers(), ErrActionHandlersInvalid)
+	}
+
+	removed := base
+	removed.ActionHandlers = nil
+	// Fill the otherwise required immutable fields equally; Action removal is
+	// the only relevant difference.
+	require.ErrorIs(t, ValidateSandboxPoolUpdate(&base, &removed), ErrActionHandlersRemoved)
+}
+
 func TestGenerationAndAssignmentValidation(t *testing.T) {
 	require.Equal(t, int64(1), NextInstanceGeneration(0))
 	require.Equal(t, int64(2), NextInstanceGeneration(1))
 
-	assignment := &SandboxAssignment{
-		FastletName: "fastlet-1", FastletPodUID: "pod-uid", Attempt: 1, InfraRevision: "sha256:infra",
+	placement := &PlacementStatus{
+		FastletName: "fastlet-1", FastletPodUID: "pod-uid", Attempt: 1,
 	}
-	require.NoError(t, assignment.Validate())
-	assignment.Attempt = 0
-	require.Error(t, assignment.Validate())
+	require.NoError(t, placement.Validate())
+	placement.Attempt = 0
+	require.Error(t, placement.Validate())
 }
 
 func TestValidateInfraComponents(t *testing.T) {

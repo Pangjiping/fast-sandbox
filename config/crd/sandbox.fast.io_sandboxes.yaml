@@ -39,6 +39,28 @@ spec:
           spec:
             description: SandboxSpec defines the desired state of Sandbox.
             properties:
+              actionBindings:
+                description: ActionBindings is atomic because its order defines Handler
+                  invocation order.
+                items:
+                  properties:
+                    handler:
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    input:
+                      description: |-
+                        Input is opaque Handler-owned data. Fast Sandbox preserves the UTF-8
+                        bytes exactly and never parses or canonicalizes its contents.
+                      maxLength: 65536
+                      type: string
+                  required:
+                  - handler
+                  - input
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
               args:
                 items:
                   type: string
@@ -237,7 +259,7 @@ spec:
               resetRevision:
                 description: |-
                   ResetRevision is an opaque token (usually a timestamp) used to trigger a manual reset.
-                  When Spec.ResetRevision > Status.AcceptedResetRevision, the sandbox will be rescheduled.
+                  When Spec.ResetRevision > Status.Runtime.AcceptedResetRevision, the sandbox will be rescheduled.
                 format: date-time
                 type: string
               workingDir:
@@ -246,77 +268,38 @@ spec:
             - image
             - poolRef
             type: object
+            x-kubernetes-validations:
+            - message: actionBindings must use unique Handler names
+              rule: '!has(self.actionBindings) || self.actionBindings.all(x, self.actionBindings.filter(y,
+                y.handler == x.handler).size() == 1)'
           status:
             description: SandboxStatus defines the observed state of Sandbox.
             properties:
-              acceptedResetRevision:
-                description: AcceptedResetRevision reflects the latest reset revision
-                  that was processed by the controller.
-                format: date-time
-                type: string
-              assignment:
-                description: Assignment is the authoritative placement for the active
-                  instance.
-                properties:
-                  attempt:
-                    format: int64
-                    type: integer
-                  fastletName:
-                    type: string
-                  fastletPodUID:
-                    type: string
-                  infraRevision:
-                    description: |-
-                      InfraRevision is the exact Pool component revision admitted by this
-                      runtime instance.
-                    type: string
-                  nodeName:
-                    type: string
-                required:
-                - attempt
-                - fastletName
-                - fastletPodUID
-                type: object
-              assignmentAttempt:
-                description: |-
-                  AssignmentAttempt is the monotonic high-water mark retained even while
-                  Assignment is cleared, so a reschedule can never reuse an old fence.
-                format: int64
-                type: integer
-              components:
+              actionBindings:
                 items:
-                  description: |-
-                    InfraComponentStatus is the durable projection of Fastlet-local component
-                    health and named route publication.
                   properties:
+                    handler:
+                      type: string
                     lastTransitionTime:
                       format: date-time
                       type: string
                     message:
                       type: string
-                    name:
-                      type: string
-                    observedRouteGeneration:
-                      format: int64
-                      type: integer
-                    port:
-                      format: int32
-                      type: integer
-                    protocol:
-                      type: string
                     state:
-                      description: InfraComponentState is the lifecycle of one named
-                        local component route.
+                      description: ActionState is the observed lifecycle of one Action
+                        Binding.
                       enum:
-                      - Starting
+                      - Pending
+                      - Applying
                       - Ready
                       - Failed
                       type: string
                   required:
-                  - name
+                  - handler
                   - state
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -373,75 +356,114 @@ spec:
                   - type
                   type: object
                 type: array
-              dataPlaneState:
-                description: ObservedState is the independently observed state of
-                  a Sandbox subsystem.
-                enum:
-                - Unknown
-                - Pending
-                - Creating
-                - Ready
-                - Draining
-                - Stopped
-                - Failed
-                - Unavailable
-                type: string
-              infraRevision:
-                type: string
-              instanceGeneration:
-                description: InstanceGeneration fences reset/recreate operations for
-                  the same CRD UID.
-                format: int64
-                type: integer
-              recovery:
-                description: |-
-                  SandboxRecoveryStatus persists the first confirmed loss and its deadline so
-                  Controller restarts cannot restart the recovery timer.
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              dataPlane:
                 properties:
-                  deadline:
+                  lastTransitionTime:
                     format: date-time
                     type: string
-                  detectedAt:
-                    format: date-time
+                  message:
+                    type: string
+                  routeGeneration:
+                    format: int64
+                    type: integer
+                  state:
+                    description: DataPlaneState is the lifecycle of the Sandbox interaction
+                      route.
+                    enum:
+                    - Unknown
+                    - Pending
+                    - Publishing
+                    - Ready
+                    - Draining
+                    - Failed
+                    - Unavailable
+                    type: string
+                type: object
+              infraComponents:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    state:
+                      description: InfraComponentState is the lifecycle of one named
+                        local component route.
+                      enum:
+                      - Starting
+                      - Ready
+                      - Failed
+                      type: string
+                  required:
+                  - name
+                  - state
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              observedGeneration:
+                format: int64
+                type: integer
+              placement:
+                properties:
+                  attempt:
+                    format: int64
+                    type: integer
+                  fastletName:
                     type: string
                   fastletPodUID:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
                     type: string
-                required:
-                - deadline
-                - detectedAt
-                - fastletPodUID
+                  recovery:
+                    properties:
+                      deadline:
+                        format: date-time
+                        type: string
+                      detectedAt:
+                        format: date-time
+                        type: string
+                    required:
+                    - deadline
+                    - detectedAt
+                    type: object
                 type: object
-              routeGeneration:
-                description: RouteGeneration fences stale local and cluster proxy
-                  routes.
-                format: int64
-                type: integer
-              runtimeState:
-                description: ObservedState is the independently observed state of
-                  a Sandbox subsystem.
-                enum:
-                - Unknown
-                - Pending
-                - Creating
-                - Ready
-                - Draining
-                - Stopped
-                - Failed
-                - Unavailable
-                type: string
-              userProcessState:
-                description: ObservedState is the independently observed state of
-                  a Sandbox subsystem.
-                enum:
-                - Unknown
-                - Pending
-                - Creating
-                - Ready
-                - Draining
-                - Stopped
-                - Failed
-                - Unavailable
-                type: string
+              runtime:
+                properties:
+                  acceptedResetRevision:
+                    format: date-time
+                    type: string
+                  generation:
+                    format: int64
+                    type: integer
+                  lastTransitionTime:
+                    format: date-time
+                    type: string
+                  message:
+                    type: string
+                  state:
+                    description: RuntimeState is the lifecycle of the concrete Sandbox
+                      runtime.
+                    enum:
+                    - Unknown
+                    - Pending
+                    - Creating
+                    - Ready
+                    - Stopping
+                    - Stopped
+                    - Failed
+                    - Unavailable
+                    type: string
+                type: object
             type: object
         type: object
     served: true

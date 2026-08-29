@@ -46,11 +46,11 @@ func (s *FastletServer) Handler() http.Handler {
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/api/v2/fastlet/create", s.handleCreate)
 	mux.HandleFunc("/api/v2/fastlet/inspect", s.handleInspect)
-	mux.HandleFunc("/api/v2/fastlet/delete", s.handleDeleteV2)
+	mux.HandleFunc("/api/v2/fastlet/delete", s.handleDelete)
+	mux.HandleFunc("/api/v2/fastlet/bindings/reconcile", s.handleReconcileBindings)
 	mux.HandleFunc("/api/v2/fastlet/heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("/api/v2/fastlet/runtime-diagnostics", s.handleRuntimeDiagnostics)
 	mux.HandleFunc("/api/v2/fastlet/diagnostics/sandbox", s.handleSandboxDiagnostics)
-	mux.HandleFunc("/api/v2/fastlet/wait-data-plane", s.handleWaitSandboxReady)
 	mux.HandleFunc("/api/v2/fastlet/draining", s.handleSetDraining)
 
 	klog.InfoS("Starting fastlet HTTP server", "addr", s.addr)
@@ -96,17 +96,27 @@ func (s *FastletServer) handleInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
-	response, err := s.sandboxManager.InspectSandboxV2(&req)
+	response, err := s.sandboxManager.InspectSandbox(&req)
 	writeResponse(w, response, err)
 }
 
-func (s *FastletServer) handleDeleteV2(w http.ResponseWriter, r *http.Request) {
-	var req fastletapi.DeleteSandboxV2Request
+func (s *FastletServer) handleDelete(w http.ResponseWriter, r *http.Request) {
+	var req fastletapi.DeleteSandboxRequest
 	if !decodePost(w, r, &req) {
 		return
 	}
 	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
-	response, err := s.sandboxManager.DeleteSandboxV2(&req)
+	response, err := s.sandboxManager.DeleteSandboxContext(r.Context(), &req)
+	writeResponse(w, response, err)
+}
+
+func (s *FastletServer) handleReconcileBindings(w http.ResponseWriter, r *http.Request) {
+	var req fastletapi.ReconcileBindingsRequest
+	if !decodePost(w, r, &req) {
+		return
+	}
+	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
+	response, err := s.sandboxManager.ReconcileBindings(r.Context(), &req)
 	writeResponse(w, response, err)
 }
 
@@ -167,16 +177,6 @@ func (s *FastletServer) handleSandboxDiagnostics(w http.ResponseWriter, r *http.
 	}
 	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
 	response, err := s.sandboxManager.SandboxDiagnostics(&req)
-	writeResponse(w, response, err)
-}
-
-func (s *FastletServer) handleWaitSandboxReady(w http.ResponseWriter, r *http.Request) {
-	var req fastletapi.WaitSandboxReadyRequest
-	if !decodePost(w, r, &req) {
-		return
-	}
-	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
-	response, err := s.sandboxManager.WaitSandboxReady(r.Context(), &req)
 	writeResponse(w, response, err)
 }
 

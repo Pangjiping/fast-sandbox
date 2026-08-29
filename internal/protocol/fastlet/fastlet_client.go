@@ -19,11 +19,11 @@ import (
 type FastletAdmissionClient interface {
 	CreateSandbox(ctx context.Context, fastletIP string, req *CreateSandboxRequest) (*CreateSandboxResponse, error)
 	InspectSandbox(ctx context.Context, fastletIP string, req *InspectSandboxRequest) (*InspectSandboxResponse, error)
-	DeleteSandboxV2(ctx context.Context, fastletIP string, req *DeleteSandboxV2Request) (*DeleteSandboxV2Response, error)
+	DeleteSandbox(ctx context.Context, fastletIP string, req *DeleteSandboxRequest) (*DeleteSandboxResponse, error)
+	ReconcileBindings(ctx context.Context, fastletIP string, req *ReconcileBindingsRequest) (*ReconcileBindingsResponse, error)
 	Heartbeat(ctx context.Context, fastletIP string, req *HeartbeatRequest) (*HeartbeatResponse, error)
 	RuntimeDiagnostics(ctx context.Context, fastletIP string) (*RuntimeDiagnostics, error)
 	SandboxDiagnostics(ctx context.Context, fastletIP string, req *SandboxDiagnosticsRequest) (*SandboxDiagnosticsResponse, error)
-	WaitSandboxReady(ctx context.Context, fastletIP string, req *WaitSandboxReadyRequest) (*WaitSandboxReadyResponse, error)
 	SetDraining(ctx context.Context, fastletIP string, req *SetDrainingRequest) (*SetDrainingResponse, error)
 }
 
@@ -82,11 +82,18 @@ func (c *FastletClient) InspectSandbox(ctx context.Context, fastletIP string, re
 	return postFastletJSON[InspectSandboxRequest, InspectSandboxResponse](c, ctx, fastletIP, "/api/v2/fastlet/inspect", req)
 }
 
-func (c *FastletClient) DeleteSandboxV2(ctx context.Context, fastletIP string, req *DeleteSandboxV2Request) (*DeleteSandboxV2Response, error) {
+func (c *FastletClient) DeleteSandbox(ctx context.Context, fastletIP string, req *DeleteSandboxRequest) (*DeleteSandboxResponse, error) {
 	if req != nil {
 		ctx = withFastletIdentity(ctx, req.Identity)
 	}
-	return postFastletJSON[DeleteSandboxV2Request, DeleteSandboxV2Response](c, ctx, fastletIP, "/api/v2/fastlet/delete", req)
+	return postFastletJSON[DeleteSandboxRequest, DeleteSandboxResponse](c, ctx, fastletIP, "/api/v2/fastlet/delete", req)
+}
+
+func (c *FastletClient) ReconcileBindings(ctx context.Context, fastletIP string, req *ReconcileBindingsRequest) (*ReconcileBindingsResponse, error) {
+	if req != nil {
+		ctx = withFastletIdentity(ctx, req.Identity)
+	}
+	return postFastletJSON[ReconcileBindingsRequest, ReconcileBindingsResponse](c, ctx, fastletIP, "/api/v2/fastlet/bindings/reconcile", req)
 }
 
 func (c *FastletClient) Heartbeat(ctx context.Context, fastletIP string, req *HeartbeatRequest) (*HeartbeatResponse, error) {
@@ -110,13 +117,6 @@ func (c *FastletClient) SandboxDiagnostics(ctx context.Context, fastletIP string
 		ctx = withFastletIdentity(ctx, req.Identity)
 	}
 	return postFastletJSON[SandboxDiagnosticsRequest, SandboxDiagnosticsResponse](c, ctx, fastletIP, "/api/v2/fastlet/diagnostics/sandbox", req)
-}
-
-func (c *FastletClient) WaitSandboxReady(ctx context.Context, fastletIP string, req *WaitSandboxReadyRequest) (*WaitSandboxReadyResponse, error) {
-	if req != nil {
-		ctx = withFastletIdentity(ctx, req.Identity)
-	}
-	return postFastletJSON[WaitSandboxReadyRequest, WaitSandboxReadyResponse](c, ctx, fastletIP, "/api/v2/fastlet/wait-data-plane", req)
 }
 
 func (c *FastletClient) SetDraining(ctx context.Context, fastletIP string, req *SetDrainingRequest) (*SetDrainingResponse, error) {
@@ -190,11 +190,11 @@ func responseFastletError(response any) *FastletError {
 		return typed.Error
 	case *InspectSandboxResponse:
 		return typed.Error
-	case *DeleteSandboxV2Response:
+	case *DeleteSandboxResponse:
+		return typed.Error
+	case *ReconcileBindingsResponse:
 		return typed.Error
 	case *SandboxDiagnosticsResponse:
-		return typed.Error
-	case *WaitSandboxReadyResponse:
 		return typed.Error
 	default:
 		return nil

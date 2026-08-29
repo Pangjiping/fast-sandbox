@@ -76,7 +76,9 @@ func TestManagerEnsureBasicCreatesMissingClusterAndDeploys(t *testing.T) {
 	assertCommand(t, runner.commands, "kind", "create", "cluster", "--name", "fsb-e2e-basic", "--image", "kindest/node:v1.27.3")
 	assertCommand(t, runner.commands, "kubectl", "config", "use-context", "kind-fsb-e2e-basic")
 	assertCommand(t, runner.commands, "make", "images", "COMPONENT=core")
+	assertCommand(t, runner.commands, "make", "images", "COMPONENT=sandbox-action-fixture")
 	assertCommand(t, runner.commands, "kind", "load", "docker-image", "fast-sandbox/controller:dev", "--name", "fsb-e2e-basic")
+	assertCommand(t, runner.commands, "kind", "load", "docker-image", "fast-sandbox/sandbox-action-fixture:dev", "--name", "fsb-e2e-basic")
 	assertCommand(t, runner.commands, "kubectl", "apply", "-k", "config/namespaces")
 	assertCommand(t, runner.commands,
 		"kubectl", "delete",
@@ -158,10 +160,10 @@ func TestManagerEnsureReportsProgress(t *testing.T) {
 		"[environment 2/6] Preparing kind cluster fsb-e2e-basic...",
 		"[environment 4/6] Preparing runtime container...",
 		"[environment 6/6] Building and deploying Fast Sandbox...",
-		"[1/25] Building core development images",
-		"[8/25] Removing legacy default-namespace components",
-		"[9/25] Checking alpha CRD compatibility",
-		"[25/25] Waiting for NodeJanitor",
+		"[1/27] Building core development images",
+		"[10/27] Removing legacy default-namespace components",
+		"[11/27] Checking alpha CRD compatibility",
+		"[27/27] Waiting for NodeJanitor",
 		"Environment ready: context=kind-fsb-e2e-basic",
 	} {
 		if !strings.Contains(output, want) {

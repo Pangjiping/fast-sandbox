@@ -49,7 +49,7 @@ sequenceDiagram
   F->>K: Create Sandbox + assignment
   F->>L: atomic Create(fenced identity)
   alt runtime created or already present
-    L-->>F: RuntimeReady
+    L-->>F: requested completion reached (default aggregate Ready)
     F-->>C: complete SandboxInfo
   else rejected before side effects
     F->>K: CAS assignment to another candidate
@@ -81,13 +81,17 @@ Transport ambiguity never authorizes reassignment. Only an explicit Fastlet reje
 
 The initial assignment is stored with the Sandbox Create. Reassignment changes it with Kubernetes resource-version compare-and-swap. Reconcilers project the durable assignment and independently observed subsystem states into status.
 
-Runtime, data plane, and user process are deliberately separate:
+Runtime, data plane, Infra Components, and Action Bindings are deliberately
+separate:
 
-- `runtimeState` reports the runtime adapter;
-- `dataPlaneState` reports required Infra readiness and route publication;
-- `userProcessState` is populated only when the runtime can prove it.
+- `status.runtime` reports the runtime adapter;
+- `status.dataPlane` reports route publication;
+- `status.infraComponents` and `status.actionBindings` report ordered detailed
+  convergence;
+- the single `Ready` Condition aggregates them.
 
-Create returns at `RuntimeReady`. `DataPlaneReady` and status projection may follow asynchronously.
+Create defaults to aggregate Ready. Explicit `RUNTIME_READY` returns early;
+remaining convergence and CRD status projection then continue asynchronously.
 
 ## Local Registry
 

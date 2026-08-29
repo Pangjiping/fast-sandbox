@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	fastpathv2 "fast-sandbox/api/proto/v2"
 
@@ -60,10 +59,9 @@ type Route struct {
 // EndpointResolver converts a user-visible Sandbox name into a short-lived,
 // instance-fenced Sandbox Proxy route.
 type EndpointResolver struct {
-	Control              EndpointControl
-	ProxyBaseURL         string
-	DefaultNamespace     string
-	ComponentWaitTimeout time.Duration
+	Control          EndpointControl
+	ProxyBaseURL     string
+	DefaultNamespace string
 }
 
 func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, target RouteTarget) (Route, error) {
@@ -97,19 +95,9 @@ func (r *EndpointResolver) Resolve(ctx context.Context, sandbox SandboxRef, targ
 		targetDescription = fmt.Sprintf("port %d", target.Port)
 	}
 	request := &fastpathv2.ResolveEndpointRequest{
-		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_NamespacedName{
-			NamespacedName: &fastpathv2.NamespacedName{Namespace: namespace, Name: sandbox.Name},
-		}},
+		Sandbox:    &fastpathv2.SandboxReference{NamespacedName: &fastpathv2.NamespacedName{Namespace: namespace, Name: sandbox.Name}},
 		Target:     requestTarget,
 		AccessMode: fastpathv2.EndpointAccessMode_CENTRAL_PROXY,
-	}
-	if componentName != "" {
-		waitTimeout := r.ComponentWaitTimeout
-		if waitTimeout <= 0 {
-			waitTimeout = 30 * time.Second
-		}
-		request.WaitUntilReady = true
-		request.WaitTimeoutMillis = int32(waitTimeout.Milliseconds())
 	}
 	resolved, err := r.Control.ResolveEndpoint(ctx, request)
 	if err != nil {

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
+	actionapi "fast-sandbox/internal/protocol/action"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 type dataPlaneWorker struct {
@@ -233,6 +235,9 @@ func (m *SandboxManager) reconcileDataPlaneOnce(ctx context.Context, metadata *S
 	case "route-pending", "route-unavailable":
 		m.mu.Unlock()
 		return m.publishDataPlaneRoute(ctx, metadata)
+	case "action-pending", "action-unavailable":
+		m.mu.Unlock()
+		return true, nil
 	case "terminating", "deleting", "delete-failed", "create-cleanup", "create-cleanup-failed":
 		m.mu.Unlock()
 		return true, ctx.Err()
@@ -304,10 +309,25 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 		m.mu.Unlock()
 		return false, publishErr
 	}
-	metadata.Phase = "running"
-	m.recordDiagnosticLocked(metadata.SandboxID, "info", "fastlet", "running", "runtime, private network, Infra Components, and proxy route are ready")
+	if len(metadata.ActionBindingStatuses) > 0 {
+		metadata.Phase = "action-pending"
+		m.recordDiagnosticLocked(metadata.SandboxID, "info", "action", "action-pending", "runtime data plane is ready; subscribed lifecycle Hooks are pending")
+	} else {
+		metadata.Phase = "running"
+		m.recordDiagnosticLocked(metadata.SandboxID, "info", "fastlet", "running", "runtime, private network, Infra Components, proxy route, and Sandbox Actions are ready")
+	}
 	m.mu.Unlock()
+	m.recordActionHook(metadata, actionapi.LifecycleHookDataPlaneReady, 2)
 	return true, nil
+}
+
+func actionStatusesReady(statuses []fastletapi.ActionBindingStatus) bool {
+	for _, status := range statuses {
+		if status.State != "Ready" {
+			return false
+		}
+	}
+	return true
 }
 
 // ReconcilePendingInfra is called after profile artifacts become Prepared and

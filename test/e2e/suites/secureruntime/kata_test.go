@@ -212,13 +212,13 @@ func verifyKataFCLostFastletCleanup(
 	waitCtx, cancelWait := context.WithTimeout(ctx, 180*time.Second)
 	defer cancelWait()
 	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: sandboxName, Namespace: namespace}, func(item *apiv1alpha2.Sandbox) bool {
-		return item.Status.Assignment != nil && item.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+		return item.Status.Placement.FastletName != "" && item.Status.Runtime.State == apiv1alpha2.RuntimeReady
 	})
 	if err != nil {
 		t.Fatalf("wait for lost-Fastlet cleanup Sandbox: %v", err)
 	}
 	fastlet := &corev1.Pod{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: sandbox.Status.Assignment.FastletName, Namespace: namespace}, fastlet); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: sandbox.Status.Placement.FastletName, Namespace: namespace}, fastlet); err != nil {
 		t.Fatalf("get Firecracker Fastlet before Pod loss: %v", err)
 	}
 	sandboxID := string(sandbox.UID)
@@ -245,11 +245,11 @@ func deleteKataFCSandboxAndVerifyNoVMM(
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: sandboxName, Namespace: namespace}, sandbox); err != nil {
 		t.Fatalf("get kata-fc sandbox before deletion: %v", err)
 	}
-	if sandbox.Status.Assignment == nil {
+	if sandbox.Status.Placement.FastletName == "" {
 		t.Fatalf("kata-fc sandbox %s has no assignment before deletion", sandboxName)
 	}
 	fastlet := &corev1.Pod{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: sandbox.Status.Assignment.FastletName, Namespace: namespace}, fastlet); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: sandbox.Status.Placement.FastletName, Namespace: namespace}, fastlet); err != nil {
 		t.Fatalf("get kata-fc Fastlet before deletion: %v", err)
 	}
 	sandboxID := string(sandbox.UID)
@@ -420,13 +420,13 @@ func verifyKataRuntime(ctx context.Context, t *testing.T, kubeClient client.Clie
 	waitCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: sandboxName, Namespace: namespace}, func(item *apiv1alpha2.Sandbox) bool {
-		return item.Status.Assignment != nil && item.Status.RuntimeState == apiv1alpha2.ObservedStateReady && item.Status.DataPlaneState == apiv1alpha2.ObservedStateReady
+		return item.Status.Placement.FastletName != "" && item.Status.Runtime.State == apiv1alpha2.RuntimeReady && item.Status.DataPlane.State == apiv1alpha2.DataPlaneReady
 	})
 	if err != nil {
 		t.Fatalf("wait for %s Sandbox readiness: %v", runtimeName, err)
 	}
 	fastlet := &corev1.Pod{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: sandbox.Status.Assignment.FastletName, Namespace: namespace}, fastlet); err != nil {
+	if err := kubeClient.Get(ctx, types.NamespacedName{Name: sandbox.Status.Placement.FastletName, Namespace: namespace}, fastlet); err != nil {
 		t.Fatalf("get %s Fastlet: %v", runtimeName, err)
 	}
 	sandboxID := secureRuntimeSandboxIdentifier(sandbox)
@@ -442,13 +442,13 @@ func verifyKataRuntime(ctx context.Context, t *testing.T, kubeClient client.Clie
 	if got := secureRuntimeLogValue(guestOutput, "DNS="); got != "DNS_OK" {
 		t.Fatalf("%s DNS result = %q, want DNS_OK", runtimeName, got)
 	}
-	verifySecureRuntimeProxy(ctx, t, string(sandbox.UID), 18080, marker)
+	verifySecureRuntimeProxy(ctx, t, sandbox.Namespace, sandbox.Name, string(sandbox.UID), 18080, marker)
 
 	previousRestarts := fastletContainerRestartCount(fastlet)
 	_, _ = secureRuntimeKubectl(ctx, "exec", "-n", namespace, fastlet.Name, "-c", "fastlet", "--", "kill", "1")
 	waitForFastletContainerRestart(ctx, t, kubeClient, namespace, fastlet.Name, string(fastlet.UID), previousRestarts)
 	waitForSecureRuntimeHTTP(ctx, t, namespace, fastlet.Name, state.IP, 18080, marker, sandboxID)
-	verifySecureRuntimeProxy(ctx, t, string(sandbox.UID), 18080, marker)
+	verifySecureRuntimeProxy(ctx, t, sandbox.Namespace, sandbox.Name, string(sandbox.UID), 18080, marker)
 	t.Logf("%s isolation, resource limits, private network, proxy and recovery verified: guest kernel=%s private IP=%s", runtimeName, guestKernel, state.IP)
 }
 

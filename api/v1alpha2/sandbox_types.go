@@ -4,6 +4,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
@@ -24,58 +25,10 @@ const (
 	FailurePolicyAutoRecreate FailurePolicy = "AutoRecreate"
 )
 
-// FastletSandboxPhase defines the lifecycle phase reported by the Fastlet.
-type FastletSandboxPhase string
-
-const (
-	// FastletPhaseCreating - Fastlet is creating the container.
-	FastletPhaseCreating FastletSandboxPhase = "creating"
-	// FastletPhaseRunning - Container is running.
-	FastletPhaseRunning FastletSandboxPhase = "running"
-	// FastletPhaseStopped - Container has stopped.
-	FastletPhaseStopped FastletSandboxPhase = "stopped"
-	// FastletPhaseFailed - Container creation or execution failed.
-	FastletPhaseFailed FastletSandboxPhase = "failed"
-	// FastletPhaseTerminated - Container has been deleted and cleaned up.
-	FastletPhaseTerminated FastletSandboxPhase = "terminated"
-)
-
-// ObservedState is the independently observed state of a Sandbox subsystem.
-// +kubebuilder:validation:Enum=Unknown;Pending;Creating;Ready;Draining;Stopped;Failed;Unavailable
-type ObservedState string
-
-const (
-	ObservedStateUnknown     ObservedState = "Unknown"
-	ObservedStatePending     ObservedState = "Pending"
-	ObservedStateCreating    ObservedState = "Creating"
-	ObservedStateReady       ObservedState = "Ready"
-	ObservedStateDraining    ObservedState = "Draining"
-	ObservedStateStopped     ObservedState = "Stopped"
-	ObservedStateFailed      ObservedState = "Failed"
-	ObservedStateUnavailable ObservedState = "Unavailable"
-)
-
-// Sandbox condition types form the durable lifecycle contract shared by the
-// imperative create path, declarative controllers, Janitor, and clients.
-const (
-	SandboxConditionRuntimeReady   = "RuntimeReady"
-	SandboxConditionDataPlaneReady = "DataPlaneReady"
-)
-
-// SandboxAssignment is the authoritative placement selected through a status
-// resourceVersion compare-and-swap. FastletPodUID fences Pod replacement, while
-// Attempt fences reassignment to a different Fastlet.
-type SandboxAssignment struct {
-	FastletName   string `json:"fastletName"`
-	FastletPodUID string `json:"fastletPodUID"`
-	NodeName      string `json:"nodeName,omitempty"`
-	Attempt       int64  `json:"attempt"`
-	// InfraRevision is the exact Pool component revision admitted by this
-	// runtime instance.
-	InfraRevision string `json:"infraRevision,omitempty"`
-}
+const SandboxConditionReady = "Ready"
 
 // SandboxSpec defines the desired state of Sandbox.
+// +kubebuilder:validation:XValidation:rule="!has(self.actionBindings) || self.actionBindings.all(x, self.actionBindings.filter(y, y.handler == x.handler).size() == 1)",message="actionBindings must use unique Handler names"
 type SandboxSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image      string          `json:"image"`
@@ -99,7 +52,7 @@ type SandboxSpec struct {
 	RecoveryTimeoutSeconds int32 `json:"recoveryTimeoutSeconds,omitempty"`
 
 	// ResetRevision is an opaque token (usually a timestamp) used to trigger a manual reset.
-	// When Spec.ResetRevision > Status.AcceptedResetRevision, the sandbox will be rescheduled.
+	// When Spec.ResetRevision > Status.Runtime.AcceptedResetRevision, the sandbox will be rescheduled.
 	ResetRevision *metav1.Time `json:"resetRevision,omitempty"`
 
 	// +kubebuilder:validation:Required
@@ -107,33 +60,122 @@ type SandboxSpec struct {
 	// PoolRef specifies which SandboxPool this sandbox should be scheduled to.
 	// This field is required.
 	PoolRef string `json:"poolRef"`
+
+	// ActionBindings is atomic because its order defines Handler invocation order.
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	ActionBindings []ActionBinding `json:"actionBindings,omitempty"`
+}
+
+type ActionBinding struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	Handler string `json:"handler"`
+
+	// Input is opaque Handler-owned data. Fast Sandbox preserves the UTF-8
+	// bytes exactly and never parses or canonicalizes its contents.
+	// +kubebuilder:validation:MaxLength=65536
+	Input string `json:"input"`
+}
+
+// RuntimeState is the lifecycle of the concrete Sandbox runtime.
+// +kubebuilder:validation:Enum=Unknown;Pending;Creating;Ready;Stopping;Stopped;Failed;Unavailable
+type RuntimeState string
+
+const (
+	RuntimeUnknown     RuntimeState = "Unknown"
+	RuntimePending     RuntimeState = "Pending"
+	RuntimeCreating    RuntimeState = "Creating"
+	RuntimeReady       RuntimeState = "Ready"
+	RuntimeStopping    RuntimeState = "Stopping"
+	RuntimeStopped     RuntimeState = "Stopped"
+	RuntimeFailed      RuntimeState = "Failed"
+	RuntimeUnavailable RuntimeState = "Unavailable"
+)
+
+type RuntimeStatus struct {
+	State      RuntimeState `json:"state,omitempty"`
+	Generation int64        `json:"generation,omitempty"`
+
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+	Message            string       `json:"message,omitempty"`
+
+	AcceptedResetRevision *metav1.Time `json:"acceptedResetRevision,omitempty"`
+}
+
+// DataPlaneState is the lifecycle of the Sandbox interaction route.
+// +kubebuilder:validation:Enum=Unknown;Pending;Publishing;Ready;Draining;Failed;Unavailable
+type DataPlaneState string
+
+const (
+	DataPlaneUnknown     DataPlaneState = "Unknown"
+	DataPlanePending     DataPlaneState = "Pending"
+	DataPlanePublishing  DataPlaneState = "Publishing"
+	DataPlaneReady       DataPlaneState = "Ready"
+	DataPlaneDraining    DataPlaneState = "Draining"
+	DataPlaneFailed      DataPlaneState = "Failed"
+	DataPlaneUnavailable DataPlaneState = "Unavailable"
+)
+
+type DataPlaneStatus struct {
+	State           DataPlaneState `json:"state,omitempty"`
+	RouteGeneration int64          `json:"routeGeneration,omitempty"`
+
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+	Message            string       `json:"message,omitempty"`
+}
+
+type PlacementStatus struct {
+	Attempt int64 `json:"attempt,omitempty"`
+
+	FastletName   string    `json:"fastletName,omitempty"`
+	FastletPodUID types.UID `json:"fastletPodUID,omitempty"`
+
+	Recovery *RecoveryStatus `json:"recovery,omitempty"`
+}
+
+type RecoveryStatus struct {
+	DetectedAt metav1.Time `json:"detectedAt"`
+	Deadline   metav1.Time `json:"deadline"`
+}
+
+// ActionState is the observed lifecycle of one Action Binding.
+// +kubebuilder:validation:Enum=Pending;Applying;Ready;Failed
+type ActionState string
+
+const (
+	ActionPending  ActionState = "Pending"
+	ActionApplying ActionState = "Applying"
+	ActionReady    ActionState = "Ready"
+	ActionFailed   ActionState = "Failed"
+)
+
+type ActionBindingStatus struct {
+	Handler string      `json:"handler"`
+	State   ActionState `json:"state"`
+
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+	Message            string       `json:"message,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
-	// Assignment is the authoritative placement for the active instance.
-	Assignment *SandboxAssignment `json:"assignment,omitempty"`
-	// AssignmentAttempt is the monotonic high-water mark retained even while
-	// Assignment is cleared, so a reschedule can never reuse an old fence.
-	AssignmentAttempt int64 `json:"assignmentAttempt,omitempty"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// InstanceGeneration fences reset/recreate operations for the same CRD UID.
-	InstanceGeneration int64 `json:"instanceGeneration,omitempty"`
+	Placement PlacementStatus `json:"placement,omitempty"`
+	Runtime   RuntimeStatus   `json:"runtime,omitempty"`
+	DataPlane DataPlaneStatus `json:"dataPlane,omitempty"`
 
-	// RouteGeneration fences stale local and cluster proxy routes.
-	RouteGeneration int64 `json:"routeGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	InfraComponents []InfraComponentStatus `json:"infraComponents,omitempty"`
 
-	RuntimeState     ObservedState          `json:"runtimeState,omitempty"`
-	DataPlaneState   ObservedState          `json:"dataPlaneState,omitempty"`
-	UserProcessState ObservedState          `json:"userProcessState,omitempty"`
-	InfraRevision    string                 `json:"infraRevision,omitempty"`
-	Components       []InfraComponentStatus `json:"components,omitempty"`
-	Recovery         *SandboxRecoveryStatus `json:"recovery,omitempty"`
+	// +listType=atomic
+	ActionBindings []ActionBindingStatus `json:"actionBindings,omitempty"`
 
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-
-	// AcceptedResetRevision reflects the latest reset revision that was processed by the controller.
-	AcceptedResetRevision *metav1.Time `json:"acceptedResetRevision,omitempty"`
 }
 
 // InfraComponentState is the lifecycle of one named local component route.
@@ -146,24 +188,12 @@ const (
 	InfraComponentFailed   InfraComponentState = "Failed"
 )
 
-// InfraComponentStatus is the durable projection of Fastlet-local component
-// health and named route publication.
 type InfraComponentStatus struct {
-	Name                    string              `json:"name"`
-	State                   InfraComponentState `json:"state"`
-	Protocol                string              `json:"protocol,omitempty"`
-	Port                    int32               `json:"port,omitempty"`
-	ObservedRouteGeneration int64               `json:"observedRouteGeneration,omitempty"`
-	LastTransitionTime      *metav1.Time        `json:"lastTransitionTime,omitempty"`
-	Message                 string              `json:"message,omitempty"`
-}
+	Name  string              `json:"name"`
+	State InfraComponentState `json:"state"`
 
-// SandboxRecoveryStatus persists the first confirmed loss and its deadline so
-// Controller restarts cannot restart the recovery timer.
-type SandboxRecoveryStatus struct {
-	FastletPodUID string      `json:"fastletPodUID"`
-	DetectedAt    metav1.Time `json:"detectedAt"`
-	Deadline      metav1.Time `json:"deadline"`
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+	Message            string       `json:"message,omitempty"`
 }
 
 // HasCondition reports whether a canonical condition currently has the given

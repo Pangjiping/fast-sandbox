@@ -16,7 +16,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -44,6 +43,20 @@ type fakeFastletClient struct {
 	inspect      func(string, *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error)
 	inspectCalls int
 	deleted      bool
+	actions      *fastletapi.ReconcileBindingsRequest
+}
+
+func (f *fakeFastletClient) ReconcileBindings(_ context.Context, _ string, request *fastletapi.ReconcileBindingsRequest) (*fastletapi.ReconcileBindingsResponse, error) {
+	f.actions = request
+	return &fastletapi.ReconcileBindingsResponse{Sandbox: &fastletapi.SandboxStatus{
+		SandboxID:          request.Identity.SandboxUID,
+		Runtime:            fastletapi.RuntimeObservation{State: fastletapi.RuntimeStateReady},
+		DataPlane:          fastletapi.DataPlaneObservation{State: fastletapi.DataPlaneStateReady},
+		AcceptedGeneration: request.SpecGeneration,
+		AppliedGeneration:  request.SpecGeneration,
+		ActionBindings: []fastletapi.ActionBindingStatus{{Handler: "egress", State: "Ready", ObservedSpecGeneration: request.SpecGeneration,
+			DesiredInputDigest: request.ActionBindings[0].InputDigest, AppliedInputDigest: request.ActionBindings[0].InputDigest}},
+	}}, nil
 }
 
 func (f *fakeFastletClient) CreateSandbox(_ context.Context, ip string, request *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
@@ -55,14 +68,17 @@ func (f *fakeFastletClient) InspectSandbox(_ context.Context, ip string, request
 	return f.inspect(ip, request)
 }
 
-func (f *fakeFastletClient) DeleteSandboxV2(context.Context, string, *fastletapi.DeleteSandboxV2Request) (*fastletapi.DeleteSandboxV2Response, error) {
+func (f *fakeFastletClient) DeleteSandbox(context.Context, string, *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error) {
 	f.deleted = true
-	return &fastletapi.DeleteSandboxV2Response{Accepted: true}, nil
+	return &fastletapi.DeleteSandboxResponse{Accepted: true}, nil
 }
 
 func TestFastPathCandidatesIsRegistryOnly(t *testing.T) {
 	orchestrator, registry, _, sandbox := newHarness(t)
-	candidate := placement.FastletInfo{ID: "fastlet-a", PodName: "fastlet-a", PodUID: "pod-a", PodIP: "10.0.0.1"}
+	candidate := placement.FastletInfo{
+		ID: "fastlet-a", PodName: "fastlet-a", PodUID: "pod-a", PodIP: "10.0.0.1",
+		RuntimeName: apiv1alpha2.RuntimeContainer, RuntimeProfileHash: "runtime-a", ResourceProfileHash: "resources-a", InfraRevision: "infra-a",
+	}
 	registry.candidates = []placement.FastletInfo{candidate}
 
 	candidates, err := orchestrator.FastPathCandidates(sandbox, "request-a")
@@ -70,7 +86,57 @@ func TestFastPathCandidatesIsRegistryOnly(t *testing.T) {
 	require.Equal(t, candidate.ID, candidates[0].ID)
 }
 
-func TestAssignDeclarativeProjectsAnnotationAndReconcilesRuntime(t *testing.T) {
+func TestReconcileBindingsPreservesOpaqueInputAndReturnsObservation(t *testing.T) {
+	orchestrator, registry, fastletClient, sandbox := newHarness(t)
+	var pool apiv1alpha2.SandboxPool
+	require.NoError(t, orchestrator.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "pool-a"}, &pool))
+	pool.Spec.ActionHandlers = []apiv1alpha2.ActionHandler{{Name: "egress", TargetHTTPPort: 18080}}
+	require.NoError(t, orchestrator.Client.Update(context.Background(), &pool))
+	candidate := placement.FastletInfo{
+		ID: "fastlet-a", PodName: "fastlet-a", PodUID: "pod-a", PodIP: "10.0.0.1",
+		RuntimeName: apiv1alpha2.RuntimeContainer, RuntimeProfileHash: "runtime-a", ResourceProfileHash: "resources-a", InfraRevision: "infra-a",
+	}
+	registry.fastlets[candidate.ID] = candidate
+	sandbox.UID = types.UID("sandbox-uid")
+	sandbox.Generation = 4
+	sandbox.Spec.ActionBindings = []apiv1alpha2.ActionBinding{{Handler: "egress", Input: `{"z":1,"a":2}`}}
+	envelope, err := AssignmentForCandidate(candidate, 1, 1, 1, "runtime-a")
+	require.NoError(t, err)
+	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
+	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
+
+	observed, err := orchestrator.ReconcileBindings(context.Background(), sandbox)
+	require.NoError(t, err)
+	require.NotNil(t, fastletClient.actions)
+	require.Equal(t, int64(4), fastletClient.actions.SpecGeneration)
+	require.Equal(t, `{"z":1,"a":2}`, fastletClient.actions.ActionBindings[0].Input)
+	require.Equal(t, int64(4), observed.AppliedGeneration)
+	// Orchestrator returns an observation; only SandboxReconciler owns CRD Status.
+	var persisted apiv1alpha2.Sandbox
+	require.NoError(t, orchestrator.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &persisted))
+	require.Empty(t, persisted.Status.ActionBindings)
+}
+
+func TestProjectObservedDemotesReadyFromOlderAppliedGeneration(t *testing.T) {
+	sandbox := &apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Generation: 5},
+		Spec:       apiv1alpha2.SandboxSpec{ActionBindings: []apiv1alpha2.ActionBinding{{Handler: "egress"}}},
+	}
+	status := &apiv1alpha2.SandboxStatus{}
+	ProjectObservedStatus(status, sandbox, &fastletapi.SandboxStatus{
+		Runtime:           fastletapi.RuntimeObservation{State: fastletapi.RuntimeStateReady},
+		DataPlane:         fastletapi.DataPlaneObservation{State: fastletapi.DataPlaneStateUnavailable},
+		AppliedGeneration: 4,
+		ActionBindings:    []fastletapi.ActionBindingStatus{{Handler: "egress", State: "Ready", ObservedSpecGeneration: 4}},
+	})
+
+	require.Equal(t, int64(5), status.ObservedGeneration)
+	require.Equal(t, apiv1alpha2.DataPlaneUnavailable, status.DataPlane.State)
+	require.Equal(t, apiv1alpha2.ActionPending, status.ActionBindings[0].State)
+	require.False(t, status.HasCondition(ConditionReady, metav1.ConditionTrue, "Ready"))
+}
+
+func TestAssignDeclarativeProjectsAnnotationAndEnsureReturnsObservation(t *testing.T) {
 	orchestrator, registry, fastletClient, sandbox := newHarness(t)
 	parameters, err := orchestrator.ResolveRuntime(context.Background(), sandbox)
 	require.NoError(t, err)
@@ -83,7 +149,7 @@ func TestAssignDeclarativeProjectsAnnotationAndReconcilesRuntime(t *testing.T) {
 	assigned, won, err := orchestrator.AssignDeclarative(context.Background(), sandbox, "sandbox-uid-a")
 	require.NoError(t, err)
 	require.True(t, won)
-	require.NotNil(t, assigned.Status.Assignment)
+	require.NotEmpty(t, assigned.Status.Placement.FastletName)
 	envelope, err := assignment.EffectiveAssignment(assigned)
 	require.NoError(t, err)
 	require.NotEmpty(t, envelope.RuntimeInstanceID)
@@ -93,17 +159,19 @@ func TestAssignDeclarativeProjectsAnnotationAndReconcilesRuntime(t *testing.T) {
 		require.Equal(t, "sandbox-uid-a", request.Identity.SandboxUID)
 		require.Equal(t, envelope.RuntimeInstanceID, request.Identity.RuntimeInstanceID)
 		require.Empty(t, request.Sandbox.CPU, "Fastlet injects its fixed resource profile")
-		return &fastletapi.CreateSandboxResponse{Accepted: true, Sandbox: &fastletapi.SandboxStatus{SandboxID: "sandbox-uid-a", Phase: "running"}}, nil
+		return &fastletapi.CreateSandboxResponse{Accepted: true, Sandbox: readyFastletObservation("sandbox-uid-a", assigned.Generation)}, nil
 	}
-	require.NoError(t, orchestrator.ReconcileRuntime(context.Background(), assigned))
-
-	var ready apiv1alpha2.Sandbox
-	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &ready))
-	require.Equal(t, apiv1alpha2.ObservedStateReady, ready.Status.RuntimeState)
-	require.Equal(t, apiv1alpha2.ObservedStateReady, ready.Status.DataPlaneState)
+	observed, err := orchestrator.EnsureRuntime(context.Background(), assigned)
+	require.NoError(t, err)
+	require.Equal(t, fastletapi.RuntimeStateReady, observed.Runtime.State)
+	require.Equal(t, fastletapi.DataPlaneStateReady, observed.DataPlane.State)
+	// EnsureRuntime itself never patches the persisted business Status.
+	var persisted apiv1alpha2.Sandbox
+	require.NoError(t, orchestrator.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &persisted))
+	require.Empty(t, persisted.Status.Runtime.State)
 }
 
-func TestReconcileRuntimeProjectsRuntimeAndDataPlaneIndependently(t *testing.T) {
+func TestObserveRuntimeReturnsStructuredRuntimeAndDataPlaneIndependently(t *testing.T) {
 	orchestrator, registry, fastletClient, sandbox := newHarness(t)
 	parameters, err := orchestrator.ResolveRuntime(context.Background(), sandbox)
 	require.NoError(t, err)
@@ -116,30 +184,23 @@ func TestReconcileRuntimeProjectsRuntimeAndDataPlaneIndependently(t *testing.T) 
 	assigned, _, err := orchestrator.AssignDeclarative(context.Background(), sandbox, "sandbox-uid-a")
 	require.NoError(t, err)
 
-	phase := "infra-pending"
-	fastletClient.create = func(string, *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
-		return &fastletapi.CreateSandboxResponse{Accepted: true, Sandbox: &fastletapi.SandboxStatus{SandboxID: "sandbox-uid-a", Phase: phase}}, nil
+	observation := &fastletapi.SandboxStatus{
+		SandboxID: "sandbox-uid-a",
+		Runtime:   fastletapi.RuntimeObservation{State: fastletapi.RuntimeStateReady},
+		DataPlane: fastletapi.DataPlaneObservation{State: fastletapi.DataPlaneStatePublishing},
 	}
-	err = orchestrator.ReconcileRuntime(context.Background(), assigned)
-	require.ErrorIs(t, err, ErrDataPlaneInProgress)
+	fastletClient.inspect = func(string, *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error) {
+		return &fastletapi.InspectSandboxResponse{Sandbox: observation}, nil
+	}
+	observed, err := orchestrator.ObserveRuntime(context.Background(), assigned)
+	require.NoError(t, err)
+	require.Equal(t, fastletapi.RuntimeStateReady, observed.Runtime.State)
+	require.Equal(t, fastletapi.DataPlaneStatePublishing, observed.DataPlane.State)
 
-	var current apiv1alpha2.Sandbox
-	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &current))
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha2.ObservedStateCreating, current.Status.DataPlaneState)
-
-	phase = "infra-unavailable"
-	err = orchestrator.ReconcileRuntime(context.Background(), &current)
-	require.ErrorIs(t, err, ErrDataPlaneUnavailable)
-	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &current))
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha2.ObservedStateUnavailable, current.Status.DataPlaneState)
-
-	phase = "running"
-	require.NoError(t, orchestrator.ReconcileRuntime(context.Background(), &current))
-	require.NoError(t, orchestrator.Client.Get(context.Background(), client.ObjectKeyFromObject(assigned), &current))
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.DataPlaneState)
+	observation.DataPlane.State = fastletapi.DataPlaneStateUnavailable
+	observed, err = orchestrator.ObserveRuntime(context.Background(), assigned)
+	require.NoError(t, err)
+	require.Equal(t, fastletapi.DataPlaneStateUnavailable, observed.DataPlane.State)
 }
 
 func TestLostCreateResponseDoesNotInspectOrChangeIdentity(t *testing.T) {
@@ -152,21 +213,28 @@ func TestLostCreateResponseDoesNotInspectOrChangeIdentity(t *testing.T) {
 	envelope, err := AssignmentForCandidate(candidate, 2, 1, 3, "runtime-a")
 	require.NoError(t, err)
 	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
-	statusAssignment := envelope.StatusAssignment()
-	sandbox.Status = apiv1alpha2.SandboxStatus{
-		Assignment: &statusAssignment, AssignmentAttempt: 2, InstanceGeneration: 1, RouteGeneration: 3,
-	}
+	sandbox.Status = statusFromEnvelope(envelope)
 	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
 	fastletClient.create = func(string, *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
 		return nil, errors.New("response lost")
 	}
 
-	err = orchestrator.ReconcileRuntime(context.Background(), sandbox)
+	_, err = orchestrator.EnsureRuntime(context.Background(), sandbox)
 	require.ErrorIs(t, err, ErrUnknownFastletOutcome)
 	require.Zero(t, fastletClient.inspectCalls)
 	current, parseErr := assignment.AssignmentFromAnnotation(sandbox)
 	require.NoError(t, parseErr)
 	require.Equal(t, envelope, *current)
+}
+
+func readyFastletObservation(sandboxID string, generation int64) *fastletapi.SandboxStatus {
+	return &fastletapi.SandboxStatus{
+		SandboxID:          sandboxID,
+		Runtime:            fastletapi.RuntimeObservation{State: fastletapi.RuntimeStateReady},
+		DataPlane:          fastletapi.DataPlaneObservation{State: fastletapi.DataPlaneStateReady},
+		AcceptedGeneration: generation,
+		AppliedGeneration:  generation,
+	}
 }
 
 func TestReassignDeclarativeAfterRejectionCASesDirectlyToAlternative(t *testing.T) {
@@ -184,10 +252,7 @@ func TestReassignDeclarativeAfterRejectionCASesDirectlyToAlternative(t *testing.
 	envelope, err := AssignmentForCandidate(first, 3, 2, 5, "runtime-a")
 	require.NoError(t, err)
 	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
-	statusAssignment := envelope.StatusAssignment()
-	sandbox.Status = apiv1alpha2.SandboxStatus{
-		Assignment: &statusAssignment, AssignmentAttempt: 3, InstanceGeneration: 2, RouteGeneration: 5,
-	}
+	sandbox.Status = statusFromEnvelope(envelope)
 	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
 
 	updated, moved, err := orchestrator.ReassignDeclarativeAfterRejection(context.Background(), sandbox, string(sandbox.UID))
@@ -203,7 +268,7 @@ func TestReassignDeclarativeAfterRejectionCASesDirectlyToAlternative(t *testing.
 	require.NotEqual(t, envelope.RuntimeInstanceID, next.RuntimeInstanceID)
 	// Status remains an asynchronous projection; the annotation CAS never
 	// passes through an unassigned value.
-	require.Equal(t, first.PodName, updated.Status.Assignment.FastletName)
+	require.Equal(t, first.PodName, updated.Status.Placement.FastletName)
 }
 
 func TestReassignDeclarativeAfterRejectionPreservesAssignmentWithoutAlternative(t *testing.T) {
@@ -238,20 +303,25 @@ func TestClearAssignmentRemovesAnnotationAndAdvancesFences(t *testing.T) {
 	envelope, err := AssignmentForCandidate(candidate, 4, 2, 5, "runtime-a")
 	require.NoError(t, err)
 	require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
-	statusAssignment := envelope.StatusAssignment()
-	sandbox.Status = apiv1alpha2.SandboxStatus{
-		Assignment: &statusAssignment, AssignmentAttempt: 4, InstanceGeneration: 2, RouteGeneration: 5,
-	}
+	sandbox.Status = statusFromEnvelope(envelope)
 	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
 
 	cleared, err := orchestrator.ClearAssignment(context.Background(), sandbox, true)
 	require.NoError(t, err)
-	require.Nil(t, cleared.Status.Assignment)
-	require.Equal(t, int64(3), cleared.Status.InstanceGeneration)
-	require.Equal(t, int64(6), cleared.Status.RouteGeneration)
+	require.Empty(t, cleared.Status.Placement.FastletName)
+	require.Equal(t, int64(3), cleared.Status.Runtime.Generation)
+	require.Equal(t, int64(6), cleared.Status.DataPlane.RouteGeneration)
 	current, err := assignment.AssignmentFromAnnotation(cleared)
 	require.NoError(t, err)
 	require.Nil(t, current)
+}
+
+func statusFromEnvelope(envelope assignment.AssignmentEnvelope) apiv1alpha2.SandboxStatus {
+	return apiv1alpha2.SandboxStatus{
+		Placement: envelope.StatusPlacement(),
+		Runtime:   apiv1alpha2.RuntimeStatus{Generation: envelope.InstanceGeneration},
+		DataPlane: apiv1alpha2.DataPlaneStatus{RouteGeneration: envelope.RouteGeneration},
+	}
 }
 
 func candidateFor(parameters RuntimeParameters) placement.FastletInfo {

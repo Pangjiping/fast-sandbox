@@ -477,17 +477,20 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 
 func TestSandboxNeedsPlacementExcludesTerminalAndAssignedStates(t *testing.T) {
 	require.True(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{}))
-	expired := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
-		Type: orchestration.ConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonExpired,
-	}}}}
+	expired := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{
+		Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeStopped},
+		Conditions: []metav1.Condition{{
+			Type: orchestration.ConditionReady, Status: metav1.ConditionFalse, Reason: "arbitrary-diagnostic",
+		}},
+	}}
 	require.False(t, sandboxNeedsPlacement(expired))
-	lost := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
-		Type: orchestration.ConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonFastletPodLost,
+	diagnosticOnly := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
+		Type: orchestration.ConditionReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonFastletPodLost,
 	}}}}
-	require.False(t, sandboxNeedsPlacement(lost))
-	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{RuntimeState: apiv1alpha2.ObservedStateDraining}}))
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
-	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Assignment: &assignment}}))
+	require.True(t, sandboxNeedsPlacement(diagnosticOnly), "Condition Reason is not state-machine input")
+	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeStopping}}}))
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Placement: placementStatus}}))
 }
 
 func newDrainHarness(t *testing.T, sandboxes []apiv1alpha2.Sandbox) (*SandboxPoolReconciler, client.Client, *recordingDrainer, *apiv1alpha2.SandboxPool) {
@@ -530,11 +533,12 @@ func fastletPod(name, uid, ip string) *corev1.Pod {
 }
 
 func assignedSandbox(name, fastletName, podUID string) apiv1alpha2.Sandbox {
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: fastletName, FastletPodUID: podUID, Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: fastletName, FastletPodUID: types.UID(podUID), Attempt: 1}
 	return apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")},
 		Spec:       apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
-		Status:     apiv1alpha2.SandboxStatus{Assignment: &assignment, AssignmentAttempt: 1, InstanceGeneration: 1},
+		Status: apiv1alpha2.SandboxStatus{Placement: placementStatus,
+			Runtime: apiv1alpha2.RuntimeStatus{Generation: 1}},
 	}
 }
 
@@ -781,10 +785,6 @@ func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
 			ObservedGeneration: 9,
 		},
 	}, warm)
-	registryStatus := reconciler.aggregateRegistryStatus(pool, compiled, pods)
-	require.Equal(t, int32(2), registryStatus.TotalFastlets)
-	require.Equal(t, int32(1), registryStatus.AppliedFastlets)
-	require.Equal(t, registryGeneration(compiled.Revision), registryStatus.TargetGeneration)
 	idle, busy := reconciler.fastletUtilizationCounts(pool, pods)
 	require.Equal(t, int32(1), idle)
 	require.Equal(t, int32(1), busy)

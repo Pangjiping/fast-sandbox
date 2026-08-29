@@ -96,9 +96,9 @@ The grammar is:
 fastctl opensandbox exec <sandbox> [adapter options] -- <remote argv>
 ```
 
-`--component` must appear before `--`. fastctl resolves the named component and
-waits directly on the assigned Fastlet; it does not hard-code port 44772 for
-route selection.
+`--component` must appear before `--`. fastctl resolves the named component
+from the assigned Fastlet's live state; resolution is non-blocking and requires
+aggregate Ready. It does not hard-code port 44772 for route selection.
 
 File operations:
 

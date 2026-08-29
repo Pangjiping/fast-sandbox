@@ -25,7 +25,6 @@ const (
 	FastPathService_ListSandboxes_FullMethodName         = "/fastpath.v2.FastPathService/ListSandboxes"
 	FastPathService_GetSandbox_FullMethodName            = "/fastpath.v2.FastPathService/GetSandbox"
 	FastPathService_GetSandboxDiagnostics_FullMethodName = "/fastpath.v2.FastPathService/GetSandboxDiagnostics"
-	FastPathService_WaitSandboxReady_FullMethodName      = "/fastpath.v2.FastPathService/WaitSandboxReady"
 	FastPathService_ResolveEndpoint_FullMethodName       = "/fastpath.v2.FastPathService/ResolveEndpoint"
 	FastPathService_GetPool_FullMethodName               = "/fastpath.v2.FastPathService/GetPool"
 	FastPathService_ListPools_FullMethodName             = "/fastpath.v2.FastPathService/ListPools"
@@ -35,16 +34,12 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type FastPathServiceClient interface {
-	CreateSandbox(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*SandboxInfo, error)
+	CreateSandbox(ctx context.Context, in *CreateSandboxRequest, opts ...grpc.CallOption) (*CreateSandboxResponse, error)
 	DeleteSandbox(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
-	UpdateSandbox(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateResponse, error)
-	ListSandboxes(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
-	GetSandbox(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*SandboxInfo, error)
+	UpdateSandbox(ctx context.Context, in *UpdateSandboxRequest, opts ...grpc.CallOption) (*UpdateSandboxResponse, error)
+	ListSandboxes(ctx context.Context, in *ListSandboxesRequest, opts ...grpc.CallOption) (*ListSandboxesResponse, error)
+	GetSandbox(ctx context.Context, in *GetSandboxRequest, opts ...grpc.CallOption) (*GetSandboxResponse, error)
 	GetSandboxDiagnostics(ctx context.Context, in *SandboxDiagnosticsRequest, opts ...grpc.CallOption) (*SandboxDiagnosticsResponse, error)
-	// WaitSandboxReady waits on the assigned Fastlet, never on CRD status
-	// propagation.
-	WaitSandboxReady(ctx context.Context, in *WaitSandboxReadyRequest, opts ...grpc.CallOption) (*SandboxInfo, error)
-	// ResolveEndpoint resolves one named component or raw user port.
 	ResolveEndpoint(ctx context.Context, in *ResolveEndpointRequest, opts ...grpc.CallOption) (*ResolveEndpointResponse, error)
 	GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*PoolInfo, error)
 	ListPools(ctx context.Context, in *ListPoolsRequest, opts ...grpc.CallOption) (*ListPoolsResponse, error)
@@ -58,9 +53,9 @@ func NewFastPathServiceClient(cc grpc.ClientConnInterface) FastPathServiceClient
 	return &fastPathServiceClient{cc}
 }
 
-func (c *fastPathServiceClient) CreateSandbox(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*SandboxInfo, error) {
+func (c *fastPathServiceClient) CreateSandbox(ctx context.Context, in *CreateSandboxRequest, opts ...grpc.CallOption) (*CreateSandboxResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SandboxInfo)
+	out := new(CreateSandboxResponse)
 	err := c.cc.Invoke(ctx, FastPathService_CreateSandbox_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -78,9 +73,9 @@ func (c *fastPathServiceClient) DeleteSandbox(ctx context.Context, in *DeleteReq
 	return out, nil
 }
 
-func (c *fastPathServiceClient) UpdateSandbox(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateResponse, error) {
+func (c *fastPathServiceClient) UpdateSandbox(ctx context.Context, in *UpdateSandboxRequest, opts ...grpc.CallOption) (*UpdateSandboxResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(UpdateResponse)
+	out := new(UpdateSandboxResponse)
 	err := c.cc.Invoke(ctx, FastPathService_UpdateSandbox_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -88,9 +83,9 @@ func (c *fastPathServiceClient) UpdateSandbox(ctx context.Context, in *UpdateReq
 	return out, nil
 }
 
-func (c *fastPathServiceClient) ListSandboxes(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error) {
+func (c *fastPathServiceClient) ListSandboxes(ctx context.Context, in *ListSandboxesRequest, opts ...grpc.CallOption) (*ListSandboxesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListResponse)
+	out := new(ListSandboxesResponse)
 	err := c.cc.Invoke(ctx, FastPathService_ListSandboxes_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -98,9 +93,9 @@ func (c *fastPathServiceClient) ListSandboxes(ctx context.Context, in *ListReque
 	return out, nil
 }
 
-func (c *fastPathServiceClient) GetSandbox(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*SandboxInfo, error) {
+func (c *fastPathServiceClient) GetSandbox(ctx context.Context, in *GetSandboxRequest, opts ...grpc.CallOption) (*GetSandboxResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SandboxInfo)
+	out := new(GetSandboxResponse)
 	err := c.cc.Invoke(ctx, FastPathService_GetSandbox_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -112,16 +107,6 @@ func (c *fastPathServiceClient) GetSandboxDiagnostics(ctx context.Context, in *S
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SandboxDiagnosticsResponse)
 	err := c.cc.Invoke(ctx, FastPathService_GetSandboxDiagnostics_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *fastPathServiceClient) WaitSandboxReady(ctx context.Context, in *WaitSandboxReadyRequest, opts ...grpc.CallOption) (*SandboxInfo, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SandboxInfo)
-	err := c.cc.Invoke(ctx, FastPathService_WaitSandboxReady_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -162,16 +147,12 @@ func (c *fastPathServiceClient) ListPools(ctx context.Context, in *ListPoolsRequ
 // All implementations must embed UnimplementedFastPathServiceServer
 // for forward compatibility.
 type FastPathServiceServer interface {
-	CreateSandbox(context.Context, *CreateRequest) (*SandboxInfo, error)
+	CreateSandbox(context.Context, *CreateSandboxRequest) (*CreateSandboxResponse, error)
 	DeleteSandbox(context.Context, *DeleteRequest) (*DeleteResponse, error)
-	UpdateSandbox(context.Context, *UpdateRequest) (*UpdateResponse, error)
-	ListSandboxes(context.Context, *ListRequest) (*ListResponse, error)
-	GetSandbox(context.Context, *GetRequest) (*SandboxInfo, error)
+	UpdateSandbox(context.Context, *UpdateSandboxRequest) (*UpdateSandboxResponse, error)
+	ListSandboxes(context.Context, *ListSandboxesRequest) (*ListSandboxesResponse, error)
+	GetSandbox(context.Context, *GetSandboxRequest) (*GetSandboxResponse, error)
 	GetSandboxDiagnostics(context.Context, *SandboxDiagnosticsRequest) (*SandboxDiagnosticsResponse, error)
-	// WaitSandboxReady waits on the assigned Fastlet, never on CRD status
-	// propagation.
-	WaitSandboxReady(context.Context, *WaitSandboxReadyRequest) (*SandboxInfo, error)
-	// ResolveEndpoint resolves one named component or raw user port.
 	ResolveEndpoint(context.Context, *ResolveEndpointRequest) (*ResolveEndpointResponse, error)
 	GetPool(context.Context, *GetPoolRequest) (*PoolInfo, error)
 	ListPools(context.Context, *ListPoolsRequest) (*ListPoolsResponse, error)
@@ -185,26 +166,23 @@ type FastPathServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedFastPathServiceServer struct{}
 
-func (UnimplementedFastPathServiceServer) CreateSandbox(context.Context, *CreateRequest) (*SandboxInfo, error) {
+func (UnimplementedFastPathServiceServer) CreateSandbox(context.Context, *CreateSandboxRequest) (*CreateSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateSandbox not implemented")
 }
 func (UnimplementedFastPathServiceServer) DeleteSandbox(context.Context, *DeleteRequest) (*DeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteSandbox not implemented")
 }
-func (UnimplementedFastPathServiceServer) UpdateSandbox(context.Context, *UpdateRequest) (*UpdateResponse, error) {
+func (UnimplementedFastPathServiceServer) UpdateSandbox(context.Context, *UpdateSandboxRequest) (*UpdateSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateSandbox not implemented")
 }
-func (UnimplementedFastPathServiceServer) ListSandboxes(context.Context, *ListRequest) (*ListResponse, error) {
+func (UnimplementedFastPathServiceServer) ListSandboxes(context.Context, *ListSandboxesRequest) (*ListSandboxesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListSandboxes not implemented")
 }
-func (UnimplementedFastPathServiceServer) GetSandbox(context.Context, *GetRequest) (*SandboxInfo, error) {
+func (UnimplementedFastPathServiceServer) GetSandbox(context.Context, *GetSandboxRequest) (*GetSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSandbox not implemented")
 }
 func (UnimplementedFastPathServiceServer) GetSandboxDiagnostics(context.Context, *SandboxDiagnosticsRequest) (*SandboxDiagnosticsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSandboxDiagnostics not implemented")
-}
-func (UnimplementedFastPathServiceServer) WaitSandboxReady(context.Context, *WaitSandboxReadyRequest) (*SandboxInfo, error) {
-	return nil, status.Error(codes.Unimplemented, "method WaitSandboxReady not implemented")
 }
 func (UnimplementedFastPathServiceServer) ResolveEndpoint(context.Context, *ResolveEndpointRequest) (*ResolveEndpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveEndpoint not implemented")
@@ -237,7 +215,7 @@ func RegisterFastPathServiceServer(s grpc.ServiceRegistrar, srv FastPathServiceS
 }
 
 func _FastPathService_CreateSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateRequest)
+	in := new(CreateSandboxRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -249,7 +227,7 @@ func _FastPathService_CreateSandbox_Handler(srv interface{}, ctx context.Context
 		FullMethod: FastPathService_CreateSandbox_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FastPathServiceServer).CreateSandbox(ctx, req.(*CreateRequest))
+		return srv.(FastPathServiceServer).CreateSandbox(ctx, req.(*CreateSandboxRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -273,7 +251,7 @@ func _FastPathService_DeleteSandbox_Handler(srv interface{}, ctx context.Context
 }
 
 func _FastPathService_UpdateSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UpdateRequest)
+	in := new(UpdateSandboxRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -285,13 +263,13 @@ func _FastPathService_UpdateSandbox_Handler(srv interface{}, ctx context.Context
 		FullMethod: FastPathService_UpdateSandbox_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FastPathServiceServer).UpdateSandbox(ctx, req.(*UpdateRequest))
+		return srv.(FastPathServiceServer).UpdateSandbox(ctx, req.(*UpdateSandboxRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _FastPathService_ListSandboxes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListRequest)
+	in := new(ListSandboxesRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -303,13 +281,13 @@ func _FastPathService_ListSandboxes_Handler(srv interface{}, ctx context.Context
 		FullMethod: FastPathService_ListSandboxes_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FastPathServiceServer).ListSandboxes(ctx, req.(*ListRequest))
+		return srv.(FastPathServiceServer).ListSandboxes(ctx, req.(*ListSandboxesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _FastPathService_GetSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetRequest)
+	in := new(GetSandboxRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -321,7 +299,7 @@ func _FastPathService_GetSandbox_Handler(srv interface{}, ctx context.Context, d
 		FullMethod: FastPathService_GetSandbox_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FastPathServiceServer).GetSandbox(ctx, req.(*GetRequest))
+		return srv.(FastPathServiceServer).GetSandbox(ctx, req.(*GetSandboxRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -340,24 +318,6 @@ func _FastPathService_GetSandboxDiagnostics_Handler(srv interface{}, ctx context
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(FastPathServiceServer).GetSandboxDiagnostics(ctx, req.(*SandboxDiagnosticsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _FastPathService_WaitSandboxReady_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(WaitSandboxReadyRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(FastPathServiceServer).WaitSandboxReady(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: FastPathService_WaitSandboxReady_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FastPathServiceServer).WaitSandboxReady(ctx, req.(*WaitSandboxReadyRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -446,10 +406,6 @@ var FastPathService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSandboxDiagnostics",
 			Handler:    _FastPathService_GetSandboxDiagnostics_Handler,
-		},
-		{
-			MethodName: "WaitSandboxReady",
-			Handler:    _FastPathService_WaitSandboxReady_Handler,
 		},
 		{
 			MethodName: "ResolveEndpoint",

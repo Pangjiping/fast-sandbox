@@ -43,8 +43,6 @@ func TestEndpointResolverPreservesRoutePathWhenAuthorityIsOverridden(t *testing.
 	require.Equal(t, "tenant-a", control.resolveRequest.GetSandbox().GetNamespacedName().GetNamespace())
 	require.Equal(t, "sandbox-a", control.resolveRequest.GetSandbox().GetNamespacedName().GetName())
 	require.Equal(t, "execd", control.resolveRequest.GetTarget().GetComponentName())
-	require.True(t, control.resolveRequest.GetWaitUntilReady())
-	require.Equal(t, int32(30_000), control.resolveRequest.GetWaitTimeoutMillis())
 	require.Equal(t, "http://127.0.0.1:18080/proxy/v2/sandboxes/uid-a/components/execd", route.Endpoint.String())
 	require.Equal(t, "route-token", route.RequiredHeaders.Get("X-Fast-Sandbox-Route-Credential"))
 
@@ -53,13 +51,12 @@ func TestEndpointResolverPreservesRoutePathWhenAuthorityIsOverridden(t *testing.
 	require.Equal(t, "http://127.0.0.1:18080/proxy/v2/sandboxes/uid-a/components/execd/command", requestURL.String())
 }
 
-func TestEndpointResolverDoesNotApplyComponentWaitToRawPort(t *testing.T) {
+func TestEndpointResolverUsesNonBlockingRawPortResolution(t *testing.T) {
 	control := &fakeEndpointControl{}
 	resolver := &EndpointResolver{Control: control}
 	_, err := resolver.Resolve(context.Background(), SandboxRef{Name: "sandbox-a"}, PortTarget(8080))
 	require.NoError(t, err)
-	require.False(t, control.resolveRequest.GetWaitUntilReady())
-	require.Zero(t, control.resolveRequest.GetWaitTimeoutMillis())
+	require.Equal(t, uint32(8080), control.resolveRequest.GetTarget().GetPort())
 }
 
 func TestEndpointResolverRejectsMismatchedRouteIdentity(t *testing.T) {

@@ -37,23 +37,17 @@ preserving the sandbox configuration.`,
 		resetRevision := time.Now().Format(time.RFC3339Nano)
 		klog.V(4).InfoS("Triggering sandbox reset", "sandboxName", sandboxName, "resetRevision", resetRevision)
 
-		req := &fastpathv2.UpdateRequest{
-			SandboxName: sandboxName,
-			Namespace:   namespace,
-			Update: &fastpathv2.UpdateRequest_ResetRevision{
+		req := &fastpathv2.UpdateSandboxRequest{
+			Sandbox: fastPathSandboxReference(sandboxName, namespace),
+			Update: &fastpathv2.UpdateSandboxRequest_ResetRevision{
 				ResetRevision: resetRevision,
 			},
 		}
 
-		resp, err := client.UpdateSandbox(context.Background(), req)
+		_, err := client.UpdateSandbox(context.Background(), req)
 		if err != nil {
 			klog.ErrorS(err, "UpdateSandbox request failed for reset", "sandboxName", sandboxName)
 			log.Fatalf("Error: %v", err)
-		}
-
-		if !resp.Success {
-			klog.ErrorS(nil, "UpdateSandbox request returned failure for reset", "sandboxName", sandboxName, "message", resp.Message)
-			log.Fatalf("Error: %s", resp.Message)
 		}
 
 		klog.V(4).InfoS("Sandbox reset triggered successfully", "sandboxName", sandboxName)

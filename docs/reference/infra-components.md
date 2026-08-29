@@ -284,22 +284,25 @@ remain the same.
 
 | Milestone | Meaning |
 | --- | --- |
-| `RuntimeReady` | Runtime, private network, component processes, and user process were created |
+| `RuntimeReady` | Runtime and user process have started; component/route convergence may continue |
 | `ComponentReady` | One component passed health and its route was acknowledged |
-| `DataPlaneReady` | Every declared component is `ComponentReady` |
+| `DataPlaneReady` | The interaction route is published and every declared component is `ComponentReady` |
+| aggregate `Ready` | Runtime, DataPlane, all components, and all Action Bindings are Ready |
 
-Create returns at `RuntimeReady`. `WaitSandboxReady` and
-`ResolveEndpoint(wait_until_ready=true)` can wait directly on the assigned
-Fastlet instead of waiting for CRD status propagation.
+Create defaults to aggregate `READY`; explicit `RUNTIME_READY` is the
+early-return option. After an update, clients poll the assigned Fastlet through
+`GetSandbox`. `ResolveEndpoint` is non-blocking and returns
+`FailedPrecondition` until aggregate Ready.
 
 Sandbox status eventually projects each component's:
 
 - name;
 - `Starting`, `Ready`, or `Failed` state;
-- protocol and port;
-- observed route generation;
 - last transition time;
 - bounded diagnostic message.
+
+Protocol and port remain in `SandboxPool.spec.infraComponents` and are returned
+by endpoint resolution rather than duplicated into every Sandbox status.
 
 Status never exposes artifact credentials, component environment values, or
 route credentials.

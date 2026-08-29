@@ -46,13 +46,15 @@ class Client:
         metadata: Optional[Mapping[str, str]] = None,
         failure_policy: str = "Manual",
         recovery_timeout_seconds: int = 60,
+        action_bindings: Optional[Iterable[tuple[str, str]]] = None,
+        completion: str = "Ready",
     ) -> Sandbox:
         selected_namespace = namespace or self.namespace
         selected_request_id = request_id or name
         if selected_request_id != name:
             raise ValueError("request_id must equal the sandbox name")
         response = self._stub.CreateSandbox(
-            fastpath_pb2.CreateRequest(
+            fastpath_pb2.CreateSandboxRequest(
                 request_id=selected_request_id,
                 namespace=selected_namespace,
                 image=image,
@@ -63,32 +65,62 @@ class Client:
                 metadata=dict(metadata or {}),
                 failure_policy=_failure_policy(failure_policy),
                 recovery_timeout_seconds=recovery_timeout_seconds,
+                action_bindings=_action_bindings(action_bindings or []),
+                completion=_create_completion(completion),
             ),
             metadata=grpc_metadata(),
         )
         return Sandbox(
-            client=self, name=response.sandbox_name or name,
-            sandbox_uid=response.sandbox_uid,
+            client=self, name=response.sandbox.identity.name or name,
+            sandbox_uid=response.sandbox.identity.uid,
             namespace=selected_namespace,
+            generation=response.generation,
+            info=response.sandbox,
         )
 
     def get(self, name: str, namespace: Optional[str] = None) -> Sandbox:
         selected_namespace = namespace or self.namespace
         response = self._stub.GetSandbox(
-            fastpath_pb2.GetRequest(sandbox_name=name, namespace=selected_namespace),
+            fastpath_pb2.GetSandboxRequest(
+                sandbox=_sandbox_reference(name, selected_namespace),
+            ),
             metadata=grpc_metadata(),
         )
         return Sandbox(
-            client=self, name=response.sandbox_name or name,
-            sandbox_uid=response.sandbox_uid, namespace=selected_namespace,
+            client=self, name=response.sandbox.identity.name or name,
+            sandbox_uid=response.sandbox.identity.uid, namespace=selected_namespace,
+            generation=response.generation, info=response.sandbox,
         )
 
-    def delete(self, name: str, namespace: Optional[str] = None) -> bool:
+    def delete(self, name: str, namespace: Optional[str] = None, *, expected_uid: str = "") -> bool:
         response = self._stub.DeleteSandbox(
-            fastpath_pb2.DeleteRequest(sandbox_name=name, namespace=namespace or self.namespace),
+            fastpath_pb2.DeleteRequest(
+                sandbox=_sandbox_reference(name, namespace or self.namespace, expected_uid)
+            ),
             metadata=grpc_metadata(),
         )
         return response.success
+
+    def replace_action_bindings(
+        self,
+        name: str,
+        action_bindings: Iterable[tuple[str, str]],
+        namespace: Optional[str] = None,
+        *,
+        expected_generation: int = 0,
+        expected_uid: str = "",
+    ):
+        """Atomically replace the complete ordered Action Binding list."""
+        return self._stub.UpdateSandbox(
+            fastpath_pb2.UpdateSandboxRequest(
+                sandbox=_sandbox_reference(name, namespace or self.namespace, expected_uid),
+                expected_generation=expected_generation,
+                action_bindings=fastpath_pb2.ReplaceActionBindings(
+                    items=_action_bindings(action_bindings),
+                ),
+            ),
+            metadata=grpc_metadata(),
+        )
 
     def resolve_endpoint(
         self,
@@ -107,15 +139,12 @@ class Client:
         name: str,
         component_name: str,
         namespace: Optional[str] = None,
-        *,
-        wait_timeout_seconds: float = 30,
     ) -> ResolvedRoute:
-        """Wait for and resolve one named Pool Infra Component."""
+        """Resolve one named component if its Fastlet-local route is Ready."""
         return self._resolver.resolve_component(
             name,
             component_name,
             namespace or self.namespace,
-            wait_timeout_seconds=wait_timeout_seconds,
         )
 
     def close(self) -> None:
@@ -136,3 +165,28 @@ def _failure_policy(value: str) -> int:
     if normalized in {"auto", "autorecreate"}:
         return fastpath_pb2.AUTO_RECREATE
     raise ValueError("failure_policy must be Manual or AutoRecreate")
+
+
+def _create_completion(value: str) -> int:
+    normalized = value.replace("-", "").replace("_", "").lower()
+    if normalized == "ready":
+        return fastpath_pb2.CREATE_COMPLETION_READY
+    if normalized == "runtimeready":
+        return fastpath_pb2.CREATE_COMPLETION_RUNTIME_READY
+    raise ValueError("completion must be Ready or RuntimeReady")
+
+
+def _sandbox_reference(name: str, namespace: str, expected_uid: str = ""):
+    return fastpath_pb2.SandboxReference(
+        namespaced_name=fastpath_pb2.NamespacedName(namespace=namespace, name=name),
+        expected_uid=expected_uid,
+    )
+
+
+def _action_bindings(values: Iterable[tuple[str, str]]):
+    result = []
+    for handler, value in values:
+        if not isinstance(value, str):
+            raise TypeError("Action Binding input must be an opaque string")
+        result.append(fastpath_pb2.ActionBinding(handler=handler, input=value))
+    return result

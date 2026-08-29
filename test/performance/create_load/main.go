@@ -180,9 +180,9 @@ type report struct {
 }
 
 type fastPathClient interface {
-	CreateSandbox(context.Context, *fastpathv2.CreateRequest, ...grpc.CallOption) (*fastpathv2.SandboxInfo, error)
+	CreateSandbox(context.Context, *fastpathv2.CreateSandboxRequest, ...grpc.CallOption) (*fastpathv2.CreateSandboxResponse, error)
 	DeleteSandbox(context.Context, *fastpathv2.DeleteRequest, ...grpc.CallOption) (*fastpathv2.DeleteResponse, error)
-	ListSandboxes(context.Context, *fastpathv2.ListRequest, ...grpc.CallOption) (*fastpathv2.ListResponse, error)
+	ListSandboxes(context.Context, *fastpathv2.ListSandboxesRequest, ...grpc.CallOption) (*fastpathv2.ListSandboxesResponse, error)
 }
 
 type outcome struct {
@@ -389,7 +389,7 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 				}
 				requestContext, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
 				requestStarted := time.Now()
-				response, err := client.CreateSandbox(requestContext, &fastpathv2.CreateRequest{
+				response, err := client.CreateSandbox(requestContext, &fastpathv2.CreateSandboxRequest{
 					Image: cfg.Image, PoolRef: cfg.Pool, Namespace: cfg.Namespace,
 					Command: []string{cfg.Command}, Args: append([]string(nil), cfg.Args...),
 					Envs: cloneMap(cfg.Envs), WorkingDir: cfg.WorkingDir,
@@ -401,11 +401,11 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 					outcomes <- outcome{latency: latency, code: grpcCode(err), attempted: true}
 					continue
 				}
-				if response == nil {
+				if response == nil || response.Sandbox == nil {
 					outcomes <- outcome{latency: latency, code: codes.Unknown, attempted: true}
 					continue
 				}
-				outcomes <- outcome{latency: latency, code: codes.OK, response: response, success: true, attempted: true}
+				outcomes <- outcome{latency: latency, code: codes.OK, response: response.Sandbox, success: true, attempted: true}
 			}
 		}()
 	}
@@ -434,15 +434,15 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 		}
 		succeeded++
 		successLatencies = append(successLatencies, item.latency)
-		if item.response.SandboxUid == "" {
+		if item.response.GetIdentity().GetUid() == "" {
 			missingUIDs++
 		} else {
-			uids[item.response.SandboxUid]++
+			uids[item.response.GetIdentity().GetUid()]++
 		}
-		if item.response.SandboxName == "" {
+		if item.response.GetIdentity().GetName() == "" {
 			missingNames++
 		} else {
-			names[item.response.SandboxName]++
+			names[item.response.GetIdentity().GetName()]++
 		}
 	}
 	finished := time.Now()
@@ -485,7 +485,9 @@ func cleanup(ctx context.Context, client fastPathClient, cfg config, names []str
 	result := &cleanupReport{Attempted: len(unique), Codes: make(map[string]int)}
 	for name := range unique {
 		requestContext, requestCancel := context.WithTimeout(cleanupContext, cfg.RequestTimeout)
-		response, err := client.DeleteSandbox(requestContext, &fastpathv2.DeleteRequest{SandboxName: name, Namespace: cfg.Namespace})
+		response, err := client.DeleteSandbox(requestContext, &fastpathv2.DeleteRequest{Sandbox: &fastpathv2.SandboxReference{
+			NamespacedName: &fastpathv2.NamespacedName{Name: name, Namespace: cfg.Namespace},
+		}})
 		requestCancel()
 		code := grpcCode(err)
 		if err == nil && response != nil && response.Success {
@@ -529,14 +531,14 @@ func waitForCleanup(ctx context.Context, client fastPathClient, cfg config, name
 		httpClient = &http.Client{Timeout: min(cfg.RequestTimeout, 5*time.Second)}
 	}
 	for {
-		response, err := client.ListSandboxes(ctx, &fastpathv2.ListRequest{Namespace: cfg.Namespace})
+		response, err := client.ListSandboxes(ctx, &fastpathv2.ListSandboxesRequest{Namespace: cfg.Namespace})
 		if err != nil {
 			return 0, fmt.Errorf("list Sandboxes while waiting for cleanup: %w", err)
 		}
 		pending := 0
 		if response != nil {
 			for _, sandbox := range response.Items {
-				if sandbox != nil && names[sandbox.SandboxName] > 0 {
+				if sandbox != nil && names[sandbox.GetIdentity().GetName()] > 0 {
 					pending++
 				}
 			}

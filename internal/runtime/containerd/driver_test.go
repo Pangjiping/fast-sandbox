@@ -611,6 +611,7 @@ func TestContainerdRuntime_prepareLabels(t *testing.T) {
 		InfraRevision: "infra-hash",
 		NetworkSlotID: "slot-1", NetworkNamespacePath: "/run/fast-sandbox/netns/fsb1",
 		NetworkIP: "172.30.0.2", NetworkGateway: "172.30.0.1", NetworkDNSPath: "/run/fast-sandbox/network/pod/slot-1.resolv.conf",
+		NetworkPrivateCIDR: "172.30.0.0/24", NetworkHostVeth: "fh1234",
 	}
 
 	labels := cr.prepareLabels(config)
@@ -640,6 +641,8 @@ func TestContainerdRuntime_prepareLabels(t *testing.T) {
 		"fast-sandbox.io/network-ip":            "172.30.0.2",
 		"fast-sandbox.io/network-gateway":       "172.30.0.1",
 		"fast-sandbox.io/network-dns-path":      "/run/fast-sandbox/network/pod/slot-1.resolv.conf",
+		"fast-sandbox.io/network-private-cidr":  "172.30.0.0/24",
+		"fast-sandbox.io/network-host-veth":     "fh1234",
 	}
 
 	assert.Equal(t, expectedLabels, labels)

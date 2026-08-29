@@ -7,6 +7,7 @@ data_plane="${3:-}"
 config_state="${4:-existing}"
 fastpath_port="${5:-9090}"
 proxy_port="${6:-18080}"
+actions="${7:-disabled}"
 
 echo "Terminal 1 (keep it running):"
 if [[ "${fastpath_port}" == "9090" && "${proxy_port}" == "18080" ]]; then
@@ -36,8 +37,13 @@ echo "Endpoint precedence: explicit flags > environment > config file > defaults
 echo "The example commands intentionally omit --endpoint and --proxy-endpoint."
 echo
 echo "Terminal 2 (copy/paste in order):"
-echo "  bin/fastctl run ${sandbox_name} --image docker.io/library/alpine:latest \\"
-echo "    --pool ${pool_name} -- /bin/sleep 3600"
+if [[ "${actions}" == "demo" ]]; then
+  echo "  bin/fastctl run ${sandbox_name} --image docker.io/library/alpine:latest \\"
+  echo "    --pool ${pool_name} --action 'egress={\"allow\":[\"api.example\"]}' -- /bin/sleep 3600"
+else
+  echo "  bin/fastctl run ${sandbox_name} --image docker.io/library/alpine:latest \\"
+  echo "    --pool ${pool_name} -- /bin/sleep 3600"
+fi
 echo
 echo "  bin/fastctl get ${sandbox_name}"
 echo
@@ -45,7 +51,7 @@ echo "  bin/fastctl diagnostics sandbox ${sandbox_name}"
 
 if [[ "${data_plane}" == "execd" ]]; then
   echo
-  echo "  # The named-route resolver waits directly on the assigned Fastlet for execd."
+  echo "  # Default Create already returned at aggregate Ready; resolve the execd route."
   echo "  bin/fastctl opensandbox exec ${sandbox_name} -- \\"
   echo "    sh -lc 'printf \"hello from execd\\n\" > /tmp/execd.txt && cat /tmp/execd.txt'"
   echo
@@ -59,6 +65,14 @@ if [[ "${data_plane}" == "execd" ]]; then
 else
   echo
   echo "This Pool declares no Infra Components; OpenSandbox exec/file commands are intentionally unavailable."
+fi
+
+if [[ "${actions}" == "demo" ]]; then
+  echo
+  echo "  # Observe SetBinding followed by the subscribed lifecycle Hooks."
+  echo "  kubectl logs -n fast-sandbox -l fast-sandbox.io/pool=${pool_name} -c sandbox-action-fixture"
+  echo
+  echo "  bin/fastctl update ${sandbox_name} --action 'egress={\"allow\":[\"api.example\",\"cdn.example\"]}'"
 fi
 
 echo

@@ -38,6 +38,7 @@ type FastletInfo struct {
 	RuntimeProfileHash  string
 	ResourceProfileHash string
 	InfraRevision       string
+	FastletRevision     string
 	InfraReady          bool
 	PreparedArtifacts   []string
 	RegistryRevision    string
@@ -79,6 +80,7 @@ type CandidateRequest struct {
 	RuntimeProfileHash  string
 	ResourceProfileHash string
 	InfraRevision       string
+	FastletRevision     string
 	Image               string
 	StableKey           string
 	Now                 time.Time
@@ -346,6 +348,9 @@ func hardFilter(info FastletInfo, request CandidateRequest, staleAfter time.Dura
 	if request.InfraRevision != "" && info.InfraRevision != request.InfraRevision {
 		return false
 	}
+	if request.FastletRevision != "" && info.FastletRevision != request.FastletRevision {
+		return false
+	}
 	return true
 }
 
@@ -427,7 +432,8 @@ func cloneStatuses(statuses map[string]fastletapi.SandboxStatus) map[string]fast
 	}
 	result := make(map[string]fastletapi.SandboxStatus, len(statuses))
 	for key, status := range statuses {
-		status.InfraDiagnostics = append([]fastletapi.InfraComponentDiagnostic(nil), status.InfraDiagnostics...)
+		status.InfraComponents = append([]fastletapi.InfraComponentDiagnostic(nil), status.InfraComponents...)
+		status.ActionBindings = append([]fastletapi.ActionBindingStatus(nil), status.ActionBindings...)
 		result[key] = status
 	}
 	return result

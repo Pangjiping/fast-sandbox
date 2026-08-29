@@ -26,12 +26,11 @@ func TestCleanupDecisionRequiresPodAndAssignmentFences(t *testing.T) {
 		SandboxUID: "sandbox-a-uid", SandboxName: "sandbox-a", SandboxNamespace: "default",
 		InstanceGeneration: 1, AssignmentAttempt: 1,
 	}
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 	running := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default", UID: types.UID("sandbox-a-uid")},
 		Status: apiv1alpha2.SandboxStatus{
-			Assignment: &assignment, InstanceGeneration: 1, AssignmentAttempt: 1,
-			RuntimeState: apiv1alpha2.ObservedStateReady,
+			Placement: apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1},
+			Runtime:   apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeReady, Generation: 1},
 		},
 	}
 	exactPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "fastlet-a", Namespace: "default", UID: types.UID("pod-a")}}
@@ -54,9 +53,13 @@ func TestCleanupDecisionRequiresPodAndAssignmentFences(t *testing.T) {
 
 	t.Run("Manual policy Sandbox is durably Lost", func(t *testing.T) {
 		lost := running.DeepCopy()
-		lost.Status.RuntimeState = apiv1alpha2.ObservedStateUnavailable
+		lost.Status.Runtime.State = apiv1alpha2.RuntimeUnavailable
+		lost.Status.Placement.Recovery = &apiv1alpha2.RecoveryStatus{
+			DetectedAt: metav1.NewTime(now.Add(-time.Minute)),
+			Deadline:   metav1.NewTime(now),
+		}
 		lost.Status.Conditions = []metav1.Condition{{
-			Type: apiv1alpha2.SandboxConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: "FastletPodLost",
+			Type: apiv1alpha2.SandboxConditionReady, Status: metav1.ConditionFalse, Reason: "arbitrary-diagnostic",
 		}}
 		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha2.Sandbox{lost})
 		decision, err := janitor.cleanupDecision(context.Background(), resource)
@@ -65,11 +68,22 @@ func TestCleanupDecisionRequiresPodAndAssignmentFences(t *testing.T) {
 		require.Equal(t, "SandboxMarkedLost", decision.Reason)
 	})
 
+	t.Run("Condition reason alone is not recovery authority", func(t *testing.T) {
+		diagnosticOnly := running.DeepCopy()
+		diagnosticOnly.Status.Conditions = []metav1.Condition{{
+			Type: apiv1alpha2.SandboxConditionReady, Status: metav1.ConditionFalse, Reason: "FastletPodLost",
+		}}
+		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha2.Sandbox{diagnosticOnly})
+		decision, err := janitor.cleanupDecision(context.Background(), resource)
+		require.NoError(t, err)
+		require.False(t, decision.Eligible)
+		require.Equal(t, "AssignmentStillAuthoritative", decision.Reason)
+	})
+
 	t.Run("AutoRecreate advanced the assignment fence", func(t *testing.T) {
 		advanced := running.DeepCopy()
-		advanced.Status.Assignment.Attempt = 2
-		advanced.Status.AssignmentAttempt = 2
-		advanced.Status.InstanceGeneration = 2
+		advanced.Status.Placement.Attempt = 2
+		advanced.Status.Runtime.Generation = 2
 		janitor := newAuthorityJanitor(t, now, nil, []*apiv1alpha2.Sandbox{advanced})
 		decision, err := janitor.cleanupDecision(context.Background(), resource)
 		require.NoError(t, err)

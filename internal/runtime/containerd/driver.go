@@ -337,6 +337,8 @@ func (r *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		createConfig.NetworkIP = slot.IP
 		createConfig.NetworkGateway = slot.Gateway
 		createConfig.NetworkDNSPath = slot.DNSPath
+		createConfig.NetworkPrivateCIDR = slot.PrivateCIDR
+		createConfig.NetworkHostVeth = slot.HostVeth
 	}
 	metadata, createErr := r.CreateSandbox(ctx, &createConfig)
 	if createErr != nil && r.networkManager != nil {
@@ -595,7 +597,7 @@ func (r *Driver) prepareLabels(config *fastletapi.SandboxSpec) map[string]string
 	if routeGeneration <= 0 {
 		routeGeneration = 1
 	}
-	return map[string]string{
+	labels := map[string]string{
 		"fast-sandbox.io/managed":               "true",
 		"fast-sandbox.io/fastlet-name":          r.fastletPodName,
 		"fast-sandbox.io/fastlet-uid":           r.fastletPodUID,
@@ -621,6 +623,13 @@ func (r *Driver) prepareLabels(config *fastletapi.SandboxSpec) map[string]string
 		"fast-sandbox.io/network-gateway":       config.NetworkGateway,
 		"fast-sandbox.io/network-dns-path":      config.NetworkDNSPath,
 	}
+	if config.NetworkPrivateCIDR != "" {
+		labels["fast-sandbox.io/network-private-cidr"] = config.NetworkPrivateCIDR
+	}
+	if config.NetworkHostVeth != "" {
+		labels["fast-sandbox.io/network-host-veth"] = config.NetworkHostVeth
+	}
+	return labels
 }
 
 func (r *Driver) SetNetworkManager(manager *fastletnetwork.Manager) {
@@ -754,6 +763,8 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 			NetworkIP:            info.Labels["fast-sandbox.io/network-ip"],
 			NetworkGateway:       info.Labels["fast-sandbox.io/network-gateway"],
 			NetworkDNSPath:       info.Labels["fast-sandbox.io/network-dns-path"],
+			NetworkPrivateCIDR:   info.Labels["fast-sandbox.io/network-private-cidr"],
+			NetworkHostVeth:      info.Labels["fast-sandbox.io/network-host-veth"],
 		},
 		ContainerID: sandboxID,
 		CreatedAt:   info.CreatedAt.Unix(),

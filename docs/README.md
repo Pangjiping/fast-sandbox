@@ -32,6 +32,7 @@ Fast Sandbox documentation is organized by reader intent:
 - [Secure runtimes](guides/secure-runtimes.md)
 - [Runtime node installation](guides/runtime-node-installation.md)
 - [Runtime environments](guides/runtime-environments.md)
+- [Sandbox Actions](guides/sandbox-actions.md)
 - [Observability](guides/observability.md)
 - [Performance](guides/performance.md)
 - [Testing](guides/testing.md)

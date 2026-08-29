@@ -36,21 +36,16 @@ func TestFastletClientAdmissionEndpoints(t *testing.T) {
 			require.NotEmpty(t, r.Header.Get("traceparent"))
 			require.NoError(t, json.NewEncoder(w).Encode(CreateSandboxResponse{Accepted: true}))
 		case "/api/v2/fastlet/inspect":
-			require.NoError(t, json.NewEncoder(w).Encode(InspectSandboxResponse{Sandbox: &SandboxStatus{Phase: "running"}}))
+			require.NoError(t, json.NewEncoder(w).Encode(InspectSandboxResponse{Sandbox: &SandboxStatus{
+				Runtime: RuntimeObservation{State: RuntimeStateReady}, DataPlane: DataPlaneObservation{State: DataPlaneStateReady},
+			}}))
 		case "/api/v2/fastlet/delete":
-			require.NoError(t, json.NewEncoder(w).Encode(DeleteSandboxV2Response{Accepted: true}))
+			require.NoError(t, json.NewEncoder(w).Encode(DeleteSandboxResponse{Accepted: true}))
 		case "/api/v2/fastlet/diagnostics/sandbox":
 			var request SandboxDiagnosticsRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			require.Equal(t, identity.RuntimeInstanceID, request.Identity.RuntimeInstanceID)
 			require.NoError(t, json.NewEncoder(w).Encode(SandboxDiagnosticsResponse{Events: []SandboxDiagnosticEvent{{Source: "runtime", Message: "ready"}}}))
-		case "/api/v2/fastlet/wait-data-plane":
-			var request WaitSandboxReadyRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-			require.Equal(t, "execd", request.ComponentName)
-			require.NoError(t, json.NewEncoder(w).Encode(WaitSandboxReadyResponse{
-				Ready: true, Sandbox: &SandboxStatus{SandboxID: identity.SandboxUID, Phase: "running"},
-			}))
 		case "/api/v2/fastlet/draining":
 			require.NoError(t, json.NewEncoder(w).Encode(SetDrainingResponse{Draining: true}))
 		default:
@@ -65,15 +60,12 @@ func TestFastletClientAdmissionEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	inspected, err := client.InspectSandbox(ctx, endpoint, &InspectSandboxRequest{Identity: identity})
 	require.NoError(t, err)
-	require.Equal(t, "running", inspected.Sandbox.Phase)
-	_, err = client.DeleteSandboxV2(ctx, endpoint, &DeleteSandboxV2Request{Identity: identity})
+	require.Equal(t, RuntimeStateReady, inspected.Sandbox.Runtime.State)
+	_, err = client.DeleteSandbox(ctx, endpoint, &DeleteSandboxRequest{Identity: identity})
 	require.NoError(t, err)
 	diagnostics, err := client.SandboxDiagnostics(ctx, endpoint, &SandboxDiagnosticsRequest{Identity: identity, Limit: 10})
 	require.NoError(t, err)
 	require.Equal(t, "ready", diagnostics.Events[0].Message)
-	ready, err := client.WaitSandboxReady(ctx, endpoint, &WaitSandboxReadyRequest{Identity: identity, ComponentName: "execd"})
-	require.NoError(t, err)
-	require.True(t, ready.Ready)
 	draining, err := client.SetDraining(ctx, endpoint, &SetDrainingRequest{Draining: true})
 	require.NoError(t, err)
 	require.True(t, draining.Draining)
@@ -81,7 +73,7 @@ func TestFastletClientAdmissionEndpoints(t *testing.T) {
 	for _, want := range []string{
 		"/api/v2/fastlet/create",
 		"/api/v2/fastlet/inspect", "/api/v2/fastlet/delete", "/api/v2/fastlet/diagnostics/sandbox",
-		"/api/v2/fastlet/wait-data-plane", "/api/v2/fastlet/draining",
+		"/api/v2/fastlet/draining",
 	} {
 		require.Equal(t, want, <-paths)
 	}

@@ -281,7 +281,7 @@ func TestTopKReturnsDeepCopy(t *testing.T) {
 	info.PreparedArtifacts = []string{"component-artifact-a"}
 	info.SandboxStatuses["sandbox-a"] = fastletapi.SandboxStatus{
 		SandboxID: "sandbox-a",
-		InfraDiagnostics: []fastletapi.InfraComponentDiagnostic{{
+		InfraComponents: []fastletapi.InfraComponentDiagnostic{{
 			Component: "execd",
 			State:     "ready",
 		}},
@@ -294,7 +294,7 @@ func TestTopKReturnsDeepCopy(t *testing.T) {
 	selected[0].PreparedArtifacts[0] = "mutated"
 	selectedStatus := selected[0].SandboxStatuses["sandbox-a"]
 	selectedStatus.SandboxID = "mutated"
-	selectedStatus.InfraDiagnostics[0].State = "mutated"
+	selectedStatus.InfraComponents[0].State = "mutated"
 	selected[0].SandboxStatuses["sandbox-a"] = selectedStatus
 
 	stored, ok := registry.GetFastletByID("fastlet-a")
@@ -302,7 +302,7 @@ func TestTopKReturnsDeepCopy(t *testing.T) {
 	require.Equal(t, []string{"alpine:latest"}, stored.Images)
 	require.Equal(t, []string{"component-artifact-a"}, stored.PreparedArtifacts)
 	require.Equal(t, "sandbox-a", stored.SandboxStatuses["sandbox-a"].SandboxID)
-	require.Equal(t, "ready", stored.SandboxStatuses["sandbox-a"].InfraDiagnostics[0].State)
+	require.Equal(t, "ready", stored.SandboxStatuses["sandbox-a"].InfraComponents[0].State)
 }
 
 func TestTopKIsSafeDuringConcurrentRegistryUpdates(t *testing.T) {
@@ -351,8 +351,9 @@ func TestStaleRegistryHintsCannotExceedFastletCapacity(t *testing.T) {
 		sandboxUID := fmt.Sprintf("sandbox-%03d", index)
 		require.Len(t, registry.TopK(candidate("alpine:latest", sandboxUID), 1), 1)
 		_, err = manager.CreateSandbox(context.Background(), &fastletapi.CreateSandboxRequest{
-			Identity: fastletapi.SandboxIdentity{SandboxUID: sandboxUID, InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + sandboxUID, AssignmentAttempt: 1, FastletPodUID: "uid-fastlet-a"},
-			Sandbox:  fastletapi.SandboxSpec{ClaimUID: "claim-" + sandboxUID, Image: "alpine:latest"},
+			Identity:       fastletapi.SandboxIdentity{SandboxUID: sandboxUID, InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + sandboxUID, AssignmentAttempt: 1, FastletPodUID: "uid-fastlet-a"},
+			Sandbox:        fastletapi.SandboxSpec{ClaimUID: "claim-" + sandboxUID, Image: "alpine:latest"},
+			SpecGeneration: 1,
 		})
 		if err == nil {
 			successes++

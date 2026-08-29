@@ -16,7 +16,10 @@ func TestSandboxDiagnosticsFetchAndTextOutput(t *testing.T) {
 		require.Equal(t, "namespace-a", request.Namespace)
 		require.EqualValues(t, 7, request.Limit)
 		return &fastpathv2.SandboxDiagnosticsResponse{
-			Sandbox:         &fastpathv2.SandboxInfo{SandboxName: "sandbox-a", SandboxUid: "uid-a", RuntimeState: "Ready", FastletPod: "fastlet-a"},
+			Sandbox: &fastpathv2.SandboxInfo{
+				Identity: &fastpathv2.SandboxIdentity{Name: "sandbox-a", Uid: "uid-a"},
+				Runtime:  &fastpathv2.RuntimeInfo{State: fastpathv2.RuntimeState_RUNTIME_STATE_READY}, Ready: true,
+			},
 			AssignmentState: "synchronized", RuntimeInstanceId: "runtime-a", AssignmentAttempt: 2, FastletReachable: true,
 			Events: []*fastpathv2.SandboxDiagnosticEvent{{TimestampUnixNano: 1, Level: "info", Source: "runtime", Phase: "running", Message: "ready"}},
 		}, nil

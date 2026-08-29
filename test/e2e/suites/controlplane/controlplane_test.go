@@ -67,7 +67,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 			t.Fatalf("create declarative Sandbox without FastPath: %v", err)
 		}
 		ready := waitForSandbox(ctx, t, k8sClient, types.NamespacedName{Namespace: namespace, Name: sandbox.Name}, func(item *apiv1alpha2.Sandbox) bool {
-			return item.Status.Assignment != nil && item.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+			return item.Status.Placement.FastletName != "" && item.Status.Runtime.State == apiv1alpha2.RuntimeReady
 		})
 		if ready.UID == "" {
 			t.Fatal("declarative Sandbox has no durable Kubernetes UID")
@@ -96,7 +96,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		defer connection.Close()
 		allInOne := fastpathv2.NewFastPathServiceClient(connection)
 
-		var response *fastpathv2.SandboxInfo
+		var response *fastpathv2.CreateSandboxResponse
 		waitUntil(ctx, t, "all-in-one Registry heartbeat and Create", func() (bool, error) {
 			requestCtx, requestCancel := context.WithTimeout(ctx, 10*time.Second)
 			defer requestCancel()
@@ -112,11 +112,11 @@ func TestMultiActiveControlPlane(t *testing.T) {
 				return false, createErr
 			}
 		})
-		ready := waitForSandbox(ctx, t, k8sClient, types.NamespacedName{Namespace: namespace, Name: response.SandboxName}, func(item *apiv1alpha2.Sandbox) bool {
-			return item.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+		ready := waitForSandbox(ctx, t, k8sClient, types.NamespacedName{Namespace: namespace, Name: response.GetSandbox().GetIdentity().GetName()}, func(item *apiv1alpha2.Sandbox) bool {
+			return item.Status.Runtime.State == apiv1alpha2.RuntimeReady
 		})
-		if response.SandboxUid != string(ready.UID) {
-			t.Fatalf("all-in-one returned UID %q, want CRD UID %q", response.SandboxUid, ready.UID)
+		if response.GetSandbox().GetIdentity().GetUid() != string(ready.UID) {
+			t.Fatalf("all-in-one returned UID %q, want CRD UID %q", response.GetSandbox().GetIdentity().GetUid(), ready.UID)
 		}
 	})
 
@@ -149,12 +149,12 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		if err != nil {
 			t.Fatalf("idempotent CreateSandbox: %v", err)
 		}
-		if first.SandboxUid == "" || first.SandboxUid != second.SandboxUid || first.SandboxName != second.SandboxName {
+		if first.GetSandbox().GetIdentity().GetUid() == "" || first.GetSandbox().GetIdentity().GetUid() != second.GetSandbox().GetIdentity().GetUid() || first.GetSandbox().GetIdentity().GetName() != second.GetSandbox().GetIdentity().GetName() {
 			t.Fatalf("idempotent response mismatch: first=%+v second=%+v", first, second)
 		}
 		waitUntil(ctx, t, "Fastlet platform diagnostics", func() (bool, error) {
 			diagnostics, diagnosticsErr := fastPath.GetSandboxDiagnostics(ctx, &fastpathv2.SandboxDiagnosticsRequest{
-				SandboxName: first.SandboxName, Namespace: namespace, Limit: 10,
+				SandboxName: first.GetSandbox().GetIdentity().GetName(), Namespace: namespace, Limit: 10,
 			})
 			if diagnosticsErr != nil {
 				return false, nil
@@ -202,7 +202,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FastPath Create during Controller election: %v", err)
 		}
-		if response.SandboxUid == "" {
+		if response.GetSandbox().GetIdentity().GetUid() == "" {
 			t.Fatal("FastPath returned empty Sandbox UID during Controller election")
 		}
 
@@ -227,7 +227,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 		var group sync.WaitGroup
 		var lock sync.Mutex
 		successes := 0
-		successfulResponses := make([]*fastpathv2.SandboxInfo, 0, capacityPool.Spec.MaxSandboxesPerPod)
+		successfulResponses := make([]*fastpathv2.CreateSandboxResponse, 0, capacityPool.Spec.MaxSandboxesPerPod)
 		failures := make([]error, 0, requests)
 		for index := 0; index < requests; index++ {
 			group.Add(1)
@@ -273,7 +273,7 @@ func TestMultiActiveControlPlane(t *testing.T) {
 					if list.Items[index].Annotations["sandbox.fast.io/assignment"] == "" {
 						return false, fmt.Errorf("CRD-first Sandbox %s/%s has no durable assignment annotation", list.Items[index].Namespace, list.Items[index].Name)
 					}
-					if list.Items[index].Status.RuntimeState == apiv1alpha2.ObservedStateReady {
+					if list.Items[index].Status.Runtime.State == apiv1alpha2.RuntimeReady {
 						if owner, exists := seenUIDs[string(list.Items[index].UID)]; !exists || owner == "" {
 							return false, fmt.Errorf("ready Sandbox %s/%s has unreported RPC identity %q", list.Items[index].Namespace, list.Items[index].Name, list.Items[index].UID)
 						}
@@ -352,19 +352,20 @@ func podReady(pod *corev1.Pod) bool {
 	return false
 }
 
-func assertUniqueCreateIdentity(t *testing.T, seenUIDs, seenNames map[string]string, owner string, response *fastpathv2.SandboxInfo) {
+func assertUniqueCreateIdentity(t *testing.T, seenUIDs, seenNames map[string]string, owner string, response *fastpathv2.CreateSandboxResponse) {
 	t.Helper()
-	if response == nil || response.SandboxUid == "" || response.SandboxName == "" {
+	identity := response.GetSandbox().GetIdentity()
+	if identity.GetUid() == "" || identity.GetName() == "" {
 		t.Fatalf("%s returned incomplete Create identity: %+v", owner, response)
 	}
-	if previous, exists := seenUIDs[response.SandboxUid]; exists {
-		t.Fatalf("duplicate Sandbox UID %q returned by %s and %s", response.SandboxUid, previous, owner)
+	if previous, exists := seenUIDs[identity.GetUid()]; exists {
+		t.Fatalf("duplicate Sandbox UID %q returned by %s and %s", identity.GetUid(), previous, owner)
 	}
-	if previous, exists := seenNames[response.SandboxName]; exists {
-		t.Fatalf("duplicate Sandbox name %q returned by %s and %s", response.SandboxName, previous, owner)
+	if previous, exists := seenNames[identity.GetName()]; exists {
+		t.Fatalf("duplicate Sandbox name %q returned by %s and %s", identity.GetName(), previous, owner)
 	}
-	seenUIDs[response.SandboxUid] = owner
-	seenNames[response.SandboxName] = owner
+	seenUIDs[identity.GetUid()] = owner
+	seenNames[identity.GetName()] = owner
 }
 
 func assertProductionTopology(ctx context.Context, t *testing.T, k8sClient client.Client) {
@@ -433,8 +434,8 @@ func controlPlanePool(namespace, name string, capacity int32) *apiv1alpha2.Sandb
 	}
 }
 
-func createRequest(namespace, pool, requestID string) *fastpathv2.CreateRequest {
-	return &fastpathv2.CreateRequest{
+func createRequest(namespace, pool, requestID string) *fastpathv2.CreateSandboxRequest {
+	return &fastpathv2.CreateSandboxRequest{
 		Namespace: namespace, PoolRef: pool, RequestId: requestID,
 		Image: "docker.io/library/alpine:latest", Command: []string{"/bin/sh", "-c", "sleep 3600"},
 	}

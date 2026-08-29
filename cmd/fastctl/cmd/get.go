@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	fastpathv2 "fast-sandbox/api/proto/v2"
 
@@ -33,16 +32,16 @@ var getCmd = &cobra.Command{
 		}
 
 		klog.V(4).InfoS("Sending GetSandbox request", "sandboxName", sandboxName, "namespace", namespace)
-		resp, err := client.GetSandbox(context.Background(), &fastpathv2.GetRequest{
-			SandboxName: sandboxName,
-			Namespace:   namespace,
+		resp, err := client.GetSandbox(context.Background(), &fastpathv2.GetSandboxRequest{
+			Sandbox: fastPathSandboxReference(sandboxName, namespace),
 		})
 		if err != nil {
 			klog.ErrorS(err, "GetSandbox request failed", "sandboxName", sandboxName, "namespace", namespace)
 			log.Fatalf("Error: %v", err)
 		}
 
-		klog.V(4).InfoS("GetSandbox request succeeded", "sandboxUid", resp.SandboxUid, "sandboxName", resp.SandboxName, "runtimeState", resp.RuntimeState, "dataPlaneState", resp.DataPlaneState, "outputFormat", outputFormat)
+		info := resp.GetSandbox()
+		klog.V(4).InfoS("GetSandbox request succeeded", "sandboxUid", info.GetIdentity().GetUid(), "sandboxName", info.GetIdentity().GetName(), "runtimeState", info.GetRuntime().GetState(), "dataPlaneState", info.GetDataPlane().GetState(), "outputFormat", outputFormat)
 		if outputFormat == "json" {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -51,7 +50,6 @@ var getCmd = &cobra.Command{
 			// Default YAML-like output
 			y, _ := yaml.Marshal(resp)
 			fmt.Print(string(y))
-			fmt.Printf("Age: %s\n", time.Since(time.Unix(resp.CreatedAtUnixSeconds, 0)).Round(time.Second))
 		}
 	},
 }

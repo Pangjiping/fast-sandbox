@@ -36,8 +36,8 @@ class FastPathServiceStub(object):
         """
         self.CreateSandbox = channel.unary_unary(
                 '/fastpath.v2.FastPathService/CreateSandbox',
-                request_serializer=fastpath__pb2.CreateRequest.SerializeToString,
-                response_deserializer=fastpath__pb2.SandboxInfo.FromString,
+                request_serializer=fastpath__pb2.CreateSandboxRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.CreateSandboxResponse.FromString,
                 _registered_method=True)
         self.DeleteSandbox = channel.unary_unary(
                 '/fastpath.v2.FastPathService/DeleteSandbox',
@@ -46,28 +46,23 @@ class FastPathServiceStub(object):
                 _registered_method=True)
         self.UpdateSandbox = channel.unary_unary(
                 '/fastpath.v2.FastPathService/UpdateSandbox',
-                request_serializer=fastpath__pb2.UpdateRequest.SerializeToString,
-                response_deserializer=fastpath__pb2.UpdateResponse.FromString,
+                request_serializer=fastpath__pb2.UpdateSandboxRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.UpdateSandboxResponse.FromString,
                 _registered_method=True)
         self.ListSandboxes = channel.unary_unary(
                 '/fastpath.v2.FastPathService/ListSandboxes',
-                request_serializer=fastpath__pb2.ListRequest.SerializeToString,
-                response_deserializer=fastpath__pb2.ListResponse.FromString,
+                request_serializer=fastpath__pb2.ListSandboxesRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.ListSandboxesResponse.FromString,
                 _registered_method=True)
         self.GetSandbox = channel.unary_unary(
                 '/fastpath.v2.FastPathService/GetSandbox',
-                request_serializer=fastpath__pb2.GetRequest.SerializeToString,
-                response_deserializer=fastpath__pb2.SandboxInfo.FromString,
+                request_serializer=fastpath__pb2.GetSandboxRequest.SerializeToString,
+                response_deserializer=fastpath__pb2.GetSandboxResponse.FromString,
                 _registered_method=True)
         self.GetSandboxDiagnostics = channel.unary_unary(
                 '/fastpath.v2.FastPathService/GetSandboxDiagnostics',
                 request_serializer=fastpath__pb2.SandboxDiagnosticsRequest.SerializeToString,
                 response_deserializer=fastpath__pb2.SandboxDiagnosticsResponse.FromString,
-                _registered_method=True)
-        self.WaitSandboxReady = channel.unary_unary(
-                '/fastpath.v2.FastPathService/WaitSandboxReady',
-                request_serializer=fastpath__pb2.WaitSandboxReadyRequest.SerializeToString,
-                response_deserializer=fastpath__pb2.SandboxInfo.FromString,
                 _registered_method=True)
         self.ResolveEndpoint = channel.unary_unary(
                 '/fastpath.v2.FastPathService/ResolveEndpoint',
@@ -125,17 +120,8 @@ class FastPathServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def WaitSandboxReady(self, request, context):
-        """WaitSandboxReady waits on the assigned Fastlet, never on CRD status
-        propagation.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
     def ResolveEndpoint(self, request, context):
-        """ResolveEndpoint resolves one named component or raw user port.
-        """
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -157,8 +143,8 @@ def add_FastPathServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'CreateSandbox': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateSandbox,
-                    request_deserializer=fastpath__pb2.CreateRequest.FromString,
-                    response_serializer=fastpath__pb2.SandboxInfo.SerializeToString,
+                    request_deserializer=fastpath__pb2.CreateSandboxRequest.FromString,
+                    response_serializer=fastpath__pb2.CreateSandboxResponse.SerializeToString,
             ),
             'DeleteSandbox': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteSandbox,
@@ -167,28 +153,23 @@ def add_FastPathServiceServicer_to_server(servicer, server):
             ),
             'UpdateSandbox': grpc.unary_unary_rpc_method_handler(
                     servicer.UpdateSandbox,
-                    request_deserializer=fastpath__pb2.UpdateRequest.FromString,
-                    response_serializer=fastpath__pb2.UpdateResponse.SerializeToString,
+                    request_deserializer=fastpath__pb2.UpdateSandboxRequest.FromString,
+                    response_serializer=fastpath__pb2.UpdateSandboxResponse.SerializeToString,
             ),
             'ListSandboxes': grpc.unary_unary_rpc_method_handler(
                     servicer.ListSandboxes,
-                    request_deserializer=fastpath__pb2.ListRequest.FromString,
-                    response_serializer=fastpath__pb2.ListResponse.SerializeToString,
+                    request_deserializer=fastpath__pb2.ListSandboxesRequest.FromString,
+                    response_serializer=fastpath__pb2.ListSandboxesResponse.SerializeToString,
             ),
             'GetSandbox': grpc.unary_unary_rpc_method_handler(
                     servicer.GetSandbox,
-                    request_deserializer=fastpath__pb2.GetRequest.FromString,
-                    response_serializer=fastpath__pb2.SandboxInfo.SerializeToString,
+                    request_deserializer=fastpath__pb2.GetSandboxRequest.FromString,
+                    response_serializer=fastpath__pb2.GetSandboxResponse.SerializeToString,
             ),
             'GetSandboxDiagnostics': grpc.unary_unary_rpc_method_handler(
                     servicer.GetSandboxDiagnostics,
                     request_deserializer=fastpath__pb2.SandboxDiagnosticsRequest.FromString,
                     response_serializer=fastpath__pb2.SandboxDiagnosticsResponse.SerializeToString,
-            ),
-            'WaitSandboxReady': grpc.unary_unary_rpc_method_handler(
-                    servicer.WaitSandboxReady,
-                    request_deserializer=fastpath__pb2.WaitSandboxReadyRequest.FromString,
-                    response_serializer=fastpath__pb2.SandboxInfo.SerializeToString,
             ),
             'ResolveEndpoint': grpc.unary_unary_rpc_method_handler(
                     servicer.ResolveEndpoint,
@@ -231,8 +212,8 @@ class FastPathService(object):
             request,
             target,
             '/fastpath.v2.FastPathService/CreateSandbox',
-            fastpath__pb2.CreateRequest.SerializeToString,
-            fastpath__pb2.SandboxInfo.FromString,
+            fastpath__pb2.CreateSandboxRequest.SerializeToString,
+            fastpath__pb2.CreateSandboxResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -285,8 +266,8 @@ class FastPathService(object):
             request,
             target,
             '/fastpath.v2.FastPathService/UpdateSandbox',
-            fastpath__pb2.UpdateRequest.SerializeToString,
-            fastpath__pb2.UpdateResponse.FromString,
+            fastpath__pb2.UpdateSandboxRequest.SerializeToString,
+            fastpath__pb2.UpdateSandboxResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -312,8 +293,8 @@ class FastPathService(object):
             request,
             target,
             '/fastpath.v2.FastPathService/ListSandboxes',
-            fastpath__pb2.ListRequest.SerializeToString,
-            fastpath__pb2.ListResponse.FromString,
+            fastpath__pb2.ListSandboxesRequest.SerializeToString,
+            fastpath__pb2.ListSandboxesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -339,8 +320,8 @@ class FastPathService(object):
             request,
             target,
             '/fastpath.v2.FastPathService/GetSandbox',
-            fastpath__pb2.GetRequest.SerializeToString,
-            fastpath__pb2.SandboxInfo.FromString,
+            fastpath__pb2.GetSandboxRequest.SerializeToString,
+            fastpath__pb2.GetSandboxResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -368,33 +349,6 @@ class FastPathService(object):
             '/fastpath.v2.FastPathService/GetSandboxDiagnostics',
             fastpath__pb2.SandboxDiagnosticsRequest.SerializeToString,
             fastpath__pb2.SandboxDiagnosticsResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def WaitSandboxReady(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/fastpath.v2.FastPathService/WaitSandboxReady',
-            fastpath__pb2.WaitSandboxReadyRequest.SerializeToString,
-            fastpath__pb2.SandboxInfo.FromString,
             options,
             channel_credentials,
             insecure,

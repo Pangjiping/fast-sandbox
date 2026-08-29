@@ -107,7 +107,8 @@ func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 
 	var created fastletapi.CreateSandboxResponse
 	recorder := postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
-		Identity: identity,
+		Identity:       identity,
+		SpecGeneration: 1,
 		Sandbox: fastletapi.SandboxSpec{
 			ClaimUID: "claim-a", ClaimNamespace: "default", ClaimName: "sandbox-a", Image: "alpine:latest",
 		},
@@ -118,14 +119,10 @@ func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 	recorder = postJSON(t, handler, "/api/v2/fastlet/diagnostics/sandbox", fastletapi.SandboxDiagnosticsRequest{Identity: identity, Limit: 2}, &diagnostics)
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.NotNil(t, diagnostics.Sandbox)
-	require.Equal(t, "running", diagnostics.Sandbox.Phase)
+	require.Equal(t, fastletapi.RuntimeStateReady, diagnostics.Sandbox.Runtime.State)
 	require.Len(t, diagnostics.Events, 2)
-	var ready fastletapi.WaitSandboxReadyResponse
-	recorder = postJSON(t, handler, "/api/v2/fastlet/wait-data-plane", fastletapi.WaitSandboxReadyRequest{
-		Identity: identity, DataPlane: true, NoWait: true,
-	}, &ready)
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.True(t, ready.Ready)
+	recorder = postJSON(t, handler, "/api/v2/fastlet/wait-data-plane", struct{}{}, nil)
+	require.Equal(t, http.StatusNotFound, recorder.Code)
 
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v2/fastlet/heartbeat", nil))
@@ -138,8 +135,9 @@ func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 
 	var rejected fastletapi.CreateSandboxResponse
 	recorder = postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
-		Identity: fastletapi.SandboxIdentity{RequestID: "request-b", SandboxUID: "sandbox-b", InstanceGeneration: 1, RuntimeInstanceID: "runtime-b", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
-		Sandbox:  fastletapi.SandboxSpec{ClaimUID: "claim-b", ClaimNamespace: "default", ClaimName: "sandbox-b", Image: "alpine:latest"},
+		Identity:       fastletapi.SandboxIdentity{RequestID: "request-b", SandboxUID: "sandbox-b", InstanceGeneration: 1, RuntimeInstanceID: "runtime-b", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
+		Sandbox:        fastletapi.SandboxSpec{ClaimUID: "claim-b", ClaimNamespace: "default", ClaimName: "sandbox-b", Image: "alpine:latest"},
+		SpecGeneration: 1,
 	}, &rejected)
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Equal(t, fastletapi.ErrorCapacityRejected, rejected.Error.Code)
@@ -175,8 +173,9 @@ func TestSetDrainingRejectsNewCreates(t *testing.T) {
 	require.True(t, draining.Draining)
 	var rejected fastletapi.CreateSandboxResponse
 	recorder = postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
-		Identity: fastletapi.SandboxIdentity{RequestID: "request-a", SandboxUID: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
-		Sandbox:  fastletapi.SandboxSpec{ClaimUID: "claim-a", ClaimNamespace: "default", ClaimName: "sandbox-a", Image: "alpine:latest"},
+		Identity:       fastletapi.SandboxIdentity{RequestID: "request-a", SandboxUID: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
+		Sandbox:        fastletapi.SandboxSpec{ClaimUID: "claim-a", ClaimNamespace: "default", ClaimName: "sandbox-a", Image: "alpine:latest"},
+		SpecGeneration: 1,
 	}, &rejected)
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Equal(t, fastletapi.ErrorDraining, rejected.Error.Code)
