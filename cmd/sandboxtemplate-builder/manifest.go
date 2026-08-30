@@ -89,6 +89,16 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 			"vcpu":   spec.Machine.VCPU,
 			"memory": spec.Machine.Memory,
 		},
+		// The guest network baked into the snapshot (clone networking
+		// model): the restored guest owns a static eth0 address/MAC; the
+		// consumer replaces only the host tap via network_overrides.
+		"guestNetwork": map[string]any{
+			"iface":   "eth0",
+			"mac":     bakedGuestMAC,
+			"ip":      bakedGuestIP,
+			"gateway": bakedGuestGateway,
+			"netmask": bakedGuestNetmask,
+		},
 		"entrypoint": spec.Entrypoint,
 		"init":       spec.Init,
 		// Note: envs are published verbatim into the manifest — do not place

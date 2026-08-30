@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	runtimecontract "fast-sandbox/internal/runtime/contract"
+
+	"k8s.io/klog/v2"
 )
 
 // imageCacheDir holds content-addressed rootfs images:
@@ -109,11 +111,13 @@ func prepareInstanceRootfs(stateRoot, image, instanceDir string) (string, error)
 }
 
 // copyReflinkOrCopy attempts a CoW reflink copy and falls back to a plain
-// copy when the host filesystem does not support reflinks.
+// copy when the host filesystem does not support reflinks (e.g. ext4): the
+// fallback pays a full rootfs copy (~1.7 GB/s) per create.
 func copyReflinkOrCopy(source, target string) error {
 	if exec.Command("cp", "--reflink=always", source, target).Run() == nil {
 		return nil
 	}
+	klog.V(4).InfoS("reflink copy unavailable, falling back to a full copy", "source", source)
 	_ = os.Remove(target)
 	return copyFile(source, target)
 }
@@ -243,9 +247,9 @@ func (d *Driver) ListImages(_ context.Context) ([]string, error) {
 // runtime-agent configured, the pull proxies to the agent's PinImage (the
 // node-level pull chain image -> index -> manifest -> digest-verified
 // cache); an unreachable agent degrades to the local cache check so warm
-// images and cold boots never depend on agent availability. Conversion is
-// out of band; an unconverted reference is reported as ErrImageNotReady
-// instead of blocking the create path.
+// images never depend on agent availability. Conversion is out of band; an
+// unconverted reference is reported as ErrImageNotReady instead of blocking
+// the create path.
 func (d *Driver) PullImage(ctx context.Context, image string) error {
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot

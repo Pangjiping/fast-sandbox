@@ -29,6 +29,7 @@ Fast Sandbox documentation is organized by reader intent:
 - [Deployment](guides/deployment.md)
 - [OpenSandbox integration](guides/opensandbox-integration.md)
 - [OpenSandbox Execd](guides/opensandbox-execd.md)
+- [SandboxTemplate golden images](guides/sandboxtemplate-golden-images.md)
 - [Private registries](guides/private-registries.md)
 - [Secure runtimes](guides/secure-runtimes.md)
 - [Runtime node installation](guides/runtime-node-installation.md)
@@ -37,6 +38,8 @@ Fast Sandbox documentation is organized by reader intent:
 - [Observability](guides/observability.md)
 - [Performance](guides/performance.md)
 - [Testing](guides/testing.md)
+- [Firecracker runtime E2E](guides/firecracker-runtime-e2e.md)
+- [Firecracker full-chain E2E](guides/firecracker-chain-e2e.md)
 
 ## Reference
 

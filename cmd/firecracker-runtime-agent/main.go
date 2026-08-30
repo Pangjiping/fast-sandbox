@@ -35,6 +35,10 @@ func main() {
 	storeRoot := getEnv("FAST_SANDBOX_ARTIFACT_STORE", "")
 	stateRoot := getEnv("FAST_SANDBOX_STATE_ROOT", defaultStateRoot)
 	registryPath := getEnv("FAST_SANDBOX_REGISTRY_CONFIG_PATH", registryconfig.MountPath)
+	// The artifact store endpoint is usually derived from the credential
+	// Host; an explicit endpoint overrides the matching key and the
+	// connection address (e.g. a local MinIO: http://127.0.0.1:9000).
+	endpoint := getEnv("FAST_SANDBOX_ARTIFACT_ENDPOINT", "")
 
 	if storeRoot == "" {
 		klog.ErrorS(errors.New("missing store root"), "FAST_SANDBOX_ARTIFACT_STORE is required (s3://bucket/prefix)")
@@ -42,7 +46,7 @@ func main() {
 	}
 
 	registryProvider := registryconfig.NewFileProvider(registryPath)
-	credential, err := resolveCredential(registryProvider, storeRoot)
+	credential, err := resolveCredential(registryProvider, storeRoot, endpoint)
 	if err != nil {
 		klog.ErrorS(err, "Failed to resolve the artifact store credential")
 		os.Exit(1)
@@ -75,21 +79,42 @@ func main() {
 
 // resolveCredential matches the store endpoint host against the compiled
 // registry configuration; the credential carries the read-only access key
-// pair (Username/Password) and the store Host.
-func resolveCredential(provider registryconfig.Provider, storeRoot string) (registryconfig.Credential, error) {
+// pair (Username/Password) and the store endpoint. When endpointEnv is set,
+// its host is the matching key (an explicit artifact store endpoint such as
+// a MinIO address); otherwise the store root host (the bucket) is matched.
+// The match is a normalized host comparison (CredentialsForHost), not an
+// image-reference match: a bare endpoint host like "127.0.0.1:9000" has no
+// repository component for the reference-splitting rules to parse.
+func resolveCredential(provider registryconfig.Provider, storeRoot, endpointEnv string) (registryconfig.Credential, error) {
 	parsed, err := url.Parse(storeRoot)
 	if err != nil {
 		return registryconfig.Credential{}, fmt.Errorf("parse store root %q: %w", storeRoot, err)
 	}
-	if parsed.Host == "" {
+	matchHost := parsed.Host
+	if endpointEnv != "" {
+		parsedEndpoint, parseErr := url.Parse(endpointEnv)
+		if parseErr != nil || parsedEndpoint.Host == "" {
+			return registryconfig.Credential{}, fmt.Errorf("invalid artifact store endpoint %q", endpointEnv)
+		}
+		matchHost = parsedEndpoint.Host
+	}
+	if matchHost == "" {
 		return registryconfig.Credential{}, fmt.Errorf("store root %q has no endpoint host", storeRoot)
 	}
-	credential, ok, err := provider.Credentials(parsed.Host)
+	var credential registryconfig.Credential
+	var ok bool
+	if hostMatcher, supports := provider.(interface {
+		CredentialsForHost(string) (registryconfig.Credential, bool, error)
+	}); supports {
+		credential, ok, err = hostMatcher.CredentialsForHost(matchHost)
+	} else {
+		credential, ok, err = provider.Credentials(matchHost)
+	}
 	if err != nil {
 		return registryconfig.Credential{}, err
 	}
 	if !ok {
-		return registryconfig.Credential{}, fmt.Errorf("no read-only credential configured for store endpoint %q", parsed.Host)
+		return registryconfig.Credential{}, fmt.Errorf("no read-only credential configured for store endpoint %q", matchHost)
 	}
 	return credential, nil
 }

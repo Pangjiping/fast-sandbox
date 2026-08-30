@@ -266,13 +266,17 @@ func (m *SandboxManager) recordRuntimeReadyAndDispatchHooks(metadata *SandboxMet
 }
 
 func (m *SandboxManager) continueDataPlaneCreation(metadata *SandboxMetadata, started time.Time, dataPlaneReady bool) {
+	m.mu.RLock()
+	phase := metadata.Phase
+	sandboxUID := metadata.Config.Identity.SandboxUID
+	m.mu.RUnlock()
 	if dataPlaneReady {
 		observeDataPlaneReady(m.runtimeName, m.infraRevision, started, nil)
-	} else if dataPlaneWorkPending(metadata.Phase) {
-		m.recordDiagnostic(metadata.Config.Identity.SandboxUID, "info", "runtime", "infra-pending", "runtime and private network are ready; Infra Component initialization continues asynchronously")
+	} else if dataPlaneWorkPending(phase) {
+		m.recordDiagnostic(sandboxUID, "info", "runtime", "infra-pending", "runtime and private network are ready; Infra Component initialization continues asynchronously")
 		m.startDataPlaneReconcile(metadata, started)
 	} else {
-		m.recordDiagnostic(metadata.Config.Identity.SandboxUID, "info", "action", "action-pending", "runtime and private network are ready; Sandbox Actions are pending")
+		m.recordDiagnostic(sandboxUID, "info", "action", "action-pending", "runtime and private network are ready; Sandbox Actions are pending")
 	}
 }
 

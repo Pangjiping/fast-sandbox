@@ -28,6 +28,23 @@ type snapshotPhaseTimings struct {
 	RestoreToHeartbeatMs int64 `json:"restoreToHeartbeatMs"`
 }
 
+// buildTap is the host tap backing the baked NIC while the snapshot VM
+// runs. It only lives for the snapshot stage; consumers of the snapshot
+// replace the host tap per instance via network_overrides, so the tap name
+// itself never leaks into the product.
+const buildTap = "fc-build-tap"
+
+// The baked guest network (mirrors the driver E2E prep recipe, e2ePrepMAC /
+// e2ePrepBootArgs): the snapshot carries a static eth0 configuration, so a
+// restored instance owns its address without any kernel ip= args (the
+// snapshot is authoritative). Consumers can only replace the host tap name.
+const (
+	bakedGuestMAC     = "02:00:00:00:00:01"
+	bakedGuestIP      = "172.30.0.3"
+	bakedGuestGateway = "172.30.0.1"
+	bakedGuestNetmask = "255.255.255.0"
+)
+
 // runSnapshotStage drives a Firecracker VM from cold boot to a validated
 // full snapshot. It is invoked by the builder image as the snapshot stage
 // helper:
@@ -57,6 +74,27 @@ func runSnapshotStage(args []string) error {
 		workdir = "/build"
 	}
 
+	// The baked NIC needs a host tap as its backing device while the VM
+	// runs. It is kept alive through the restore validation (the snapshot's
+	// NIC host_dev references it) and removed afterwards.
+	if err := ensureBuildTap(); err != nil {
+		return err
+	}
+	defer deleteBuildTap()
+
+	// The drive path baked into the vmstate must be RELATIVE and carry the
+	// filename the consumer's restore resolves in its process cwd: the
+	// driver restores with cwd = the instance state dir, where the
+	// per-instance root drive is named rootfs.img (the reflink copy). A
+	// symlink in the workdir gives the snapshot VM the same file under
+	// that name (both the snapshot create and the Stage B restore run with
+	// cwd = workdir).
+	driveLink := filepath.Join(workdir, snapshotDriveName)
+	_ = os.Remove(driveLink)
+	if err := os.Symlink(rootfs, driveLink); err != nil {
+		return fmt.Errorf("link snapshot drive %s: %w", driveLink, err)
+	}
+
 	// Stage A: cold boot and wait for guest readiness.
 	bootLog := filepath.Join(workdir, "boot.console.log")
 	bootSocket := filepath.Join(workdir, "boot.sock")
@@ -65,8 +103,9 @@ func runSnapshotStage(args []string) error {
 	if err != nil {
 		return err
 	}
-	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off nomodules root=/dev/vda rw"
+	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 root=/dev/vda rw"
 	bootArgs += " init=" + guestInitPath(spec)
+	bootArgs = bakedNetworkBootArgs(bootArgs)
 	if err := configureVM(vm, kernel, rootfs, bootArgs, spec); err != nil {
 		vm.stop()
 		return err
@@ -99,6 +138,10 @@ func runSnapshotStage(args []string) error {
 	// device state and the original paths still existing on this host. This
 	// is verified against firecracker v1.16.1 but is an implicit dependency
 	// on that version's behavior — revisit when bumping the VMM.
+	//
+	// The baked NIC references buildTap, which is still alive here, so the
+	// validation restore needs no network_overrides; consumers later replace
+	// the host tap per instance.
 	restoreStarted := time.Now()
 	restoreLog := filepath.Join(workdir, "restore.console.log")
 	restoreSocket := filepath.Join(workdir, "restore.sock")
@@ -152,6 +195,10 @@ type vmm struct {
 // startVMM launches firecracker in the background with the serial output
 // captured in the console log, then waits for the API socket.
 func startVMM(socketPath, logPath, workdir string) (*vmm, error) {
+	// A stale socket file from a crashed or interrupted earlier run makes
+	// the firecracker bind fail (EADDRINUSE) and the process exit right
+	// after startup; remove it before launching.
+	_ = os.Remove(socketPath)
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {
 		return nil, err
@@ -179,8 +226,12 @@ func (vm *vmm) stop() {
 	}
 }
 
-// configureVM applies the machine config, boot source, root drive, and
-// starts the instance.
+// configureVM applies the machine config, boot source, root drive, the baked
+// guest NIC, and starts the instance. The NIC (iface eth0, MAC, and the
+// static guest address from the kernel ip= boot args) is baked into the
+// snapshot, so every restored instance resumes with the same guest network
+// (clone networking model); consumers override only the host tap name via
+// network_overrides.
 func configureVM(vm *vmm, kernel, rootfs, bootArgs string, spec apiv1alpha2.SandboxTemplateSpec) error {
 	vcpuCount, err := vcpus(spec.Machine.VCPU)
 	if err != nil {
@@ -210,13 +261,50 @@ func configureVM(vm *vmm, kernel, rootfs, bootArgs string, spec apiv1alpha2.Sand
 	}
 	if err := api(vm.socket, "PUT", "/drives/rootfs", map[string]any{
 		"drive_id":       "rootfs",
-		"path_on_host":   rootfs,
+		"path_on_host":   snapshotDriveName,
 		"is_root_device": true,
 		"is_read_only":   false,
 	}); err != nil {
 		return err
 	}
+	if err := api(vm.socket, "PUT", "/network-interfaces/eth0", map[string]any{
+		"iface_id":      "eth0",
+		"host_dev_name": buildTap,
+		"guest_mac":     bakedGuestMAC,
+	}); err != nil {
+		return err
+	}
 	return api(vm.socket, "PUT", "/actions", map[string]string{"action_type": "InstanceStart"})
+}
+
+// snapshotDriveName is the RELATIVE drive path baked into the vmstate. It
+// must match the filename the driver's restore resolves in its process cwd:
+// the per-instance rootfs reflink copy is rootfs.img in the instance state
+// directory (the driver's instanceRootfsName).
+const snapshotDriveName = "rootfs.img"
+
+// ensureBuildTap creates the host tap backing the baked NIC.
+func ensureBuildTap() error {
+	if output, err := exec.Command("ip", "tuntap", "add", "dev", buildTap, "mode", "tap").CombinedOutput(); err != nil {
+		return fmt.Errorf("create build tap %s: %w: %s", buildTap, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// deleteBuildTap removes the build tap; a missing tap is not an error.
+func deleteBuildTap() {
+	_, _ = exec.Command("ip", "link", "del", buildTap).CombinedOutput()
+}
+
+// bakedNetworkBootArgs appends the static guest network to the kernel
+// command line so the snapshot carries a live eth0 configuration (the
+// restored guest owns the address without kernel ip= args — the snapshot
+// is authoritative).
+func bakedNetworkBootArgs(base string) string {
+	if strings.Contains(base, " ip=") {
+		return base
+	}
+	return base + " ip=" + bakedGuestIP + "::" + bakedGuestGateway + ":" + bakedGuestNetmask + "::eth0:off"
 }
 
 // api performs one Firecracker API call over its Unix domain socket. A

@@ -2,14 +2,14 @@ package firecracker
 
 // restore.go implements the golden snapshot restore startup path
 // (implementation plan §3.3): restore is the only startup path, the cold
-// boot branch is removed. EnsureSandbox launches the Firecracker process
-// with the state directory as its working directory (so the relative
-// rootfs.img path baked in the vmstate resolves to this instance's reflink
-// copy), validates the request memory against the manifest machine tuple,
-// then loads the golden snapshot (vmstate + file-backed memory) as the
-// FIRST API call and starts the instance. Devices (root drive, NIC) are
-// restored from the snapshot; only the NIC host tap is replaced per
-// instance via network_overrides.
+// boot branch is removed. EnsureSandbox validates the request memory
+// against the manifest machine tuple, launches the Firecracker process via
+// the jailer (which chroots it and pins it to the slot netns; the jail root
+// holds the instance rootfs reflink copy and hard-linked snapshots), then
+// loads the golden snapshot (vmstate + file-backed memory) as the FIRST API
+// call and resumes the instance. Devices (root drive, NIC) are restored
+// from the snapshot; only the NIC host tap is replaced per instance via
+// network_overrides.
 
 import (
 	"context"
@@ -60,6 +60,32 @@ func readCachedManifestMachine(stateRoot, image string) (manifestMachine, bool, 
 		return manifestMachine{}, false, nil
 	}
 	return document.Machine, true, nil
+}
+
+// readCachedManifestGuestNetwork loads the baked guest address from the
+// cached manifest (builder records guestNetwork.ip). It reports false when
+// the manifest is absent or carries no guest network (hand-seeded local
+// cache); the caller falls back to the BakedGuestIP convention.
+func readCachedManifestGuestNetwork(stateRoot, image string) (string, bool, error) {
+	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var document struct {
+		GuestNetwork struct {
+			IP string `json:"ip"`
+		} `json:"guestNetwork"`
+	}
+	if err := json.Unmarshal(payload, &document); err != nil {
+		return "", false, fmt.Errorf("decode cached manifest: %w", err)
+	}
+	if document.GuestNetwork.IP == "" {
+		return "", false, nil
+	}
+	return document.GuestNetwork.IP, true, nil
 }
 
 // validateRestoreMachineConfig validates the Sandbox request against the
@@ -171,17 +197,25 @@ func resolveRestoreSnapshotFiles(stateRoot, image string) (vmstate, memory strin
 // already contains the guest state, no kernel is booted.
 //
 // The root drive path is baked in the vmstate as a relative path
-// ("rootfs.img") so each instance resolves it to its own reflink copy in
-// its state directory (the Firecracker process cwd).
-func configureRestoreVM(ctx context.Context, client *Client, slot *fastletnetwork.Slot, vmstatePath, memoryPath string) error {
+// ("rootfs.img"); in direct mode each instance resolves it to its own
+// reflink copy via the process cwd (the Firecracker process working
+// directory). In jailer mode the chroot fixes the working directory to the
+// jail root, so the snapshot files prepared under snapshots/ are addressed
+// with their chroot-relative paths.
+func configureRestoreVM(ctx context.Context, client *Client, slot *fastletnetwork.Slot, vmstatePath, memoryPath string, jailed bool) error {
 	tapDevice := slot.GuestTap
 	if tapDevice == "" {
 		return fmt.Errorf("%w: slot %s has no pre-provisioned guest tap", ErrNetworkUnavailable, slot.ID)
 	}
+	snapshotPath, memPath := vmstatePath, memoryPath
+	if jailed {
+		snapshotPath = filepath.ToSlash(filepath.Join("/", jailerChrootSnapshotsDir, vmstateSnapshotName))
+		memPath = filepath.ToSlash(filepath.Join("/", jailerChrootSnapshotsDir, memorySnapshotName))
+	}
 	if err := client.LoadSnapshot(ctx, SnapshotLoadRequest{
-		SnapshotPath: vmstatePath,
+		SnapshotPath: snapshotPath,
 		MemBackend: SnapshotMemBackend{
-			BackendType: "File", BackendPath: memoryPath,
+			BackendType: "File", BackendPath: memPath,
 		},
 		ResumeVM: false,
 		NetworkOverrides: []SnapshotNetworkOverride{{

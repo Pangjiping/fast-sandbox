@@ -39,6 +39,13 @@ type Credential struct {
 	Username         string `json:"username,omitempty"`
 	Password         string `json:"password,omitempty"`
 	IdentityToken    string `json:"identityToken,omitempty"`
+	// Endpoint is the connection address of an S3-compatible artifact store
+	// (firecracker runtime-agent), e.g. "http://127.0.0.1:9000". Host keeps
+	// its matching-key meaning (registry host, or the artifact store host
+	// matched against the store root); Endpoint may carry the scheme and
+	// port and is used verbatim, so it is exempt from host normalization.
+	// Image-registry credentials leave it empty.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 type Compiled struct {
@@ -153,6 +160,21 @@ func (c Compiled) Match(reference string) (Credential, bool) {
 	return selected, selectedLength >= 0
 }
 
+// MatchHost selects the credential whose normalized Host equals host,
+// ignoring repository prefixes. This is the artifact-store lookup of the
+// firecracker runtime-agent: the match key is the store endpoint host
+// itself (e.g. "127.0.0.1:9000"), not an image reference, so the
+// reference-splitting rules of Match do not apply.
+func (c Compiled) MatchHost(host string) (Credential, bool) {
+	normalized := NormalizeHost(host)
+	for _, credential := range c.Credentials {
+		if NormalizeHost(credential.Host) == normalized {
+			return credential, true
+		}
+	}
+	return Credential{}, false
+}
+
 type FileProvider struct {
 	path        string
 	mu          sync.RWMutex
@@ -171,6 +193,18 @@ func (p *FileProvider) Credentials(reference string) (Credential, bool, error) {
 		return Credential{}, false, err
 	}
 	credential, found := compiled.Match(reference)
+	return credential, found, nil
+}
+
+// CredentialsForHost resolves a credential by normalized host match (the
+// artifact-store lookup of the firecracker runtime-agent), bypassing the
+// image-reference semantics of Match.
+func (p *FileProvider) CredentialsForHost(host string) (Credential, bool, error) {
+	compiled, err := p.load()
+	if err != nil {
+		return Credential{}, false, err
+	}
+	credential, found := compiled.MatchHost(host)
 	return credential, found, nil
 }
 
