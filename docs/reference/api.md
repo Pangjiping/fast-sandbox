@@ -69,7 +69,11 @@ User metadata is stored as ordinary Kubernetes labels. Labels under
 
 Runtime and DataPlane use separate state enums. Input digests, invocation IDs,
 runtime IDs, and per-Handler fences remain internal and never appear in CRD
-Status.
+Status. `observedGeneration` means the Controller processed that Spec; current
+convergence requires the aggregate `Ready` Condition to be `True` with its
+`observedGeneration` equal to `metadata.generation`. A Binding transition time
+comes from Fastlet and includes an internally observed `Ready -> Applying ->
+Ready` cycle even if the Controller only polls the final `Ready` state.
 
 ## SandboxPool
 
@@ -234,7 +238,7 @@ The protobuf contract is
 | `CreateSandbox` | Atomic durable intent followed by Fastlet admission; omitted completion waits for aggregate `READY`, explicit `RUNTIME_READY` returns early |
 | `GetSandbox` | Fenced point-in-time live view from the assigned Fastlet |
 | `ListSandboxes` | Lightweight CRD-backed identity/generation summaries with metadata filtering |
-| `UpdateSandbox` | Typed desired-state mutation, complete ordered Binding replacement, and metadata upsert/delete |
+| `UpdateSandbox` | Asynchronously commit a typed desired-state mutation, complete ordered Binding replacement, or metadata upsert/delete; the returned generation is not an applied/Ready acknowledgement |
 | `DeleteSandbox` | Submit declarative deletion |
 | `GetSandboxDiagnostics` | Lifecycle and Fastlet diagnostics, not process stdout |
 | `ResolveEndpoint` | Non-blocking resolution of a named component or raw user port in central/direct mode; requires live aggregate Ready |

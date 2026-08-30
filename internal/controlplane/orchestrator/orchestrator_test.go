@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/assignment"
@@ -133,6 +134,53 @@ func TestProjectObservedDemotesReadyFromOlderAppliedGeneration(t *testing.T) {
 	require.Equal(t, apiv1alpha2.DataPlaneUnavailable, status.DataPlane.State)
 	require.Equal(t, apiv1alpha2.ActionPending, status.ActionBindings[0].State)
 	require.False(t, status.HasCondition(ConditionReady, metav1.ConditionTrue, "Ready"))
+}
+
+func TestProjectObservedUsesLatestCurrentGenerationActionTransition(t *testing.T) {
+	oldTransition := metav1.NewTime(time.Date(2026, time.August, 30, 10, 12, 25, 0, time.UTC))
+	newTransition := oldTransition.Add(time.Minute)
+	sandbox := &apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Spec:       apiv1alpha2.SandboxSpec{ActionBindings: []apiv1alpha2.ActionBinding{{Handler: "egress"}}},
+	}
+	status := &apiv1alpha2.SandboxStatus{ActionBindings: []apiv1alpha2.ActionBindingStatus{{
+		Handler: "egress", State: apiv1alpha2.ActionReady, LastTransitionTime: &oldTransition,
+	}}}
+
+	ProjectObservedStatus(status, sandbox, &fastletapi.SandboxStatus{
+		Runtime:           fastletapi.RuntimeObservation{State: fastletapi.RuntimeStateReady},
+		DataPlane:         fastletapi.DataPlaneObservation{State: fastletapi.DataPlaneStateReady},
+		AppliedGeneration: 2,
+		ActionBindings: []fastletapi.ActionBindingStatus{{
+			Handler: "egress", State: "Ready", ObservedSpecGeneration: 2, LastTransitionTime: newTransition,
+		}},
+	})
+
+	require.Equal(t, newTransition, status.ActionBindings[0].LastTransitionTime.Time)
+	require.True(t, status.HasCondition(ConditionReady, metav1.ConditionTrue, "Ready"))
+}
+
+func TestProjectObservedNeverMovesActionTransitionBackward(t *testing.T) {
+	currentTransition := metav1.NewTime(time.Date(2026, time.August, 30, 10, 13, 25, 0, time.UTC))
+	olderTransition := currentTransition.Add(-time.Minute)
+	sandbox := &apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Spec:       apiv1alpha2.SandboxSpec{ActionBindings: []apiv1alpha2.ActionBinding{{Handler: "egress"}}},
+	}
+	status := &apiv1alpha2.SandboxStatus{ActionBindings: []apiv1alpha2.ActionBindingStatus{{
+		Handler: "egress", State: apiv1alpha2.ActionReady, LastTransitionTime: &currentTransition,
+	}}}
+
+	ProjectObservedStatus(status, sandbox, &fastletapi.SandboxStatus{
+		Runtime:           fastletapi.RuntimeObservation{State: fastletapi.RuntimeStateReady},
+		DataPlane:         fastletapi.DataPlaneObservation{State: fastletapi.DataPlaneStateReady},
+		AppliedGeneration: 2,
+		ActionBindings: []fastletapi.ActionBindingStatus{{
+			Handler: "egress", State: "Ready", ObservedSpecGeneration: 2, LastTransitionTime: olderTransition,
+		}},
+	})
+
+	require.Equal(t, currentTransition.Time, status.ActionBindings[0].LastTransitionTime.Time)
 }
 
 func TestAssignDeclarativeProjectsAnnotationAndEnsureReturnsObservation(t *testing.T) {

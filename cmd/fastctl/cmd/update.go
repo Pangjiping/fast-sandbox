@@ -134,7 +134,7 @@ Examples:
 		}
 
 		klog.V(4).InfoS("UpdateSandbox request succeeded", "sandboxName", sandboxName)
-		fmt.Printf("✓ Sandbox %s updated successfully\n", sandboxName)
+		fmt.Printf("✓ Sandbox %s update committed\n", sandboxName)
 		fmt.Printf("  Committed generation: %d\n", resp.CommittedGeneration)
 	},
 }

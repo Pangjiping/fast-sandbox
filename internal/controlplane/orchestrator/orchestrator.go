@@ -555,13 +555,25 @@ func ProjectObservedStatus(status *apiv1alpha2.SandboxStatus, sandbox *apiv1alph
 			action.State = apiv1alpha2.ActionPending
 			action.Message = "Action Binding has not applied the current Sandbox generation"
 		}
-		if old, found := previousActions[action.Handler]; found && old.State == action.State && old.Message == action.Message {
-			action.LastTransitionTime = old.LastTransitionTime
-		} else if !observedAction.LastTransitionTime.IsZero() {
+		old, found := previousActions[action.Handler]
+		samePublicState := found && old.State == action.State && old.Message == action.Message
+		// Fastlet owns the Binding lifecycle and can observe Ready -> Applying ->
+		// Ready between Controller polls. Prefer its newer transition time even
+		// when the final public state and message are unchanged. An observation
+		// from an older Spec generation must not advance or roll back the current
+		// Binding timestamp.
+		if currentGeneration && !observedAction.LastTransitionTime.IsZero() {
 			transition := metav1.NewTime(observedAction.LastTransitionTime)
-			action.LastTransitionTime = &transition
-		} else {
-			action.LastTransitionTime = &now
+			if !found || old.LastTransitionTime == nil || transition.After(old.LastTransitionTime.Time) {
+				action.LastTransitionTime = &transition
+			}
+		}
+		if action.LastTransitionTime == nil {
+			if samePublicState {
+				action.LastTransitionTime = old.LastTransitionTime
+			} else {
+				action.LastTransitionTime = &now
+			}
 		}
 		actions = append(actions, action)
 	}

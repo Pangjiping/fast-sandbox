@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	fastpathv2 "fast-sandbox/api/proto/v2"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,18 +21,6 @@ type FastctlConfig struct {
 	Args       []string          `yaml:"args,omitempty"`
 	Envs       map[string]string `yaml:"envs,omitempty"`
 	WorkingDir string            `yaml:"working_dir,omitempty"`
-}
-
-type SandboxInfo struct {
-	SandboxUID       string `json:"sandbox_uid"`
-	SandboxName      string `json:"sandbox_name"`
-	RuntimeState     string `json:"runtime_state"`
-	DataPlaneState   string `json:"data_plane_state"`
-	UserProcessState string `json:"user_process_state"`
-	FastletPod       string `json:"fastlet_pod"`
-	Image            string `json:"image"`
-	PoolRef          string `json:"pool_ref"`
-	CreatedAt        int64  `json:"created_at"`
 }
 
 type FastctlOption func(*Fastctl)
@@ -153,17 +143,17 @@ func (c *Fastctl) Run(ctx context.Context, name string, config FastctlConfig) ([
 	return c.run(ctx, "run", name, "-f", configPath)
 }
 
-func (c *Fastctl) GetJSON(ctx context.Context, name string) (*SandboxInfo, error) {
+func (c *Fastctl) GetJSON(ctx context.Context, name string) (*fastpathv2.GetSandboxResponse, error) {
 	output, err := c.run(ctx, "get", name, "-o", "json")
 	if err != nil {
 		return nil, err
 	}
-	var info SandboxInfo
+	var response fastpathv2.GetSandboxResponse
 	payload := jsonPayload(output)
-	if err := json.Unmarshal(payload, &info); err != nil {
+	if err := json.Unmarshal(payload, &response); err != nil {
 		return nil, fmt.Errorf("parse fastctl get output: %w\n%s", err, string(output))
 	}
-	return &info, nil
+	return &response, nil
 }
 
 func (c *Fastctl) UpdateMetadata(ctx context.Context, name string, metadata ...string) ([]byte, error) {
@@ -185,14 +175,17 @@ func (c *Fastctl) Command(ctx context.Context, args ...string) ([]byte, error) {
 	return c.run(ctx, args...)
 }
 
-func (c *Fastctl) WaitRunning(ctx context.Context, name string) (*SandboxInfo, error) {
+func (c *Fastctl) WaitRunning(ctx context.Context, name string) (*fastpathv2.GetSandboxResponse, error) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		info, err := c.GetJSON(ctx, name)
-		if err == nil && info.RuntimeState == "Ready" && info.DataPlaneState == "Ready" && info.SandboxUID != "" && info.FastletPod != "" {
-			return info, nil
+		response, err := c.GetJSON(ctx, name)
+		info := response.GetSandbox()
+		if err == nil && info.GetReady() && info.GetRuntime().GetState() == fastpathv2.RuntimeState_RUNTIME_STATE_READY &&
+			info.GetDataPlane().GetState() == fastpathv2.DataPlaneState_DATA_PLANE_STATE_READY && info.GetIdentity().GetUid() != "" &&
+			info.GetAppliedGeneration() == response.GetGeneration() {
+			return response, nil
 		}
 		select {
 		case <-ctx.Done():

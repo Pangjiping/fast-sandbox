@@ -228,6 +228,22 @@ func assertFastPathReadyCreate(t *testing.T, ctx context.Context, fixture *fixtu
 	}
 
 	name := created.GetSandbox().GetIdentity().GetName()
+	previousLiveTransition := liveActionTransition(t, observed.GetSandbox(), "egress")
+	beforeUpdate := waitActions(t, ctx, fixture, types.NamespacedName{Namespace: namespace, Name: name}, "audit", "egress")
+	previousCRDTransition := crdActionTransition(t, beforeUpdate, "egress")
+	// FastPath exposes whole Unix seconds. Cross the previous second so this
+	// E2E assertion cannot collapse two real transitions into the same value.
+	previousSecond := previousLiveTransition
+	if value := previousCRDTransition.Unix(); value > previousSecond {
+		previousSecond = value
+	}
+	if delay := time.Until(time.Unix(previousSecond+1, 0)); delay > 0 {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait before Action update: %v", ctx.Err())
+		case <-time.After(delay):
+		}
+	}
 	updated, err := client.UpdateSandbox(requestCtx, &fastpathv2.UpdateSandboxRequest{
 		Sandbox:            sandboxReference(namespace, name, created.GetSandbox().GetIdentity().GetUid()),
 		ExpectedGeneration: created.GetGeneration(),
@@ -258,6 +274,13 @@ func assertFastPathReadyCreate(t *testing.T, ctx context.Context, fixture *fixtu
 		}
 	}
 	assertLiveReadyInfo(t, observed.GetSandbox(), updated.GetCommittedGeneration(), "egress", "audit")
+	if transition := liveActionTransition(t, observed.GetSandbox(), "egress"); transition <= previousLiveTransition {
+		t.Fatalf("FastPath Action transition did not advance after update: before=%d after=%d", previousLiveTransition, transition)
+	}
+	afterUpdate := waitActions(t, updateCtx, fixture, types.NamespacedName{Namespace: namespace, Name: name}, "egress", "audit")
+	if transition := crdActionTransition(t, afterUpdate, "egress"); !transition.After(previousCRDTransition) {
+		t.Fatalf("CRD Action transition did not advance after update: before=%s after=%s", previousCRDTransition, transition)
+	}
 	resolved, err := client.ResolveEndpoint(requestCtx, &fastpathv2.ResolveEndpointRequest{
 		Sandbox:            sandboxReference(namespace, name, created.GetSandbox().GetIdentity().GetUid()),
 		Target:             &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: 8080}},
@@ -276,6 +299,34 @@ func assertFastPathReadyCreate(t *testing.T, ctx context.Context, fixture *fixtu
 	if err := fixture.WaitForSandboxDeleted(deleteCtx, types.NamespacedName{Namespace: namespace, Name: name}); err != nil {
 		t.Fatalf("wait for FastPath-created Sandbox deletion: %v", err)
 	}
+}
+
+func liveActionTransition(t *testing.T, info *fastpathv2.SandboxInfo, handler string) int64 {
+	t.Helper()
+	for _, binding := range info.GetActionBindings() {
+		if binding.GetHandler() == handler {
+			if binding.GetLastTransitionUnixSeconds() <= 0 {
+				t.Fatalf("FastPath Action %s has no transition time", handler)
+			}
+			return binding.GetLastTransitionUnixSeconds()
+		}
+	}
+	t.Fatalf("FastPath Action %s is missing", handler)
+	return 0
+}
+
+func crdActionTransition(t *testing.T, sandbox *apiv1alpha2.Sandbox, handler string) time.Time {
+	t.Helper()
+	for _, binding := range sandbox.Status.ActionBindings {
+		if binding.Handler == handler {
+			if binding.LastTransitionTime == nil {
+				t.Fatalf("CRD Action %s has no transition time", handler)
+			}
+			return binding.LastTransitionTime.Time
+		}
+	}
+	t.Fatalf("CRD Action %s is missing", handler)
+	return time.Time{}
 }
 
 func assertLiveReadyInfo(t *testing.T, info *fastpathv2.SandboxInfo, generation int64, handlers ...string) {

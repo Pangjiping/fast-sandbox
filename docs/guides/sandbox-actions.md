@@ -215,8 +215,12 @@ already-created runtime, Infra Component, or route, but aggregate Ready remains
 false while Fastlet retries locally.
 
 FastPath `GetSandbox` asks the assigned Fastlet for the live `SandboxInfo`.
-After `UpdateSandbox`, poll Get until `applied_generation` reaches the returned
-`committed_generation` and the relevant Bindings are Ready.
+`UpdateSandbox` success only commits desired state and returns
+`committed_generation`; it does not wait for Handlers. After an update, poll
+Get until the response `generation` and live `applied_generation` both equal
+`committed_generation`, aggregate `ready` is true, and the relevant Bindings
+are Ready. A greater response generation means a later update superseded the
+generation being checked.
 
 ## Update or remove Bindings
 
