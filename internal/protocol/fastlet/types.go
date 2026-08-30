@@ -131,10 +131,6 @@ type ActionBindingStatus struct {
 	Message                    string    `json:"message,omitempty"`
 }
 
-// SandboxActionStatus is retained as an internal source compatibility alias
-// while the controller and runtime drivers migrate to ActionBindingStatus.
-type SandboxActionStatus = ActionBindingStatus
-
 type InfraComponentDiagnostic struct {
 	Component               string `json:"component"`
 	Protocol                string `json:"protocol,omitempty"`

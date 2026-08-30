@@ -204,6 +204,7 @@ Thumbs.db
 *.tmp
 *.temp
 *~
+docs/review-notes.md
 
 # Environment variables
 .env
