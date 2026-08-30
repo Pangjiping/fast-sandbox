@@ -54,8 +54,7 @@ func (f *fakeFastletClient) ReconcileBindings(_ context.Context, _ string, reque
 		DataPlane:          fastletapi.DataPlaneObservation{State: fastletapi.DataPlaneStateReady},
 		AcceptedGeneration: request.SpecGeneration,
 		AppliedGeneration:  request.SpecGeneration,
-		ActionBindings: []fastletapi.ActionBindingStatus{{Handler: "egress", State: "Ready", ObservedSpecGeneration: request.SpecGeneration,
-			DesiredInputDigest: request.ActionBindings[0].InputDigest, AppliedInputDigest: request.ActionBindings[0].InputDigest}},
+		ActionBindings:     []fastletapi.ActionBindingStatus{{Handler: "egress", State: "Ready", ObservedSpecGeneration: request.SpecGeneration}},
 	}}, nil
 }
 
@@ -70,7 +69,7 @@ func (f *fakeFastletClient) InspectSandbox(_ context.Context, ip string, request
 
 func (f *fakeFastletClient) DeleteSandbox(context.Context, string, *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error) {
 	f.deleted = true
-	return &fastletapi.DeleteSandboxResponse{Accepted: true}, nil
+	return &fastletapi.DeleteSandboxResponse{}, nil
 }
 
 func TestFastPathCandidatesIsRegistryOnly(t *testing.T) {
@@ -159,7 +158,7 @@ func TestAssignDeclarativeProjectsAnnotationAndEnsureReturnsObservation(t *testi
 		require.Equal(t, "sandbox-uid-a", request.Identity.SandboxUID)
 		require.Equal(t, envelope.RuntimeInstanceID, request.Identity.RuntimeInstanceID)
 		require.Empty(t, request.Sandbox.CPU, "Fastlet injects its fixed resource profile")
-		return &fastletapi.CreateSandboxResponse{Accepted: true, Sandbox: readyFastletObservation("sandbox-uid-a", assigned.Generation)}, nil
+		return &fastletapi.CreateSandboxResponse{Disposition: fastletapi.CreateDispositionCreated, Sandbox: readyFastletObservation("sandbox-uid-a", assigned.Generation)}, nil
 	}
 	observed, err := orchestrator.EnsureRuntime(context.Background(), assigned)
 	require.NoError(t, err)

@@ -21,7 +21,7 @@ func TestServerLifecycleAndStrictContract(t *testing.T) {
 
 	request := boxliteprotocol.EnsureRequest{
 		Namespace: "ns", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{SandboxID: "uid-a", ClaimNamespace: "ns", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1},
+		Sandbox: fastletapi.RuntimeSandboxSpec{SandboxID: "uid-a", ClaimNamespace: "ns", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1},
 	}
 	response := doJSONHandler(t, server, http.MethodPut, "/v1/boxes/uid-a", request)
 	require.Equal(t, http.StatusOK, response.Code)

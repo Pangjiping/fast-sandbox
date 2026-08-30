@@ -94,8 +94,8 @@ func writeBoxLiteState(t *testing.T, root, podUID, sandboxUID string) (string, s
 	record := boxlitestate.SandboxRecord{
 		Version: boxlitestate.Version, Namespace: "default", SpecHash: "spec-hash", HostPort: 21000,
 		CreatedAt: createdAt, BundleRoot: bundleRoot,
-		Request: boxliteprotocol.EnsureRequest{Namespace: "default", TunnelGuestPort: 19090, Sandbox: fastletapi.SandboxSpec{
-			SandboxID: sandboxUID, ClaimUID: sandboxUID, ClaimName: "sandbox-a", ClaimNamespace: "default",
+		Request: boxliteprotocol.EnsureRequest{Namespace: "default", TunnelGuestPort: 19090, Sandbox: fastletapi.RuntimeSandboxSpec{
+			SandboxID: sandboxUID, ClaimName: "sandbox-a", ClaimNamespace: "default",
 			FastletPodUID: podUID, InstanceGeneration: 2, AssignmentAttempt: 3, RouteGeneration: 4,
 		}},
 	}

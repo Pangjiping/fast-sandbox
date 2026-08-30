@@ -52,14 +52,14 @@ type Artifact struct {
 }
 
 type EnsureRequest struct {
-	Namespace       string                 `json:"namespace"`
-	Sandbox         fastletapi.SandboxSpec `json:"sandbox"`
-	TunnelGuestPort uint32                 `json:"tunnelGuestPort"`
-	Artifacts       []Artifact             `json:"artifacts,omitempty"`
+	Namespace       string                        `json:"namespace"`
+	Sandbox         fastletapi.RuntimeSandboxSpec `json:"sandbox"`
+	TunnelGuestPort uint32                        `json:"tunnelGuestPort"`
+	Artifacts       []Artifact                    `json:"artifacts,omitempty"`
 }
 
 type Box struct {
-	Sandbox                fastletapi.SandboxSpec              `json:"sandbox"`
+	Sandbox                fastletapi.RuntimeSandboxSpec       `json:"sandbox"`
 	BoxID                  string                              `json:"boxId"`
 	PID                    int                                 `json:"pid,omitempty"`
 	Phase                  string                              `json:"phase"`

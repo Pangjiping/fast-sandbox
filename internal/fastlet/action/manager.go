@@ -811,9 +811,6 @@ func (m *Manager) validateDesired(desired []DesiredInput) ([]DesiredInput, strin
 		}
 		digestBytes := sha256.Sum256([]byte(input.Input))
 		digest := "sha256:" + hex.EncodeToString(digestBytes[:])
-		if input.Digest != "" && input.Digest != digest {
-			return nil, "", fmt.Errorf("Action Binding %s input does not match its internal digest", input.Handler)
-		}
 		input.Digest = digest
 		result = append(result, input)
 		_, _ = hash.Write([]byte(input.Handler))

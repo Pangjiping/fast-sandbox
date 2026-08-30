@@ -418,9 +418,6 @@ spec:
                 type: integer
               runtimeRevision:
                 type: string
-              totalFastlets:
-                format: int32
-                type: integer
               warmImages:
                 items:
                   description: WarmImageStatus aggregates cache state for one configured

@@ -80,19 +80,18 @@ class EndpointResolver:
         )
         if not response.sandbox_uid:
             raise RuntimeError("FastPath returned a route without a Sandbox UID")
-        if response.target.WhichOneof("target") != target.WhichOneof("target"):
-            raise RuntimeError("FastPath returned a route for a different target kind")
+        endpoint_info = response.endpoint
         if target.component_name:
-            if response.component_name != target.component_name or not response.resolved_port:
+            if endpoint_info.component_name != target.component_name or not endpoint_info.port:
                 raise RuntimeError("FastPath returned a route for a different Infra Component")
-        elif response.resolved_port != target.port:
+        elif endpoint_info.component_name or endpoint_info.port != target.port:
             raise RuntimeError("FastPath returned a route for a different target port")
         endpoint = _replace_authority(response.proxy_endpoint, self._proxy_endpoint)
         return ResolvedRoute(
             sandbox_uid=response.sandbox_uid,
-            component_name=response.component_name,
-            protocol=response.protocol,
-            resolved_port=response.resolved_port,
+            component_name=endpoint_info.component_name,
+            protocol=endpoint_info.protocol,
+            resolved_port=endpoint_info.port,
             endpoint=endpoint,
             headers=dict(response.required_headers),
             route_generation=response.route_generation,

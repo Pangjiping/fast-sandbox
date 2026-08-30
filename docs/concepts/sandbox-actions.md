@@ -1,10 +1,8 @@
 # Sandbox Actions
 
-Status: implemented design for `sandbox.fast.io/v1alpha2`.
-
-The authoritative public structures are documented in
-[sandbox-api-data-model.md](sandbox-api-data-model.md). This document defines
-the Pod-local Handler protocol, ordering, readiness, retry, and recovery rules.
+This concept defines the Pod-local Handler protocol, ordering, readiness,
+retry, and recovery rules for `sandbox.fast.io/v1alpha2`. Exact public fields
+are listed in the [API reference](../reference/api.md).
 
 ## 1. Model
 
@@ -265,19 +263,3 @@ resurrected by a delayed Create retry.
 - Input is persisted in the Sandbox CRD and is not a secret transport. Secret
   material needs a separate reference/credential design.
 - Inputs and diagnostics must not be logged by the platform by default.
-
-## 9. Required verification
-
-Unit and race coverage must include opaque input byte preservation, empty and
-literal-null values, SetBinding-before-Hook ordering, config-only Handlers,
-Hook failure as a Ready barrier, stable retry identity, Handler restart replay,
-old-result fences, concurrent Sandboxes, reverse live removal, terminal cleanup
-under a shared deadline, and Terminating-versus-reconcile races.
-
-The E2E suite additionally exercises CRD and FastPath create/update/remove/
-delete, Fastlet and Handler container restarts, aggregate Ready, and the
-separate `sandbox-action-fixture` image. The same fixture is available through:
-
-```bash
-make quickstart RUNTIME=container INFRA=minimal ACTIONS=demo
-```

@@ -21,6 +21,7 @@ Fast Sandbox documentation is organized by reader intent:
 - [Private networking](concepts/networking.md)
 - [Data plane](concepts/data-plane.md)
 - [Infra Components](concepts/infra-components.md)
+- [Sandbox Actions](concepts/sandbox-actions.md)
 - [Scheduling and capacity](concepts/scheduling-and-capacity.md)
 
 ## Guides

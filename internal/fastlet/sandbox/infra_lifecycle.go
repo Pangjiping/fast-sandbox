@@ -32,17 +32,17 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 	var instance fastletinfra.PreparedInstance
 	var err error
 	if metadata.NetworkIP != "" {
-		instance, err = m.infraManager.InitializeInstance(ctx, &metadata.SandboxSpec, metadata.NetworkIP)
+		instance, err = m.infraManager.InitializeInstance(ctx, &metadata.RuntimeSandboxSpec, metadata.NetworkIP)
 	} else if provider, ok := m.runtime.(AccessDescriptorProvider); ok {
 		var access dataplane.AccessDescriptor
 		access, err = provider.GetAccessDescriptor(metadata.SandboxID)
 		if err == nil {
 			switch access.Kind {
 			case dataplane.AccessKindDirectIP:
-				instance, err = m.infraManager.InitializeInstance(ctx, &metadata.SandboxSpec, access.Address)
+				instance, err = m.infraManager.InitializeInstance(ctx, &metadata.RuntimeSandboxSpec, access.Address)
 			case dataplane.AccessKindLocalForward:
 				endpoint := access.Address
-				instance, err = m.infraManager.InitializeInstanceWithDialer(ctx, &metadata.SandboxSpec, func(ctx context.Context, targetPort uint32) (net.Conn, error) {
+				instance, err = m.infraManager.InitializeInstanceWithDialer(ctx, &metadata.RuntimeSandboxSpec, func(ctx context.Context, targetPort uint32) (net.Conn, error) {
 					connection, dialErr := (&net.Dialer{}).DialContext(ctx, "tcp", endpoint)
 					if dialErr != nil {
 						return nil, dialErr

@@ -57,7 +57,7 @@ type instanceIdentity struct {
 	AssignmentAttempt  int64  `json:"assignmentAttempt"`
 }
 
-func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxSpec) (_ PreparedInstance, resultErr error) {
+func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec) (_ PreparedInstance, resultErr error) {
 	started := time.Now()
 	ctx, span := observability.Start(ctx, "fastlet.infra.prepare_instance")
 	defer func() {
@@ -153,7 +153,7 @@ func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxS
 	return result, nil
 }
 
-func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.SandboxSpec) (PreparedInstance, error) {
+func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec) (PreparedInstance, error) {
 	if spec == nil {
 		return PreparedInstance{}, errors.New("Sandbox spec is required")
 	}
@@ -179,7 +179,7 @@ func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.SandboxS
 	return persisted.Prepared, nil
 }
 
-func (m *Manager) RemoveInstance(spec *fastletapi.SandboxSpec) error {
+func (m *Manager) RemoveInstance(spec *fastletapi.RuntimeSandboxSpec) error {
 	if spec == nil {
 		return nil
 	}

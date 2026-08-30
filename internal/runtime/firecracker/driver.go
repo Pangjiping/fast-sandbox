@@ -45,7 +45,7 @@ type Driver struct {
 	waitSocket     func(ctx context.Context, socketPath string, timeout time.Duration) error
 	networkManager *fastletnetwork.Manager
 	infraMgr       *fastletinfra.Manager
-	prepareInfra   func(ctx context.Context, spec *fastletapi.SandboxSpec) (fastletinfra.PreparedInstance, error)
+	prepareInfra   func(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec) (fastletinfra.PreparedInstance, error)
 	processes      map[string]Process
 	// agentSocket, newAgentClient, and agentClient wire the node-level
 	// runtime-agent (agent_wiring.go): an empty socket means local mode, a
@@ -295,7 +295,7 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 
 // EnsureSandbox boots one Firecracker microVM on demand. The call is
 // idempotent and emits an OTel span tree correlated by the Sandbox identity.
-func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (_ *SandboxMetadata, resultErr error) {
+func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSandboxSpec) (_ *SandboxMetadata, resultErr error) {
 	if config == nil || config.SandboxID == "" || config.FastletPodUID == "" ||
 		config.InstanceGeneration <= 0 || config.RuntimeInstanceID == "" || config.AssignmentAttempt <= 0 {
 		return nil, fmt.Errorf("%w: complete Firecracker Sandbox identity is required", ErrInvalidConfig)
@@ -777,7 +777,7 @@ func waitVMRunning(ctx context.Context, client *Client, timeoutSeconds int32) (i
 
 // resolveMachineConfig maps the Sandbox resource profile to Firecracker
 // machine configuration, falling back to runtime defaults.
-func resolveMachineConfig(spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig) (MachineConfigRequest, error) {
+func resolveMachineConfig(spec fastletapi.RuntimeSandboxSpec, config runtimecatalog.FirecrackerConfig) (MachineConfigRequest, error) {
 	request := MachineConfigRequest{VCPUs: int(config.DefaultVCPUs), MemSizeMiB: defaultMemoryMiB(config.DefaultMemory)}
 	if spec.CPU != "" {
 		quantity, err := resource.ParseQuantity(spec.CPU)
@@ -815,7 +815,7 @@ func defaultMemoryMiB(memory string) int {
 	return mib
 }
 
-func (d *Driver) networkOwner(config *fastletapi.SandboxSpec) fastletnetwork.Owner {
+func (d *Driver) networkOwner(config *fastletapi.RuntimeSandboxSpec) fastletnetwork.Owner {
 	generation := config.InstanceGeneration
 	if generation <= 0 {
 		generation = 1
@@ -832,7 +832,7 @@ func (d *Driver) networkOwner(config *fastletapi.SandboxSpec) fastletnetwork.Own
 }
 
 func existingMetadata(state *SandboxState) *SandboxMetadata {
-	metadata := &SandboxMetadata{SandboxSpec: state.Spec}
+	metadata := &SandboxMetadata{RuntimeSandboxSpec: state.Spec}
 	metadata.ContainerID = state.Spec.SandboxID
 	metadata.PID = state.PID
 	metadata.Phase = string(state.Phase)

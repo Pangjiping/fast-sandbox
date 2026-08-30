@@ -72,7 +72,7 @@ func readCachedManifestMachine(stateRoot, image string) (manifestMachine, bool, 
 // the snapshot memory is rejected with an explicit error. When the cached
 // manifest carries no machine tuple (hand-seeded local cache), the request
 // profile is validated as the fallback.
-func validateRestoreMachineConfig(spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig, stateRoot, image string) error {
+func validateRestoreMachineConfig(spec fastletapi.RuntimeSandboxSpec, config runtimecatalog.FirecrackerConfig, stateRoot, image string) error {
 	machine, ok, err := readCachedManifestMachine(stateRoot, image)
 	if err != nil {
 		return err
@@ -183,7 +183,7 @@ func configureRestoreVM(ctx context.Context, client *Client, slot *fastletnetwor
 		MemBackend: SnapshotMemBackend{
 			BackendType: "File", BackendPath: memoryPath,
 		},
-		ResumeVM:     false,
+		ResumeVM: false,
 		NetworkOverrides: []SnapshotNetworkOverride{{
 			IfaceID: "eth0", HostDevName: tapDevice,
 		}},

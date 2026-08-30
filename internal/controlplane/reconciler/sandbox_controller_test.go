@@ -66,7 +66,7 @@ func (f *controllerFastlet) CreateSandbox(_ context.Context, _ string, request *
 	status := controllerObservation(request.Identity.SandboxUID, phase)
 	status.AcceptedGeneration = request.SpecGeneration
 	status.AppliedGeneration = request.SpecGeneration
-	return &fastletapi.CreateSandboxResponse{Accepted: true, Sandbox: status}, nil
+	return &fastletapi.CreateSandboxResponse{Disposition: fastletapi.CreateDispositionCreated, Sandbox: status}, nil
 }
 
 func (f *controllerFastlet) InspectSandbox(_ context.Context, _ string, request *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error) {
@@ -88,7 +88,7 @@ func (f *controllerFastlet) DeleteSandbox(_ context.Context, _ string, request *
 	defer f.mu.Unlock()
 	f.deleteCall++
 	delete(f.runtimes, request.Identity.SandboxUID)
-	return &fastletapi.DeleteSandboxResponse{Accepted: true}, nil
+	return &fastletapi.DeleteSandboxResponse{}, nil
 }
 
 func (f *controllerFastlet) ReconcileBindings(_ context.Context, _ string, request *fastletapi.ReconcileBindingsRequest) (*fastletapi.ReconcileBindingsResponse, error) {
@@ -174,7 +174,7 @@ func TestDeclarativeCreatePollsDataPlaneWithoutBlockingRuntimeReady(t *testing.T
 
 func TestExplicitCapacityRejectionPreservesDurableAssignmentAndAttemptFence(t *testing.T) {
 	reconciler, _, fastlet, sandbox := newControllerHarness(t)
-	failure := &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true, Outcome: fastletapi.OutcomeRejectedBeforeSideEffects}
+	failure := &fastletapi.CreateCallError{Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects, Failure: &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true}}
 	fastlet.ensureErr = failure
 	reconcileTwice(t, reconciler, sandbox.Name)
 	current := getControllerSandbox(t, reconciler, sandbox.Name)

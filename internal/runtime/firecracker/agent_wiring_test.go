@@ -41,7 +41,7 @@ func (f *fakeAgentClient) UnpinImage(_ context.Context, requestID, image string)
 	return nil
 }
 
-func (f *fakeAgentClient) LeaseDevices(context.Context, string, *fastletapi.SandboxSpec) (Lease, error) {
+func (f *fakeAgentClient) LeaseDevices(context.Context, string, *fastletapi.RuntimeSandboxSpec) (Lease, error) {
 	return Lease{}, nil
 }
 

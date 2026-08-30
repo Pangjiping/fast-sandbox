@@ -139,7 +139,7 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 	return report
 }
 
-func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (*SandboxMetadata, error) {
+func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSandboxSpec) (*SandboxMetadata, error) {
 	if config == nil || config.SandboxID == "" || config.FastletPodUID == "" || config.InstanceGeneration <= 0 || config.RuntimeInstanceID == "" || config.AssignmentAttempt <= 0 {
 		return nil, fmt.Errorf("%w: complete BoxLite Sandbox identity is required", ErrInvalidConfig)
 	}
@@ -303,7 +303,7 @@ func (d *Driver) metadataFromBox(box boxLiteBox) (*SandboxMetadata, error) {
 		return nil, fmt.Errorf("%w: invalid BoxLite LocalForward endpoint: %v", ErrNetworkUnavailable, err)
 	}
 	return &SandboxMetadata{
-		SandboxSpec: box.Sandbox, ContainerID: box.BoxID, PID: box.PID, Phase: box.Phase, CreatedAt: box.CreatedAt,
+		RuntimeSandboxSpec: box.Sandbox, ContainerID: box.BoxID, PID: box.PID, Phase: box.Phase, CreatedAt: box.CreatedAt,
 		UserProcessStartedAt:   box.UserProcessStartedAt,
 		UserProcessStartSource: box.UserProcessStartSource,
 		InfraServices:          append([]fastletinfra.ServiceEndpoint(nil), box.InfraServices...),

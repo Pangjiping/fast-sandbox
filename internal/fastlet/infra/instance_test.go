@@ -16,9 +16,9 @@ import (
 func TestPrepareAndRecoverInstanceUsesFencedPrivateConfigWithoutComponentToken(t *testing.T) {
 	manager, _ := testManager(t, apiv1alpha2.RuntimeContainer)
 	require.NoError(t, manager.Prepare(context.Background()))
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "uid-a", InstanceGeneration: 2, AssignmentAttempt: 3,
-		InfraRevision: manager.Revision(),
+	spec := &fastletapi.RuntimeSandboxSpec{
+		SandboxSpec: fastletapi.SandboxSpec{InfraRevision: manager.Revision()},
+		SandboxID:   "uid-a", InstanceGeneration: 2, AssignmentAttempt: 3,
 	}
 	instance, err := manager.PrepareInstance(context.Background(), spec)
 	require.NoError(t, err)
@@ -52,8 +52,9 @@ func TestPrepareAndRecoverInstanceUsesFencedPrivateConfigWithoutComponentToken(t
 func TestPrepareInstanceRejectsWrongImmutableRevision(t *testing.T) {
 	manager, _ := testManager(t, apiv1alpha2.RuntimeContainer)
 	require.NoError(t, manager.Prepare(context.Background()))
-	_, err := manager.PrepareInstance(context.Background(), &fastletapi.SandboxSpec{
-		SandboxID: "uid-a", InstanceGeneration: 1, AssignmentAttempt: 1, InfraRevision: "sha256:stale",
+	_, err := manager.PrepareInstance(context.Background(), &fastletapi.RuntimeSandboxSpec{
+		SandboxSpec: fastletapi.SandboxSpec{InfraRevision: "sha256:stale"},
+		SandboxID:   "uid-a", InstanceGeneration: 1, AssignmentAttempt: 1,
 	})
 	require.ErrorContains(t, err, "revision")
 }

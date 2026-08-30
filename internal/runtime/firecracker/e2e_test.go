@@ -520,13 +520,16 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 }
 
 // spec builds the SandboxSpec for the i-th sandbox ("e2e-sandbox-<i>").
-func (env *e2eEnvironment) spec(index int) *fastletapi.SandboxSpec {
+func (env *e2eEnvironment) spec(index int) *fastletapi.RuntimeSandboxSpec {
 	sandboxID := fmt.Sprintf("e2e-sandbox-%d", index)
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: sandboxID, ClaimUID: fmt.Sprintf("e2e-claim-%d", index), ClaimName: sandboxID, ClaimNamespace: "e2e",
+	spec := &fastletapi.RuntimeSandboxSpec{
+		SandboxSpec: fastletapi.SandboxSpec{
+			Image: env.imageRef, CPU: "1", Memory: "512Mi",
+			RuntimeProfileHash: "e2e-profile", ResourceProfileHash: "e2e-resource",
+		},
+		SandboxID: sandboxID, ClaimName: sandboxID, ClaimNamespace: "e2e",
 		InstanceGeneration: 1, RuntimeInstanceID: fmt.Sprintf("e2e-ri-%d", index), AssignmentAttempt: 1,
-		FastletPodUID: env.podUID, Image: env.imageRef, CPU: "1", Memory: "512Mi",
-		RuntimeProfileHash: "e2e-profile", ResourceProfileHash: "e2e-resource",
+		FastletPodUID: env.podUID,
 	}
 	if env.infraEnabled {
 		spec.InfraRevision = env.infraMgr.Revision()
@@ -553,7 +556,7 @@ func (env *e2eEnvironment) traceContext(sandboxID string) (context.Context, func
 
 // boot creates one sandbox through the driver and validates the result.
 // It must be called from the test goroutine (it uses require).
-func (env *e2eEnvironment) boot(ctx context.Context, spec *fastletapi.SandboxSpec) *SandboxMetadata {
+func (env *e2eEnvironment) boot(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec) *SandboxMetadata {
 	env.t.Helper()
 	metadata, err := env.driver.EnsureSandbox(ctx, spec)
 	require.NoError(env.t, err)
@@ -563,7 +566,7 @@ func (env *e2eEnvironment) boot(ctx context.Context, spec *fastletapi.SandboxSpe
 
 // assertBooted validates the metadata, trace correlation, and process
 // identity of one successful boot.
-func (env *e2eEnvironment) assertBooted(metadata *SandboxMetadata, spec *fastletapi.SandboxSpec, traceID trace.TraceID) {
+func (env *e2eEnvironment) assertBooted(metadata *SandboxMetadata, spec *fastletapi.RuntimeSandboxSpec, traceID trace.TraceID) {
 	t := env.t
 	t.Helper()
 	digest := sha256.Sum256([]byte(spec.SandboxID))

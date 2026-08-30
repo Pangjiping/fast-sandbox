@@ -23,7 +23,7 @@ const (
 
 // InitializeInstance executes per-instance initialization and local probes.
 // It dials the Sandbox private IP directly and never traverses Sandbox Proxy.
-func (m *Manager) InitializeInstance(ctx context.Context, spec *fastletapi.SandboxSpec, privateIP string) (PreparedInstance, error) {
+func (m *Manager) InitializeInstance(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec, privateIP string) (PreparedInstance, error) {
 	if spec == nil || privateIP == "" {
 		return PreparedInstance{}, errors.New("Sandbox spec and private IP are required for Infra initialization")
 	}
@@ -34,7 +34,7 @@ func (m *Manager) InitializeInstance(ctx context.Context, spec *fastletapi.Sandb
 
 // InitializeInstanceWithDialer supports runtimes such as BoxLite whose guest
 // loopback is reached through a runtime-specific LocalForward transport.
-func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, spec *fastletapi.SandboxSpec, dial TargetDialer) (PreparedInstance, error) {
+func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec, dial TargetDialer) (PreparedInstance, error) {
 	if spec == nil || dial == nil {
 		return PreparedInstance{}, errors.New("Sandbox spec and target dialer are required for Infra initialization")
 	}

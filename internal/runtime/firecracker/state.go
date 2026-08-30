@@ -40,7 +40,7 @@ const (
 // immutable SandboxSpec so Fastlet restart recovery can validate that a
 // re-admitted request matches the existing VM identity.
 type SandboxState struct {
-	Spec             fastletapi.SandboxSpec              `json:"spec"`
+	Spec             fastletapi.RuntimeSandboxSpec       `json:"spec"`
 	Phase            VMPhase                             `json:"phase"`
 	PID              int                                 `json:"pid,omitempty"`
 	APIAddress       string                              `json:"apiAddress,omitempty"`

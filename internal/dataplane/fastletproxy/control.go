@@ -87,17 +87,17 @@ func removeStaleSocket(path string) error {
 }
 
 func (s *ControlServer) applyRoute(writer http.ResponseWriter, request *http.Request) {
-	var route Route
-	if err := decodeJSON(request, &route); err != nil {
+	generation, err := parseGeneration(request)
+	if err != nil {
 		writeControlError(writer, err)
 		return
 	}
-	if pathUID := request.PathValue("sandboxUID"); route.SandboxUID == "" {
-		route.SandboxUID = pathUID
-	} else if route.SandboxUID != pathUID {
-		writeControlError(writer, ErrRouteConflict)
+	var spec RouteSpec
+	if err := decodeJSON(request, &spec); err != nil {
+		writeControlError(writer, err)
 		return
 	}
+	route := Route{RouteKey: RouteKey{SandboxUID: request.PathValue("sandboxUID"), RouteGeneration: generation}, RouteSpec: spec}
 	revision, err := s.Store.Apply(route)
 	if err != nil {
 		writeControlError(writer, err)
@@ -225,11 +225,12 @@ func NewControlClient(socketPath string) *ControlClient {
 }
 
 func (c *ControlClient) Apply(ctx context.Context, route Route) error {
-	body, err := json.Marshal(route)
+	body, err := json.Marshal(route.RouteSpec)
 	if err != nil {
 		return err
 	}
-	return c.do(ctx, http.MethodPut, "/v1/routes/"+url.PathEscape(route.SandboxUID), body, nil)
+	path := "/v1/routes/" + url.PathEscape(route.SandboxUID) + "?routeGeneration=" + strconv.FormatInt(route.RouteGeneration, 10)
+	return c.do(ctx, http.MethodPut, path, body, nil)
 }
 
 func (c *ControlClient) Delete(ctx context.Context, sandboxUID string, generation int64) error {

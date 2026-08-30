@@ -423,7 +423,7 @@ func expirationPending(sandbox *apiv1alpha2.Sandbox, now time.Time) bool {
 
 func explicitReschedule(err error) bool {
 	var failure *fastletapi.FastletError
-	if !errors.As(err, &failure) || failure.Outcome != fastletapi.OutcomeRejectedBeforeSideEffects {
+	if !errors.As(err, &failure) || fastletapi.CreateDispositionFromError(err) != fastletapi.CreateDispositionRejectedBeforeSideEffects {
 		return false
 	}
 	switch failure.Code {

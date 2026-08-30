@@ -24,7 +24,7 @@ func TestStateRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &SandboxState{
-		Spec:       fastletapi.SandboxSpec{SandboxID: "sandbox-1", ClaimUID: "claim-1", Image: "example.com/app:v1"},
+		Spec:       fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{Image: "example.com/app:v1"}, SandboxID: "sandbox-1"},
 		Phase:      PhaseRunning,
 		PID:        4242,
 		APIAddress: filepath.Join(directory, "api.sock"),

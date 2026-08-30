@@ -119,10 +119,7 @@ func (b *ContainerdBackend) identity(ctx context.Context, container containerd.C
 	if sandboxNamespace == "" {
 		sandboxNamespace = labels["fast-sandbox.io/namespace"]
 	}
-	sandboxUID := labels["fast-sandbox.io/claim-uid"]
-	if sandboxUID == "" {
-		sandboxUID = labels["fast-sandbox.io/id"]
-	}
+	sandboxUID := labels["fast-sandbox.io/id"]
 	return ResourceIdentity{
 		Backend: BackendContainerd, ResourceID: container.ID(), ContainerdNamespace: runtimeNamespace, CreatedAt: info.CreatedAt,
 		FastletPodUID: labels["fast-sandbox.io/fastlet-uid"], FastletPodName: labels["fast-sandbox.io/fastlet-name"],

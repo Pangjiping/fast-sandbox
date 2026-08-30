@@ -44,7 +44,7 @@ type AgentClient interface {
 	UnpinImage(ctx context.Context, requestID, image string) error
 	// LeaseDevices creates a device lease for a Sandbox. The native stage
 	// returns the shared cache file paths.
-	LeaseDevices(ctx context.Context, requestID string, spec *fastletapi.SandboxSpec) (Lease, error)
+	LeaseDevices(ctx context.Context, requestID string, spec *fastletapi.RuntimeSandboxSpec) (Lease, error)
 	// ReleaseDevices drops a device lease owned by this pod.
 	ReleaseDevices(ctx context.Context, requestID, leaseID string) error
 	// ListLeases returns every lease on the node.
@@ -99,7 +99,7 @@ func (c *agentHTTPClient) UnpinImage(ctx context.Context, requestID, image strin
 	}, nil)
 }
 
-func (c *agentHTTPClient) LeaseDevices(ctx context.Context, requestID string, spec *fastletapi.SandboxSpec) (Lease, error) {
+func (c *agentHTTPClient) LeaseDevices(ctx context.Context, requestID string, spec *fastletapi.RuntimeSandboxSpec) (Lease, error) {
 	if spec == nil {
 		return Lease{}, fmt.Errorf("%w: sandbox spec is required", runtimecontract.ErrInvalidConfig)
 	}

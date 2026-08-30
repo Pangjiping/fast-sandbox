@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -70,9 +71,17 @@ func (c *FastletClient) SetCreateTimeout(timeout time.Duration) {
 func (c *FastletClient) CreateSandbox(ctx context.Context, fastletIP string, req *CreateSandboxRequest) (*CreateSandboxResponse, error) {
 	if req != nil {
 		ctx = withFastletIdentity(ctx, req.Identity)
-		ctx = observability.WithIdentity(ctx, observability.Identity{Namespace: req.Sandbox.ClaimNamespace, SandboxName: req.Sandbox.ClaimName})
+		ctx = observability.WithIdentity(ctx, observability.Identity{RequestID: req.RequestID, Namespace: req.Identity.Namespace, SandboxName: req.Identity.Name})
 	}
-	return postFastletJSONWithTimeout[CreateSandboxRequest, CreateSandboxResponse](c, ctx, fastletIP, "/api/v2/fastlet/create", req, c.createTimeout)
+	response, err := postFastletJSONWithTimeout[CreateSandboxRequest, CreateSandboxResponse](c, ctx, fastletIP, "/api/v2/fastlet/create", req, c.createTimeout)
+	if err == nil || response == nil {
+		return response, err
+	}
+	var failure *FastletError
+	if errors.As(err, &failure) {
+		return response, &CreateCallError{Disposition: response.Disposition, Failure: failure}
+	}
+	return response, err
 }
 
 func (c *FastletClient) InspectSandbox(ctx context.Context, fastletIP string, req *InspectSandboxRequest) (*InspectSandboxResponse, error) {
@@ -160,7 +169,7 @@ func getFastletJSON[Response any](c *FastletClient, ctx context.Context, fastlet
 
 func withFastletIdentity(ctx context.Context, identity SandboxIdentity) context.Context {
 	return observability.WithIdentity(ctx, observability.Identity{
-		RequestID: identity.RequestID, SandboxUID: identity.SandboxUID, FastletPodUID: identity.FastletPodUID,
+		Namespace: identity.Namespace, SandboxName: identity.Name, SandboxUID: identity.SandboxUID, FastletPodUID: identity.FastletPodUID,
 		InstanceGeneration: identity.InstanceGeneration, AssignmentAttempt: identity.AssignmentAttempt, RouteGeneration: identity.RouteGeneration,
 	})
 }

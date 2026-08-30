@@ -25,10 +25,7 @@ func (c *fakeEndpointControl) ResolveEndpoint(_ context.Context, request *fastpa
 	}
 	return &fastpathv2.ResolveEndpointResponse{
 		SandboxUid:      "uid-a",
-		Target:          request.Target,
-		ComponentName:   componentName,
-		Protocol:        "HTTP",
-		ResolvedPort:    port,
+		Endpoint:        &fastpathv2.ResolvedEndpoint{ComponentName: componentName, Protocol: "HTTP", Port: port},
 		ProxyEndpoint:   "http://sandbox-proxy.svc" + path,
 		RequiredHeaders: map[string]string{"X-Fast-Sandbox-Route-Credential": "route-token"}, RouteGeneration: 3,
 	}, nil
@@ -70,6 +67,6 @@ type mismatchedEndpointControl struct{ *fakeEndpointControl }
 
 func (c mismatchedEndpointControl) ResolveEndpoint(ctx context.Context, request *fastpathv2.ResolveEndpointRequest, options ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 	response, err := c.fakeEndpointControl.ResolveEndpoint(ctx, request, options...)
-	response.ComponentName = "other"
+	response.Endpoint.ComponentName = "other"
 	return response, err
 }

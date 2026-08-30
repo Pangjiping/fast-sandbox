@@ -99,7 +99,7 @@ class Client:
             ),
             metadata=grpc_metadata(),
         )
-        return response.success
+        return response is not None
 
     def replace_action_bindings(
         self,

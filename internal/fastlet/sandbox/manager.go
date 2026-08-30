@@ -290,6 +290,10 @@ func (m *SandboxManager) ResourceProfileHash() string {
 	return m.resourceProfileHash
 }
 
+func (m *SandboxManager) RuntimeProfileHash() string {
+	return m.runtimeProfileHash
+}
+
 func capacityFromEnvironment() int {
 	capVal := 5
 	if capStr := os.Getenv("FASTLET_CAPACITY"); capStr != "" {
@@ -300,7 +304,7 @@ func capacityFromEnvironment() int {
 	return capVal
 }
 
-func (m *SandboxManager) validateProfiles(spec *fastletapi.SandboxSpec) error {
+func (m *SandboxManager) validateProfiles(spec *fastletapi.RuntimeSandboxSpec) error {
 	if m.runtimeProfileHash != "" && spec.RuntimeProfileHash != m.runtimeProfileHash {
 		return fmt.Errorf("%w: runtime profile hash %q does not match Fastlet profile %q", ErrSandboxProfileMismatch, spec.RuntimeProfileHash, m.runtimeProfileHash)
 	}
@@ -333,7 +337,7 @@ func (m *SandboxManager) validateProfiles(spec *fastletapi.SandboxSpec) error {
 	return m.validateInfraRevision(spec)
 }
 
-func (m *SandboxManager) validateInfraRevision(spec *fastletapi.SandboxSpec) error {
+func (m *SandboxManager) validateInfraRevision(spec *fastletapi.RuntimeSandboxSpec) error {
 	if m.infraRevision != "" && spec.InfraRevision != m.infraRevision {
 		return fmt.Errorf("%w: Infra revision %q does not match Fastlet revision %q", ErrSandboxProfileMismatch, spec.InfraRevision, m.infraRevision)
 	}
@@ -437,7 +441,6 @@ func (m *SandboxManager) GetSandboxStatuses(ctx context.Context) []fastletapi.Sa
 		}
 		result = append(result, fastletapi.SandboxStatus{
 			SandboxID:          sandboxID,
-			ClaimUID:           meta.ClaimUID,
 			InstanceGeneration: meta.InstanceGeneration,
 			RuntimeInstanceID:  meta.RuntimeInstanceID,
 			AssignmentAttempt:  meta.AssignmentAttempt,

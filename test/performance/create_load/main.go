@@ -490,7 +490,7 @@ func cleanup(ctx context.Context, client fastPathClient, cfg config, names []str
 		}})
 		requestCancel()
 		code := grpcCode(err)
-		if err == nil && response != nil && response.Success {
+		if err == nil && response != nil {
 			result.Succeeded++
 			result.Codes[codes.OK.String()]++
 			continue

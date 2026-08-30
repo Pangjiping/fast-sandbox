@@ -55,7 +55,7 @@ func (f *fakeFastPath) DeleteSandbox(_ context.Context, request *fastpathv2.Dele
 		f.deletedSet = make(map[string]bool)
 	}
 	f.deletedSet[name] = true
-	return &fastpathv2.DeleteResponse{Success: true}, nil
+	return &fastpathv2.DeleteResponse{}, nil
 }
 
 func (f *fakeFastPath) ListSandboxes(_ context.Context, request *fastpathv2.ListSandboxesRequest, _ ...grpc.CallOption) (*fastpathv2.ListSandboxesResponse, error) {

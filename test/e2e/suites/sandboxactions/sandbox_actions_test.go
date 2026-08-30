@@ -263,7 +263,8 @@ func assertFastPathReadyCreate(t *testing.T, ctx context.Context, fixture *fixtu
 		Target:             &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: 8080}},
 		ExpectedGeneration: updated.GetCommittedGeneration(),
 	})
-	if err != nil || resolved.GetProxyEndpoint() == "" || resolved.GetRouteGeneration() <= 0 {
+	if err != nil || resolved.GetProxyEndpoint() == "" || resolved.GetRouteGeneration() <= 0 ||
+		resolved.GetEndpoint() == nil || resolved.GetEndpoint().GetPort() != 8080 || resolved.GetEndpoint().GetProtocol() == "" {
 		t.Fatalf("ResolveEndpoint after aggregate Ready: response=%+v error=%v", resolved, err)
 	}
 

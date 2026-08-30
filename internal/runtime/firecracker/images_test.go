@@ -90,7 +90,7 @@ func TestGarbageCollectImages(t *testing.T) {
 	directory, err := ensureSandboxDir(root, "sbx-1")
 	require.NoError(t, err)
 	require.NoError(t, saveState(directory, &SandboxState{
-		Spec:  fastletapi.SandboxSpec{SandboxID: "sbx-1", Image: "example.com/used:v1"},
+		Spec:  fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{Image: "example.com/used:v1"}, SandboxID: "sbx-1"},
 		Phase: PhaseRunning,
 	}))
 

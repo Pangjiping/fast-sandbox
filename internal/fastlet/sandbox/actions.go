@@ -62,7 +62,7 @@ func (m *SandboxManager) ReconcileBindings(ctx context.Context, req *fastletapi.
 	}
 	desired := make([]fastletaction.DesiredInput, 0, len(req.ActionBindings))
 	for _, input := range req.ActionBindings {
-		desired = append(desired, fastletaction.DesiredInput{Handler: input.Handler, Input: input.Input, Digest: input.InputDigest})
+		desired = append(desired, fastletaction.DesiredInput{Handler: input.Handler, Input: input.Input})
 	}
 	statuses, appliedGeneration, reconcileErr := actionManager.Reconcile(ctx, attachment, req.SpecGeneration, desired)
 
@@ -96,7 +96,7 @@ func (m *SandboxManager) ReconcileBindings(ctx context.Context, req *fastletapi.
 func desiredActionInputs(bindings []fastletapi.ActionBindingInput) []fastletaction.DesiredInput {
 	desired := make([]fastletaction.DesiredInput, 0, len(bindings))
 	for _, input := range bindings {
-		desired = append(desired, fastletaction.DesiredInput{Handler: input.Handler, Input: input.Input, Digest: input.InputDigest})
+		desired = append(desired, fastletaction.DesiredInput{Handler: input.Handler, Input: input.Input})
 	}
 	return desired
 }

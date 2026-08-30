@@ -34,7 +34,7 @@ spec:
   recoveryTimeoutSeconds: 60
   actionBindings:
     - handler: egress
-      input: {defaultAction: deny}
+      input: '{"defaultAction":"deny"}'
 ```
 
 ### Spec
@@ -145,6 +145,8 @@ rollout details are not duplicated as nested status. Conditions are
 
 See the [Infra Components reference](infra-components.md) for the complete
 artifact, process, health, endpoint, validation, and revision contract.
+See [Sandbox Actions](../concepts/sandbox-actions.md) for Binding, lifecycle
+Hook, ordering, readiness, and recovery semantics.
 
 ## FastPath v2
 
@@ -196,8 +198,9 @@ exactly one of:
 
 Resolution never waits. A non-Ready live Sandbox returns
 `FailedPrecondition`; stale/missing assignment state returns `Unavailable`.
-The response includes the resolved protocol/port, route generation, expiry, proxy URL, and
-`X-Fast-Sandbox-Route-Credential`.
+The response contains one nested `endpoint` with the final component identity
+(when applicable), protocol, and port, plus route generation, expiry, proxy URL,
+and `X-Fast-Sandbox-Route-Credential`.
 
 Central mode returns:
 

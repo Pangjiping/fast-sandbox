@@ -83,7 +83,7 @@ func TestNativeBundleCopiesOnlySharedInfraArtifacts(t *testing.T) {
 func TestNativeEnsureHashFencesImmutableSpec(t *testing.T) {
 	request := boxliteprotocol.EnsureRequest{
 		Namespace: "ns", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{SandboxID: "uid-a", Image: "alpine:latest", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1},
+		Sandbox: fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{Image: "alpine:latest"}, SandboxID: "uid-a", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1},
 	}
 	first, err := ensureHash(request)
 	require.NoError(t, err)
@@ -96,8 +96,8 @@ func TestNativeEnsureHashFencesImmutableSpec(t *testing.T) {
 func TestNativeEnsureReturnsTypedImmutableSpecConflict(t *testing.T) {
 	request := boxliteprotocol.EnsureRequest{
 		Namespace: "default", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{
-			SandboxID: "sandbox-a", Image: "alpine:latest", CPU: "1", Memory: "256Mi",
+		Sandbox: fastletapi.RuntimeSandboxSpec{
+			SandboxSpec: fastletapi.SandboxSpec{Image: "alpine:latest", CPU: "1", Memory: "256Mi"}, SandboxID: "sandbox-a",
 			FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1,
 		},
 		Artifacts: []boxliteprotocol.Artifact{{Destination: fastletinfra.SandboxTunnelContainerPath}},
@@ -122,8 +122,8 @@ func TestNativeLoadRecordsValidatesOwnerFilenameAndBundleFences(t *testing.T) {
 	require.NoError(t, os.MkdirAll(bundleRoot, 0700))
 	request := boxliteprotocol.EnsureRequest{
 		Namespace: "default", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{
-			SandboxID: "sandbox-a", Image: "alpine:latest", CPU: "250m", Memory: "256Mi",
+		Sandbox: fastletapi.RuntimeSandboxSpec{
+			SandboxSpec: fastletapi.SandboxSpec{Image: "alpine:latest", CPU: "250m", Memory: "256Mi"}, SandboxID: "sandbox-a",
 			FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1,
 		},
 		Artifacts: []boxliteprotocol.Artifact{{

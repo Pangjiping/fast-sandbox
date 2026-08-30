@@ -25,7 +25,7 @@ func (m *MockClient) CreateSandbox(ctx context.Context, in *fastpathv2.CreateSan
 }
 
 func (m *MockClient) DeleteSandbox(ctx context.Context, in *fastpathv2.DeleteRequest, opts ...grpc.CallOption) (*fastpathv2.DeleteResponse, error) {
-	return &fastpathv2.DeleteResponse{Success: true}, nil
+	return &fastpathv2.DeleteResponse{}, nil
 }
 func (m *MockClient) ListSandboxes(ctx context.Context, in *fastpathv2.ListSandboxesRequest, opts ...grpc.CallOption) (*fastpathv2.ListSandboxesResponse, error) {
 	return &fastpathv2.ListSandboxesResponse{}, nil

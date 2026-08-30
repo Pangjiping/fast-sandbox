@@ -48,7 +48,6 @@ type FastletInfo struct {
 	DrainRequested      bool
 	Draining            bool
 
-	Capacity  int
 	Admission fastletapi.AdmissionStatus
 
 	Images          []string
@@ -65,6 +64,10 @@ type FastletInfo struct {
 
 func (i FastletInfo) Used() int {
 	return i.Admission.Used
+}
+
+func (i FastletInfo) Capacity() int {
+	return i.Admission.Capacity
 }
 
 // FastletRegistry is the scheduling view consumed by the Pool controller.
@@ -151,7 +154,6 @@ func preserveHeartbeat(target *FastletInfo, previous FastletInfo) {
 	target.RuntimeReady = previous.RuntimeReady
 	target.InfraReady = previous.InfraReady
 	target.Draining = target.DrainRequested || previous.Draining
-	target.Capacity = previous.Capacity
 	target.Admission = previous.Admission
 	target.Images = append([]string(nil), previous.Images...)
 	target.PreparedArtifacts = append([]string(nil), previous.PreparedArtifacts...)
@@ -184,7 +186,7 @@ func (r *InMemoryRegistry) ApplyHeartbeat(id FastletID, expectedPodUID string, h
 	if heartbeat.Cache.Epoch == slot.info.CacheEpoch && heartbeat.Sequence <= slot.info.HeartbeatSequence {
 		return ErrStaleHeartbeat
 	}
-	if (slot.info.RuntimeProfileHash != "" && heartbeat.Diagnostics.RuntimeProfileHash != slot.info.RuntimeProfileHash) ||
+	if (slot.info.RuntimeProfileHash != "" && heartbeat.RuntimeProfileHash != slot.info.RuntimeProfileHash) ||
 		(slot.info.ResourceProfileHash != "" && heartbeat.ResourceProfileHash != slot.info.ResourceProfileHash) ||
 		(slot.info.InfraRevision != "" && heartbeat.InfraRevision != slot.info.InfraRevision) {
 		slot.info.RuntimeReady = false
@@ -198,13 +200,9 @@ func (r *InMemoryRegistry) ApplyHeartbeat(id FastletID, expectedPodUID string, h
 	slot.info.PreparedArtifacts = append([]string(nil), heartbeat.PreparedArtifacts...)
 	slot.info.RegistryRevision = heartbeat.RegistryRevision
 	slot.info.WarmImages = cloneWarmImageStates(heartbeat.WarmImages)
-	slot.info.Capacity = heartbeat.Admission.Capacity
-	if slot.info.Capacity <= 0 {
-		slot.info.Capacity = heartbeat.Capacity
-	}
 	slot.info.Admission = heartbeat.Admission
 	if slot.info.RuntimeProfileHash == "" {
-		slot.info.RuntimeProfileHash = heartbeat.Diagnostics.RuntimeProfileHash
+		slot.info.RuntimeProfileHash = heartbeat.RuntimeProfileHash
 	}
 	if slot.info.ResourceProfileHash == "" {
 		slot.info.ResourceProfileHash = heartbeat.ResourceProfileHash
@@ -284,7 +282,7 @@ func (r *InMemoryRegistry) TopK(request CandidateRequest, k int) []FastletInfo {
 		ranked = append(ranked, rankedFastlet{
 			slot:        slot,
 			id:          info.ID,
-			capacity:    info.Capacity,
+			capacity:    info.Capacity(),
 			imageHit:    imageHit(info, request.Image),
 			used:        info.Used(),
 			stableOrder: stableOrder(request.StableKey, info.ID),
@@ -333,7 +331,7 @@ func hardFilter(info FastletInfo, request CandidateRequest, staleAfter time.Dura
 	if request.Now.Sub(info.LastHeartbeat) > staleAfter || request.Now.Before(info.RejectedUntil) {
 		return false
 	}
-	if info.Capacity <= 0 || info.Used() >= info.Capacity {
+	if info.Capacity() <= 0 || info.Used() >= info.Capacity() {
 		return false
 	}
 	if request.RuntimeName != "" && info.RuntimeName != request.RuntimeName {

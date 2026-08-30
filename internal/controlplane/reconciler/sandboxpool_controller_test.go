@@ -144,7 +144,7 @@ func seedControllerRegistry(t *testing.T, registry *placement.InMemoryRegistry, 
 	require.NoError(t, registry.ApplyHeartbeat(info.ID, info.PodUID, &fastletapi.HeartbeatResponse{
 		FastletStatus: fastletapi.FastletStatus{
 			FastletPodUID: info.PodUID, RuntimeReady: info.RuntimeReady, InfraReady: info.InfraReady,
-			Capacity: info.Capacity, Admission: info.Admission, SandboxStatuses: statuses,
+			RuntimeProfileHash: info.RuntimeProfileHash, Admission: info.Admission, SandboxStatuses: statuses,
 			InfraRevision: info.InfraRevision, RegistryRevision: info.RegistryRevision,
 			PreparedArtifacts: info.PreparedArtifacts, WarmImages: info.WarmImages,
 		},
@@ -458,7 +458,7 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 	newPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 	seedControllerRegistry(t, registry, placement.FastletInfo{
 		ID: placement.FastletID(newPod.Name), Namespace: newPod.Namespace, PodName: newPod.Name, PodUID: string(newPod.UID),
-		PodReady: true, RuntimeReady: true, InfraReady: true, LastHeartbeat: time.Now(), Capacity: 1,
+		PodReady: true, RuntimeReady: true, InfraReady: true, LastHeartbeat: time.Now(),
 		Admission: fastletapi.AdmissionStatus{Capacity: 1},
 	})
 	_, handled, err = reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha2.Sandbox{
@@ -750,7 +750,7 @@ func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
 	seedControllerRegistry(t, registry, placement.FastletInfo{
 		ID: "tenant-a/fastlet-a", Namespace: "tenant-a", PoolName: "pool-a",
 		PodName: "fastlet-a", PodUID: "uid-a", PodReady: true, RuntimeReady: true, InfraReady: true,
-		Capacity: 4, Admission: fastletapi.AdmissionStatus{Capacity: 4},
+		Admission:        fastletapi.AdmissionStatus{Capacity: 4},
 		RegistryRevision: compiled.Revision, LastHeartbeat: now,
 		WarmImages: []fastletapi.WarmImageState{
 			{Image: "alpine:latest", State: "Cached"},
@@ -760,7 +760,7 @@ func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
 	seedControllerRegistry(t, registry, placement.FastletInfo{
 		ID: "tenant-a/fastlet-b", Namespace: "tenant-a", PoolName: "pool-a",
 		PodName: "fastlet-b", PodUID: "uid-b", PodReady: true, RuntimeReady: true, InfraReady: true,
-		Capacity: 4, Admission: fastletapi.AdmissionStatus{Capacity: 4, Used: 1, Running: 1},
+		Admission:        fastletapi.AdmissionStatus{Capacity: 4, Used: 1, Running: 1},
 		RegistryRevision: "stale-revision", LastHeartbeat: now,
 		WarmImages: []fastletapi.WarmImageState{{
 			Image: "alpine:latest", State: "Failed", Message: "pull denied",

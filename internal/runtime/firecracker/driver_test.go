@@ -182,7 +182,7 @@ type driverFixture struct {
 	killCalls   []int
 	stateRoot   string
 	manager     *fastletnetwork.Manager
-	sandboxSpec fastletapi.SandboxSpec
+	sandboxSpec fastletapi.RuntimeSandboxSpec
 }
 
 func newDriverFixture(t *testing.T) *driverFixture {
@@ -218,11 +218,14 @@ func newDriverFixture(t *testing.T) *driverFixture {
 	}
 	driver.SetNetworkManager(fixture.manager)
 	fixture.driver = driver
-	fixture.sandboxSpec = fastletapi.SandboxSpec{
-		SandboxID: "sandbox-1", ClaimUID: "claim-1", ClaimName: "sandbox-1", ClaimNamespace: "tenant-a",
+	fixture.sandboxSpec = fastletapi.RuntimeSandboxSpec{
+		SandboxSpec: fastletapi.SandboxSpec{
+			Image: "example.com/app:v1", CPU: "2", Memory: "1Gi",
+			RuntimeProfileHash: "hash", ResourceProfileHash: "r-hash",
+		},
+		SandboxID: "sandbox-1", ClaimName: "sandbox-1", ClaimNamespace: "tenant-a",
 		InstanceGeneration: 1, RuntimeInstanceID: "runtime-1", AssignmentAttempt: 1,
-		FastletPodUID: "pod-1", Image: "example.com/app:v1", CPU: "2", Memory: "1Gi",
-		RuntimeProfileHash: "hash", ResourceProfileHash: "r-hash",
+		FastletPodUID: "pod-1",
 	}
 	return fixture
 }
@@ -310,7 +313,7 @@ func TestEnsureSandboxDeliversInfraComponents(t *testing.T) {
 
 	infraJSON := filepath.Join(t.TempDir(), "infra.json")
 	require.NoError(t, os.WriteFile(infraJSON, []byte(`{"version":1}`), 0o400))
-	fixture.driver.prepareInfra = func(context.Context, *fastletapi.SandboxSpec) (fastletinfra.PreparedInstance, error) {
+	fixture.driver.prepareInfra = func(context.Context, *fastletapi.RuntimeSandboxSpec) (fastletinfra.PreparedInstance, error) {
 		return fastletinfra.PreparedInstance{
 			ConfigHostPath: infraJSON,
 			Mounts: []fastletinfra.Mount{
@@ -348,7 +351,7 @@ func TestEnsureSandboxInfraFailureReleasesResources(t *testing.T) {
 	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	fixture.driver.prepareInfra = func(context.Context, *fastletapi.SandboxSpec) (fastletinfra.PreparedInstance, error) {
+	fixture.driver.prepareInfra = func(context.Context, *fastletapi.RuntimeSandboxSpec) (fastletinfra.PreparedInstance, error) {
 		return fastletinfra.PreparedInstance{}, errors.New("plan revision mismatch")
 	}
 	root := t.TempDir()
@@ -655,22 +658,22 @@ func TestCloseKillsManagedProcesses(t *testing.T) {
 func TestResolveMachineConfig(t *testing.T) {
 	config := firecrackerConfigForTest(t, t.TempDir())
 
-	request, err := resolveMachineConfig(fastletapi.SandboxSpec{}, config)
+	request, err := resolveMachineConfig(fastletapi.RuntimeSandboxSpec{}, config)
 	require.NoError(t, err)
 	require.Equal(t, int(config.DefaultVCPUs), request.VCPUs)
 	require.Equal(t, 512, request.MemSizeMiB)
 
-	request, err = resolveMachineConfig(fastletapi.SandboxSpec{CPU: "500m", Memory: "1Gi"}, config)
+	request, err = resolveMachineConfig(fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "500m", Memory: "1Gi"}}, config)
 	require.NoError(t, err)
 	require.Equal(t, 1, request.VCPUs)
 	require.Equal(t, 1024, request.MemSizeMiB)
 
-	request, err = resolveMachineConfig(fastletapi.SandboxSpec{CPU: "2.5", Memory: "256Mi"}, config)
+	request, err = resolveMachineConfig(fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "2.5", Memory: "256Mi"}}, config)
 	require.NoError(t, err)
 	require.Equal(t, 3, request.VCPUs)
 	require.Equal(t, 256, request.MemSizeMiB)
 
-	_, err = resolveMachineConfig(fastletapi.SandboxSpec{CPU: "not-a-quantity"}, config)
+	_, err = resolveMachineConfig(fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "not-a-quantity"}}, config)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
@@ -688,10 +691,10 @@ func TestValidateRestoreMachineConfigUsesManifest(t *testing.T) {
 
 	// The manifest machine tuple is authoritative: a request profile that
 	// differs (more cpu/mem) still validates.
-	require.NoError(t, validateRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "4", Memory: "1Gi"}, config, stateRoot, image))
+	require.NoError(t, validateRestoreMachineConfig(fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "4", Memory: "1Gi"}}, config, stateRoot, image))
 
 	// A request memory below the snapshot memory is rejected.
-	err = validateRestoreMachineConfig(fastletapi.SandboxSpec{Memory: "256Mi"}, config, stateRoot, image)
+	err = validateRestoreMachineConfig(fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{Memory: "256Mi"}}, config, stateRoot, image)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 	require.Contains(t, err.Error(), "below the template snapshot memory")
 }
@@ -701,8 +704,8 @@ func TestValidateRestoreMachineConfigFallsBackWithoutManifest(t *testing.T) {
 	image := "example.com/app:v1"
 	config := firecrackerConfigForTest(t, stateRoot)
 
-	require.NoError(t, validateRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "2", Memory: "1Gi"}, config, stateRoot, image))
-	require.ErrorIs(t, validateRestoreMachineConfig(fastletapi.SandboxSpec{CPU: "not-a-quantity"}, config, stateRoot, image), ErrInvalidConfig)
+	require.NoError(t, validateRestoreMachineConfig(fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "2", Memory: "1Gi"}}, config, stateRoot, image))
+	require.ErrorIs(t, validateRestoreMachineConfig(fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "not-a-quantity"}}, config, stateRoot, image), ErrInvalidConfig)
 }
 
 func TestResolveRestoreSnapshotFilesRequiresBothArtifacts(t *testing.T) {

@@ -17,9 +17,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -58,6 +60,7 @@ type fastpathFastlet struct {
 	createRequests []*fastletapi.CreateSandboxRequest
 	createIPs      []string
 	createPhase    string
+	nilCreateReply bool
 	inspectStatus  *fastletapi.SandboxStatus
 	inspectError   error
 	diagnostics    *fastletapi.SandboxDiagnosticsResponse
@@ -70,10 +73,13 @@ func (f *fastpathFastlet) CreateSandbox(_ context.Context, fastletIP string, req
 	f.createRequests = append(f.createRequests, request)
 	f.createIPs = append(f.createIPs, fastletIP)
 	if f.createFailure != nil {
-		return &fastletapi.CreateSandboxResponse{}, f.createFailure
+		return &fastletapi.CreateSandboxResponse{Disposition: fastletapi.CreateDispositionFromError(f.createFailure)}, f.createFailure
 	}
 	if failure := f.createFailures[fastletIP]; failure != nil {
-		return &fastletapi.CreateSandboxResponse{}, failure
+		return &fastletapi.CreateSandboxResponse{Disposition: fastletapi.CreateDispositionFromError(failure)}, failure
+	}
+	if f.nilCreateReply {
+		return nil, nil
 	}
 	phase := f.createPhase
 	if phase == "" {
@@ -85,7 +91,7 @@ func (f *fastpathFastlet) CreateSandbox(_ context.Context, fastletIP string, req
 	}
 	observed := testObservedStatus(request.Identity.SandboxUID, phase, request.SpecGeneration, bindings)
 	observed.RuntimeInstanceID = request.Identity.RuntimeInstanceID
-	return &fastletapi.CreateSandboxResponse{Accepted: true, Created: true, Sandbox: observed}, nil
+	return &fastletapi.CreateSandboxResponse{Disposition: fastletapi.CreateDispositionCreated, Sandbox: observed}, nil
 }
 
 func (f *fastpathFastlet) InspectSandbox(_ context.Context, _ string, request *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error) {
@@ -102,7 +108,7 @@ func (f *fastpathFastlet) InspectSandbox(_ context.Context, _ string, request *f
 }
 
 func (*fastpathFastlet) DeleteSandbox(context.Context, string, *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error) {
-	return &fastletapi.DeleteSandboxResponse{Accepted: true}, nil
+	return &fastletapi.DeleteSandboxResponse{}, nil
 }
 
 func (f *fastpathFastlet) ReconcileBindings(_ context.Context, _ string, request *fastletapi.ReconcileBindingsRequest) (*fastletapi.ReconcileBindingsResponse, error) {
@@ -140,11 +146,12 @@ func (f *fastpathFastlet) SandboxDiagnostics(context.Context, string, *fastletap
 
 type countingUIDClient struct {
 	client.Client
-	mu      sync.Mutex
-	creates int
-	gets    int
-	lists   int
-	patches int
+	mu         sync.Mutex
+	creates    int
+	gets       int
+	lists      int
+	patches    int
+	patchError error
 }
 
 func (c *countingUIDClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
@@ -179,7 +186,11 @@ func (c *countingUIDClient) List(ctx context.Context, list client.ObjectList, op
 func (c *countingUIDClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
 	c.mu.Lock()
 	c.patches++
+	patchError := c.patchError
 	c.mu.Unlock()
+	if patchError != nil {
+		return patchError
+	}
 	return c.Client.Patch(ctx, object, patch, options...)
 }
 
@@ -263,6 +274,25 @@ func TestCreateCompletionRuntimeReadyIsForwarded(t *testing.T) {
 	fastlet.mu.Unlock()
 }
 
+func TestCreateCompletionRejectsUnknownEnum(t *testing.T) {
+	server, _, _, fastlet := newV2Server(t)
+	request := createRequest("invalid-completion")
+	request.Completion = fastpathv2.CreateCompletion(99)
+	_, err := server.CreateSandbox(context.Background(), request)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Empty(t, fastlet.createRequests)
+}
+
+func TestCreateNilFastletReplyIsProtocolFailureWithoutNilFormatting(t *testing.T) {
+	server, k8sClient, _, fastlet := newV2Server(t)
+	fastlet.nilCreateReply = true
+	_, err := server.CreateSandbox(context.Background(), createRequest("nil-reply"))
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	require.NotContains(t, err.Error(), "<nil>")
+	var persisted apiv1alpha2.Sandbox
+	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "nil-reply"}, &persisted))
+}
+
 func TestCreateRetryUsesSameCRDAndRuntimeIdentity(t *testing.T) {
 	server, _, _, fastlet := newV2Server(t)
 	first, err := server.CreateSandbox(context.Background(), createRequest("request-a"))
@@ -289,7 +319,7 @@ func TestNoCandidateAndExplicitRejection(t *testing.T) {
 	require.Zero(t, creates)
 
 	registry.candidates = []placement.FastletInfo{testCandidate("fastlet-a", "pod-a", "10.0.0.1")}
-	fastlet.createFailure = &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true, Outcome: fastletapi.OutcomeRejectedBeforeSideEffects}
+	fastlet.createFailure = &fastletapi.CreateCallError{Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects, Failure: &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true}}
 	_, err = server.CreateSandbox(context.Background(), createRequest("rejected"))
 	require.Equal(t, codes.ResourceExhausted, status.Code(err))
 	var persisted apiv1alpha2.Sandbox
@@ -301,8 +331,9 @@ func TestExplicitRejectionCASesToSecondCandidate(t *testing.T) {
 	second := testCandidate("fastlet-b", "pod-b", "10.0.0.2")
 	registry.candidates = append(registry.candidates, second)
 	registry.fastlets[second.ID] = second
-	fastlet.createFailures = map[string]error{"10.0.0.1": &fastletapi.FastletError{
-		Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true, Outcome: fastletapi.OutcomeRejectedBeforeSideEffects,
+	fastlet.createFailures = map[string]error{"10.0.0.1": &fastletapi.CreateCallError{
+		Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects,
+		Failure:     &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true},
 	}}
 
 	_, err := server.CreateSandbox(context.Background(), createRequest("request-a"))
@@ -314,6 +345,47 @@ func TestExplicitRejectionCASesToSecondCandidate(t *testing.T) {
 	require.Equal(t, "fastlet-b", envelope.FastletName)
 	require.Equal(t, int64(2), envelope.Attempt)
 	require.Equal(t, int64(2), envelope.RouteGeneration)
+}
+
+func TestFallbackCASConflictAbortsBeforeCallingSecondCandidate(t *testing.T) {
+	server, k8sClient, registry, fastlet := newV2Server(t)
+	second := testCandidate("fastlet-b", "pod-b", "10.0.0.2")
+	registry.candidates = append(registry.candidates, second)
+	registry.fastlets[second.ID] = second
+	fastlet.createFailures = map[string]error{"10.0.0.1": &fastletapi.CreateCallError{
+		Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects,
+		Failure:     &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true},
+	}}
+	k8sClient.patchError = apierrors.NewConflict(schema.GroupResource{Group: apiv1alpha2.GroupVersion.Group, Resource: "sandboxes"}, "request-a", errors.New("assignment changed"))
+
+	_, err := server.CreateSandbox(context.Background(), createRequest("request-a"))
+	require.Equal(t, codes.Aborted, status.Code(err))
+	fastlet.mu.Lock()
+	require.Equal(t, []string{"10.0.0.1"}, fastlet.createIPs)
+	fastlet.mu.Unlock()
+
+	var persisted apiv1alpha2.Sandbox
+	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "request-a"}, &persisted))
+	envelope, err := assignment.AssignmentFromAnnotation(&persisted)
+	require.NoError(t, err)
+	require.Equal(t, "fastlet-a", envelope.FastletName)
+}
+
+func TestExistingIntentExplicitRejectionIsNeverDeleted(t *testing.T) {
+	server, k8sClient, _, fastlet := newV2Server(t)
+	fastlet.createFailure = errors.New("transport response lost")
+	_, err := server.CreateSandbox(context.Background(), createRequest("existing-intent"))
+	require.Equal(t, codes.Unavailable, status.Code(err))
+
+	fastlet.createFailure = &fastletapi.CreateCallError{
+		Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects,
+		Failure:     &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "still full", Retryable: true},
+	}
+	_, err = server.CreateSandbox(context.Background(), createRequest("existing-intent"))
+	require.Equal(t, codes.ResourceExhausted, status.Code(err))
+
+	var persisted apiv1alpha2.Sandbox
+	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "existing-intent"}, &persisted))
 }
 
 func TestAmbiguousFailureNeverReassigns(t *testing.T) {
@@ -452,7 +524,7 @@ func TestDeleteOnlyCommitsDesiredState(t *testing.T) {
 		ExpectedUid:    created.Sandbox.GetIdentity().GetUid(),
 	}})
 	require.NoError(t, err)
-	require.True(t, deleted.Success)
+	require.NotNil(t, deleted)
 	require.NoError(t, k8sClient.Client.Get(context.Background(), client.ObjectKeyFromObject(&sandbox), &sandbox))
 	require.NotNil(t, sandbox.DeletionTimestamp)
 }
@@ -521,7 +593,7 @@ func discoveryPool(name, namespace string) *apiv1alpha2.SandboxPool {
 			}},
 		},
 		Status: apiv1alpha2.SandboxPoolStatus{
-			TotalFastlets: 3, ReadyPods: 2, IdleFastlets: 1, InfraRevision: "sha256:infra", PreparedFastlets: 2,
+			CurrentPods: 3, ReadyPods: 2, IdleFastlets: 1, InfraRevision: "sha256:infra", PreparedFastlets: 2,
 			WarmImages: []apiv1alpha2.WarmImageStatus{{Image: "alpine:latest", DesiredFastlets: 3, CachedFastlets: 2}},
 		},
 	}

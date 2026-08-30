@@ -18,7 +18,7 @@ func TestWaitUntilSandboxReadyUsesLocalStateNotification(t *testing.T) {
 		RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 2,
 	}
 	metadata := &SandboxMetadata{
-		SandboxSpec: fastletapi.SandboxSpec{
+		RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{
 			SandboxID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
 			RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 2,
 		},
@@ -81,7 +81,7 @@ func TestWaitUntilSandboxReadyWaitsForExpectedGeneration(t *testing.T) {
 		RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 1,
 	}
 	metadata := &SandboxMetadata{
-		SandboxSpec: fastletapi.SandboxSpec{
+		RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{
 			SandboxID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
 			RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 1,
 		},
@@ -105,7 +105,7 @@ func TestWaitUntilSandboxReadyFailsWhenSandboxTerminates(t *testing.T) {
 	manager := &SandboxManager{
 		fastletPodUID: "pod-a",
 		sandboxes: map[string]*SandboxMetadata{"sandbox-a": {
-			SandboxSpec: fastletapi.SandboxSpec{
+			RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{
 				SandboxID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
 				RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 1,
 			},
@@ -122,8 +122,8 @@ func TestWaitUntilSandboxReadyFailsWhenSandboxTerminates(t *testing.T) {
 func TestHealthRegressionRevokesRouteAndReadiness(t *testing.T) {
 	runtime := newAdmissionRuntime()
 	metadata := &SandboxMetadata{
-		SandboxSpec: fastletapi.SandboxSpec{
-			SandboxID: "sandbox-a", ClaimUID: "claim-a", ClaimNamespace: "fast-sandbox",
+		RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{
+			SandboxID: "sandbox-a", ClaimNamespace: "fast-sandbox",
 			FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a",
 			AssignmentAttempt: 1, RouteGeneration: 2,
 		},

@@ -129,7 +129,7 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	return nil
 }
 
-func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (_ *SandboxMetadata, resultErr error) {
+func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.RuntimeSandboxSpec) (_ *SandboxMetadata, resultErr error) {
 	totalStart := time.Now()
 	ctx, finishTotal := startContainerdCreateStage(ctx, string(r.runtimeName), "total")
 	defer func() { finishTotal(resultErr) }()
@@ -274,7 +274,7 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		"start_ms", (taskCreateDuration + taskStartDuration).Milliseconds())
 
 	metadata := &SandboxMetadata{
-		SandboxSpec:            *config,
+		RuntimeSandboxSpec:     *config,
 		ContainerID:            containerID,
 		Phase:                  "running",
 		CreatedAt:              time.Now().Unix(),
@@ -292,7 +292,7 @@ func (r *Driver) CreateSandbox(ctx context.Context, config *fastletapi.SandboxSp
 
 // EnsureSandbox is idempotent for a Sandbox runtime identity. It returns the
 // existing managed runtime when a retry observes an already-created Sandbox.
-func (r *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (*SandboxMetadata, error) {
+func (r *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSandboxSpec) (*SandboxMetadata, error) {
 	inspectContext, finishInspect := startContainerdCreateStage(ctx, string(r.runtimeName), "inspect_existing")
 	existing, err := r.InspectSandbox(inspectContext, config.SandboxID)
 	inspectErr := err
@@ -355,16 +355,15 @@ func userProcessStartAfterTaskStart(instance *infra.PreparedInstance, observedAt
 	return observedAt, fastletapi.UserProcessStartRuntimeDirect
 }
 
-func validateExistingRuntimeProfile(existing *SandboxMetadata, requested *fastletapi.SandboxSpec) error {
+func validateExistingRuntimeProfile(existing *SandboxMetadata, requested *fastletapi.RuntimeSandboxSpec) error {
 	return runtimecontract.ValidateProfile(existing, requested)
 }
 
-func sameRuntimeIdentity(existing *SandboxMetadata, requested *fastletapi.SandboxSpec) bool {
+func sameRuntimeIdentity(existing *SandboxMetadata, requested *fastletapi.RuntimeSandboxSpec) bool {
 	if existing == nil || requested == nil {
 		return false
 	}
 	return existing.SandboxID == requested.SandboxID &&
-		existing.ClaimUID == requested.ClaimUID &&
 		existing.ClaimNamespace == requested.ClaimNamespace &&
 		existing.ClaimName == requested.ClaimName &&
 		existing.FastletPodUID == requested.FastletPodUID &&
@@ -421,7 +420,7 @@ func (r *Driver) pullImage(ctx context.Context, imageName string) (containerd.Im
 	return r.client.Pull(ctx, imageName, options...)
 }
 
-func (r *Driver) prepareSpecOpts(ctx context.Context, config *fastletapi.SandboxSpec, image containerd.Image) ([]oci.SpecOpts, *infra.PreparedInstance, error) {
+func (r *Driver) prepareSpecOpts(ctx context.Context, config *fastletapi.RuntimeSandboxSpec, image containerd.Image) ([]oci.SpecOpts, *infra.PreparedInstance, error) {
 	originalArgs := append(config.Command, config.Args...)
 
 	var mounts []specs.Mount
@@ -538,7 +537,7 @@ func cloneStringMap(input map[string]string) map[string]string {
 	return result
 }
 
-func sandboxResourceSpecOpts(config *fastletapi.SandboxSpec) ([]oci.SpecOpts, error) {
+func sandboxResourceSpecOpts(config *fastletapi.RuntimeSandboxSpec) ([]oci.SpecOpts, error) {
 	var opts []oci.SpecOpts
 	if config.CPU != "" {
 		cpu, err := resource.ParseQuantity(config.CPU)
@@ -592,7 +591,7 @@ func (r *Driver) getRuntimeOptions() *runtimeoptions.Options {
 	return nil
 }
 
-func (r *Driver) prepareLabels(config *fastletapi.SandboxSpec) map[string]string {
+func (r *Driver) prepareLabels(config *fastletapi.RuntimeSandboxSpec) map[string]string {
 	routeGeneration := config.RouteGeneration
 	if routeGeneration <= 0 {
 		routeGeneration = 1
@@ -603,7 +602,6 @@ func (r *Driver) prepareLabels(config *fastletapi.SandboxSpec) map[string]string
 		"fast-sandbox.io/fastlet-uid":           r.fastletPodUID,
 		"fast-sandbox.io/namespace":             r.fastletNamespace,
 		"fast-sandbox.io/id":                    config.SandboxID,
-		"fast-sandbox.io/claim-uid":             config.ClaimUID,
 		"fast-sandbox.io/claim-namespace":       config.ClaimNamespace,
 		"fast-sandbox.io/sandbox-name":          config.ClaimName,
 		"fast-sandbox.io/runtime-profile-hash":  config.RuntimeProfileHash,
@@ -744,20 +742,21 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 		return nil, err
 	}
 	metadata := &SandboxMetadata{
-		SandboxSpec: fastletapi.SandboxSpec{
+		RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{
+			SandboxSpec: fastletapi.SandboxSpec{
+				Image:               info.Image,
+				CPU:                 info.Labels["fast-sandbox.io/resource-cpu"],
+				Memory:              info.Labels["fast-sandbox.io/resource-memory"],
+				RuntimeProfileHash:  info.Labels["fast-sandbox.io/runtime-profile-hash"],
+				ResourceProfileHash: info.Labels["fast-sandbox.io/resource-profile-hash"],
+				InfraRevision:       info.Labels["fast-sandbox.io/infra-revision"],
+			},
 			SandboxID:            sandboxID,
 			RequestID:            info.Labels["fast-sandbox.io/request-id"],
-			ClaimUID:             info.Labels["fast-sandbox.io/claim-uid"],
 			ClaimNamespace:       info.Labels["fast-sandbox.io/claim-namespace"],
 			ClaimName:            info.Labels["fast-sandbox.io/sandbox-name"],
 			FastletPodUID:        info.Labels["fast-sandbox.io/fastlet-uid"],
 			RuntimeInstanceID:    info.Labels["fast-sandbox.io/runtime-instance-id"],
-			Image:                info.Image,
-			CPU:                  info.Labels["fast-sandbox.io/resource-cpu"],
-			Memory:               info.Labels["fast-sandbox.io/resource-memory"],
-			RuntimeProfileHash:   info.Labels["fast-sandbox.io/runtime-profile-hash"],
-			ResourceProfileHash:  info.Labels["fast-sandbox.io/resource-profile-hash"],
-			InfraRevision:        info.Labels["fast-sandbox.io/infra-revision"],
 			NetworkSlotID:        info.Labels["fast-sandbox.io/network-slot-id"],
 			NetworkNamespacePath: info.Labels["fast-sandbox.io/network-netns-path"],
 			NetworkIP:            info.Labels["fast-sandbox.io/network-ip"],
@@ -797,7 +796,7 @@ func (r *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 			metadata.NetworkNamespacePath != slot.HostNetNSPath || metadata.NetworkIP != slot.IP {
 			return fmt.Errorf("%w: runtime sandbox %s does not match its durable network descriptor", fastletnetwork.ErrStateInconsistent, metadata.SandboxID)
 		}
-		owners = append(owners, r.networkOwner(&metadata.SandboxSpec))
+		owners = append(owners, r.networkOwner(&metadata.RuntimeSandboxSpec))
 	}
 	return r.networkManager.Reconcile(ctx, owners)
 }
@@ -817,7 +816,7 @@ func (r *Driver) GetAccessDescriptor(sandboxID string) (dataplane.AccessDescript
 	return slot.Access, nil
 }
 
-func (r *Driver) networkOwner(config *fastletapi.SandboxSpec) fastletnetwork.Owner {
+func (r *Driver) networkOwner(config *fastletapi.RuntimeSandboxSpec) fastletnetwork.Owner {
 	generation := config.InstanceGeneration
 	if generation <= 0 {
 		generation = 1

@@ -33,10 +33,10 @@ func (*serverRuntime) Close() error                             { return nil }
 func (*serverRuntime) ProbeCapabilities(context.Context) runtimecontract.CapabilityReport {
 	return runtimecontract.CapabilityReport{State: runtimecatalog.CapabilityReady, Reason: "TestRuntimeReady"}
 }
-func (r *serverRuntime) EnsureSandbox(_ context.Context, spec *fastletapi.SandboxSpec) (*runtimecontract.Metadata, error) {
+func (r *serverRuntime) EnsureSandbox(_ context.Context, spec *fastletapi.RuntimeSandboxSpec) (*runtimecontract.Metadata, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	metadata := &runtimecontract.Metadata{SandboxSpec: *spec, Phase: "running"}
+	metadata := &runtimecontract.Metadata{RuntimeSandboxSpec: *spec, Phase: "running"}
 	r.sandboxes[spec.SandboxID] = metadata
 	copy := *metadata
 	return &copy, nil
@@ -103,18 +103,17 @@ func postJSON(t *testing.T, handler http.Handler, path string, request, response
 func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 	manager := newServerManager(t, newServerRuntime(), false)
 	handler := NewFastletServer(":0", manager).Handler()
-	identity := fastletapi.SandboxIdentity{RequestID: "request-a", SandboxUID: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"}
+	identity := fastletapi.SandboxIdentity{SandboxUID: "sandbox-a", Namespace: "default", Name: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"}
 
 	var created fastletapi.CreateSandboxResponse
 	recorder := postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
+		RequestID:      "request-a",
 		Identity:       identity,
 		SpecGeneration: 1,
-		Sandbox: fastletapi.SandboxSpec{
-			ClaimUID: "claim-a", ClaimNamespace: "default", ClaimName: "sandbox-a", Image: "alpine:latest",
-		},
+		Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
 	}, &created)
 	require.Equal(t, http.StatusOK, recorder.Code)
-	require.True(t, created.Created)
+	require.Equal(t, fastletapi.CreateDispositionCreated, created.Disposition)
 	var diagnostics fastletapi.SandboxDiagnosticsResponse
 	recorder = postJSON(t, handler, "/api/v2/fastlet/diagnostics/sandbox", fastletapi.SandboxDiagnosticsRequest{Identity: identity, Limit: 2}, &diagnostics)
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -135,8 +134,9 @@ func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 
 	var rejected fastletapi.CreateSandboxResponse
 	recorder = postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
-		Identity:       fastletapi.SandboxIdentity{RequestID: "request-b", SandboxUID: "sandbox-b", InstanceGeneration: 1, RuntimeInstanceID: "runtime-b", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
-		Sandbox:        fastletapi.SandboxSpec{ClaimUID: "claim-b", ClaimNamespace: "default", ClaimName: "sandbox-b", Image: "alpine:latest"},
+		RequestID:      "request-b",
+		Identity:       fastletapi.SandboxIdentity{SandboxUID: "sandbox-b", Namespace: "default", Name: "sandbox-b", InstanceGeneration: 1, RuntimeInstanceID: "runtime-b", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
+		Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
 		SpecGeneration: 1,
 	}, &rejected)
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
@@ -173,8 +173,9 @@ func TestSetDrainingRejectsNewCreates(t *testing.T) {
 	require.True(t, draining.Draining)
 	var rejected fastletapi.CreateSandboxResponse
 	recorder = postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
-		Identity:       fastletapi.SandboxIdentity{RequestID: "request-a", SandboxUID: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
-		Sandbox:        fastletapi.SandboxSpec{ClaimUID: "claim-a", ClaimNamespace: "default", ClaimName: "sandbox-a", Image: "alpine:latest"},
+		RequestID:      "request-a",
+		Identity:       fastletapi.SandboxIdentity{SandboxUID: "sandbox-a", Namespace: "default", Name: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
+		Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
 		SpecGeneration: 1,
 	}, &rejected)
 	require.Equal(t, http.StatusConflict, recorder.Code)

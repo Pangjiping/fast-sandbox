@@ -10,10 +10,12 @@ import (
 
 func testRoute(generation int64) Route {
 	return Route{
-		Namespace: "default", SandboxUID: "uid-a", FastletPodUID: "pod-a",
-		AssignmentAttempt: generation, RouteGeneration: generation,
-		Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: "10.42.0.2"},
-		State:  RouteReady,
+		RouteKey: RouteKey{SandboxUID: "uid-a", RouteGeneration: generation},
+		RouteSpec: RouteSpec{
+			Namespace: "default", FastletPodUID: "pod-a", AssignmentAttempt: generation,
+			Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: "10.42.0.2"},
+			State:  RouteReady,
+		},
 	}
 }
 

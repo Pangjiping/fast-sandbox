@@ -89,11 +89,13 @@ func TestDriverSidecarContract(t *testing.T) {
 	report := driver.ProbeCapabilities(context.Background())
 	require.True(t, report.Ready(), report.Message)
 
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "uid-a", ClaimUID: "uid-a", ClaimNamespace: "tenant-a", ClaimName: "sandbox-a", FastletPodUID: "pod-a",
-		InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 2, RouteGeneration: 3, Image: "alpine:latest",
-		CPU: "1", Memory: "256Mi", PIDs: 128, RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
-		InfraRevision: "infra-hash",
+	spec := &fastletapi.RuntimeSandboxSpec{
+		SandboxSpec: fastletapi.SandboxSpec{
+			Image: "alpine:latest", CPU: "1", Memory: "256Mi", PIDs: 128,
+			RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash", InfraRevision: "infra-hash",
+		},
+		SandboxID: "uid-a", ClaimNamespace: "tenant-a", ClaimName: "sandbox-a", FastletPodUID: "pod-a",
+		InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 2, RouteGeneration: 3,
 	}
 	metadata, err := driver.EnsureSandbox(context.Background(), spec)
 	require.NoError(t, err)
@@ -155,7 +157,7 @@ func TestDriverCapabilityAndIdentityFailClosed(t *testing.T) {
 	require.Equal(t, "BoxLiteSidecarCapabilityMissing", report.Reason)
 	require.Contains(t, report.Missing, "local-forward-v1")
 
-	_, err := driver.EnsureSandbox(context.Background(), &fastletapi.SandboxSpec{
+	_, err := driver.EnsureSandbox(context.Background(), &fastletapi.RuntimeSandboxSpec{
 		SandboxID: "uid-conflict", FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-conflict", AssignmentAttempt: 1,
 	})
 	require.ErrorIs(t, err, ErrSandboxProfileMismatch)

@@ -249,7 +249,24 @@ and Fast Sandbox solve adjacent problems with different workload units:
 
 This is an architectural comparison, not a performance claim.
 
-## Performance semantics
+## Performance
+
+The latest published warm, concurrency-1 engineering sample is summarized
+below. It was reported on 2026-08-09 at commit
+`cde6d5c8e82f568ae3dbfd919ea7284713603f13`; it used a warm Alpine image,
+pre-created network slots, no Infra Components, a single-node Kind cluster with
+containerd 1.7.18, and a non-nested KVM host with 104 vCPUs and 187 GiB RAM.
+
+| Runtime | Boundary | N | Mean | p50 | p95 | Max |
+|---|---|---:|---:|---:|---:|---:|
+| container (`runc`) | `RUNTIME_READY` | 20 | 72.4 ms | 72.7 ms | 80.2 ms | 83.1 ms |
+| Kata Firecracker | `RUNTIME_READY` | 20 | 560.6 ms | 559.6 ms | 622.8 ms | 626.9 ms |
+
+With only 20 samples, this report uses maximum rather than presenting an
+unstable p99. Aggregate `READY`, `ResolveEndpoint`, and sustained concurrent
+throughput were not measured in that run and are not implied by this table.
+These are reproducible engineering observations, not a production SLA. See the
+[full report and benchmark command](docs/guides/performance.md#create-load-tool).
 
 The default Create latency ends at aggregate `Ready`. Performance experiments
 may explicitly request the earlier `RuntimeReady` boundary; component health,

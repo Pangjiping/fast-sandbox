@@ -16,7 +16,7 @@ import (
 )
 
 type Metadata struct {
-	fastletapi.SandboxSpec
+	fastletapi.RuntimeSandboxSpec
 	ContainerID            string
 	PID                    int
 	Phase                  string
@@ -34,7 +34,7 @@ type Driver interface {
 	Initialize(ctx context.Context, socketPath string) error
 	SetNamespace(ns string)
 	ProbeCapabilities(ctx context.Context) CapabilityReport
-	EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (*Metadata, error)
+	EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSandboxSpec) (*Metadata, error)
 	InspectSandbox(ctx context.Context, sandboxID string) (*Metadata, error)
 	DeleteSandbox(ctx context.Context, sandboxID string) error
 	ListManagedSandboxes(ctx context.Context) ([]*Metadata, error)
@@ -85,7 +85,7 @@ type CapabilityProber interface {
 	Probe(ctx context.Context, profile runtimecatalog.RuntimeProfile, socketPath string) CapabilityReport
 }
 
-func ValidateProfile(existing *Metadata, requested *fastletapi.SandboxSpec) error {
+func ValidateProfile(existing *Metadata, requested *fastletapi.RuntimeSandboxSpec) error {
 	if existing == nil || requested == nil {
 		return fmt.Errorf("%w: existing and requested runtime specs are required", ErrSandboxProfileMismatch)
 	}

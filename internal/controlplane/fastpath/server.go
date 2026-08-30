@@ -49,6 +49,24 @@ const (
 	metadataLabelPrefix = "metadata.sandbox.fast.io/"
 )
 
+type createCompletion struct {
+	api     fastpathv2.CreateCompletion
+	fastlet fastletapi.CreateCompletion
+}
+
+type plannedCreate struct {
+	sandbox    *apiv1alpha2.Sandbox
+	candidates []placement.FastletInfo
+	assignment assignment.AssignmentEnvelope
+}
+
+type acceptedCreate struct {
+	sandbox    *apiv1alpha2.Sandbox
+	candidates []placement.FastletInfo
+	assignment assignment.AssignmentEnvelope
+	created    bool
+}
+
 func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSandboxRequest) (_ *fastpathv2.CreateSandboxResponse, resultErr error) {
 	started := time.Now()
 	acceptedObserved := false
@@ -65,6 +83,10 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	}()
 
 	if err := s.validateCreateRequest(request); err != nil {
+		return nil, err
+	}
+	completion, err := parseCreateCompletion(request.Completion)
+	if err != nil {
 		return nil, err
 	}
 	pool, err := s.getPool(ctx, request.Namespace, request.PoolRef)
@@ -90,19 +112,24 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	if err != nil {
 		return nil, err
 	}
-	sandbox, rankedFastlets, envelope, createdIntent, err := s.createOrGetSandboxCRD(ctx, orchestrator, sandbox, rankedFastlets, envelope, request.RequestId, createSpecHash)
+	accepted, err := s.acceptCreateIntent(ctx, plannedCreate{sandbox: sandbox, candidates: rankedFastlets, assignment: envelope})
 	if err != nil {
 		return nil, err
 	}
-	if createdIntent {
+	if accepted.created {
 		observeCreateAccepted("crd", started, nil)
 	} else {
 		observeCreateAccepted("idempotent", started, nil)
 	}
 	acceptedObserved = true
 
-	completion := normalizeCreateCompletion(request.Completion)
-	return s.createRuntimeWithFallback(ctx, orchestrator, sandbox, rankedFastlets, envelope, createdIntent, completion)
+	observed, err := s.provisionRuntime(ctx, accepted, completion.fastlet)
+	if err != nil {
+		return nil, err
+	}
+	return &fastpathv2.CreateSandboxResponse{
+		Sandbox: sandboxInfoFromFastlet(accepted.sandbox, observed), Generation: accepted.sandbox.Generation, Completion: completion.api,
+	}, nil
 }
 
 func (s *Server) validateCreateRequest(request *fastpathv2.CreateSandboxRequest) error {
@@ -167,73 +194,63 @@ func (s *Server) selectFastletsForPool(ctx context.Context, orchestrator *orches
 	return rankedFastlets, envelope, nil
 }
 
-func (s *Server) createOrGetSandboxCRD(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox, rankedFastlets []placement.FastletInfo, envelope assignment.AssignmentEnvelope, requestID, createSpecHash string) (*apiv1alpha2.Sandbox, []placement.FastletInfo, assignment.AssignmentEnvelope, bool, error) {
+func (s *Server) acceptCreateIntent(ctx context.Context, plan plannedCreate) (*acceptedCreate, error) {
 	crdContext, finishCRDCreate := startCreateStage(ctx, "crd_create")
-	createErr := s.K8sClient.Create(crdContext, sandbox)
+	createErr := s.K8sClient.Create(crdContext, plan.sandbox)
 	finishCRDCreate(createErr)
 	if createErr == nil {
-		return sandbox, rankedFastlets, envelope, true, nil
+		return &acceptedCreate{sandbox: plan.sandbox, candidates: plan.candidates, assignment: plan.assignment, created: true}, nil
 	}
 	var existing apiv1alpha2.Sandbox
 	getContext, finishRead := startCreateStage(ctx, "idempotency_read")
-	getErr := s.K8sClient.Get(getContext, client.ObjectKeyFromObject(sandbox), &existing)
+	getErr := s.K8sClient.Get(getContext, client.ObjectKeyFromObject(plan.sandbox), &existing)
 	finishRead(getErr)
 	if getErr != nil {
-		return nil, nil, assignment.AssignmentEnvelope{}, false, grpcKubernetesError(errors.Join(createErr, getErr))
+		return nil, grpcKubernetesError(errors.Join(createErr, getErr))
 	}
-	if existing.Annotations[assignment.AnnotationRequestID] != requestID || existing.Annotations[assignment.AnnotationCreateSpecHash] != createSpecHash {
-		return nil, nil, assignment.AssignmentEnvelope{}, false, status.Errorf(codes.AlreadyExists, "Sandbox name %q belongs to another create intent", sandbox.Name)
+	if existing.Annotations[assignment.AnnotationRequestID] != plan.sandbox.Annotations[assignment.AnnotationRequestID] ||
+		existing.Annotations[assignment.AnnotationCreateSpecHash] != plan.sandbox.Annotations[assignment.AnnotationCreateSpecHash] {
+		return nil, status.Errorf(codes.AlreadyExists, "Sandbox name %q belongs to another create intent", plan.sandbox.Name)
 	}
 	existingEnvelope, err := assignment.AssignmentFromAnnotation(&existing)
 	if err != nil || existingEnvelope == nil {
-		return nil, nil, assignment.AssignmentEnvelope{}, false, status.Errorf(codes.Unavailable, "existing Sandbox assignment is not ready: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "existing Sandbox assignment is not ready: %v", err)
 	}
-	selected, ok := orchestrator.Registry.GetFastletByID(placement.FastletID(existingEnvelope.FastletName))
+	selected, ok := s.Orchestrator.Registry.GetFastletByID(placement.FastletID(existingEnvelope.FastletName))
 	if !ok {
-		return nil, nil, assignment.AssignmentEnvelope{}, false, status.Error(codes.Unavailable, orchestration.ErrAssignedFastletUnavailable.Error())
+		return nil, status.Error(codes.Unavailable, orchestration.ErrAssignedFastletUnavailable.Error())
 	}
-	return existing.DeepCopy(), []placement.FastletInfo{selected}, *existingEnvelope, false, nil
+	return &acceptedCreate{sandbox: existing.DeepCopy(), candidates: []placement.FastletInfo{selected}, assignment: *existingEnvelope}, nil
 }
 
-func (s *Server) createRuntimeWithFallback(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox, rankedFastlets []placement.FastletInfo, envelope assignment.AssignmentEnvelope, createdIntent bool, completion fastpathv2.CreateCompletion) (*fastpathv2.CreateSandboxResponse, error) {
-	internalCompletion := fastletapi.CreateCompletionReady
-	if completion == fastpathv2.CreateCompletion_CREATE_COMPLETION_RUNTIME_READY {
-		internalCompletion = fastletapi.CreateCompletionRuntimeReady
-	}
-	for index, candidate := range rankedFastlets {
+func (s *Server) provisionRuntime(ctx context.Context, accepted *acceptedCreate, completion fastletapi.CreateCompletion) (*fastletapi.SandboxStatus, error) {
+	for index, candidate := range accepted.candidates {
 		if index > 0 {
 			orchestration.RecordTopKRetry("attempt")
-			runtimeInstanceID, err := idgen.GenerateRequestID()
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "generate runtime instance ID: %v", err)
+			if err := s.advanceCreateAssignment(ctx, accepted, candidate); err != nil {
+				return nil, err
 			}
-			next, err := orchestration.AssignmentForCandidate(candidate, envelope.Attempt+1, envelope.InstanceGeneration, envelope.RouteGeneration+1, runtimeInstanceID)
-			if err != nil {
-				return nil, status.Errorf(codes.FailedPrecondition, "invalid Fastlet candidate: %v", err)
-			}
-			sandbox, err = assignment.CASAssignmentAnnotation(ctx, s.K8sClient, client.ObjectKeyFromObject(sandbox), envelope, next)
-			if err != nil {
-				return nil, status.Errorf(codes.Aborted, "assignment changed concurrently: %v", err)
-			}
-			envelope = next
 		}
 		fastletContext, finishFastletCreate := startCreateStage(ctx, "fastlet_create")
-		response, callErr := orchestrator.CreateRuntimeOnCandidateWithCompletion(fastletContext, sandbox, candidate, envelope, internalCompletion)
+		response, callErr := s.Orchestrator.CreateRuntimeOnCandidateWithCompletion(fastletContext, accepted.sandbox, candidate, accepted.assignment, completion)
 		finishFastletCreate(callErr)
 		if callErr == nil && response != nil && response.Sandbox != nil {
-			return &fastpathv2.CreateSandboxResponse{Sandbox: sandboxInfoFromFastlet(sandbox, response.Sandbox), Generation: sandbox.Generation, Completion: completion}, nil
+			return response.Sandbox, nil
 		}
-		if orchestration.IsCandidateRejection(callErr) && index+1 < len(rankedFastlets) {
+		if callErr == nil {
+			return nil, status.Error(codes.Unavailable, "Fastlet Create returned no Sandbox observation; Sandbox intent is persisted for Controller recovery")
+		}
+		if orchestration.IsCandidateRejection(callErr) && index+1 < len(accepted.candidates) {
 			orchestration.RecordTopKRetry("candidate_rejected")
-			orchestrator.RecordCandidateFeedback(candidate.ID, callErr)
+			s.Orchestrator.RecordCandidateFeedback(candidate.ID, callErr)
 			continue
 		}
 		if !orchestration.IsCandidateRejection(callErr) {
 			return nil, status.Errorf(codes.Unavailable, "Sandbox intent is persisted and Controller will retry: %v", callErr)
 		}
-		if createdIntent {
-			uid := sandbox.UID
-			rollbackErr := s.K8sClient.Delete(ctx, sandbox, client.Preconditions{UID: &uid})
+		if accepted.created {
+			uid := accepted.sandbox.UID
+			rollbackErr := s.K8sClient.Delete(ctx, accepted.sandbox, client.Preconditions{UID: &uid})
 			if rollbackErr != nil && !apierrors.IsNotFound(rollbackErr) {
 				return nil, status.Errorf(codes.Unavailable, "all Fastlet candidates rejected and intent rollback failed: rejection=%v rollback=%v", callErr, rollbackErr)
 			}
@@ -241,6 +258,23 @@ func (s *Server) createRuntimeWithFallback(ctx context.Context, orchestrator *or
 		return nil, status.Errorf(codes.ResourceExhausted, "all Fastlet candidates rejected admission: %v", callErr)
 	}
 	return nil, status.Error(codes.ResourceExhausted, orchestration.ErrNoCandidate.Error())
+}
+
+func (s *Server) advanceCreateAssignment(ctx context.Context, accepted *acceptedCreate, candidate placement.FastletInfo) error {
+	runtimeInstanceID, err := idgen.GenerateRequestID()
+	if err != nil {
+		return status.Errorf(codes.Internal, "generate runtime instance ID: %v", err)
+	}
+	next, err := orchestration.AssignmentForCandidate(candidate, accepted.assignment.Attempt+1, accepted.assignment.InstanceGeneration, accepted.assignment.RouteGeneration+1, runtimeInstanceID)
+	if err != nil {
+		return status.Errorf(codes.FailedPrecondition, "invalid Fastlet candidate: %v", err)
+	}
+	sandbox, err := assignment.CASAssignmentAnnotation(ctx, s.K8sClient, client.ObjectKeyFromObject(accepted.sandbox), accepted.assignment, next)
+	if err != nil {
+		return status.Errorf(codes.Aborted, "assignment changed concurrently: %v", err)
+	}
+	accepted.sandbox, accepted.assignment = sandbox, next
+	return nil
 }
 
 func (s *Server) GetSandbox(ctx context.Context, request *fastpathv2.GetSandboxRequest) (*fastpathv2.GetSandboxResponse, error) {
@@ -426,15 +460,15 @@ func (s *Server) DeleteSandbox(ctx context.Context, request *fastpathv2.DeleteRe
 	sandbox, err := s.sandboxFromReference(ctx, request.Sandbox)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
-			return &fastpathv2.DeleteResponse{Success: true}, nil
+			return &fastpathv2.DeleteResponse{}, nil
 		}
 		return nil, err
 	}
 	uid := sandbox.UID
 	if err := s.K8sClient.Delete(ctx, sandbox, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
-		return &fastpathv2.DeleteResponse{Success: false}, grpcKubernetesError(err)
+		return nil, grpcKubernetesError(err)
 	}
-	return &fastpathv2.DeleteResponse{Success: true}, nil
+	return &fastpathv2.DeleteResponse{}, nil
 }
 
 func (s *Server) ResolveEndpoint(ctx context.Context, request *fastpathv2.ResolveEndpointRequest) (*fastpathv2.ResolveEndpointResponse, error) {
@@ -479,8 +513,11 @@ func (s *Server) ResolveEndpoint(ctx context.Context, request *fastpathv2.Resolv
 	}
 	_ = envelope
 	return &fastpathv2.ResolveEndpointResponse{
-		SandboxUid: string(sandbox.UID), Target: request.Target, ComponentName: componentName,
-		Protocol: protocol, ResolvedPort: port, ProxyEndpoint: baseURL + path,
+		SandboxUid: string(sandbox.UID),
+		Endpoint: &fastpathv2.ResolvedEndpoint{
+			ComponentName: componentName, Protocol: protocol, Port: port,
+		},
+		ProxyEndpoint:   baseURL + path,
 		RequiredHeaders: map[string]string{dataplane.HeaderRouteCredential: credential},
 		RouteGeneration: claims.RouteGeneration, ExpiresAtUnixSeconds: claims.ExpiresAt,
 	}, nil
@@ -523,7 +560,7 @@ func poolInfo(pool *apiv1alpha2.SandboxPool) *fastpathv2.PoolInfo {
 		Namespace: pool.Namespace, Name: pool.Name, Runtime: string(pool.Spec.Runtime),
 		SandboxCpu: pool.Spec.SandboxResources.CPU.String(), SandboxMemory: pool.Spec.SandboxResources.Memory.String(),
 		SandboxPids: pool.Spec.SandboxResources.PIDs, MaxSandboxesPerPod: pool.Spec.MaxSandboxesPerPod,
-		TotalFastlets: pool.Status.TotalFastlets, ReadyFastlets: pool.Status.ReadyPods, IdleFastlets: pool.Status.IdleFastlets,
+		TotalFastlets: pool.Status.CurrentPods, ReadyFastlets: pool.Status.ReadyPods, IdleFastlets: pool.Status.IdleFastlets,
 		RuntimeRevision: pool.Status.RuntimeRevision, InfraRevision: pool.Status.InfraRevision,
 		FastletRevision: pool.Status.FastletRevision, PreparedFastlets: pool.Status.PreparedFastlets,
 	}
@@ -896,11 +933,6 @@ func validateCreateOptions(request *fastpathv2.CreateSandboxRequest, now time.Ti
 	if request.FailurePolicy != fastpathv2.FailurePolicy_MANUAL && request.FailurePolicy != fastpathv2.FailurePolicy_AUTO_RECREATE {
 		return errors.New("failure_policy is invalid")
 	}
-	if request.Completion != fastpathv2.CreateCompletion_CREATE_COMPLETION_UNSPECIFIED &&
-		request.Completion != fastpathv2.CreateCompletion_CREATE_COMPLETION_READY &&
-		request.Completion != fastpathv2.CreateCompletion_CREATE_COMPLETION_RUNTIME_READY {
-		return errors.New("completion is invalid")
-	}
 	if _, err := apiActionBindings(request.ActionBindings); err != nil {
 		return err
 	}
@@ -991,7 +1023,7 @@ func protoIdentity(sandbox *apiv1alpha2.Sandbox) *fastpathv2.SandboxIdentity {
 
 func internalIdentity(sandbox *apiv1alpha2.Sandbox, envelope *assignment.AssignmentEnvelope) fastletapi.SandboxIdentity {
 	return fastletapi.SandboxIdentity{
-		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], SandboxUID: string(sandbox.UID),
+		SandboxUID: string(sandbox.UID), Namespace: sandbox.Namespace, Name: sandbox.Name,
 		FastletPodUID: envelope.FastletPodUID, InstanceGeneration: envelope.InstanceGeneration,
 		RuntimeInstanceID: envelope.RuntimeInstanceID, AssignmentAttempt: envelope.Attempt, RouteGeneration: envelope.RouteGeneration,
 	}
@@ -1011,11 +1043,15 @@ func identityFromSandbox(sandbox *apiv1alpha2.Sandbox, targetPort uint32) observ
 
 func metadataLabelKey(name string) string { return metadataLabelPrefix + name }
 
-func normalizeCreateCompletion(value fastpathv2.CreateCompletion) fastpathv2.CreateCompletion {
-	if value == fastpathv2.CreateCompletion_CREATE_COMPLETION_UNSPECIFIED {
-		return fastpathv2.CreateCompletion_CREATE_COMPLETION_READY
+func parseCreateCompletion(value fastpathv2.CreateCompletion) (createCompletion, error) {
+	switch value {
+	case fastpathv2.CreateCompletion_CREATE_COMPLETION_UNSPECIFIED, fastpathv2.CreateCompletion_CREATE_COMPLETION_READY:
+		return createCompletion{api: fastpathv2.CreateCompletion_CREATE_COMPLETION_READY, fastlet: fastletapi.CreateCompletionReady}, nil
+	case fastpathv2.CreateCompletion_CREATE_COMPLETION_RUNTIME_READY:
+		return createCompletion{api: value, fastlet: fastletapi.CreateCompletionRuntimeReady}, nil
+	default:
+		return createCompletion{}, status.Errorf(codes.InvalidArgument, "completion %d is invalid", value)
 	}
-	return value
 }
 
 func toFailurePolicy(policy fastpathv2.FailurePolicy) apiv1alpha2.FailurePolicy {

@@ -230,14 +230,13 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	preparedFastlets := r.preparedFastletCount(&pool, infraPlan.Revision)
 	warmImageStatuses := r.aggregateWarmImageStatus(&pool, childPods.Items)
 	idleFastlets, busyFastlets := r.fastletUtilizationCounts(&pool, childPods.Items)
-	if pool.Status.CurrentPods != currentCount || pool.Status.TotalFastlets != currentCount ||
+	if pool.Status.CurrentPods != currentCount ||
 		pool.Status.ReadyPods != readyPods || pool.Status.IdleFastlets != idleFastlets ||
 		pool.Status.BusyFastlets != busyFastlets ||
 		pool.Status.RuntimeRevision != runtimePlan.Revision || pool.Status.InfraRevision != infraPlan.Revision ||
 		pool.Status.FastletRevision != desiredPodHash || pool.Status.PreparedFastlets != preparedFastlets ||
 		!reflect.DeepEqual(pool.Status.WarmImages, warmImageStatuses) {
 		pool.Status.CurrentPods = currentCount
-		pool.Status.TotalFastlets = currentCount
 		pool.Status.ReadyPods = readyPods
 		pool.Status.IdleFastlets = idleFastlets
 		pool.Status.BusyFastlets = busyFastlets

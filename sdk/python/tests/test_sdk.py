@@ -47,7 +47,7 @@ class FakeFastPathStub:
     def DeleteSandbox(self, request, metadata=()):
         self.metadata.append(tuple(metadata))
         self.delete_requests.append(request)
-        return fastpath_pb2.DeleteResponse(success=True)
+        return fastpath_pb2.DeleteResponse()
 
     def UpdateSandbox(self, request, metadata=()):
         self.metadata.append(tuple(metadata))
@@ -70,10 +70,11 @@ class FakeFastPathStub:
             path = f"/v2/sandboxes/uid-a/ports/{port}"
         return fastpath_pb2.ResolveEndpointResponse(
             sandbox_uid="uid-a",
-            target=request.target,
-            component_name=component_name,
-            protocol="HTTP",
-            resolved_port=port,
+            endpoint=fastpath_pb2.ResolvedEndpoint(
+                component_name=component_name,
+                protocol="HTTP",
+                port=port,
+            ),
             proxy_endpoint=f"http://sandbox-proxy.svc{path}",
             required_headers={
                 "X-Fast-Sandbox-Route-Credential": "route-token"

@@ -17,13 +17,13 @@ var _ runtimecontract.Driver = (*FakeRuntime)(nil)
 type FakeRuntime struct {
 	mu sync.Mutex
 
-	EnsureFunc func(context.Context, *fastletapi.SandboxSpec) (*runtimecontract.Metadata, error)
+	EnsureFunc func(context.Context, *fastletapi.RuntimeSandboxSpec) (*runtimecontract.Metadata, error)
 	DeleteFunc func(context.Context, string) error
 	StatusFunc func(context.Context, string) (string, error)
 	ImagesFunc func(context.Context) ([]string, error)
 
 	Namespace   string
-	EnsureCalls []fastletapi.SandboxSpec
+	EnsureCalls []fastletapi.RuntimeSandboxSpec
 	DeleteCalls []string
 }
 
@@ -39,14 +39,14 @@ func (f *FakeRuntime) SetNamespace(namespace string) {
 	f.Namespace = namespace
 }
 
-func (f *FakeRuntime) EnsureSandbox(ctx context.Context, spec *fastletapi.SandboxSpec) (*runtimecontract.Metadata, error) {
+func (f *FakeRuntime) EnsureSandbox(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec) (*runtimecontract.Metadata, error) {
 	f.mu.Lock()
 	f.EnsureCalls = append(f.EnsureCalls, *spec)
 	f.mu.Unlock()
 	if f.EnsureFunc != nil {
 		return f.EnsureFunc(ctx, spec)
 	}
-	return &runtimecontract.Metadata{SandboxSpec: *spec, ContainerID: spec.SandboxID, Phase: "running"}, nil
+	return &runtimecontract.Metadata{RuntimeSandboxSpec: *spec, ContainerID: spec.SandboxID, Phase: "running"}, nil
 }
 
 func (f *FakeRuntime) DeleteSandbox(ctx context.Context, sandboxID string) error {
@@ -80,7 +80,7 @@ func (f *FakeRuntime) InspectSandbox(ctx context.Context, sandboxID string) (*ru
 	if err != nil {
 		return nil, err
 	}
-	return &runtimecontract.Metadata{SandboxSpec: fastletapi.SandboxSpec{SandboxID: sandboxID}, Phase: status}, nil
+	return &runtimecontract.Metadata{RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{SandboxID: sandboxID}, Phase: status}, nil
 }
 
 func (f *FakeRuntime) ListManagedSandboxes(context.Context) ([]*runtimecontract.Metadata, error) {

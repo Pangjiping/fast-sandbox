@@ -2,8 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -300,7 +298,7 @@ func (o *Orchestrator) CreateRuntimeOnCandidateWithCompletion(ctx context.Contex
 		return nil, ErrAssignedFastletUnavailable
 	}
 	identity := fastletapi.SandboxIdentity{
-		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], SandboxUID: string(sandbox.UID),
+		SandboxUID: string(sandbox.UID), Namespace: sandbox.Namespace, Name: sandbox.Name,
 		InstanceGeneration: envelope.InstanceGeneration, RuntimeInstanceID: envelope.RuntimeInstanceID,
 		AssignmentAttempt: envelope.Attempt, RouteGeneration: envelope.RouteGeneration, FastletPodUID: envelope.FastletPodUID,
 	}
@@ -313,17 +311,19 @@ func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1
 		return nil, err
 	}
 	request := &fastletapi.CreateSandboxRequest{
-		Identity: identity, SpecGeneration: sandbox.Generation, ActionBindings: bindings, Completion: completion,
+		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], Identity: identity,
+		SpecGeneration: sandbox.Generation, ActionBindings: bindings, Completion: completion,
 		Sandbox: fastletapi.SandboxSpec{
-			SandboxID: string(sandbox.UID), RequestID: sandbox.Annotations[assignment.AnnotationRequestID], ClaimUID: string(sandbox.UID),
-			ClaimNamespace: sandbox.Namespace, ClaimName: sandbox.Name, Image: sandbox.Spec.Image,
+			Image:              sandbox.Spec.Image,
 			RuntimeProfileHash: envelope.RuntimeProfileHash, ResourceProfileHash: envelope.ResourceProfileHash,
 			InfraRevision: envelope.InfraRevision,
 			Command:       sandbox.Spec.Command, Args: sandbox.Spec.Args, Env: envMap(sandbox.Spec.Envs), WorkingDir: sandbox.Spec.WorkingDir,
 		},
 	}
 	response, createErr := o.FastletClient.CreateSandbox(ctx, fastlet.PodIP, request)
-	if createErr == nil && response != nil && response.Accepted && response.Sandbox != nil && response.Sandbox.Runtime.State == fastletapi.RuntimeStateReady {
+	if createErr == nil && response != nil &&
+		(response.Disposition == fastletapi.CreateDispositionCreated || response.Disposition == fastletapi.CreateDispositionExisting) &&
+		response.Sandbox != nil && response.Sandbox.Runtime.State == fastletapi.RuntimeStateReady {
 		return response, nil
 	}
 	if createErr == nil {
@@ -632,7 +632,7 @@ func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha2.Sandbox) (placement.F
 		return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, ErrAssignedFastletUnavailable
 	}
 	identity := fastletapi.SandboxIdentity{
-		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], SandboxUID: string(sandbox.UID),
+		SandboxUID: string(sandbox.UID), Namespace: sandbox.Namespace, Name: sandbox.Name,
 		InstanceGeneration: envelope.InstanceGeneration, RuntimeInstanceID: envelope.RuntimeInstanceID,
 		AssignmentAttempt: envelope.Attempt, RouteGeneration: envelope.RouteGeneration, FastletPodUID: envelope.FastletPodUID,
 	}
@@ -649,7 +649,7 @@ func envMap(values []corev1.EnvVar) map[string]string {
 
 func IsCandidateRejection(err error) bool {
 	var failure *fastletapi.FastletError
-	if !errors.As(err, &failure) || failure.Outcome != fastletapi.OutcomeRejectedBeforeSideEffects {
+	if !errors.As(err, &failure) || fastletapi.CreateDispositionFromError(err) != fastletapi.CreateDispositionRejectedBeforeSideEffects {
 		return false
 	}
 	switch failure.Code {
@@ -695,8 +695,7 @@ func compileActionBindings(bindings []apiv1alpha2.ActionBinding) ([]fastletapi.A
 		if len(binding.Input) > apiv1alpha2.MaxActionBindingInputBytes || total > apiv1alpha2.MaxSandboxActionBindingInputBytes {
 			return nil, fmt.Errorf("Action Binding inputs exceed configured size limits")
 		}
-		digest := sha256.Sum256([]byte(binding.Input))
-		result = append(result, fastletapi.ActionBindingInput{Handler: binding.Handler, Input: binding.Input, InputDigest: "sha256:" + hex.EncodeToString(digest[:])})
+		result = append(result, fastletapi.ActionBindingInput{Handler: binding.Handler, Input: binding.Input})
 	}
 	return result, nil
 }

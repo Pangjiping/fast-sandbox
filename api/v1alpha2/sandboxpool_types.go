@@ -225,11 +225,10 @@ type PoolCapacity struct {
 type SandboxPoolStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	CurrentPods   int32 `json:"currentPods,omitempty"`
-	ReadyPods     int32 `json:"readyPods,omitempty"`
-	TotalFastlets int32 `json:"totalFastlets,omitempty"`
-	IdleFastlets  int32 `json:"idleFastlets,omitempty"`
-	BusyFastlets  int32 `json:"busyFastlets,omitempty"`
+	CurrentPods  int32 `json:"currentPods,omitempty"`
+	ReadyPods    int32 `json:"readyPods,omitempty"`
+	IdleFastlets int32 `json:"idleFastlets,omitempty"`
+	BusyFastlets int32 `json:"busyFastlets,omitempty"`
 
 	RuntimeRevision  string `json:"runtimeRevision,omitempty"`
 	InfraRevision    string `json:"infraRevision,omitempty"`

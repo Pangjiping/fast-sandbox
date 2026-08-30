@@ -78,10 +78,13 @@ func TestProxyForwardsThroughLocalTunnelWithSignedTargetPort(t *testing.T) {
 	verifier, err := routeauth.NewVerifier(publicKey, time.Now)
 	require.NoError(t, err)
 	route := Route{
-		Namespace: "default", SandboxUID: "uid-boxlite", FastletPodUID: "pod-a", AssignmentAttempt: 1, RouteGeneration: 1,
-		Access: dataplane.AccessDescriptor{
-			Kind: dataplane.AccessKindLocalForward, Address: listener.Addr().String(), Credential: credential,
-		}, State: RouteReady,
+		RouteKey: RouteKey{SandboxUID: "uid-boxlite", RouteGeneration: 1},
+		RouteSpec: RouteSpec{
+			Namespace: "default", FastletPodUID: "pod-a", AssignmentAttempt: 1,
+			Access: dataplane.AccessDescriptor{
+				Kind: dataplane.AccessKindLocalForward, Address: listener.Addr().String(), Credential: credential,
+			}, State: RouteReady,
+		},
 	}
 	store := NewStore()
 	_, err = store.Apply(route)

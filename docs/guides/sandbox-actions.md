@@ -1,22 +1,26 @@
-# Sandbox Actions 使用手册
+# Sandbox Actions guide
 
-Sandbox Actions 把每个 Sandbox 的有序业务配置交给 Fastlet Pod 内的
-Action Handler，并在两个本地生命周期检查点通知 Handler。Handler 不是用户
-Sandbox 内部插件，而是 Pool 管理员部署的 Pod-local 扩展进程。
+Sandbox Actions deliver ordered, per-Sandbox configuration to Action Handlers
+running in the Fastlet Pod and notify them at two local lifecycle checkpoints.
+A Handler is a Pool-managed Pod-local extension, not a plugin running inside
+the user's Sandbox.
 
-## 1. Quick Start
+For the protocol invariants, see the [Sandbox Actions concept](../concepts/sandbox-actions.md).
 
-在开发环境启用 Actions 示例：
+## Quick start
+
+Enable the demo Handler in the development environment:
 
 ```bash
-make quickstart ACTIONS=demo
+make quickstart RUNTIME=container INFRA=minimal ACTIONS=demo
 ```
 
-该命令会额外构建独立的 `sandbox-action-fixture` 测试镜像，创建带 `egress`
-Handler 的示例 Pool，并打印创建、更新、查看和删除 Sandbox 的命令。Fixture
-不在 Fastlet 生产镜像中。
+This builds the standalone `sandbox-action-fixture` E2E image, creates a Pool
+with an `egress` Handler, and prints commands for creating, updating,
+inspecting, and deleting a Sandbox. The fixture is not included in the
+production Fastlet image.
 
-## 2. 在 SandboxPool 声明 Handler
+## Declare a Handler in SandboxPool
 
 ```yaml
 apiVersion: sandbox.fast.io/v1alpha2
@@ -51,19 +55,22 @@ spec:
             path: /_fastlet/v1/actions/status
 ```
 
-Handler 名称和端口在 Pool 内唯一。`targetHTTPPort` 总是通过 Pod loopback
-访问。空 `hooks` 表示配置型 Handler，只接收 Binding 同步和终态清理。
+Handler names and ports must be unique within a Pool. Fastlet always connects
+to `targetHTTPPort` through Pod loopback. An empty `hooks` list creates a
+config-only Handler that receives Binding synchronization and terminal cleanup.
 
-当前支持：
+The supported Hooks are:
 
-- `sandbox.runtime-ready`：runtime 创建完成，私网身份可用；
-- `sandbox.data-plane-ready`：Infra Components 就绪且 proxy route 已发布。
+- `sandbox.runtime-ready`: runtime creation completed and the private network
+  identity is available;
+- `sandbox.data-plane-ready`: Infra Components are healthy and the proxy route
+  is published.
 
-未知 Hook 会被拒绝，不会静默忽略。
+Unknown Hooks are rejected rather than ignored.
 
-## 3. 实现 Handler HTTP 协议
+## Implement the Handler HTTP protocol
 
-### 3.1 状态端点
+Expose the status endpoint:
 
 ```text
 GET /_fastlet/v1/actions/status
@@ -77,18 +84,18 @@ GET /_fastlet/v1/actions/status
 }
 ```
 
-`instanceId` 标识 Handler 进程 incarnation，每次进程重启必须变化。Fastlet
-发现变化后会对当前 Sandbox 重放最新 `SetBinding`，再按顺序补发已经到达且
-该 Handler 订阅的 Hook。
+`instanceId` identifies one Handler process incarnation and must change after
+a process restart. Fastlet then replays the latest `SetBinding`, followed by
+the subscribed Hooks that the Sandbox has already reached.
 
-### 3.2 调用端点
+Accept calls at:
 
 ```text
 POST /_fastlet/v1/actions
 Content-Type: application/json
 ```
 
-示例 `SetBinding`：
+Example `SetBinding`:
 
 ```json
 {
@@ -120,20 +127,24 @@ Content-Type: application/json
 }
 ```
 
-协议只有三种正交操作：
+The operations are deliberately separate:
 
-- `SET_BINDING`：同步完整 input；`input` 非空指针时允许值为 `""` 或字面量
-  `"null"`，JSON `null` 表示从仍存活的 Sandbox 移除该 Binding；
-- `LIFECYCLE_HOOK`：通知已到达的检查点，不重复携带业务 input；
-- `REMOVE_BINDING`：整个 Sandbox 的终态清理，无 input。
+- `SET_BINDING` synchronizes the complete input. A present input may be `""`
+  or the literal string `"null"`; JSON `null` removes a Binding from a live
+  Sandbox.
+- `LIFECYCLE_HOOK` announces a reached checkpoint without repeating input.
+- `REMOVE_BINDING` performs terminal cleanup for the complete Sandbox and has
+  no input.
 
-只有 HTTP 200 表示成功。调用是 at-least-once；同一逻辑操作重试会复用稳定
-的 `invocationId`，Handler 必须幂等。成功的 `SetBinding` 必须表示配置已经对
-Sandbox 当前所处生命周期阶段生效，因此普通 input 更新不会重放 Hook。
+Only HTTP 200 means success. Delivery is at-least-once, and retries for the
+same logical operation reuse `invocationId`; the Handler must be idempotent.
+A successful `SetBinding` means the configuration is already effective at the
+Sandbox's current lifecycle stage, so an ordinary input update does not replay
+Hooks.
 
-## 4. 创建 Sandbox
+## Create a Sandbox with Bindings
 
-CRD 使用有序原子数组：
+The CRD uses an ordered atomic array:
 
 ```yaml
 apiVersion: sandbox.fast.io/v1alpha2
@@ -149,7 +160,7 @@ spec:
     input: '{"defaultAction":"deny"}'
 ```
 
-`input` 是不透明字符串，不要求 JSON。以下值语义不同且都会逐字节保留：
+`input` is an opaque string. These are distinct, byte-preserved values:
 
 ```yaml
 input: ""
@@ -159,7 +170,7 @@ input: |-
   allow: [example.com]
 ```
 
-Fastctl 等价形式：
+The equivalent Fastctl command is:
 
 ```bash
 fastctl run agent-a \
@@ -168,16 +179,17 @@ fastctl run agent-a \
   --action 'egress={"defaultAction":"deny"}'
 ```
 
-FastPath `CreateCompletion` 有两个边界：
+FastPath Create has two completion boundaries:
 
-- 默认 `READY`：Runtime、DataPlane、Infra Components 和全部 Bindings 都
-  Ready 后返回；
-- `RUNTIME_READY`：runtime 创建成功后返回，其他部分可能仍在收敛。
+- omitted or `READY`: return after Runtime, DataPlane, Infra Components, and
+  all Bindings are Ready;
+- `RUNTIME_READY`: return after runtime creation while later stages continue
+  converging.
 
-等待发生在 Fastlet 本地，不依赖 CRD Status watch，也没有
-`WaitSandboxReady` RPC。
+Waiting happens inside Fastlet and does not require a CRD Status watch. There
+is no `WaitSandboxReady` RPC.
 
-## 5. 观察状态
+## Observe readiness
 
 ```yaml
 status:
@@ -197,17 +209,18 @@ status:
     observedGeneration: 1
 ```
 
-Binding Ready 表示当前 input 已 `SetBinding`，且该 Handler 订阅并已到达的
-Hook 全部成功。失败不会回滚已经创建的 runtime、Infra 或 route，但整体
-Ready 保持 False，Fastlet 在本地持续重试。
+A Binding is Ready when its current input has completed `SetBinding` and all
+subscribed, reached Hooks have succeeded. Handler failure does not roll back an
+already-created runtime, Infra Component, or route, but aggregate Ready remains
+false while Fastlet retries locally.
 
-FastPath `GetSandbox` 会调用 assigned Fastlet，返回实时 `SandboxInfo`。
-`UpdateSandbox` 返回 `committed_generation`；调用方可轮询 Get，直到
-`applied_generation >= committed_generation` 且相关 Binding Ready。
+FastPath `GetSandbox` asks the assigned Fastlet for the live `SandboxInfo`.
+After `UpdateSandbox`, poll Get until `applied_generation` reaches the returned
+`committed_generation` and the relevant Bindings are Ready.
 
-## 6. 更新和移除 Binding
+## Update or remove Bindings
 
-更新替换完整有序数组：
+An update replaces the complete ordered array:
 
 ```bash
 fastctl update agent-a \
@@ -215,7 +228,7 @@ fastctl update agent-a \
   --action 'egress={"defaultAction":"allow"}'
 ```
 
-或直接 patch CRD：
+Or patch the CRD directly:
 
 ```bash
 kubectl patch sandbox agent-a --type=merge -p='{
@@ -225,42 +238,50 @@ kubectl patch sandbox agent-a --type=merge -p='{
 }'
 ```
 
-新/保留 Binding 按新数组顺序执行 `SetBinding`。从列表移除的 Binding 按旧
-数组逆序执行 `SetBinding(input=null)`，这是 Ready barrier，失败会重试。
+New and retained Bindings use the new declaration order. Removed live Bindings
+are cleared in reverse old-list order with `SetBinding(input=null)`, which is a
+Ready barrier and is retried until successful.
 
-清空全部 Bindings：
+Clear all Bindings with:
 
 ```bash
 fastctl update agent-a --clear-actions
 ```
 
-这不是终态 `RemoveBinding`：Sandbox 仍然存活，之后可以重新绑定。
+This is not terminal `RemoveBinding`; the Sandbox remains live and may bind the
+Handler again later.
 
-## 7. 顺序、重启和删除
+## Restart and deletion behavior
 
-- 同一 Sandbox + Handler 的 Set/Hook/Remove 串行；不同 Sandbox 可并发；
-- Set 和 Hook 按 Binding 声明顺序；解除和终态删除按逆序；
-- Hook 到达早于当前 generation 的 Set 成功时，先 Pending，Set 成功后补发；
-- Handler 重启后由 Fastlet 重放 Set 和已到达 Hook；
-- Fastlet 重启后由 Controller 重新下发 desired Bindings，Hook 仍只由 Fastlet
-  根据本地 checkpoint 发送。
+- Set and Hook delivery follows Binding declaration order; live removal and
+  terminal cleanup use reverse order.
+- One Sandbox/Handler operation stream is serialized; different Sandboxes may
+  progress concurrently.
+- A Hook reached before the current generation's Set succeeds remains Pending
+  and is delivered afterward.
+- Handler restart replay is owned by Fastlet. Fastlet restart rehydration gets
+  desired Bindings from the Controller, but Hooks are still dispatched only by
+  Fastlet from local checkpoints.
 
-删除时，Fastlet 先原子标记 Sandbox 为 Terminating，禁止新的 Set/Hook，再
-对全部 Handler 逆序执行 `RemoveBinding`。所有 Handler 共享固定 5 秒总
-deadline；错误只写诊断，不阻塞 route、runtime 和 network teardown。
+On Sandbox deletion, Fastlet first marks it Terminating, blocks new Set/Hook
+work, and sends reverse-order `RemoveBinding`. All Handlers share one fixed
+five-second deadline. Handler failures are diagnostic only and do not block
+route, runtime, or network teardown.
 
-## 8. ResolveEndpoint
+## ResolveEndpoint
 
-`ResolveEndpoint` 不承担等待语义。它读取 assigned Fastlet 的实时状态，确认
-整体 Ready、目标 component route Ready，再签发带 `routeGeneration` fence 的
-短期凭证。未 Ready 返回 `FailedPrecondition`，调用方自行退避重试。
+`ResolveEndpoint` does not wait. It reads live state from the assigned Fastlet,
+requires aggregate Ready and a Ready target route, then signs a short-lived
+credential fenced by `routeGeneration`. `FailedPrecondition` means the caller
+should retry with backoff.
 
-缓存已同步时，该调用不访问 Kubernetes apiserver；如果调用方携带的
-`expected_generation` 高于本地 cache，则回退一次直接 GET。
+A synchronized cache avoids Kubernetes API-server IO. If the requested
+`expected_generation` is ahead of the local cache, the service performs one
+direct GET.
 
-## 9. 测试
+## Test
 
-单元测试：
+Run the focused unit tests:
 
 ```bash
 go test ./internal/fastlet/action \
@@ -270,11 +291,12 @@ go test ./internal/fastlet/action \
   ./internal/controlplane/fastpath
 ```
 
-Actions E2E：
+Run the Actions E2E suite:
 
 ```bash
 make e2e SUITE=sandboxactions E2E_TEST_TIMEOUT=15m
 ```
 
-E2E 覆盖 opaque input、空字符串/`"null"`、声明顺序、两个 Hook、Ready
-barrier、Binding 更新和解除、Handler/Fastlet 重启重放，以及逆序终态清理。
+The suite covers opaque and empty inputs, the literal `"null"`, declaration
+order, both Hooks, Ready barriers, update/removal, Handler and Fastlet restart
+replay, and reverse terminal cleanup.

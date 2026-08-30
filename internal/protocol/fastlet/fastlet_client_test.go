@@ -24,7 +24,7 @@ func testFastletClient(t *testing.T, handler http.Handler) (*FastletClient, stri
 
 func TestFastletClientAdmissionEndpoints(t *testing.T) {
 	paths := make(chan string, 8)
-	identity := SandboxIdentity{RequestID: "request-a", SandboxUID: "sandbox-a", RuntimeInstanceID: "runtime-a", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1}
+	identity := SandboxIdentity{SandboxUID: "sandbox-a", Namespace: "default", Name: "sandbox-a", RuntimeInstanceID: "runtime-a", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths <- r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
@@ -32,15 +32,15 @@ func TestFastletClientAdmissionEndpoints(t *testing.T) {
 		case "/api/v2/fastlet/create":
 			var request CreateSandboxRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-			require.Equal(t, "request-a", request.Identity.RequestID)
+			require.Equal(t, "request-a", request.RequestID)
 			require.NotEmpty(t, r.Header.Get("traceparent"))
-			require.NoError(t, json.NewEncoder(w).Encode(CreateSandboxResponse{Accepted: true}))
+			require.NoError(t, json.NewEncoder(w).Encode(CreateSandboxResponse{Disposition: CreateDispositionCreated}))
 		case "/api/v2/fastlet/inspect":
 			require.NoError(t, json.NewEncoder(w).Encode(InspectSandboxResponse{Sandbox: &SandboxStatus{
 				Runtime: RuntimeObservation{State: RuntimeStateReady}, DataPlane: DataPlaneObservation{State: DataPlaneStateReady},
 			}}))
 		case "/api/v2/fastlet/delete":
-			require.NoError(t, json.NewEncoder(w).Encode(DeleteSandboxResponse{Accepted: true}))
+			require.NoError(t, json.NewEncoder(w).Encode(DeleteSandboxResponse{}))
 		case "/api/v2/fastlet/diagnostics/sandbox":
 			var request SandboxDiagnosticsRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
@@ -56,7 +56,7 @@ func TestFastletClientAdmissionEndpoints(t *testing.T) {
 	traceHeaders := make(http.Header)
 	traceHeaders.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	ctx := observability.ExtractHTTP(context.Background(), traceHeaders)
-	_, err := client.CreateSandbox(ctx, endpoint, &CreateSandboxRequest{Identity: identity})
+	_, err := client.CreateSandbox(ctx, endpoint, &CreateSandboxRequest{RequestID: "request-a", Identity: identity})
 	require.NoError(t, err)
 	inspected, err := client.InspectSandbox(ctx, endpoint, &InspectSandboxRequest{Identity: identity})
 	require.NoError(t, err)
@@ -107,7 +107,7 @@ func TestFastletClientPreservesStructuredErrorsAndTimeout(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		require.NoError(t, json.NewEncoder(w).Encode(CreateSandboxResponse{Error: &FastletError{
+		require.NoError(t, json.NewEncoder(w).Encode(CreateSandboxResponse{Disposition: CreateDispositionRejectedBeforeSideEffects, Error: &FastletError{
 			Code: ErrorCapacityRejected, Message: "full", Retryable: true,
 		}}))
 	})
@@ -123,4 +123,5 @@ func TestFastletClientPreservesStructuredErrorsAndTimeout(t *testing.T) {
 	require.ErrorAs(t, err, &failure)
 	require.Equal(t, ErrorCapacityRejected, failure.Code)
 	require.True(t, failure.Retryable)
+	require.Equal(t, CreateDispositionRejectedBeforeSideEffects, CreateDispositionFromError(err))
 }
