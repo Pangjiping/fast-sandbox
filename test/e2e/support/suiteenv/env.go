@@ -30,6 +30,7 @@ const (
 	defaultNamespacePrefix     = "fsb-e2e"
 	maxNamespaceLength         = 63
 	defaultFastletImage        = "fast-sandbox/fastlet:dev"
+	defaultActionFixtureImage  = "fast-sandbox/sandbox-action-fixture:dev"
 )
 
 var requireProfile = e2eenv.Require
@@ -218,6 +219,13 @@ func FastletImage() string {
 		}
 	}
 	return defaultFastletImage
+}
+
+func ActionFixtureImage() string {
+	if value := strings.TrimSpace(os.Getenv("FAST_SANDBOX_ACTION_FIXTURE_IMAGE")); value != "" {
+		return value
+	}
+	return defaultActionFixtureImage
 }
 
 // SmallSandboxResourceProfile keeps e2e Pool capacity arithmetic realistic

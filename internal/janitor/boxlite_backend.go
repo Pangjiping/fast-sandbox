@@ -183,28 +183,29 @@ func readBoxLiteRecord(path string) (boxlitestate.SandboxRecord, error) {
 	if err := json.NewDecoder(file).Decode(&record); err != nil {
 		return boxlitestate.SandboxRecord{}, err
 	}
-	if record.Version != boxlitestate.Version || record.Request.Sandbox.SandboxID == "" ||
-		record.Request.Sandbox.FastletPodUID == "" || record.CreatedAt <= 0 {
+	identity := record.Request.Input.Sandbox.Identity
+	if record.Version != boxlitestate.Version || identity.SandboxUID == "" ||
+		identity.FastletPodUID == "" || record.CreatedAt <= 0 {
 		return boxlitestate.SandboxRecord{}, errors.New("invalid BoxLite Sandbox record")
 	}
 	return record, nil
 }
 
 func boxLiteResource(homeSegment, recordName string, owner boxlitestate.OwnerRecord, record boxlitestate.SandboxRecord) (ResourceIdentity, error) {
-	spec := record.Request.Sandbox
-	if spec.FastletPodUID != owner.FastletPodUID || recordName != boxlitestate.RecordFileName(spec.SandboxID) {
+	identity := record.Request.Input.Sandbox.Identity
+	if identity.FastletPodUID != owner.FastletPodUID || recordName != boxlitestate.RecordFileName(identity.SandboxUID) {
 		return ResourceIdentity{}, errors.New("BoxLite Sandbox record does not match its owner or filename fence")
 	}
-	sandboxNamespace := spec.ClaimNamespace
+	sandboxNamespace := identity.Namespace
 	if sandboxNamespace == "" {
 		sandboxNamespace = record.Namespace
 	}
 	return ResourceIdentity{
 		Backend: BackendBoxLite, ResourceID: filepath.Join(homeSegment, recordName),
 		FastletPodUID: owner.FastletPodUID, FastletPodNamespace: record.Namespace,
-		SandboxUID: spec.SandboxID, SandboxName: spec.ClaimName, SandboxNamespace: sandboxNamespace,
-		InstanceGeneration: spec.InstanceGeneration, AssignmentAttempt: spec.AssignmentAttempt,
-		RouteGeneration: spec.RouteGeneration, CreatedAt: time.Unix(record.CreatedAt, 0),
+		SandboxUID: identity.SandboxUID, SandboxName: identity.Name, SandboxNamespace: sandboxNamespace,
+		InstanceGeneration: identity.InstanceGeneration, AssignmentAttempt: identity.AssignmentAttempt,
+		RouteGeneration: identity.RouteGeneration, CreatedAt: time.Unix(record.CreatedAt, 0),
 	}, nil
 }
 

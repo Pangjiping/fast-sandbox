@@ -8,7 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
 	"fast-sandbox/internal/observability"
@@ -46,11 +45,11 @@ func (s *FastletServer) Handler() http.Handler {
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/api/v2/fastlet/create", s.handleCreate)
 	mux.HandleFunc("/api/v2/fastlet/inspect", s.handleInspect)
-	mux.HandleFunc("/api/v2/fastlet/delete", s.handleDeleteV2)
+	mux.HandleFunc("/api/v2/fastlet/delete", s.handleDelete)
+	mux.HandleFunc("/api/v2/fastlet/bindings/reconcile", s.handleReconcileBindings)
 	mux.HandleFunc("/api/v2/fastlet/heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("/api/v2/fastlet/runtime-diagnostics", s.handleRuntimeDiagnostics)
 	mux.HandleFunc("/api/v2/fastlet/diagnostics/sandbox", s.handleSandboxDiagnostics)
-	mux.HandleFunc("/api/v2/fastlet/wait-data-plane", s.handleWaitSandboxReady)
 	mux.HandleFunc("/api/v2/fastlet/draining", s.handleSetDraining)
 
 	klog.InfoS("Starting fastlet HTTP server", "addr", s.addr)
@@ -84,7 +83,7 @@ func (s *FastletServer) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
 	r = r.WithContext(observability.WithIdentity(r.Context(), observability.Identity{
-		Namespace: req.Sandbox.ClaimNamespace, SandboxName: req.Sandbox.ClaimName,
+		RequestID: req.RequestID, Namespace: req.Identity.Namespace, SandboxName: req.Identity.Name,
 	}))
 	response, err := s.sandboxManager.CreateSandbox(r.Context(), &req)
 	writeResponse(w, response, err)
@@ -96,23 +95,33 @@ func (s *FastletServer) handleInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
-	response, err := s.sandboxManager.InspectSandboxV2(&req)
+	response, err := s.sandboxManager.InspectSandbox(&req)
 	writeResponse(w, response, err)
 }
 
-func (s *FastletServer) handleDeleteV2(w http.ResponseWriter, r *http.Request) {
-	var req fastletapi.DeleteSandboxV2Request
+func (s *FastletServer) handleDelete(w http.ResponseWriter, r *http.Request) {
+	var req fastletapi.DeleteSandboxRequest
 	if !decodePost(w, r, &req) {
 		return
 	}
 	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
-	response, err := s.sandboxManager.DeleteSandboxV2(&req)
+	response, err := s.sandboxManager.DeleteSandboxContext(r.Context(), &req)
+	writeResponse(w, response, err)
+}
+
+func (s *FastletServer) handleReconcileBindings(w http.ResponseWriter, r *http.Request) {
+	var req fastletapi.ReconcileBindingsRequest
+	if !decodePost(w, r, &req) {
+		return
+	}
+	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
+	response, err := s.sandboxManager.ReconcileBindings(r.Context(), &req)
 	writeResponse(w, response, err)
 }
 
 func withFastletRequestIdentity(ctx context.Context, identity fastletapi.SandboxIdentity) context.Context {
 	return observability.WithIdentity(ctx, observability.Identity{
-		RequestID: identity.RequestID, SandboxUID: identity.SandboxUID, FastletPodUID: identity.FastletPodUID,
+		Namespace: identity.Namespace, SandboxName: identity.Name, SandboxUID: identity.SandboxUID, FastletPodUID: identity.FastletPodUID,
 		InstanceGeneration: identity.InstanceGeneration, AssignmentAttempt: identity.AssignmentAttempt, RouteGeneration: identity.RouteGeneration,
 	})
 }
@@ -170,16 +179,6 @@ func (s *FastletServer) handleSandboxDiagnostics(w http.ResponseWriter, r *http.
 	writeResponse(w, response, err)
 }
 
-func (s *FastletServer) handleWaitSandboxReady(w http.ResponseWriter, r *http.Request) {
-	var req fastletapi.WaitSandboxReadyRequest
-	if !decodePost(w, r, &req) {
-		return
-	}
-	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
-	response, err := s.sandboxManager.WaitSandboxReady(r.Context(), &req)
-	writeResponse(w, response, err)
-}
-
 func decodePost(w http.ResponseWriter, r *http.Request, target any) bool {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -233,13 +232,13 @@ func (s *FastletServer) heartbeat(r *http.Request, cursor fastletapi.CacheCursor
 	status := fastletapi.FastletStatus{
 		FastletID:           os.Getenv("POD_NAME"), // Use Pod Name as Fastlet ID
 		NodeName:            nodeName,
-		Capacity:            s.sandboxManager.GetCapacity(),
 		SandboxStatuses:     sbStatuses,
 		Admission:           admission,
 		RuntimeReady:        s.sandboxManager.RuntimeReady(),
 		Recovering:          recovering,
 		Draining:            draining,
 		FastletPodUID:       s.sandboxManager.FastletPodUID(),
+		RuntimeProfileHash:  s.sandboxManager.RuntimeProfileHash(),
 		ResourceProfileHash: s.sandboxManager.ResourceProfileHash(),
 		InfraRevision:       infraRevision,
 		InfraReady:          infraReady, PreparedArtifacts: preparedArtifacts,
@@ -248,7 +247,7 @@ func (s *FastletServer) heartbeat(r *http.Request, cursor fastletapi.CacheCursor
 	}
 	return fastletapi.HeartbeatResponse{
 		FastletStatus: status,
-		Sequence:      s.sandboxManager.NextHeartbeatSequence(), ObservedAt: time.Now().UTC(),
-		Cache: cacheSnapshot, Diagnostics: s.sandboxManager.RuntimeDiagnostics(r.Context()),
+		Sequence:      s.sandboxManager.NextHeartbeatSequence(),
+		Cache:         cacheSnapshot,
 	}
 }

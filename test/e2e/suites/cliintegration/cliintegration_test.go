@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	fastpathv2 "fast-sandbox/api/proto/v2"
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	e2eenv "fast-sandbox/test/e2e/env"
 	"fast-sandbox/test/e2e/support/fixtures"
@@ -235,7 +236,7 @@ func TestUpdateReset(t *testing.T) {
 			if err != nil {
 				t.Fatalf("fastctl get failed: %v", err)
 			}
-			if info.RuntimeState == "" {
+			if info.GetSandbox().GetRuntime().GetState() == fastpathv2.RuntimeState_RUNTIME_STATE_UNSPECIFIED {
 				t.Fatalf("fastctl get output missing runtime state: %+v", info)
 			}
 			t.Log("✓ fastctl get command works")
@@ -243,7 +244,7 @@ func TestUpdateReset(t *testing.T) {
 			// Test 2: fastctl update --metadata
 			t.Log("Testing fastctl update --metadata...")
 			output, err := ctl.UpdateMetadata(ctx, "sb-update-test", "test=e2e", "env=cli")
-			if err != nil || !strings.Contains(string(output), "updated successfully") {
+			if err != nil || !strings.Contains(string(output), "update committed") {
 				t.Fatalf("fastctl update metadata failed: %v\noutput: %s", err, output)
 			}
 			t.Log("✓ fastctl update --metadata works")

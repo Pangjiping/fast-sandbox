@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +17,6 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
 	"fast-sandbox/internal/fastlet/podcgroup"
 	"fast-sandbox/internal/nodecleanup"
@@ -121,8 +118,6 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionFalse,
 			Reason: apiv1alpha2.ReasonRegistryInvalid, Message: boundedStatusMessage(err.Error()),
 		})
-		pool.Status.Registry.LastError = boundedStatusMessage(err.Error())
-		_ = r.Status().Update(ctx, &pool)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
@@ -152,6 +147,19 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.durableReader().List(ctx, &childPods, client.InNamespace(req.Namespace), client.MatchingLabels(poolLabels(pool.Name))); err != nil {
 		return ctrl.Result{}, err
 	}
+	appliedRegistry, totalRegistry := r.registryRolloutCounts(&pool, compiledRegistry, childPods.Items)
+	registryCondition := metav1.Condition{
+		Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionTrue,
+		Reason: apiv1alpha2.ReasonRegistryAvailable, Message: "Registry configuration is applied to every current Fastlet",
+	}
+	if appliedRegistry != totalRegistry {
+		registryCondition.Status = metav1.ConditionFalse
+		registryCondition.Reason = "RegistryPropagating"
+		registryCondition.Message = fmt.Sprintf("Registry configuration is applied to %d/%d current Fastlets", appliedRegistry, totalRegistry)
+	}
+	if err := r.updatePoolCondition(ctx, &pool, registryCondition); err != nil {
+		return ctrl.Result{}, err
+	}
 	runtimeCondition, readyPods := r.runtimeCapabilityCondition(&pool, childPods.Items)
 	if err := r.updatePoolCondition(ctx, &pool, runtimeCondition); err != nil {
 		return ctrl.Result{}, err
@@ -168,8 +176,8 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	for _, sb := range allSandboxes.Items {
 		if sb.Spec.PoolRef == pool.Name && sb.DeletionTimestamp == nil {
-			if sb.Status.Assignment != nil {
-				identity := sb.Status.Assignment.FastletName + "/" + sb.Status.Assignment.FastletPodUID
+			if sb.Status.Placement.FastletName != "" {
+				identity := sb.Status.Placement.FastletName + "/" + string(sb.Status.Placement.FastletPodUID)
 				if _, exists := childIdentities[identity]; exists {
 					activeCount++
 				}
@@ -220,27 +228,23 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: drainRequeue}, nil
 	}
 	preparedFastlets := r.preparedFastletCount(&pool, infraPlan.Revision)
-	componentSummaries := infraComponentSummaries(infraPlan)
 	warmImageStatuses := r.aggregateWarmImageStatus(&pool, childPods.Items)
-	registryStatus := r.aggregateRegistryStatus(&pool, compiledRegistry, childPods.Items)
 	idleFastlets, busyFastlets := r.fastletUtilizationCounts(&pool, childPods.Items)
-	if pool.Status.CurrentPods != currentCount || pool.Status.TotalFastlets != currentCount ||
+	if pool.Status.CurrentPods != currentCount ||
 		pool.Status.ReadyPods != readyPods || pool.Status.IdleFastlets != idleFastlets ||
 		pool.Status.BusyFastlets != busyFastlets ||
 		pool.Status.RuntimeRevision != runtimePlan.Revision || pool.Status.InfraRevision != infraPlan.Revision ||
-		pool.Status.PreparedFastlets != preparedFastlets || !reflect.DeepEqual(pool.Status.InfraComponents, componentSummaries) ||
-		!reflect.DeepEqual(pool.Status.WarmImages, warmImageStatuses) || !reflect.DeepEqual(pool.Status.Registry, registryStatus) {
+		pool.Status.FastletRevision != desiredPodHash || pool.Status.PreparedFastlets != preparedFastlets ||
+		!reflect.DeepEqual(pool.Status.WarmImages, warmImageStatuses) {
 		pool.Status.CurrentPods = currentCount
-		pool.Status.TotalFastlets = currentCount
 		pool.Status.ReadyPods = readyPods
 		pool.Status.IdleFastlets = idleFastlets
 		pool.Status.BusyFastlets = busyFastlets
 		pool.Status.RuntimeRevision = runtimePlan.Revision
 		pool.Status.InfraRevision = infraPlan.Revision
+		pool.Status.FastletRevision = desiredPodHash
 		pool.Status.PreparedFastlets = preparedFastlets
-		pool.Status.InfraComponents = componentSummaries
 		pool.Status.WarmImages = warmImageStatuses
-		pool.Status.Registry = registryStatus
 		if err := r.Status().Update(ctx, &pool); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -542,22 +546,21 @@ func activeAssignmentsByPod(sandboxes []apiv1alpha2.Sandbox, poolName string) ma
 	result := make(map[string]int)
 	for index := range sandboxes {
 		sandbox := &sandboxes[index]
-		if sandbox.Spec.PoolRef != poolName || sandbox.Status.Assignment == nil {
+		if sandbox.Spec.PoolRef != poolName || sandbox.Status.Placement.FastletName == "" {
 			continue
 		}
-		assignment := sandbox.Status.Assignment
-		result[assignment.FastletName+"/"+assignment.FastletPodUID]++
+		placement := sandbox.Status.Placement
+		result[placement.FastletName+"/"+string(placement.FastletPodUID)]++
 	}
 	return result
 }
 
 func sandboxNeedsPlacement(sandbox *apiv1alpha2.Sandbox) bool {
-	if sandbox == nil || sandbox.Status.Assignment != nil || sandbox.DeletionTimestamp != nil {
+	if sandbox == nil || sandbox.Status.Placement.FastletName != "" || sandbox.DeletionTimestamp != nil {
 		return false
 	}
-	if sandbox.Status.HasCondition(orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonExpired) ||
-		sandbox.Status.HasCondition(orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost) ||
-		sandbox.Status.RuntimeState == apiv1alpha2.ObservedStateDraining {
+	if sandbox.Status.Runtime.State == apiv1alpha2.RuntimeStopping ||
+		sandbox.Status.Runtime.State == apiv1alpha2.RuntimeStopped {
 		return false
 	}
 	return true
@@ -598,6 +601,9 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, prof
 }
 
 func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.SandboxPool, runtimePlan runtimeenv.ResolvedRuntimePlan) (*corev1.Pod, error) {
+	if err := pool.Spec.ValidateActionHandlers(); err != nil {
+		return nil, err
+	}
 	profile := runtimePlan.Profile
 	sandboxResources := pool.Spec.SandboxResources
 	if err := apiv1alpha2.ValidateSandboxResourceProfile(sandboxResources); err != nil {
@@ -628,6 +634,10 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 	warmImagesJSON, err := json.Marshal(uniqueWarmImages(pool.Spec.WarmImages))
 	if err != nil {
 		return nil, fmt.Errorf("encode warmImages: %w", err)
+	}
+	actionHandlersJSON, err := json.Marshal(pool.Spec.ActionHandlers)
+	if err != nil {
+		return nil, fmt.Errorf("encode actionHandlers: %w", err)
 	}
 
 	podSpec := pool.Spec.FastletTemplate.Spec.DeepCopy()
@@ -665,6 +675,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			corev1.EnvVar{Name: "FASTLET_CONTROL_PORT", Value: ":5758"},
 			corev1.EnvVar{Name: "FASTLET_PROXY_CONTROL_SOCKET", Value: "/run/fast-sandbox/proxy/control.sock"},
 			corev1.EnvVar{Name: "FAST_SANDBOX_WARM_IMAGES", Value: string(warmImagesJSON)},
+			corev1.EnvVar{Name: "FAST_SANDBOX_ACTION_HANDLERS", Value: string(actionHandlersJSON)},
 			corev1.EnvVar{
 				Name:      "NODE_NAME",
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}},
@@ -1290,38 +1301,26 @@ func (r *SandboxPoolReconciler) persistRegistrySecret(
 	return r.Patch(ctx, &secret, client.MergeFrom(before))
 }
 
-func registryGeneration(revision string) int64 {
-	digest := strings.TrimPrefix(revision, "sha256:")
-	decoded, err := hex.DecodeString(digest)
-	if err != nil || len(decoded) < 8 {
-		sum := sha256.Sum256([]byte(revision))
-		decoded = sum[:]
-	}
-	return int64(binary.BigEndian.Uint64(decoded[:8]) & uint64(^uint64(0)>>1))
-}
-
-func (r *SandboxPoolReconciler) aggregateRegistryStatus(
+func (r *SandboxPoolReconciler) registryRolloutCounts(
 	pool *apiv1alpha2.SandboxPool,
 	compiled registryconfig.Compiled,
 	pods []corev1.Pod,
-) apiv1alpha2.RegistryApplicationStatus {
+) (int32, int32) {
 	children := childPodIdentities(pods)
-	status := apiv1alpha2.RegistryApplicationStatus{
-		TargetGeneration: registryGeneration(compiled.Revision),
-		TotalFastlets:    int32(len(children)),
-	}
+	total := int32(len(children))
 	if r.Registry == nil {
-		return status
+		return 0, total
 	}
+	var applied int32
 	for _, info := range r.Registry.GetAllFastlets() {
 		if info.Namespace != pool.Namespace || info.PoolName != pool.Name || info.RegistryRevision != compiled.Revision {
 			continue
 		}
 		if _, exists := children[info.PodName+"/"+info.PodUID]; exists {
-			status.AppliedFastlets++
+			applied++
 		}
 	}
-	return status
+	return applied, total
 }
 
 func (r *SandboxPoolReconciler) ensureInfraPlanConfigMap(
@@ -1424,17 +1423,6 @@ func (r *SandboxPoolReconciler) preparedFastletCount(pool *apiv1alpha2.SandboxPo
 	return count
 }
 
-func infraComponentSummaries(plan infracatalog.Plan) []apiv1alpha2.InfraComponentSummary {
-	result := make([]apiv1alpha2.InfraComponentSummary, 0, len(plan.Components))
-	for _, component := range plan.Components {
-		result = append(result, apiv1alpha2.InfraComponentSummary{
-			Name: component.Name, Protocol: component.Endpoint.Protocol,
-			Port: int32(component.Endpoint.Port), HealthKind: string(component.Process.Readiness.Type),
-		})
-	}
-	return result
-}
-
 var runtimeOwnedEnv = map[string]struct{}{
 	"FAST_SANDBOX_RUNTIME": {}, "FAST_SANDBOX_RUNTIME_PROFILE_HASH": {},
 	"FAST_SANDBOX_RUNTIME_PLAN_PATH": {}, "FAST_SANDBOX_SNAPSHOTTER": {}, "FAST_SANDBOX_KUBELET_ROOT": {},
@@ -1445,6 +1433,8 @@ var runtimeOwnedEnv = map[string]struct{}{
 	"FASTLET_CONTROL_PORT":         {},
 	"FASTLET_PROXY_CONTROL_SOCKET": {},
 	"FAST_SANDBOX_WARM_IMAGES":     {},
+	"FAST_SANDBOX_ACTION_HANDLERS": {},
+	"FAST_SANDBOX_ACTIONS":         {},
 	"NODE_NAME":                    {}, "POD_NAME": {}, "POD_IP": {}, "POD_UID": {}, "NAMESPACE": {},
 }
 

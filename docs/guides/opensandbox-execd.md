@@ -53,14 +53,15 @@ the artifact image as a separate container.
 Fastlet prepares the Pool artifact revision
 -> Runtime creates the Sandbox
 -> sandbox-init starts Execd and the user process concurrently
--> Create returns at RuntimeReady
+-> RuntimeReady (optional early-return boundary)
 -> Fastlet probes GET /ping locally
 -> Fastlet Proxy acknowledges the named execd route
--> ComponentReady and DataPlaneReady
+-> ComponentReady, DataPlaneReady, and aggregate Ready (default return)
 ```
 
-The FastPath wait operation observes the assigned Fastlet directly. An
-OpenSandbox adapter does not need to wait for the CRD status watch to catch up.
+The default Create observes aggregate Ready directly inside the assigned
+Fastlet call. An adapter that explicitly requests RuntimeReady polls the live
+`GetSandbox` view; it does not wait for CRD status projection.
 If Execd later exits or becomes unhealthy, Fastlet revokes its route and
 republishes it after restart and health recovery.
 
@@ -106,8 +107,9 @@ and user `Authorization` remains intact.
 
 ## fastctl
 
-The adapter defaults to component `execd` and waits for that component directly
-through FastPath:
+The adapter defaults to component `execd`. Endpoint resolution is non-blocking
+and succeeds after aggregate Ready; a caller that requested the early
+`RuntimeReady` Create boundary must poll `GetSandbox` or retry explicitly:
 
 ```bash
 bin/fastctl opensandbox exec my-sandbox -- uname -a

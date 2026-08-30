@@ -40,8 +40,11 @@ func newProxyHarness(t *testing.T, upstream *httptest.Server) *proxyHarness {
 	verifier, err := routeauth.NewVerifier(publicKey, time.Now)
 	require.NoError(t, err)
 	route := Route{
-		Namespace: "default", SandboxUID: "uid-stream", FastletPodUID: "pod-a", AssignmentAttempt: 1, RouteGeneration: 1,
-		Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: upstreamURL.Hostname()}, State: RouteReady,
+		RouteKey: RouteKey{SandboxUID: "uid-stream", RouteGeneration: 1},
+		RouteSpec: RouteSpec{
+			Namespace: "default", FastletPodUID: "pod-a", AssignmentAttempt: 1,
+			Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: upstreamURL.Hostname()}, State: RouteReady,
+		},
 	}
 	store := NewStore()
 	_, err = store.Apply(route)

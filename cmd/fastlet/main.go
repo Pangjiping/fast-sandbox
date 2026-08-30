@@ -14,6 +14,7 @@ import (
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	"fast-sandbox/internal/dataplane/fastletproxy"
+	fastletaction "fast-sandbox/internal/fastlet/action"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
@@ -70,6 +71,16 @@ func main() {
 	warmImages, err := warmImagesFromEnvironment()
 	if err != nil {
 		klog.ErrorS(err, "Failed to parse warmImages")
+		os.Exit(1)
+	}
+	actionHandlers, err := actionHandlersFromEnvironment()
+	if err != nil {
+		klog.ErrorS(err, "Failed to parse Action Handlers")
+		os.Exit(1)
+	}
+	actionManager, err := fastletaction.NewManager(actionHandlers, nil)
+	if err != nil {
+		klog.ErrorS(err, "Failed to configure Action Handlers")
 		os.Exit(1)
 	}
 
@@ -163,12 +174,14 @@ func main() {
 		RoutePublisher: fastletproxy.NewRoutePublisher(proxyControlClient),
 		InfraRevision:  infraManager.Revision(), InfraManager: infraManager,
 		RegistryProvider: registryProvider,
+		ActionManager:    actionManager,
 	})
 	if err != nil {
 		klog.ErrorS(err, "Failed to initialize Sandbox manager")
 		os.Exit(1)
 	}
 	defer sandboxManager.Close()
+	actionManager.Start(ctx)
 	go recoverUntilReady(ctx, sandboxManager, proxyControlClient)
 
 	fastletServer := server.NewFastletServer(fastletPort, sandboxManager)
@@ -360,6 +373,15 @@ func warmImagesFromEnvironment() ([]string, error) {
 		return nil, err
 	}
 	return images, nil
+}
+
+func actionHandlersFromEnvironment() ([]apiv1alpha2.ActionHandler, error) {
+	value := getEnv("FAST_SANDBOX_ACTION_HANDLERS", "[]")
+	var handlers []apiv1alpha2.ActionHandler
+	if err := json.Unmarshal([]byte(value), &handlers); err != nil {
+		return nil, err
+	}
+	return handlers, nil
 }
 
 func resourceProfileFromEnvironment() (apiv1alpha2.SandboxResourceProfile, error) {

@@ -63,7 +63,7 @@ func TestWaitForSandboxRuntimeStateReturnsUpdatedSandbox(t *testing.T) {
 			PoolRef: "pool-a",
 		},
 		Status: apiv1alpha2.SandboxStatus{
-			RuntimeState: apiv1alpha2.ObservedStatePending,
+			Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending},
 		},
 	}
 	if err := fixture.client.Create(context.Background(), sb); err != nil {
@@ -76,19 +76,19 @@ func TestWaitForSandboxRuntimeStateReturnsUpdatedSandbox(t *testing.T) {
 		if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "sb-running", Namespace: "tenant-a"}, current); err != nil {
 			return
 		}
-		current.Status.RuntimeState = apiv1alpha2.ObservedStateReady
+		current.Status.Runtime.State = apiv1alpha2.RuntimeReady
 		_ = fixture.client.Update(context.Background(), current)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	got, err := fixture.WaitForSandboxRuntimeState(ctx, types.NamespacedName{Name: "sb-running", Namespace: "tenant-a"}, apiv1alpha2.ObservedStateReady)
+	got, err := fixture.WaitForSandboxRuntimeState(ctx, types.NamespacedName{Name: "sb-running", Namespace: "tenant-a"}, apiv1alpha2.RuntimeReady)
 	if err != nil {
 		t.Fatalf("expected wait to succeed, got error: %v", err)
 	}
-	if got.Status.RuntimeState != apiv1alpha2.ObservedStateReady {
-		t.Fatalf("expected ready runtime state, got %q", got.Status.RuntimeState)
+	if got.Status.Runtime.State != apiv1alpha2.RuntimeReady {
+		t.Fatalf("expected ready runtime state, got %q", got.Status.Runtime.State)
 	}
 }
 
@@ -101,7 +101,7 @@ func TestWaitForSandboxUsesPredicate(t *testing.T) {
 			PoolRef: "pool-a",
 		},
 		Status: apiv1alpha2.SandboxStatus{
-			RuntimeState: apiv1alpha2.ObservedStatePending,
+			Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending},
 		},
 	}
 	if err := fixture.client.Create(context.Background(), sb); err != nil {
@@ -114,8 +114,8 @@ func TestWaitForSandboxUsesPredicate(t *testing.T) {
 		if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "sb-predicate", Namespace: "tenant-a"}, current); err != nil {
 			return
 		}
-		current.Status.RuntimeState = apiv1alpha2.ObservedStateReady
-		current.Status.Assignment = &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+		current.Status.Runtime.State = apiv1alpha2.RuntimeReady
+		current.Status.Placement = apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 		_ = fixture.client.Update(context.Background(), current)
 	}()
 
@@ -123,13 +123,13 @@ func TestWaitForSandboxUsesPredicate(t *testing.T) {
 	defer cancel()
 
 	got, err := fixture.WaitForSandbox(ctx, types.NamespacedName{Name: "sb-predicate", Namespace: "tenant-a"}, func(sb *apiv1alpha2.Sandbox) bool {
-		return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+		return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 	})
 	if err != nil {
 		t.Fatalf("expected predicate wait to succeed, got error: %v", err)
 	}
-	if got.Status.Assignment.FastletName != "fastlet-a" {
-		t.Fatalf("expected assigned pod to be observed, got %q", got.Status.Assignment.FastletName)
+	if got.Status.Placement.FastletName != "fastlet-a" {
+		t.Fatalf("expected assigned pod to be observed, got %q", got.Status.Placement.FastletName)
 	}
 }
 
@@ -152,7 +152,7 @@ func TestEnsureSandboxRemainsUnassignedFailsOnAssignment(t *testing.T) {
 		if err := fixture.client.Get(context.Background(), types.NamespacedName{Name: "sb-assigned", Namespace: "tenant-a"}, current); err != nil {
 			return
 		}
-		current.Status.Assignment = &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+		current.Status.Placement = apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 		_ = fixture.client.Update(context.Background(), current)
 	}()
 

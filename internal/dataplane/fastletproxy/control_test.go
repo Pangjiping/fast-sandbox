@@ -2,6 +2,7 @@ package fastletproxy
 
 import (
 	"context"
+	"encoding/json"
 	dataplane "fast-sandbox/internal/dataplane/contract"
 	"path/filepath"
 	"testing"
@@ -23,9 +24,16 @@ func TestUnixControlApplySnapshotWatchAndDelete(t *testing.T) {
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 	route := Route{
-		Namespace: "default", SandboxUID: "uid-a", FastletPodUID: "pod-a", AssignmentAttempt: 1, RouteGeneration: 1,
-		Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: "10.42.0.2"}, State: RouteReady,
+		RouteKey: RouteKey{SandboxUID: "uid-a", RouteGeneration: 1},
+		RouteSpec: RouteSpec{
+			Namespace: "default", FastletPodUID: "pod-a", AssignmentAttempt: 1,
+			Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: "10.42.0.2"}, State: RouteReady,
+		},
 	}
+	body, err := json.Marshal(route.RouteSpec)
+	require.NoError(t, err)
+	require.NotContains(t, string(body), "sandboxUid")
+	require.NotContains(t, string(body), "routeGeneration")
 	require.NoError(t, client.Apply(context.Background(), route))
 	snapshot, err := client.Snapshot(context.Background())
 	require.NoError(t, err)
@@ -45,6 +53,8 @@ func TestUnixControlApplySnapshotWatchAndDelete(t *testing.T) {
 	select {
 	case event := <-events:
 		require.Equal(t, EventDraining, event.Type)
+		require.Equal(t, route.RouteKey, event.Key)
+		require.NotNil(t, event.Spec)
 	case <-time.After(time.Second):
 		t.Fatal("route watch did not receive draining event")
 	}

@@ -5,20 +5,13 @@ package fastpath.v2;
 option go_package = "fast-sandbox/api/proto/v2;fastpathv2";
 
 service FastPathService {
-  rpc CreateSandbox(CreateRequest) returns (SandboxInfo);
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
   rpc DeleteSandbox(DeleteRequest) returns (DeleteResponse);
-  rpc UpdateSandbox(UpdateRequest) returns (UpdateResponse);
-  rpc ListSandboxes(ListRequest) returns (ListResponse);
-  rpc GetSandbox(GetRequest) returns (SandboxInfo);
+  rpc UpdateSandbox(UpdateSandboxRequest) returns (UpdateSandboxResponse);
+  rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  rpc GetSandbox(GetSandboxRequest) returns (GetSandboxResponse);
   rpc GetSandboxDiagnostics(SandboxDiagnosticsRequest) returns (SandboxDiagnosticsResponse);
-
-  // WaitSandboxReady waits on the assigned Fastlet, never on CRD status
-  // propagation.
-  rpc WaitSandboxReady(WaitSandboxReadyRequest) returns (SandboxInfo);
-
-  // ResolveEndpoint resolves one named component or raw user port.
   rpc ResolveEndpoint(ResolveEndpointRequest) returns (ResolveEndpointResponse);
-
   rpc GetPool(GetPoolRequest) returns (PoolInfo);
   rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
 }
@@ -29,10 +22,14 @@ message NamespacedName {
 }
 
 message SandboxReference {
-  oneof reference {
-    string sandbox_uid = 1;
-    NamespacedName namespaced_name = 2;
-  }
+  NamespacedName namespaced_name = 2;
+  string expected_uid = 3;
+}
+
+message SandboxIdentity {
+  string uid = 1;
+  string name = 2;
+  string namespace = 3;
 }
 
 enum FailurePolicy {
@@ -40,39 +37,87 @@ enum FailurePolicy {
   AUTO_RECREATE = 1;
 }
 
-message ComponentInfo {
+enum RuntimeState {
+  RUNTIME_STATE_UNSPECIFIED = 0;
+  RUNTIME_STATE_UNKNOWN = 1;
+  RUNTIME_STATE_PENDING = 2;
+  RUNTIME_STATE_CREATING = 3;
+  RUNTIME_STATE_READY = 4;
+  RUNTIME_STATE_STOPPING = 5;
+  RUNTIME_STATE_STOPPED = 6;
+  RUNTIME_STATE_FAILED = 7;
+  RUNTIME_STATE_UNAVAILABLE = 8;
+}
+
+enum DataPlaneState {
+  DATA_PLANE_STATE_UNSPECIFIED = 0;
+  DATA_PLANE_STATE_UNKNOWN = 1;
+  DATA_PLANE_STATE_PENDING = 2;
+  DATA_PLANE_STATE_PUBLISHING = 3;
+  DATA_PLANE_STATE_READY = 4;
+  DATA_PLANE_STATE_DRAINING = 5;
+  DATA_PLANE_STATE_FAILED = 6;
+  DATA_PLANE_STATE_UNAVAILABLE = 7;
+}
+
+enum InfraComponentState {
+  INFRA_COMPONENT_STATE_UNSPECIFIED = 0;
+  INFRA_COMPONENT_STATE_STARTING = 1;
+  INFRA_COMPONENT_STATE_READY = 2;
+  INFRA_COMPONENT_STATE_FAILED = 3;
+}
+
+enum ActionState {
+  ACTION_STATE_UNSPECIFIED = 0;
+  ACTION_STATE_PENDING = 1;
+  ACTION_STATE_APPLYING = 2;
+  ACTION_STATE_READY = 3;
+  ACTION_STATE_FAILED = 4;
+}
+
+message RuntimeInfo {
+  RuntimeState state = 1;
+}
+
+message DataPlaneInfo {
+  DataPlaneState state = 1;
+}
+
+message InfraComponentInfo {
   string name = 1;
-  string state = 2;
-  string protocol = 3;
-  uint32 port = 4;
-  int64 observed_route_generation = 5;
-  int64 last_transition_unix_seconds = 6;
-  string message = 7;
+  InfraComponentState state = 2;
+  string message = 4;
+}
+
+message ActionBindingInfo {
+  string handler = 1;
+  ActionState state = 2;
+  int64 last_transition_unix_seconds = 3;
+  string message = 4;
 }
 
 message SandboxInfo {
-  string sandbox_uid = 1;
-  string sandbox_name = 2;
-  string namespace = 3;
-  string runtime_state = 4;
-  string data_plane_state = 5;
-  string user_process_state = 6;
-  string fastlet_pod = 7;
-  int64 created_at_unix_seconds = 8;
-  string image = 9;
-  string pool_ref = 10;
-  map<string, string> metadata = 11;
-  int64 expires_at_unix_seconds = 12;
-  FailurePolicy failure_policy = 13;
-  int32 recovery_timeout_seconds = 14;
-  int64 assignment_attempt = 15;
-  int64 instance_generation = 16;
-  int64 route_generation = 17;
-  string infra_revision = 18;
-  repeated ComponentInfo components = 19;
+  SandboxIdentity identity = 1;
+  int64 applied_generation = 2;
+  RuntimeInfo runtime = 3;
+  DataPlaneInfo data_plane = 4;
+  repeated InfraComponentInfo infra_components = 5;
+  repeated ActionBindingInfo action_bindings = 6;
+  bool ready = 7;
 }
 
-message CreateRequest {
+message ActionBinding {
+  string handler = 1;
+  string input = 2;
+}
+
+enum CreateCompletion {
+  CREATE_COMPLETION_UNSPECIFIED = 0;
+  CREATE_COMPLETION_READY = 1;
+  CREATE_COMPLETION_RUNTIME_READY = 2;
+}
+
+message CreateSandboxRequest {
   string request_id = 1;
   string namespace = 2;
   string image = 3;
@@ -85,53 +130,72 @@ message CreateRequest {
   map<string, string> metadata = 10;
   FailurePolicy failure_policy = 11;
   int32 recovery_timeout_seconds = 12;
+  repeated ActionBinding action_bindings = 13;
+  CreateCompletion completion = 14;
 }
 
-message GetRequest {
-  string sandbox_name = 1;
-  string namespace = 2;
+message CreateSandboxResponse {
+  SandboxInfo sandbox = 1;
+  int64 generation = 2;
+  CreateCompletion completion = 3;
 }
 
-message ListRequest {
+message GetSandboxRequest {
+  SandboxReference sandbox = 1;
+  int64 expected_generation = 2;
+}
+
+message GetSandboxResponse {
+  SandboxInfo sandbox = 1;
+  int64 generation = 2;
+}
+
+message SandboxSummary {
+  SandboxIdentity identity = 1;
+  int64 generation = 2;
+}
+
+message ListSandboxesRequest {
   string namespace = 1;
   map<string, string> metadata = 2;
   int32 page_size = 3;
   string page_token = 4;
 }
 
-message ListResponse {
-  repeated SandboxInfo items = 1;
+message ListSandboxesResponse {
+  repeated SandboxSummary items = 1;
   string next_page_token = 2;
 }
 
 message DeleteRequest {
-  string sandbox_name = 1;
-  string namespace = 2;
+  SandboxReference sandbox = 3;
 }
 
-message DeleteResponse {
-  bool success = 1;
+message DeleteResponse {}
+
+message ReplaceActionBindings {
+  repeated ActionBinding items = 1;
 }
 
-message UpdateRequest {
-  string sandbox_name = 1;
-  string namespace = 2;
+message UpdateSandboxRequest {
+  SandboxReference sandbox = 1;
+  int64 expected_generation = 2;
 
   oneof update {
     int64 expires_at_unix_seconds = 3;
     string reset_revision = 4;
     FailurePolicy failure_policy = 5;
     int32 recovery_timeout_seconds = 6;
+    ReplaceActionBindings action_bindings = 7;
   }
 
-  map<string, string> metadata_upsert = 7;
-  repeated string metadata_delete_keys = 8;
+  map<string, string> metadata_upsert = 8;
+  repeated string metadata_delete_keys = 9;
 }
 
-message UpdateResponse {
-  bool success = 1;
-  string message = 2;
-  SandboxInfo sandbox = 3;
+message UpdateSandboxResponse {
+  SandboxIdentity sandbox = 1;
+  int64 committed_generation = 2;
 }
 
 message SandboxDiagnosticsRequest {
@@ -158,15 +222,6 @@ message SandboxDiagnosticsResponse {
   repeated SandboxDiagnosticEvent events = 7;
 }
 
-message WaitSandboxReadyRequest {
-  SandboxReference sandbox = 1;
-  oneof target {
-    bool data_plane = 2;
-    string component_name = 3;
-  }
-  int32 wait_timeout_millis = 4;
-}
-
 message EndpointTarget {
   oneof target {
     string component_name = 1;
@@ -183,20 +238,22 @@ message ResolveEndpointRequest {
   SandboxReference sandbox = 1;
   EndpointTarget target = 2;
   EndpointAccessMode access_mode = 3;
-  bool wait_until_ready = 4;
-  int32 wait_timeout_millis = 5;
+  int64 expected_generation = 4;
+}
+
+message ResolvedEndpoint {
+  string component_name = 1;
+  string protocol = 2;
+  uint32 port = 3;
 }
 
 message ResolveEndpointResponse {
   string sandbox_uid = 1;
-  EndpointTarget target = 2;
-  string component_name = 3;
-  string protocol = 4;
-  uint32 resolved_port = 5;
-  string proxy_endpoint = 6;
-  map<string, string> required_headers = 7;
-  int64 route_generation = 8;
-  int64 expires_at_unix_seconds = 9;
+  ResolvedEndpoint endpoint = 2;
+  string proxy_endpoint = 3;
+  map<string, string> required_headers = 4;
+  int64 route_generation = 5;
+  int64 expires_at_unix_seconds = 6;
 }
 
 message ComponentCapability {
@@ -216,13 +273,6 @@ message WarmImageInfo {
   string last_error = 7;
 }
 
-message RegistryInfo {
-  int64 target_generation = 1;
-  int32 applied_fastlets = 2;
-  int32 total_fastlets = 3;
-  string last_error = 4;
-}
-
 message PoolInfo {
   string namespace = 1;
   string name = 2;
@@ -234,11 +284,12 @@ message PoolInfo {
   int32 total_fastlets = 8;
   int32 ready_fastlets = 9;
   int32 idle_fastlets = 10;
-  string infra_revision = 11;
-  int32 prepared_fastlets = 12;
-  repeated ComponentCapability components = 13;
-  RegistryInfo registry = 14;
-  repeated WarmImageInfo warm_images = 15;
+  string runtime_revision = 11;
+  string infra_revision = 12;
+  string fastlet_revision = 13;
+  int32 prepared_fastlets = 14;
+  repeated ComponentCapability components = 15;
+  repeated WarmImageInfo warm_images = 16;
 }
 
 message GetPoolRequest {

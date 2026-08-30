@@ -137,7 +137,37 @@ type InfraComponent struct {
 	Endpoint InfraEndpoint `json:"endpoint"`
 }
 
+// LifecycleHook is a versioned Fastlet-local Sandbox lifecycle checkpoint.
+// It is intentionally a string alias so future hooks do not require changing
+// the CRD shape. ValidateActionHandlers rejects names unsupported by this
+// Fastlet version instead of silently ignoring them.
+type LifecycleHook string
+
+const (
+	LifecycleHookRuntimeReady   LifecycleHook = "sandbox.runtime-ready"
+	LifecycleHookDataPlaneReady LifecycleHook = "sandbox.data-plane-ready"
+)
+
+// ActionHandler declares one Pod-local HTTP receiver served on loopback.
+type ActionHandler struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	TargetHTTPPort int32 `json:"targetHTTPPort"`
+
+	// Hooks selects the lifecycle checkpoints delivered to this Handler. An
+	// empty list makes the Handler config-only: it receives SetBinding and
+	// RemoveBinding but no lifecycle Hook calls.
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=16
+	Hooks []LifecycleHook `json:"hooks,omitempty"`
+}
+
 // SandboxPoolSpec defines the desired state of SandboxPool.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.actionHandlers) || (has(self.actionHandlers) && oldSelf.actionHandlers.all(x, self.actionHandlers.exists(y, y.name == x.name)))",message="existing Action Handler names cannot be removed or renamed"
 type SandboxPoolSpec struct {
 	Capacity PoolCapacity `json:"capacity"`
 
@@ -165,6 +195,13 @@ type SandboxPoolSpec struct {
 	// +kubebuilder:validation:MaxItems=16
 	InfraComponents []InfraComponent `json:"infraComponents,omitempty"`
 
+	// ActionHandlers are Pod-local HTTP receivers used by ordered per-Sandbox
+	// Action Bindings.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	ActionHandlers []ActionHandler `json:"actionHandlers,omitempty"`
+
 	// FastletTemplate is intentionally preserved as a Kubernetes-native pod
 	// template. Fast Sandbox validates the platform-owned fields separately.
 	// +kubebuilder:validation:Schemaless
@@ -186,36 +223,20 @@ type PoolCapacity struct {
 
 // SandboxPoolStatus defines the observed state of SandboxPool.
 type SandboxPoolStatus struct {
-	ObservedGeneration int64                     `json:"observedGeneration,omitempty"`
-	CurrentPods        int32                     `json:"currentPods,omitempty"`
-	ReadyPods          int32                     `json:"readyPods,omitempty"`
-	TotalFastlets      int32                     `json:"totalFastlets,omitempty"`
-	IdleFastlets       int32                     `json:"idleFastlets,omitempty"`
-	BusyFastlets       int32                     `json:"busyFastlets,omitempty"`
-	RuntimeRevision    string                    `json:"runtimeRevision,omitempty"`
-	InfraRevision      string                    `json:"infraRevision,omitempty"`
-	PreparedFastlets   int32                     `json:"preparedFastlets,omitempty"`
-	InfraComponents    []InfraComponentSummary   `json:"infraComponents,omitempty"`
-	Registry           RegistryApplicationStatus `json:"registry,omitempty"`
-	WarmImages         []WarmImageStatus         `json:"warmImages,omitempty"`
-	Conditions         []metav1.Condition        `json:"conditions,omitempty"`
-}
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-// InfraComponentSummary is safe discovery data for a compiled Pool revision.
-type InfraComponentSummary struct {
-	Name       string `json:"name"`
-	Protocol   string `json:"protocol"`
-	Port       int32  `json:"port"`
-	HealthKind string `json:"healthKind"`
-}
+	CurrentPods  int32 `json:"currentPods,omitempty"`
+	ReadyPods    int32 `json:"readyPods,omitempty"`
+	IdleFastlets int32 `json:"idleFastlets,omitempty"`
+	BusyFastlets int32 `json:"busyFastlets,omitempty"`
 
-// RegistryApplicationStatus reports configuration rollout without exposing
-// credentials.
-type RegistryApplicationStatus struct {
-	TargetGeneration int64  `json:"targetGeneration,omitempty"`
-	AppliedFastlets  int32  `json:"appliedFastlets,omitempty"`
-	TotalFastlets    int32  `json:"totalFastlets,omitempty"`
-	LastError        string `json:"lastError,omitempty"`
+	RuntimeRevision  string `json:"runtimeRevision,omitempty"`
+	InfraRevision    string `json:"infraRevision,omitempty"`
+	FastletRevision  string `json:"fastletRevision,omitempty"`
+	PreparedFastlets int32  `json:"preparedFastlets,omitempty"`
+
+	WarmImages []WarmImageStatus  `json:"warmImages,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // WarmImageStatus aggregates cache state for one configured warm image.

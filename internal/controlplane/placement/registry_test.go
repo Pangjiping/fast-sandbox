@@ -22,7 +22,7 @@ func readyFastlet(id string, used, capacity int, images ...string) FastletInfo {
 		ID: FastletID(id), Namespace: "default", PodName: id, PodUID: "uid-" + id,
 		PodIP: "10.0.0.1", NodeName: "node-a", PoolName: "pool-a",
 		RuntimeName: apiv1alpha2.RuntimeContainer, RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
-		PodReady: true, RuntimeReady: true, InfraReady: true, Capacity: capacity,
+		PodReady: true, RuntimeReady: true, InfraReady: true,
 		Admission: fastletapi.AdmissionStatus{Capacity: capacity, Used: used, Running: used},
 		Images:    append([]string(nil), images...), CacheEpoch: "boot-a", CacheRevision: 1, CacheComplete: true,
 		SandboxStatuses: make(map[string]fastletapi.SandboxStatus), HeartbeatSequence: 1, LastHeartbeat: registryNow, PodObservedAt: registryNow,
@@ -57,7 +57,7 @@ func seedFastlet(tb testing.TB, registry *InMemoryRegistry, info FastletInfo) {
 	heartbeat := &fastletapi.HeartbeatResponse{
 		FastletStatus: fastletapi.FastletStatus{
 			FastletPodUID: info.PodUID, RuntimeReady: info.RuntimeReady, Draining: info.Draining,
-			Capacity: info.Capacity, Admission: info.Admission, ResourceProfileHash: info.ResourceProfileHash,
+			RuntimeProfileHash: info.RuntimeProfileHash, Admission: info.Admission, ResourceProfileHash: info.ResourceProfileHash,
 			InfraRevision: info.InfraRevision, InfraReady: info.InfraReady,
 			PreparedArtifacts: info.PreparedArtifacts, SandboxStatuses: statuses,
 		},
@@ -65,7 +65,6 @@ func seedFastlet(tb testing.TB, registry *InMemoryRegistry, info FastletInfo) {
 		Cache: fastletapi.CacheSnapshot{
 			Epoch: epoch, Revision: info.CacheRevision, Full: true, Complete: info.CacheComplete, Images: info.Images,
 		},
-		Diagnostics: fastletapi.RuntimeDiagnostics{RuntimeProfileHash: info.RuntimeProfileHash},
 	}
 	observedAt := info.LastHeartbeat
 	if observedAt.IsZero() {
@@ -149,7 +148,7 @@ func TestPodReplacementClearsOldHeartbeatState(t *testing.T) {
 	replaced, _ := registry.GetFastletByID(old.ID)
 	require.Equal(t, "replacement-uid", replaced.PodUID)
 	require.False(t, replaced.RuntimeReady)
-	require.Zero(t, replaced.Capacity)
+	require.Zero(t, replaced.Capacity())
 	require.Empty(t, replaced.Images)
 	require.True(t, replaced.LastHeartbeat.IsZero())
 }
@@ -181,11 +180,10 @@ func TestApplyHeartbeatFencesPodUIDSequenceAndCacheRevision(t *testing.T) {
 	})
 	heartbeat := &fastletapi.HeartbeatResponse{
 		FastletStatus: fastletapi.FastletStatus{
-			FastletPodUID: "pod-uid-a", RuntimeReady: true, ResourceProfileHash: "resource-hash",
+			FastletPodUID: "pod-uid-a", RuntimeReady: true, RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
 			Admission: fastletapi.AdmissionStatus{Capacity: 5, Used: 2, Running: 2},
 		},
 		Sequence: 1, Cache: fastletapi.CacheSnapshot{Epoch: "boot-a", Revision: 1, Full: true, Complete: true, Images: []string{"alpine:latest"}},
-		Diagnostics: fastletapi.RuntimeDiagnostics{RuntimeProfileHash: "runtime-hash"},
 	}
 	require.NoError(t, registry.ApplyHeartbeat("fastlet-a", "pod-uid-a", heartbeat, registryNow))
 	stored, _ := registry.GetFastletByID("fastlet-a")
@@ -228,11 +226,10 @@ func TestApplyHeartbeatFailsClosedOnProfileMismatch(t *testing.T) {
 func heartbeatWithProfilesForRegistry(runtimeHash, resourceHash string) *fastletapi.HeartbeatResponse {
 	return &fastletapi.HeartbeatResponse{
 		FastletStatus: fastletapi.FastletStatus{
-			FastletPodUID: "pod-uid-a", RuntimeReady: true, ResourceProfileHash: resourceHash,
+			FastletPodUID: "pod-uid-a", RuntimeReady: true, RuntimeProfileHash: runtimeHash, ResourceProfileHash: resourceHash,
 			Admission: fastletapi.AdmissionStatus{Capacity: 5},
 		},
 		Sequence: 1, Cache: fastletapi.CacheSnapshot{Epoch: "boot-a", Revision: 1, Full: true, Complete: true},
-		Diagnostics: fastletapi.RuntimeDiagnostics{RuntimeProfileHash: runtimeHash},
 	}
 }
 
@@ -281,7 +278,7 @@ func TestTopKReturnsDeepCopy(t *testing.T) {
 	info.PreparedArtifacts = []string{"component-artifact-a"}
 	info.SandboxStatuses["sandbox-a"] = fastletapi.SandboxStatus{
 		SandboxID: "sandbox-a",
-		InfraDiagnostics: []fastletapi.InfraComponentDiagnostic{{
+		InfraComponents: []fastletapi.InfraComponentDiagnostic{{
 			Component: "execd",
 			State:     "ready",
 		}},
@@ -294,7 +291,7 @@ func TestTopKReturnsDeepCopy(t *testing.T) {
 	selected[0].PreparedArtifacts[0] = "mutated"
 	selectedStatus := selected[0].SandboxStatuses["sandbox-a"]
 	selectedStatus.SandboxID = "mutated"
-	selectedStatus.InfraDiagnostics[0].State = "mutated"
+	selectedStatus.InfraComponents[0].State = "mutated"
 	selected[0].SandboxStatuses["sandbox-a"] = selectedStatus
 
 	stored, ok := registry.GetFastletByID("fastlet-a")
@@ -302,7 +299,7 @@ func TestTopKReturnsDeepCopy(t *testing.T) {
 	require.Equal(t, []string{"alpine:latest"}, stored.Images)
 	require.Equal(t, []string{"component-artifact-a"}, stored.PreparedArtifacts)
 	require.Equal(t, "sandbox-a", stored.SandboxStatuses["sandbox-a"].SandboxID)
-	require.Equal(t, "ready", stored.SandboxStatuses["sandbox-a"].InfraDiagnostics[0].State)
+	require.Equal(t, "ready", stored.SandboxStatuses["sandbox-a"].InfraComponents[0].State)
 }
 
 func TestTopKIsSafeDuringConcurrentRegistryUpdates(t *testing.T) {
@@ -351,8 +348,10 @@ func TestStaleRegistryHintsCannotExceedFastletCapacity(t *testing.T) {
 		sandboxUID := fmt.Sprintf("sandbox-%03d", index)
 		require.Len(t, registry.TopK(candidate("alpine:latest", sandboxUID), 1), 1)
 		_, err = manager.CreateSandbox(context.Background(), &fastletapi.CreateSandboxRequest{
-			Identity: fastletapi.SandboxIdentity{SandboxUID: sandboxUID, InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + sandboxUID, AssignmentAttempt: 1, FastletPodUID: "uid-fastlet-a"},
-			Sandbox:  fastletapi.SandboxSpec{ClaimUID: "claim-" + sandboxUID, Image: "alpine:latest"},
+			RequestID:      "request-" + sandboxUID,
+			Identity:       fastletapi.SandboxIdentity{SandboxUID: sandboxUID, Namespace: "default", Name: sandboxUID, InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + sandboxUID, AssignmentAttempt: 1, FastletPodUID: "uid-fastlet-a"},
+			Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
+			SpecGeneration: 1,
 		})
 		if err == nil {
 			successes++

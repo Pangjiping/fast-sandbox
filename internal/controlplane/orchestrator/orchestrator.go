@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 
@@ -27,24 +26,21 @@ import (
 
 var (
 	ErrNoCandidate                = errors.New("no eligible Fastlet for the Sandbox request")
-	ErrRuntimeInProgress          = errors.New("Sandbox runtime creation is in progress")
-	ErrDataPlaneInProgress        = errors.New("Sandbox data plane initialization is in progress")
-	ErrDataPlaneUnavailable       = errors.New("Sandbox data plane is unavailable and retrying")
+	ErrInvalidActionDesiredState  = errors.New("Sandbox Action desired state is invalid")
 	ErrAssignedFastletUnavailable = errors.New("assigned Fastlet is unavailable or was replaced")
 	ErrUnknownFastletOutcome      = errors.New("Fastlet operation outcome is unknown")
 )
 
 const (
-	ConditionRuntimeReady   = apiv1alpha2.SandboxConditionRuntimeReady
-	ConditionDataPlaneReady = apiv1alpha2.SandboxConditionDataPlaneReady
-	ReasonFastletPodLost    = "FastletPodLost"
-	ReasonExpired           = "Expired"
+	ConditionReady       = apiv1alpha2.SandboxConditionReady
+	ReasonFastletPodLost = "FastletPodLost"
+	ReasonExpired        = "Expired"
 )
 
 type FastletClient interface {
 	CreateSandbox(context.Context, string, *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error)
 	InspectSandbox(context.Context, string, *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error)
-	DeleteSandboxV2(context.Context, string, *fastletapi.DeleteSandboxV2Request) (*fastletapi.DeleteSandboxV2Response, error)
+	DeleteSandbox(context.Context, string, *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error)
 }
 
 type Registry interface {
@@ -70,6 +66,7 @@ type RuntimeParameters struct {
 	RuntimeProfileHash  string
 	ResourceProfileHash string
 	InfraRevision       string
+	FastletRevision     string
 }
 
 func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (RuntimeParameters, error) {
@@ -82,6 +79,12 @@ func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.
 	}
 	if err := pool.Spec.ValidateRuntime(); err != nil {
 		return RuntimeParameters{}, fmt.Errorf("resolve Pool runtime: %w", err)
+	}
+	if err := pool.Spec.ValidateActionHandlers(); err != nil {
+		return RuntimeParameters{}, fmt.Errorf("resolve Pool Action Handlers: %w", err)
+	}
+	if err := sandbox.Spec.ValidateActionBindings(pool.Spec.ActionHandlers); err != nil {
+		return RuntimeParameters{}, err
 	}
 	catalog := o.Catalog
 	if catalog == nil {
@@ -109,6 +112,7 @@ func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.
 		RuntimeName: pool.Spec.Runtime, RuntimeProfileHash: runtimeProfileHash,
 		ResourceProfileHash: pool.Spec.SandboxResources.Hash(),
 		InfraRevision:       infraPlan.Revision,
+		FastletRevision:     pool.Status.FastletRevision,
 	}, nil
 }
 
@@ -121,7 +125,8 @@ func (o *Orchestrator) Candidates(ctx context.Context, sandbox *apiv1alpha2.Sand
 		Namespace: sandbox.Namespace, PoolName: sandbox.Spec.PoolRef,
 		RuntimeName: parameters.RuntimeName, RuntimeProfileHash: parameters.RuntimeProfileHash,
 		ResourceProfileHash: parameters.ResourceProfileHash, InfraRevision: parameters.InfraRevision,
-		Image: sandbox.Spec.Image, StableKey: stableKey,
+		FastletRevision: parameters.FastletRevision,
+		Image:           sandbox.Spec.Image, StableKey: stableKey,
 	})
 	if len(candidates) == 0 {
 		return nil, parameters, ErrNoCandidate
@@ -196,25 +201,6 @@ func (o *Orchestrator) AssignDeclarative(ctx context.Context, sandbox *apiv1alph
 		return projected, false, err
 	}
 
-	// Upgrade bridge for objects created by the previous status-only model.
-	if sandbox.Status.Assignment != nil {
-		candidate, ok := o.Registry.GetFastletByID(placement.FastletID(sandbox.Status.Assignment.FastletName))
-		if !ok || candidate.PodUID != sandbox.Status.Assignment.FastletPodUID {
-			return nil, false, ErrAssignedFastletUnavailable
-		}
-		generation := max(sandbox.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration)
-		routeGeneration := max(sandbox.Status.RouteGeneration, int64(1))
-		legacyEnvelope, err := AssignmentForCandidate(candidate, sandbox.Status.Assignment.Attempt, generation, routeGeneration, "legacy-"+string(sandbox.UID))
-		if err != nil {
-			return nil, false, err
-		}
-		if _, _, err := assignment.InitializeAssignmentAnnotation(ctx, o.Client, client.ObjectKeyFromObject(sandbox), legacyEnvelope); err != nil {
-			return nil, false, err
-		}
-		projected, err := assignment.ProjectAssignmentToStatus(ctx, o.Client, client.ObjectKeyFromObject(sandbox))
-		return projected, false, err
-	}
-
 	candidates, _, err := o.Candidates(ctx, sandbox, stableKey)
 	if err != nil {
 		return nil, false, err
@@ -223,9 +209,9 @@ func (o *Orchestrator) AssignDeclarative(ctx context.Context, sandbox *apiv1alph
 	if err != nil {
 		return nil, false, fmt.Errorf("generate runtime instance ID: %w", err)
 	}
-	attempt := sandbox.Status.AssignmentAttempt + 1
-	generation := max(sandbox.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration)
-	routeGeneration := max(sandbox.Status.RouteGeneration, int64(1))
+	attempt := sandbox.Status.Placement.Attempt + 1
+	generation := max(sandbox.Status.Runtime.Generation, apiv1alpha2.InitialInstanceGeneration)
+	routeGeneration := max(sandbox.Status.DataPlane.RouteGeneration, int64(1))
 	desired, err := AssignmentForCandidate(candidates[0], attempt, generation, routeGeneration, runtimeInstanceID)
 	if err != nil {
 		return nil, false, err
@@ -288,13 +274,17 @@ func (o *Orchestrator) CreateRuntime(ctx context.Context, sandbox *apiv1alpha2.S
 	if err != nil {
 		return nil, err
 	}
-	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity)
+	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity, "")
 }
 
 // CreateRuntimeOnCandidate is used immediately after FastPath wins an
 // annotation Create/CAS. The annotation is revalidated, while a concurrently
 // stale status projection is deliberately ignored.
 func (o *Orchestrator) CreateRuntimeOnCandidate(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope) (*fastletapi.CreateSandboxResponse, error) {
+	return o.CreateRuntimeOnCandidateWithCompletion(ctx, sandbox, fastlet, envelope, "")
+}
+
+func (o *Orchestrator) CreateRuntimeOnCandidateWithCompletion(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, completion fastletapi.CreateCompletion) (*fastletapi.CreateSandboxResponse, error) {
 	current, err := assignment.AssignmentFromAnnotation(sandbox)
 	if err != nil {
 		return nil, err
@@ -308,100 +298,112 @@ func (o *Orchestrator) CreateRuntimeOnCandidate(ctx context.Context, sandbox *ap
 		return nil, ErrAssignedFastletUnavailable
 	}
 	identity := fastletapi.SandboxIdentity{
-		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], SandboxUID: string(sandbox.UID),
+		SandboxUID: string(sandbox.UID), Namespace: sandbox.Namespace, Name: sandbox.Name,
 		InstanceGeneration: envelope.InstanceGeneration, RuntimeInstanceID: envelope.RuntimeInstanceID,
 		AssignmentAttempt: envelope.Attempt, RouteGeneration: envelope.RouteGeneration, FastletPodUID: envelope.FastletPodUID,
 	}
-	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity)
+	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity, completion)
 }
 
-func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, identity fastletapi.SandboxIdentity) (*fastletapi.CreateSandboxResponse, error) {
+func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, identity fastletapi.SandboxIdentity, completion fastletapi.CreateCompletion) (*fastletapi.CreateSandboxResponse, error) {
+	bindings, err := compileActionBindings(sandbox.Spec.ActionBindings)
+	if err != nil {
+		return nil, err
+	}
 	request := &fastletapi.CreateSandboxRequest{
-		Identity: identity,
+		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], Identity: identity,
+		SpecGeneration: sandbox.Generation, ActionBindings: bindings, Completion: completion,
 		Sandbox: fastletapi.SandboxSpec{
-			SandboxID: string(sandbox.UID), RequestID: sandbox.Annotations[assignment.AnnotationRequestID], ClaimUID: string(sandbox.UID),
-			ClaimNamespace: sandbox.Namespace, ClaimName: sandbox.Name, Image: sandbox.Spec.Image,
+			Image:              sandbox.Spec.Image,
 			RuntimeProfileHash: envelope.RuntimeProfileHash, ResourceProfileHash: envelope.ResourceProfileHash,
 			InfraRevision: envelope.InfraRevision,
 			Command:       sandbox.Spec.Command, Args: sandbox.Spec.Args, Env: envMap(sandbox.Spec.Envs), WorkingDir: sandbox.Spec.WorkingDir,
 		},
 	}
 	response, createErr := o.FastletClient.CreateSandbox(ctx, fastlet.PodIP, request)
-	if createErr == nil && response != nil && response.Accepted && response.Sandbox != nil {
-		switch response.Sandbox.Phase {
-		case "running", "infra-pending", "initializing-infra", "infra-unavailable", "route-pending", "publishing-route", "route-unavailable":
-			return response, nil
-		}
+	if createErr == nil && response != nil &&
+		(response.Disposition == fastletapi.CreateDispositionCreated || response.Disposition == fastletapi.CreateDispositionExisting) &&
+		response.Sandbox != nil && response.Sandbox.Runtime.State == fastletapi.RuntimeStateReady {
+		return response, nil
 	}
 	if createErr == nil {
 		createErr = ErrUnknownFastletOutcome
+	} else {
+		var failure *fastletapi.FastletError
+		if !errors.As(createErr, &failure) {
+			createErr = fmt.Errorf("%w: %v", ErrUnknownFastletOutcome, createErr)
+		}
 	}
 	o.recordFeedback(fastlet.ID, createErr)
 	return response, createErr
 }
 
-// ReconcileRuntime is the declarative wrapper around CreateRuntime. A
-// successful Create proves the runtime is ready; Infra readiness and route
-// publication are projected independently as the data plane converges.
-func (o *Orchestrator) ReconcileRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) error {
+// EnsureRuntime performs the side-effecting create/ensure operation. A
+// structured observation is returned whenever Fastlet can identify the local
+// Sandbox, including normal Pending or unavailable states.
+func (o *Orchestrator) EnsureRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (*fastletapi.SandboxStatus, error) {
 	response, err := o.CreateRuntime(ctx, sandbox)
+	if response != nil && response.Sandbox != nil {
+		return response.Sandbox, nil
+	}
 	if err == nil {
-		return o.projectObservedStatus(ctx, sandbox, response.Sandbox)
+		return nil, ErrUnknownFastletOutcome
 	}
-	var failure *fastletapi.FastletError
-	if errors.As(err, &failure) && failure.Code == fastletapi.ErrorInProgress {
-		_ = o.MarkCreating(ctx, sandbox, failure.Message)
-		return ErrRuntimeInProgress
-	}
-	if errors.As(err, &failure) {
-		return err
-	}
-	return fmt.Errorf("%w: %v", ErrUnknownFastletOutcome, err)
+	return nil, err
 }
 
-func (o *Orchestrator) ObserveRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) error {
+// ReconcileBindings sends CRD-persisted desired input to the assigned Fastlet.
+// Fastlet remains the only lifecycle Hook dispatcher.
+func (o *Orchestrator) ReconcileBindings(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (*fastletapi.SandboxStatus, error) {
+	var pool apiv1alpha2.SandboxPool
+	if err := o.Client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Spec.PoolRef}, &pool); err != nil {
+		return nil, fmt.Errorf("get SandboxPool for Actions: %w", err)
+	}
+	if err := pool.Spec.ValidateActionHandlers(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidActionDesiredState, err)
+	}
+	if err := sandbox.Spec.ValidateActionBindings(pool.Spec.ActionHandlers); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidActionDesiredState, err)
+	}
+	inputs, err := compileActionBindings(sandbox.Spec.ActionBindings)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidActionDesiredState, err)
+	}
 	fastlet, _, identity, err := o.assignedTarget(sandbox)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	client, ok := o.FastletClient.(interface {
+		ReconcileBindings(context.Context, string, *fastletapi.ReconcileBindingsRequest) (*fastletapi.ReconcileBindingsResponse, error)
+	})
+	if !ok {
+		return nil, errors.New("Fastlet client does not support Sandbox Actions")
+	}
+	response, callErr := client.ReconcileBindings(ctx, fastlet.PodIP, &fastletapi.ReconcileBindingsRequest{
+		Identity: identity, SpecGeneration: sandbox.Generation, ActionBindings: inputs,
+	})
+	if response != nil && response.Sandbox != nil {
+		return response.Sandbox, nil
+	}
+	if callErr != nil {
+		return nil, callErr
+	}
+	return nil, ErrUnknownFastletOutcome
+}
+
+func (o *Orchestrator) ObserveRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (*fastletapi.SandboxStatus, error) {
+	fastlet, _, identity, err := o.assignedTarget(sandbox)
+	if err != nil {
+		return nil, err
 	}
 	response, inspectErr := o.FastletClient.InspectSandbox(ctx, fastlet.PodIP, &fastletapi.InspectSandboxRequest{Identity: identity})
 	if inspectErr != nil {
-		return inspectErr
+		return nil, inspectErr
 	}
 	if response == nil || response.Sandbox == nil {
-		return ErrUnknownFastletOutcome
+		return nil, ErrUnknownFastletOutcome
 	}
-	switch response.Sandbox.Phase {
-	case "running":
-		return o.MarkReady(ctx, sandbox, response.Sandbox)
-	case "creating":
-		_ = o.MarkCreating(ctx, sandbox, "Fastlet is still creating the runtime")
-		return ErrRuntimeInProgress
-	default:
-		return o.projectObservedStatus(ctx, sandbox, response.Sandbox)
-	}
-}
-
-func (o *Orchestrator) projectObservedStatus(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
-	if observed == nil {
-		return ErrUnknownFastletOutcome
-	}
-	switch observed.Phase {
-	case "running":
-		return o.MarkReady(ctx, sandbox, observed)
-	case "infra-pending", "initializing-infra", "route-pending", "publishing-route":
-		if err := o.MarkRuntimeReadyDataPlaneCreating(ctx, sandbox, observed); err != nil {
-			return err
-		}
-		return ErrDataPlaneInProgress
-	case "infra-unavailable", "route-unavailable":
-		if err := o.MarkRuntimeReadyDataPlaneUnavailable(ctx, sandbox, observed); err != nil {
-			return err
-		}
-		return ErrDataPlaneUnavailable
-	default:
-		return fmt.Errorf("runtime is %s", observed.Phase)
-	}
+	return response.Sandbox, nil
 }
 
 func (o *Orchestrator) DeleteRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) error {
@@ -409,7 +411,7 @@ func (o *Orchestrator) DeleteRuntime(ctx context.Context, sandbox *apiv1alpha2.S
 	if err != nil {
 		return err
 	}
-	_, err = o.FastletClient.DeleteSandboxV2(ctx, fastlet.PodIP, &fastletapi.DeleteSandboxV2Request{Identity: identity})
+	_, err = o.FastletClient.DeleteSandbox(ctx, fastlet.PodIP, &fastletapi.DeleteSandboxRequest{Identity: identity})
 	return err
 }
 
@@ -438,7 +440,7 @@ func (o *Orchestrator) ClearAssignment(ctx context.Context, sandbox *apiv1alpha2
 		return nil, err
 	}
 	if envelope == nil {
-		if sandbox.Status.Assignment == nil {
+		if sandbox.Status.Placement.FastletName == "" {
 			return sandbox.DeepCopy(), nil
 		}
 		return o.clearAssignmentProjection(ctx, sandbox, nil, advanceInstance)
@@ -465,12 +467,12 @@ func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *a
 		if active != nil {
 			return assignment.ErrAssignmentAnnotationChanged
 		}
-		if current.Status.Assignment == nil {
+		if current.Status.Placement.FastletName == "" {
 			result = current.DeepCopy()
 			return nil
 		}
-		generation := max(current.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration)
-		routeGeneration := max(current.Status.RouteGeneration, int64(1)) + 1
+		generation := max(current.Status.Runtime.Generation, apiv1alpha2.InitialInstanceGeneration)
+		routeGeneration := max(current.Status.DataPlane.RouteGeneration, int64(1)) + 1
 		if envelope != nil {
 			generation = max(generation, envelope.InstanceGeneration)
 			routeGeneration = max(routeGeneration, envelope.RouteGeneration+1)
@@ -479,12 +481,16 @@ func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *a
 			generation = apiv1alpha2.NextInstanceGeneration(generation)
 		}
 		before := current.DeepCopy()
-		current.Status.Assignment = nil
-		current.Status.InstanceGeneration = generation
-		current.Status.RouteGeneration = routeGeneration
-		current.Status.RuntimeState = apiv1alpha2.ObservedStatePending
-		current.Status.DataPlaneState = apiv1alpha2.ObservedStatePending
-		current.Status.Recovery = nil
+		attempt := current.Status.Placement.Attempt
+		if envelope != nil {
+			attempt = max(attempt, envelope.Attempt)
+		}
+		current.Status.Placement = apiv1alpha2.PlacementStatus{Attempt: attempt}
+		current.Status.Runtime.Generation = generation
+		current.Status.DataPlane.RouteGeneration = routeGeneration
+		// This projection is deliberately fence-only. SandboxReconciler owns
+		// Runtime/DataPlane/Ready business state and will publish the outcome of
+		// expiration, reset, or recovery in its own status mutation.
 		if err := o.Client.Status().Patch(ctx, &current, client.MergeFrom(before)); err != nil {
 			return err
 		}
@@ -494,70 +500,30 @@ func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *a
 	return result, err
 }
 
-func (o *Orchestrator) MarkPending(ctx context.Context, sandbox *apiv1alpha2.Sandbox, reason, message string) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStatePending
-		status.DataPlaneState = apiv1alpha2.ObservedStatePending
-		setCondition(status, ConditionRuntimeReady, metav1.ConditionFalse, reason, message)
-		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, reason, message)
-	})
-}
-
-func (o *Orchestrator) MarkCreating(ctx context.Context, sandbox *apiv1alpha2.Sandbox, message string) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStateCreating
-		status.DataPlaneState = apiv1alpha2.ObservedStatePending
-		setCondition(status, ConditionRuntimeReady, metav1.ConditionFalse, "Creating", message)
-	})
-}
-
-func (o *Orchestrator) MarkRuntimeReadyDataPlaneCreating(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStateReady
-		status.DataPlaneState = apiv1alpha2.ObservedStateCreating
-		projectComponentStatus(status, sandbox, observed)
-		setCondition(status, ConditionRuntimeReady, metav1.ConditionTrue, "RuntimeRunning", "Fastlet reports the runtime and private network ready")
-		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, "DataPlaneInitializing", "Fastlet data plane is "+observed.Phase)
-	})
-}
-
-func (o *Orchestrator) MarkRuntimeReadyDataPlaneUnavailable(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStateReady
-		status.DataPlaneState = apiv1alpha2.ObservedStateUnavailable
-		projectComponentStatus(status, sandbox, observed)
-		setCondition(status, ConditionRuntimeReady, metav1.ConditionTrue, "RuntimeRunning", "Fastlet reports the runtime and private network ready")
-		setCondition(status, ConditionDataPlaneReady, metav1.ConditionFalse, "DataPlaneUnavailable", "Fastlet data plane is "+observed.Phase+" and will be retried")
-	})
-}
-
-func (o *Orchestrator) MarkReady(ctx context.Context, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) error {
-	return o.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStateReady
-		status.DataPlaneState = apiv1alpha2.ObservedStateReady
-		status.Recovery = nil
-		projectComponentStatus(status, sandbox, observed)
-		setCondition(status, ConditionRuntimeReady, metav1.ConditionTrue, "RuntimeRunning", "Fastlet reports the runtime running")
-		setCondition(status, ConditionDataPlaneReady, metav1.ConditionTrue, "FastletRouteReady", "Fastlet reports the instance-fenced local proxy route published")
-	})
-}
-
-func projectComponentStatus(status *apiv1alpha2.SandboxStatus, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) {
+// ProjectObservedStatus is a pure projection used by SandboxReconciler while
+// it owns the single business-status write for one reconcile pass.
+func ProjectObservedStatus(status *apiv1alpha2.SandboxStatus, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) {
 	if status == nil || observed == nil {
 		return
 	}
-	revision := status.InfraRevision
-	if sandbox != nil && sandbox.Status.Assignment != nil && sandbox.Status.Assignment.InfraRevision != "" {
-		revision = sandbox.Status.Assignment.InfraRevision
+	now := metav1.Now()
+	setRuntimeStatus(&status.Runtime, apiv1alpha2.RuntimeState(observed.Runtime.State), observed.Runtime.Message, now)
+	setDataPlaneStatus(&status.DataPlane, apiv1alpha2.DataPlaneState(observed.DataPlane.State), observed.DataPlane.Message, now)
+	// ObservedGeneration follows the Kubernetes convention: the Controller has
+	// processed this Spec generation, regardless of whether applying it is
+	// Pending, Ready, or Failed. Fastlet's applied generation remains a live-only
+	// convergence fence and is deliberately not duplicated into CRD status.
+	status.ObservedGeneration = sandbox.Generation
+	if observed.Runtime.State == fastletapi.RuntimeStateReady {
+		status.Placement.Recovery = nil
 	}
-	status.InfraRevision = revision
-	previous := make(map[string]apiv1alpha2.InfraComponentStatus, len(status.Components))
-	for _, component := range status.Components {
+
+	previous := make(map[string]apiv1alpha2.InfraComponentStatus, len(status.InfraComponents))
+	for _, component := range status.InfraComponents {
 		previous[component.Name] = component
 	}
-	components := make([]apiv1alpha2.InfraComponentStatus, 0, len(observed.InfraDiagnostics))
-	now := metav1.Now()
-	for _, diagnostic := range observed.InfraDiagnostics {
+	components := make([]apiv1alpha2.InfraComponentStatus, 0, len(observed.InfraComponents))
+	for _, diagnostic := range observed.InfraComponents {
 		state := apiv1alpha2.InfraComponentStarting
 		switch diagnostic.State {
 		case "Ready":
@@ -565,40 +531,99 @@ func projectComponentStatus(status *apiv1alpha2.SandboxStatus, sandbox *apiv1alp
 		case "Failed":
 			state = apiv1alpha2.InfraComponentFailed
 		}
-		component := apiv1alpha2.InfraComponentStatus{
-			Name: diagnostic.Component, State: state, Protocol: diagnostic.Protocol,
-			Port: int32(diagnostic.Port), ObservedRouteGeneration: diagnostic.ObservedRouteGeneration,
-			Message: diagnostic.Message,
-		}
-		if old, found := previous[component.Name]; found && old.State == component.State &&
-			old.Protocol == component.Protocol && old.Port == component.Port &&
-			old.ObservedRouteGeneration == component.ObservedRouteGeneration && old.Message == component.Message {
+		component := apiv1alpha2.InfraComponentStatus{Name: diagnostic.Component, State: state, Message: diagnostic.Message}
+		if old, found := previous[component.Name]; found && old.State == component.State && old.Message == component.Message {
 			component.LastTransitionTime = old.LastTransitionTime
 		} else {
 			component.LastTransitionTime = &now
 		}
 		components = append(components, component)
 	}
-	status.Components = components
+	status.InfraComponents = components
+	previousActions := make(map[string]apiv1alpha2.ActionBindingStatus, len(status.ActionBindings))
+	for _, action := range status.ActionBindings {
+		previousActions[action.Handler] = action
+	}
+	actions := make([]apiv1alpha2.ActionBindingStatus, 0, len(observed.ActionBindings))
+	for _, observedAction := range observed.ActionBindings {
+		action := apiv1alpha2.ActionBindingStatus{
+			Handler: observedAction.Handler, State: apiv1alpha2.ActionState(observedAction.State), Message: observedAction.Message,
+		}
+		currentGeneration := observedAction.ObservedSpecGeneration == sandbox.Generation ||
+			(observedAction.ObservedSpecGeneration == 0 && observed.AppliedGeneration == sandbox.Generation)
+		if !currentGeneration {
+			action.State = apiv1alpha2.ActionPending
+			action.Message = "Action Binding has not applied the current Sandbox generation"
+		}
+		old, found := previousActions[action.Handler]
+		samePublicState := found && old.State == action.State && old.Message == action.Message
+		// Fastlet owns the Binding lifecycle and can observe Ready -> Applying ->
+		// Ready between Controller polls. Prefer its newer transition time even
+		// when the final public state and message are unchanged. An observation
+		// from an older Spec generation must not advance or roll back the current
+		// Binding timestamp.
+		if currentGeneration && !observedAction.LastTransitionTime.IsZero() {
+			transition := metav1.NewTime(observedAction.LastTransitionTime)
+			if !found || old.LastTransitionTime == nil || transition.After(old.LastTransitionTime.Time) {
+				action.LastTransitionTime = &transition
+			}
+		}
+		if action.LastTransitionTime == nil {
+			if samePublicState {
+				action.LastTransitionTime = old.LastTransitionTime
+			} else {
+				action.LastTransitionTime = &now
+			}
+		}
+		actions = append(actions, action)
+	}
+	status.ActionBindings = actions
+	ready, reason, message := overallReady(sandbox, status)
+	if ready && observed.AppliedGeneration != sandbox.Generation {
+		ready, reason, message = false, "GenerationNotApplied", "Fastlet has not applied the current Sandbox generation"
+	}
+	setReadyCondition(status, sandbox.Generation, ready, reason, message)
 }
 
-func (o *Orchestrator) patchStatus(ctx context.Context, sandbox *apiv1alpha2.Sandbox, mutate func(*apiv1alpha2.SandboxStatus)) error {
-	key := client.ObjectKeyFromObject(sandbox)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var current apiv1alpha2.Sandbox
-		if err := o.Client.Get(ctx, key, &current); err != nil {
-			return err
+func setRuntimeStatus(status *apiv1alpha2.RuntimeStatus, state apiv1alpha2.RuntimeState, message string, now metav1.Time) {
+	if status.State != state || status.Message != message || status.LastTransitionTime == nil {
+		status.LastTransitionTime = &now
+	}
+	status.State, status.Message = state, message
+}
+
+func setDataPlaneStatus(status *apiv1alpha2.DataPlaneStatus, state apiv1alpha2.DataPlaneState, message string, now metav1.Time) {
+	if status.State != state || status.Message != message || status.LastTransitionTime == nil {
+		status.LastTransitionTime = &now
+	}
+	status.State, status.Message = state, message
+}
+
+func overallReady(sandbox *apiv1alpha2.Sandbox, status *apiv1alpha2.SandboxStatus) (bool, string, string) {
+	if status.Runtime.State != apiv1alpha2.RuntimeReady {
+		return false, "RuntimeNotReady", status.Runtime.Message
+	}
+	if status.DataPlane.State != apiv1alpha2.DataPlaneReady {
+		return false, "DataPlaneNotReady", status.DataPlane.Message
+	}
+	for _, component := range status.InfraComponents {
+		if component.State != apiv1alpha2.InfraComponentReady {
+			return false, "InfraComponentNotReady", component.Name + " is " + string(component.State)
 		}
-		if _, err := assignment.EffectiveAssignment(&current); err != nil {
-			return err
+	}
+	if len(status.ActionBindings) != len(sandbox.Spec.ActionBindings) {
+		return false, "ActionBindingNotReady", "Action Binding status has not converged"
+	}
+	for index, binding := range sandbox.Spec.ActionBindings {
+		observed := status.ActionBindings[index]
+		if observed.Handler != binding.Handler || observed.State != apiv1alpha2.ActionReady {
+			return false, "ActionBindingNotReady", binding.Handler + " is not Ready"
 		}
-		before := current.DeepCopy().Status
-		mutate(&current.Status)
-		if reflect.DeepEqual(before, current.Status) {
-			return nil
-		}
-		return o.Client.Status().Update(ctx, &current)
-	})
+	}
+	if status.ObservedGeneration != sandbox.Generation {
+		return false, "GenerationNotObserved", "Fastlet has not applied the current Sandbox generation"
+	}
+	return true, "Ready", "Runtime, data plane, Infra Components, and Action Bindings are Ready"
 }
 
 func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha2.Sandbox) (placement.FastletInfo, assignment.AssignmentEnvelope, fastletapi.SandboxIdentity, error) {
@@ -607,29 +632,7 @@ func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha2.Sandbox) (placement.F
 	}
 	envelope, err := assignment.EffectiveAssignment(sandbox)
 	if err != nil {
-		if !errors.Is(err, assignment.ErrAssignmentAnnotationMissing) || sandbox.Status.Assignment == nil {
-			return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, err
-		}
-		// Status-only objects are an upgrade bridge. Existing runtimes recover the
-		// same deterministic legacy identity; active reconcile persists it later.
-		legacyFastlet, ok := o.Registry.GetFastletByID(placement.FastletID(sandbox.Status.Assignment.FastletName))
-		if !ok || legacyFastlet.PodUID != sandbox.Status.Assignment.FastletPodUID || legacyFastlet.PodIP == "" {
-			return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, ErrAssignedFastletUnavailable
-		}
-		legacy, legacyErr := AssignmentForCandidate(
-			legacyFastlet, sandbox.Status.Assignment.Attempt,
-			max(sandbox.Status.InstanceGeneration, apiv1alpha2.InitialInstanceGeneration),
-			max(sandbox.Status.RouteGeneration, int64(1)), "legacy-"+string(sandbox.UID),
-		)
-		if legacyErr != nil {
-			return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, legacyErr
-		}
-		identity := fastletapi.SandboxIdentity{
-			RequestID: sandbox.Annotations[assignment.AnnotationRequestID], SandboxUID: string(sandbox.UID),
-			InstanceGeneration: legacy.InstanceGeneration, RuntimeInstanceID: legacy.RuntimeInstanceID,
-			AssignmentAttempt: legacy.Attempt, RouteGeneration: legacy.RouteGeneration, FastletPodUID: legacy.FastletPodUID,
-		}
-		return legacyFastlet, legacy, identity, nil
+		return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, err
 	}
 	if envelope == nil {
 		return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, ErrAssignedFastletUnavailable
@@ -641,7 +644,7 @@ func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha2.Sandbox) (placement.F
 		return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, ErrAssignedFastletUnavailable
 	}
 	identity := fastletapi.SandboxIdentity{
-		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], SandboxUID: string(sandbox.UID),
+		SandboxUID: string(sandbox.UID), Namespace: sandbox.Namespace, Name: sandbox.Name,
 		InstanceGeneration: envelope.InstanceGeneration, RuntimeInstanceID: envelope.RuntimeInstanceID,
 		AssignmentAttempt: envelope.Attempt, RouteGeneration: envelope.RouteGeneration, FastletPodUID: envelope.FastletPodUID,
 	}
@@ -658,7 +661,7 @@ func envMap(values []corev1.EnvVar) map[string]string {
 
 func IsCandidateRejection(err error) bool {
 	var failure *fastletapi.FastletError
-	if !errors.As(err, &failure) || failure.Outcome != fastletapi.OutcomeRejectedBeforeSideEffects {
+	if !errors.As(err, &failure) || fastletapi.CreateDispositionFromError(err) != fastletapi.CreateDispositionRejectedBeforeSideEffects {
 		return false
 	}
 	switch failure.Code {
@@ -685,11 +688,28 @@ func (o *Orchestrator) recordFeedback(id placement.FastletID, err error) {
 	o.Registry.RecordFeedback(id, placement.LocalFeedback{Code: failure.Code, ObservedAt: now})
 }
 
-func setCondition(status *apiv1alpha2.SandboxStatus, conditionType string, conditionStatus metav1.ConditionStatus, reason, message string) {
+func setReadyCondition(status *apiv1alpha2.SandboxStatus, generation int64, ready bool, reason, message string) {
+	conditionStatus := metav1.ConditionFalse
+	if ready {
+		conditionStatus = metav1.ConditionTrue
+	}
 	apiMeta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type: conditionType, Status: conditionStatus, Reason: reason, Message: message,
-		ObservedGeneration: 0, LastTransitionTime: metav1.Now(),
+		Type: ConditionReady, Status: conditionStatus, Reason: reason, Message: message,
+		ObservedGeneration: generation, LastTransitionTime: metav1.Now(),
 	})
+}
+
+func compileActionBindings(bindings []apiv1alpha2.ActionBinding) ([]fastletapi.ActionBindingInput, error) {
+	result := make([]fastletapi.ActionBindingInput, 0, len(bindings))
+	total := 0
+	for _, binding := range bindings {
+		total += len(binding.Input)
+		if len(binding.Input) > apiv1alpha2.MaxActionBindingInputBytes || total > apiv1alpha2.MaxSandboxActionBindingInputBytes {
+			return nil, fmt.Errorf("Action Binding inputs exceed configured size limits")
+		}
+		result = append(result, fastletapi.ActionBindingInput{Handler: binding.Handler, Input: binding.Input})
+	}
+	return result, nil
 }
 
 func IsNotFound(err error) bool {

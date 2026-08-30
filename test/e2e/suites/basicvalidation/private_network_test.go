@@ -63,21 +63,21 @@ func TestSandboxPrivateNetwork(t *testing.T) {
 			}
 			first = waitForAssignedSandbox(ctx, t, fixture, namespace, first.Name)
 			second = waitForAssignedSandbox(ctx, t, fixture, namespace, second.Name)
-			if first.Status.Assignment == nil || second.Status.Assignment == nil {
+			if first.Status.Placement.FastletName == "" || second.Status.Placement.FastletName == "" {
 				t.Fatalf("sandboxes have no authoritative assignment")
 			}
-			if first.Status.Assignment.FastletName != second.Status.Assignment.FastletName {
-				t.Fatalf("sandboxes were not placed on the same Fastlet: %s != %s", first.Status.Assignment.FastletName, second.Status.Assignment.FastletName)
+			if first.Status.Placement.FastletName != second.Status.Placement.FastletName {
+				t.Fatalf("sandboxes were not placed on the same Fastlet: %s != %s", first.Status.Placement.FastletName, second.Status.Placement.FastletName)
 			}
-			fastletPod := first.Status.Assignment.FastletName
-			fastletPodUID := first.Status.Assignment.FastletPodUID
-			if fastletPodUID == "" || second.Status.Assignment.FastletPodUID != fastletPodUID {
+			fastletPod := first.Status.Placement.FastletName
+			fastletPodUID := first.Status.Placement.FastletPodUID
+			if fastletPodUID == "" || second.Status.Placement.FastletPodUID != fastletPodUID {
 				t.Fatalf("sandboxes do not share a fenced Fastlet Pod UID")
 			}
 
 			waitForSandboxLog(ctx, t, namespace, fastletPod, sandboxIdentifier(first), "DNS_OK")
 			waitForSandboxLog(ctx, t, namespace, fastletPod, sandboxIdentifier(second), "DNS_OK")
-			states := waitForNetworkStates(ctx, t, namespace, fastletPod, fastletPodUID, sandboxIdentifier(first), sandboxIdentifier(second))
+			states := waitForNetworkStates(ctx, t, namespace, fastletPod, string(fastletPodUID), sandboxIdentifier(first), sandboxIdentifier(second))
 			firstState := states[sandboxIdentifier(first)]
 			secondState := states[sandboxIdentifier(second)]
 			if firstState.IP == secondState.IP {
@@ -97,13 +97,13 @@ func TestSandboxPrivateNetwork(t *testing.T) {
 			if err := fixture.WaitForSandboxDeleted(deleteCtx, types.NamespacedName{Namespace: namespace, Name: first.Name}); err != nil {
 				t.Fatalf("wait for first sandbox deletion: %v", err)
 			}
-			waitForNetworkStateAbsent(ctx, t, namespace, fastletPod, fastletPodUID, sandboxIdentifier(first))
+			waitForNetworkStateAbsent(ctx, t, namespace, fastletPod, string(fastletPodUID), sandboxIdentifier(first))
 			waitForSandboxHTTP(ctx, t, namespace, fastletPod, secondState.IP, second.Name)
 
 			initialRestartCount := fastletRestartCount(ctx, t, k8sClient, namespace, fastletPod)
 			_, _ = kubectl(ctx, "exec", "-n", namespace, fastletPod, "-c", "fastlet", "--", "kill", "1")
-			waitForFastletRestart(ctx, t, k8sClient, namespace, fastletPod, fastletPodUID, initialRestartCount)
-			states = waitForNetworkStates(ctx, t, namespace, fastletPod, fastletPodUID, sandboxIdentifier(second))
+			waitForFastletRestart(ctx, t, k8sClient, namespace, fastletPod, string(fastletPodUID), initialRestartCount)
+			states = waitForNetworkStates(ctx, t, namespace, fastletPod, string(fastletPodUID), sandboxIdentifier(second))
 			recovered := states[sandboxIdentifier(second)]
 			if recovered.ID != secondState.ID || recovered.IP != secondState.IP || recovered.NetNSName != secondState.NetNSName {
 				t.Fatalf("network descriptor changed across Fastlet restart: before=%+v after=%+v", secondState, recovered)

@@ -51,59 +51,39 @@ func (m *SandboxManager) signalReadinessChangedLocked() {
 	m.readinessChanged = make(chan struct{})
 }
 
-// WaitSandboxReady waits on manager state transitions rather than sampling
-// diagnostics. A named component is ready only after its health check passed
-// and the instance-fenced Fastlet Proxy route was published.
-func (m *SandboxManager) WaitSandboxReady(ctx context.Context, req *fastletapi.WaitSandboxReadyRequest) (*fastletapi.WaitSandboxReadyResponse, error) {
-	if req == nil || (req.ComponentName == "" && !req.DataPlane) || (req.ComponentName != "" && req.DataPlane) {
-		failure := fastletError(fastletapi.ErrorConflict, "exactly one readiness target is required", false)
-		return &fastletapi.WaitSandboxReadyResponse{Error: failure}, failure
-	}
-	if failure := m.validateIdentityTarget(&req.Identity); failure != nil {
-		return &fastletapi.WaitSandboxReadyResponse{Error: failure}, failure
+// waitUntilSandboxReady is the single Fastlet-local READY completion barrier.
+// It derives readiness from the complete current observation rather than
+// accepting a second caller-provided component or Binding selector.
+func (m *SandboxManager) waitUntilSandboxReady(ctx context.Context, identity fastletapi.SandboxIdentity, expectedGeneration int64) (*fastletapi.SandboxStatus, error) {
+	if failure := m.validateIdentityTarget(&identity); failure != nil {
+		return nil, failure
 	}
 	for {
 		m.mu.Lock()
-		metadata := m.sandboxes[req.Identity.SandboxUID]
+		metadata := m.sandboxes[identity.SandboxUID]
 		if metadata == nil {
 			m.mu.Unlock()
 			failure := fastletError(fastletapi.ErrorNotFound, "Sandbox is not managed by this Fastlet", false)
-			return &fastletapi.WaitSandboxReadyResponse{Error: failure}, failure
+			return nil, failure
 		}
-		if failure := validateIdentityFence(m.fastletPodUID, metadata, req.Identity); failure != nil {
+		if failure := validateIdentityFence(m.fastletPodUID, metadata, identity); failure != nil {
 			m.mu.Unlock()
-			return &fastletapi.WaitSandboxReadyResponse{Error: failure}, failure
+			return nil, failure
 		}
-		status := sandboxStatus(metadata)
-		ready := metadata.Phase == "running"
-		if req.ComponentName != "" {
-			ready = false
-			for _, component := range status.InfraDiagnostics {
-				if component.Component == req.ComponentName &&
-					component.State == string(apiv1alpha2.InfraComponentReady) &&
-					component.ObservedRouteGeneration == metadata.RouteGeneration {
-					ready = metadata.Phase == "running"
-					break
-				}
-			}
+		status := m.sandboxStatusLocked(metadata)
+		if m.actionManager != nil {
+			status.ActionBindings, status.AppliedGeneration = m.actionManager.Statuses(identity.SandboxUID)
 		}
+		ready := sandboxObservationReady(&status, metadata, expectedGeneration, m.routePublisher == nil || m.routeReady)
 		if ready {
 			m.mu.Unlock()
-			return &fastletapi.WaitSandboxReadyResponse{Sandbox: &status, Ready: true}, nil
+			return &status, nil
 		}
 		switch metadata.Phase {
 		case "terminating", "deleting", "delete-failed", "create-cleanup", "create-cleanup-failed":
 			m.mu.Unlock()
-			failure := fastletError(fastletapi.ErrorConflict, "Sandbox stopped before the requested data plane became ready", false)
-			return &fastletapi.WaitSandboxReadyResponse{Sandbox: &status, Error: failure}, failure
-		case "infra-unavailable", "route-unavailable":
-			m.mu.Unlock()
-			failure := fastletError(fastletapi.ErrorInfraUnavailable, "Sandbox data plane is temporarily unavailable", true)
-			return &fastletapi.WaitSandboxReadyResponse{Sandbox: &status, Error: failure}, failure
-		}
-		if req.NoWait {
-			m.mu.Unlock()
-			return &fastletapi.WaitSandboxReadyResponse{Sandbox: &status, Ready: false}, nil
+			failure := fastletError(fastletapi.ErrorConflict, "Sandbox stopped before overall Ready", false)
+			return &status, failure
 		}
 		changed := m.readinessChanged
 		if changed == nil {
@@ -118,6 +98,18 @@ func (m *SandboxManager) WaitSandboxReady(ctx context.Context, req *fastletapi.W
 		case <-changed:
 		}
 	}
+}
+
+func sandboxObservationReady(status *fastletapi.SandboxStatus, metadata *SandboxMetadata, expectedGeneration int64, routeReady bool) bool {
+	if status == nil || metadata == nil || metadata.Phase != "running" || !routeReady || status.AppliedGeneration < expectedGeneration {
+		return false
+	}
+	for _, component := range status.InfraComponents {
+		if component.State != string(apiv1alpha2.InfraComponentReady) || component.ObservedRouteGeneration != metadata.Config.Identity.RouteGeneration {
+			return false
+		}
+	}
+	return actionStatusesReady(status.ActionBindings)
 }
 
 func (m *SandboxManager) SandboxDiagnostics(req *fastletapi.SandboxDiagnosticsRequest) (*fastletapi.SandboxDiagnosticsResponse, error) {
@@ -155,7 +147,7 @@ func (m *SandboxManager) SandboxDiagnostics(req *fastletapi.SandboxDiagnosticsRe
 	}
 	response := &fastletapi.SandboxDiagnosticsResponse{Events: append([]fastletapi.SandboxDiagnosticEvent(nil), events...)}
 	if metadata != nil {
-		status := sandboxStatus(metadata)
+		status := m.sandboxStatusLocked(metadata)
 		response.Sandbox = &status
 	}
 	return response, nil

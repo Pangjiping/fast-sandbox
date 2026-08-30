@@ -28,10 +28,11 @@ import (
 )
 
 const (
-	FinalizerName          = "sandbox.fast.io/cleanup"
-	DefaultRequeueInterval = 5 * time.Second
-	DeletionPollInterval   = time.Second
-	DataPlanePollInterval  = 100 * time.Millisecond
+	FinalizerName           = "sandbox.fast.io/cleanup"
+	DefaultRequeueInterval  = 5 * time.Second
+	ReadyRequeueInterval    = 30 * time.Second
+	DeletionPollInterval    = time.Second
+	ObservationPollInterval = time.Second
 )
 
 type SandboxReconciler struct {
@@ -65,17 +66,15 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-	if sandbox.Status.HasCondition(orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonExpired) {
-		return ctrl.Result{}, nil
-	}
-	if sandbox.Spec.ExpireTime != nil && !time.Now().Before(sandbox.Spec.ExpireTime.Time) {
-		return r.reconcileExpiration(ctx, orchestrator, &sandbox)
-	}
 	if resetPending(&sandbox) {
 		return r.reconcileReset(ctx, orchestrator, &sandbox)
 	}
-	if sandbox.Status.HasCondition(orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost) && sandbox.Spec.FailurePolicy != apiv1alpha2.FailurePolicyAutoRecreate {
-		return ctrl.Result{}, nil
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	if expirationPending(&sandbox, now) {
+		return r.reconcileExpiration(ctx, orchestrator, &sandbox)
 	}
 	return r.reconcileEnsure(ctx, orchestrator, &sandbox)
 }
@@ -83,17 +82,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 func sandboxObservabilityIdentity(sandbox *apiv1alpha2.Sandbox) observability.Identity {
 	identity := observability.Identity{
 		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], Namespace: sandbox.Namespace, SandboxName: sandbox.Name,
-		SandboxUID: string(sandbox.UID), InstanceGeneration: sandbox.Status.InstanceGeneration, RouteGeneration: sandbox.Status.RouteGeneration,
+		SandboxUID: string(sandbox.UID), InstanceGeneration: sandbox.Status.Runtime.Generation, RouteGeneration: sandbox.Status.DataPlane.RouteGeneration,
 	}
-	if sandbox.Status.Assignment != nil {
-		identity.FastletPodUID = sandbox.Status.Assignment.FastletPodUID
-		identity.AssignmentAttempt = sandbox.Status.Assignment.Attempt
+	if sandbox.Status.Placement.FastletName != "" {
+		identity.FastletPodUID = string(sandbox.Status.Placement.FastletPodUID)
+		identity.AssignmentAttempt = sandbox.Status.Placement.Attempt
 	}
 	return identity
 }
 
 func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox) (ctrl.Result, error) {
-	if sandbox.Status.Assignment != nil {
+	if sandbox.Status.Placement.FastletName != "" {
 		lost, err := r.assignedPodLost(ctx, sandbox)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -105,7 +104,7 @@ func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *o
 	assigned, newlyAssigned, err := orchestrator.AssignDeclarative(ctx, sandbox, string(sandbox.UID))
 	if err != nil {
 		if errors.Is(err, orchestration.ErrNoCandidate) {
-			_ = orchestrator.MarkPending(ctx, sandbox, "NoCandidate", "No Ready Fastlet currently accepts this Pool/profile")
+			_ = r.markPending(ctx, sandbox, "NoCandidate", "No Ready Fastlet currently accepts this Pool/profile")
 			return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
 		}
 		if errors.Is(err, orchestration.ErrAssignedFastletUnavailable) {
@@ -116,16 +115,17 @@ func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *o
 		}
 		return ctrl.Result{}, err
 	}
-	if err := orchestrator.ReconcileRuntime(ctx, assigned); err != nil {
-		if errors.Is(err, orchestration.ErrDataPlaneInProgress) {
-			return ctrl.Result{RequeueAfter: DataPlanePollInterval}, nil
+
+	var observed *fastletapi.SandboxStatus
+	if newlyAssigned {
+		observed, err = orchestrator.EnsureRuntime(ctx, assigned)
+	} else {
+		observed, err = orchestrator.ObserveRuntime(ctx, assigned)
+		if orchestration.IsNotFound(err) {
+			observed, err = orchestrator.EnsureRuntime(ctx, assigned)
 		}
-		if errors.Is(err, orchestration.ErrDataPlaneUnavailable) {
-			return ctrl.Result{RequeueAfter: DeletionPollInterval}, nil
-		}
-		if errors.Is(err, orchestration.ErrRuntimeInProgress) || errors.Is(err, orchestration.ErrUnknownFastletOutcome) {
-			return ctrl.Result{RequeueAfter: DeletionPollInterval}, nil
-		}
+	}
+	if err != nil {
 		if errors.Is(err, orchestration.ErrAssignedFastletUnavailable) {
 			if statusErr := r.markAssignedFastletUnavailable(ctx, assigned); statusErr != nil {
 				return ctrl.Result{}, statusErr
@@ -147,39 +147,121 @@ func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *o
 				// before the new identity is sent to Fastlet.
 				return ctrl.Result{Requeue: true}, nil
 			}
-			_ = orchestrator.MarkPending(ctx, assigned, "FastletRejected", err.Error())
+			_ = r.markPending(ctx, assigned, "FastletRejected", err.Error())
 			return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
 		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, err
+		var failure *fastletapi.FastletError
+		if errors.As(err, &failure) && failure.Code == fastletapi.ErrorInProgress {
+			_ = r.markCreating(ctx, assigned, failure.Message)
+			return ctrl.Result{RequeueAfter: ObservationPollInterval}, nil
+		}
+		if errors.Is(err, orchestration.ErrUnknownFastletOutcome) {
+			// The durable assignment is retained. A later local observation or
+			// idempotent Ensure resolves whether the runtime was created.
+			return ctrl.Result{RequeueAfter: ObservationPollInterval}, nil
+		}
+		return ctrl.Result{RequeueAfter: ObservationPollInterval}, err
+	}
+	if observed == nil {
+		return ctrl.Result{RequeueAfter: ObservationPollInterval}, orchestration.ErrUnknownFastletOutcome
+	}
+
+	// Initial Create already registers Bindings. Rehydrate desired state only
+	// when Inspect proves that this Fastlet has not accepted the current Spec.
+	if observed.Runtime.State == fastletapi.RuntimeStateReady && observed.AcceptedGeneration < assigned.Generation {
+		observed, err = orchestrator.ReconcileBindings(ctx, assigned)
+		if err != nil {
+			if errors.Is(err, orchestration.ErrInvalidActionDesiredState) {
+				if statusErr := r.markActionDesiredStateInvalid(ctx, assigned, err.Error()); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+			}
+			return ctrl.Result{RequeueAfter: ObservationPollInterval}, err
+		}
+	}
+	if err := r.patchStatus(ctx, assigned, func(status *apiv1alpha2.SandboxStatus) {
+		orchestration.ProjectObservedStatus(status, assigned, observed)
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 	if newlyAssigned {
-		klog.FromContext(ctx).Info("Sandbox assigned and runtime ensured", "sandbox", sandbox.Name, "fastlet", assigned.Status.Assignment.FastletName)
+		klog.FromContext(ctx).Info("Sandbox assigned and runtime ensured", "sandbox", sandbox.Name, "fastlet", assigned.Status.Placement.FastletName)
 	}
-	return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+	if observationReady(assigned, observed) {
+		return ctrl.Result{RequeueAfter: ReadyRequeueInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: ObservationPollInterval}, nil
 }
 
 func (r *SandboxReconciler) assignedPodLost(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (bool, error) {
-	if sandbox == nil || sandbox.Status.Assignment == nil {
+	if sandbox == nil || sandbox.Status.Placement.FastletName == "" {
 		return false, nil
 	}
-	assignment := sandbox.Status.Assignment
+	placement := sandbox.Status.Placement
 	var pod corev1.Pod
-	err := r.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: assignment.FastletName}, &pod)
+	err := r.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: placement.FastletName}, &pod)
 	if apierrors.IsNotFound(err) {
 		return true, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return string(pod.UID) != assignment.FastletPodUID || pod.DeletionTimestamp != nil, nil
+	return pod.UID != placement.FastletPodUID || pod.DeletionTimestamp != nil, nil
 }
 
 func (r *SandboxReconciler) markAssignedFastletUnavailable(ctx context.Context, sandbox *apiv1alpha2.Sandbox) error {
 	return r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStateUnavailable
-		status.DataPlaneState = apiv1alpha2.ObservedStateUnavailable
-		setSandboxCondition(status, orchestration.ConditionRuntimeReady, metav1.ConditionFalse, "FastletRegistryPending", "The assigned Fastlet Pod still exists, but its local registry endpoint is temporarily unavailable")
+		setControllerStates(status, apiv1alpha2.RuntimeUnavailable, apiv1alpha2.DataPlaneUnavailable, "The assigned Fastlet Pod still exists, but its local registry endpoint is temporarily unavailable")
+		setSandboxReadyCondition(status, sandbox.Generation, "FastletRegistryPending", "The assigned Fastlet Pod still exists, but its local registry endpoint is temporarily unavailable")
 	})
+}
+
+func (r *SandboxReconciler) markPending(ctx context.Context, sandbox *apiv1alpha2.Sandbox, reason, message string) error {
+	return r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		setControllerStates(status, apiv1alpha2.RuntimePending, apiv1alpha2.DataPlanePending, message)
+		setSandboxReadyCondition(status, sandbox.Generation, reason, message)
+	})
+}
+
+func (r *SandboxReconciler) markCreating(ctx context.Context, sandbox *apiv1alpha2.Sandbox, message string) error {
+	return r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		setControllerStates(status, apiv1alpha2.RuntimeCreating, apiv1alpha2.DataPlanePending, message)
+		setSandboxReadyCondition(status, sandbox.Generation, "RuntimeCreating", message)
+	})
+}
+
+func (r *SandboxReconciler) markActionDesiredStateInvalid(ctx context.Context, sandbox *apiv1alpha2.Sandbox, message string) error {
+	return r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		now := metav1.Now()
+		status.ActionBindings = make([]apiv1alpha2.ActionBindingStatus, 0, len(sandbox.Spec.ActionBindings))
+		for _, binding := range sandbox.Spec.ActionBindings {
+			transition := now
+			status.ActionBindings = append(status.ActionBindings, apiv1alpha2.ActionBindingStatus{
+				Handler: binding.Handler, State: apiv1alpha2.ActionFailed, LastTransitionTime: &transition, Message: message,
+			})
+		}
+		setSandboxReadyCondition(status, sandbox.Generation, "ActionBindingInvalid", message)
+	})
+}
+
+func observationReady(sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) bool {
+	if sandbox == nil || observed == nil || observed.Runtime.State != fastletapi.RuntimeStateReady ||
+		observed.DataPlane.State != fastletapi.DataPlaneStateReady || observed.AppliedGeneration != sandbox.Generation ||
+		len(observed.ActionBindings) != len(sandbox.Spec.ActionBindings) {
+		return false
+	}
+	for _, component := range observed.InfraComponents {
+		if component.State != string(apiv1alpha2.InfraComponentReady) {
+			return false
+		}
+	}
+	for index, binding := range sandbox.Spec.ActionBindings {
+		if observed.ActionBindings[index].Handler != binding.Handler || observed.ActionBindings[index].State != string(apiv1alpha2.ActionReady) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *SandboxReconciler) reconcilePodLost(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox) (ctrl.Result, error) {
@@ -191,25 +273,22 @@ func (r *SandboxReconciler) reconcilePodLost(ctx context.Context, orchestrator *
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	if sandbox.Status.Recovery == nil || sandbox.Status.Recovery.FastletPodUID != sandbox.Status.Assignment.FastletPodUID {
+	if sandbox.Status.Placement.Recovery == nil {
 		deadline := now.Add(timeout)
 		err := r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-			status.RuntimeState = apiv1alpha2.ObservedStateUnavailable
-			status.DataPlaneState = apiv1alpha2.ObservedStateUnavailable
-			status.Recovery = &apiv1alpha2.SandboxRecoveryStatus{
-				FastletPodUID: sandbox.Status.Assignment.FastletPodUID,
-				DetectedAt:    metav1.NewTime(now), Deadline: metav1.NewTime(deadline),
+			setControllerStates(status, apiv1alpha2.RuntimeUnavailable, apiv1alpha2.DataPlaneUnavailable, "The assigned Fastlet Pod is lost; recovery delay is active")
+			status.Placement.Recovery = &apiv1alpha2.RecoveryStatus{
+				DetectedAt: metav1.NewTime(now), Deadline: metav1.NewTime(deadline),
 			}
-			setSandboxCondition(status, orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost, "The assigned Fastlet Pod is lost; recovery delay is active")
-			setSandboxCondition(status, orchestration.ConditionDataPlaneReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost, "The assigned Fastlet Pod is lost; recovery delay is active")
+			setSandboxReadyCondition(status, sandbox.Generation, orchestration.ReasonFastletPodLost, "The assigned Fastlet Pod is lost; recovery delay is active")
 		})
 		return ctrl.Result{RequeueAfter: timeout}, err
 	}
-	if now.Before(sandbox.Status.Recovery.Deadline.Time) {
-		return ctrl.Result{RequeueAfter: sandbox.Status.Recovery.Deadline.Sub(now)}, nil
+	if now.Before(sandbox.Status.Placement.Recovery.Deadline.Time) {
+		return ctrl.Result{RequeueAfter: sandbox.Status.Placement.Recovery.Deadline.Sub(now)}, nil
 	}
 	if sandbox.Spec.FailurePolicy == apiv1alpha2.FailurePolicyAutoRecreate {
-		if sandbox.Status.Assignment != nil {
+		if sandbox.Status.Placement.FastletName != "" {
 			if _, err := orchestrator.ClearAssignment(ctx, sandbox, true); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -217,10 +296,8 @@ func (r *SandboxReconciler) reconcilePodLost(ctx context.Context, orchestrator *
 		return ctrl.Result{Requeue: true}, nil
 	}
 	err := r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStateUnavailable
-		status.DataPlaneState = apiv1alpha2.ObservedStateUnavailable
-		setSandboxCondition(status, orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost, "The assigned Fastlet Pod is lost and Manual failure policy requires operator action")
-		setSandboxCondition(status, orchestration.ConditionDataPlaneReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost, "The assigned Fastlet Pod is lost and Manual failure policy requires operator action")
+		setControllerStates(status, apiv1alpha2.RuntimeUnavailable, apiv1alpha2.DataPlaneUnavailable, "The assigned Fastlet Pod is lost and Manual failure policy requires operator action")
+		setSandboxReadyCondition(status, sandbox.Generation, orchestration.ReasonFastletPodLost, "The assigned Fastlet Pod is lost and Manual failure policy requires operator action")
 	})
 	return ctrl.Result{}, err
 }
@@ -235,8 +312,8 @@ func (r *SandboxReconciler) reconcileDeletion(ctx context.Context, orchestrator 
 	}
 	if !done {
 		_ = r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-			status.RuntimeState = apiv1alpha2.ObservedStateDraining
-			status.DataPlaneState = apiv1alpha2.ObservedStateDraining
+			setControllerStates(status, apiv1alpha2.RuntimeStopping, apiv1alpha2.DataPlaneDraining, "Sandbox deletion is in progress")
+			setSandboxReadyCondition(status, sandbox.Generation, "Deleting", "Sandbox deletion is in progress")
 		})
 		return ctrl.Result{RequeueAfter: DeletionPollInterval}, nil
 	}
@@ -255,24 +332,22 @@ func (r *SandboxReconciler) reconcileExpiration(ctx context.Context, orchestrato
 	if err != nil || !done {
 		return ctrl.Result{RequeueAfter: DeletionPollInterval}, err
 	}
-	if sandbox.Status.Assignment != nil {
-		cleared, err := orchestrator.ClearAssignment(ctx, sandbox, false)
+	if sandbox.Status.Placement.FastletName != "" {
+		cleared, err := orchestrator.ClearAssignment(ctx, sandbox, true)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		sandbox = cleared
 	}
 	err = r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		status.RuntimeState = apiv1alpha2.ObservedStateStopped
-		status.DataPlaneState = apiv1alpha2.ObservedStateStopped
-		setSandboxCondition(status, orchestration.ConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonExpired, "Sandbox desired lifetime expired")
-		setSandboxCondition(status, orchestration.ConditionDataPlaneReady, metav1.ConditionFalse, orchestration.ReasonExpired, "Sandbox desired lifetime expired")
+		setControllerStates(status, apiv1alpha2.RuntimeStopped, apiv1alpha2.DataPlaneUnavailable, "Sandbox desired lifetime expired")
+		setSandboxReadyCondition(status, sandbox.Generation, orchestration.ReasonExpired, "Sandbox desired lifetime expired")
 	})
 	return ctrl.Result{}, err
 }
 
 func (r *SandboxReconciler) reconcileReset(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox) (ctrl.Result, error) {
-	if sandbox.Status.Assignment != nil {
+	if sandbox.Status.Placement.FastletName != "" {
 		done, err := r.ensureRuntimeDeleted(ctx, orchestrator, sandbox)
 		if err != nil || !done {
 			return ctrl.Result{RequeueAfter: DeletionPollInterval}, err
@@ -284,14 +359,12 @@ func (r *SandboxReconciler) reconcileReset(ctx context.Context, orchestrator *or
 		sandbox = cleared
 	}
 	if err := r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
-		if status.InstanceGeneration < apiv1alpha2.InitialInstanceGeneration {
-			status.InstanceGeneration = apiv1alpha2.InitialInstanceGeneration
+		if status.Runtime.Generation < apiv1alpha2.InitialInstanceGeneration {
+			status.Runtime.Generation = apiv1alpha2.InitialInstanceGeneration
 		}
-		status.AcceptedResetRevision = sandbox.Spec.ResetRevision.DeepCopy()
-		status.RuntimeState = apiv1alpha2.ObservedStatePending
-		status.DataPlaneState = apiv1alpha2.ObservedStatePending
-		setSandboxCondition(status, orchestration.ConditionRuntimeReady, metav1.ConditionFalse, "ResetRequested", "Sandbox reset is pending")
-		setSandboxCondition(status, orchestration.ConditionDataPlaneReady, metav1.ConditionFalse, "ResetRequested", "Sandbox reset is pending")
+		status.Runtime.AcceptedResetRevision = sandbox.Spec.ResetRevision.DeepCopy()
+		setControllerStates(status, apiv1alpha2.RuntimePending, apiv1alpha2.DataPlanePending, "Sandbox reset is pending")
+		setSandboxReadyCondition(status, sandbox.Generation, "ResetRequested", "Sandbox reset is pending")
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -299,7 +372,7 @@ func (r *SandboxReconciler) reconcileReset(ctx context.Context, orchestrator *or
 }
 
 func (r *SandboxReconciler) ensureRuntimeDeleted(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox) (bool, error) {
-	if sandbox.Status.Assignment == nil {
+	if sandbox.Status.Placement.FastletName == "" {
 		return true, nil
 	}
 	gone, inspectErr := orchestrator.RuntimeGone(ctx, sandbox)
@@ -334,12 +407,23 @@ func resetPending(sandbox *apiv1alpha2.Sandbox) bool {
 	if sandbox.Spec.ResetRevision == nil {
 		return false
 	}
-	return sandbox.Status.AcceptedResetRevision == nil || sandbox.Spec.ResetRevision.After(sandbox.Status.AcceptedResetRevision.Time)
+	return sandbox.Status.Runtime.AcceptedResetRevision == nil || sandbox.Spec.ResetRevision.After(sandbox.Status.Runtime.AcceptedResetRevision.Time)
+}
+
+// expirationPending treats a reset revision newer than the absolute expiry as
+// an explicit recovery override. A later ExpireTime still takes effect because
+// it is newer than the accepted reset revision.
+func expirationPending(sandbox *apiv1alpha2.Sandbox, now time.Time) bool {
+	if sandbox == nil || sandbox.Spec.ExpireTime == nil || now.Before(sandbox.Spec.ExpireTime.Time) {
+		return false
+	}
+	acceptedReset := sandbox.Status.Runtime.AcceptedResetRevision
+	return acceptedReset == nil || !acceptedReset.After(sandbox.Spec.ExpireTime.Time)
 }
 
 func explicitReschedule(err error) bool {
 	var failure *fastletapi.FastletError
-	if !errors.As(err, &failure) || failure.Outcome != fastletapi.OutcomeRejectedBeforeSideEffects {
+	if !errors.As(err, &failure) || fastletapi.CreateDispositionFromError(err) != fastletapi.CreateDispositionRejectedBeforeSideEffects {
 		return false
 	}
 	switch failure.Code {
@@ -359,6 +443,12 @@ func (r *SandboxReconciler) patchStatus(ctx context.Context, sandbox *apiv1alpha
 		}
 		before := current.DeepCopy().Status
 		mutate(&current.Status)
+		current.Status.ObservedGeneration = current.Generation
+		for index := range current.Status.Conditions {
+			if current.Status.Conditions[index].Type == orchestration.ConditionReady {
+				current.Status.Conditions[index].ObservedGeneration = current.Generation
+			}
+		}
 		if reflect.DeepEqual(before, current.Status) {
 			return nil
 		}
@@ -366,19 +456,32 @@ func (r *SandboxReconciler) patchStatus(ctx context.Context, sandbox *apiv1alpha
 	})
 }
 
-func setSandboxCondition(status *apiv1alpha2.SandboxStatus, conditionType string, conditionStatus metav1.ConditionStatus, reason, message string) {
+func setSandboxReadyCondition(status *apiv1alpha2.SandboxStatus, generation int64, reason, message string) {
 	apiMeta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type: conditionType, Status: conditionStatus, Reason: reason, Message: message, LastTransitionTime: metav1.Now(),
+		Type: orchestration.ConditionReady, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+		ObservedGeneration: generation, LastTransitionTime: metav1.Now(),
 	})
 }
 
+func setControllerStates(status *apiv1alpha2.SandboxStatus, runtimeState apiv1alpha2.RuntimeState, dataPlaneState apiv1alpha2.DataPlaneState, message string) {
+	now := metav1.Now()
+	if status.Runtime.State != runtimeState || status.Runtime.Message != message || status.Runtime.LastTransitionTime == nil {
+		status.Runtime.LastTransitionTime = &now
+	}
+	status.Runtime.State, status.Runtime.Message = runtimeState, message
+	if status.DataPlane.State != dataPlaneState || status.DataPlane.Message != message || status.DataPlane.LastTransitionTime == nil {
+		status.DataPlane.LastTransitionTime = &now
+	}
+	status.DataPlane.State, status.DataPlane.Message = dataPlaneState, message
+}
+
 func (r *SandboxReconciler) SetupWithManager(manager ctrl.Manager) error {
-	if err := manager.GetFieldIndexer().IndexField(context.Background(), &apiv1alpha2.Sandbox{}, "status.assignment.fastletName", func(object client.Object) []string {
+	if err := manager.GetFieldIndexer().IndexField(context.Background(), &apiv1alpha2.Sandbox{}, "status.placement.fastletName", func(object client.Object) []string {
 		sandbox := object.(*apiv1alpha2.Sandbox)
-		if sandbox.Status.Assignment == nil {
+		if sandbox.Status.Placement.FastletName == "" {
 			return nil
 		}
-		return []string{sandbox.Status.Assignment.FastletName}
+		return []string{sandbox.Status.Placement.FastletName}
 	}); err != nil {
 		return fmt.Errorf("index Sandbox assignment: %w", err)
 	}
@@ -393,7 +496,7 @@ func (r *SandboxReconciler) mapPodToSandboxes(ctx context.Context, object client
 		return nil
 	}
 	var list apiv1alpha2.SandboxList
-	if err := r.List(ctx, &list, client.InNamespace(object.GetNamespace()), client.MatchingFields{"status.assignment.fastletName": object.GetName()}); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(object.GetNamespace()), client.MatchingFields{"status.placement.fastletName": object.GetName()}); err != nil {
 		return nil
 	}
 	result := make([]ctrl.Request, 0, len(list.Items))

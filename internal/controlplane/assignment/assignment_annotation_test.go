@@ -36,12 +36,11 @@ func TestEffectiveAssignmentFailsClosedOnProjectionMismatch(t *testing.T) {
 	sandbox := &apiv1alpha2.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "default"}}
 	envelope := testAssignmentEnvelope()
 	require.NoError(t, SetAssignmentAnnotation(sandbox, envelope))
-	wrong := envelope.StatusAssignment()
+	wrong := envelope.StatusPlacement()
 	wrong.FastletPodUID = "pod-b"
-	sandbox.Status = apiv1alpha2.SandboxStatus{
-		Assignment: &wrong, AssignmentAttempt: envelope.Attempt,
-		InstanceGeneration: envelope.InstanceGeneration, RouteGeneration: envelope.RouteGeneration,
-	}
+	sandbox.Status = apiv1alpha2.SandboxStatus{Placement: wrong,
+		Runtime:   apiv1alpha2.RuntimeStatus{Generation: envelope.InstanceGeneration},
+		DataPlane: apiv1alpha2.DataPlaneStatus{RouteGeneration: envelope.RouteGeneration}}
 
 	_, err := EffectiveAssignment(sandbox)
 	require.ErrorIs(t, err, ErrAssignmentProjectionConflict)
@@ -60,8 +59,8 @@ func TestProjectAssignmentToStatusAndCASReassignment(t *testing.T) {
 
 	projected, err := ProjectAssignmentToStatus(context.Background(), k8sClient, types.NamespacedName{Namespace: "default", Name: "sandbox-a"})
 	require.NoError(t, err)
-	require.Equal(t, first.StatusAssignment(), *projected.Status.Assignment)
-	require.Equal(t, first.InstanceGeneration, projected.Status.InstanceGeneration)
+	require.Equal(t, first.StatusPlacement(), projected.Status.Placement)
+	require.Equal(t, first.InstanceGeneration, projected.Status.Runtime.Generation)
 
 	second := first
 	second.FastletName, second.FastletPodUID, second.NodeName = "fastlet-b", "pod-b", "node-b"
@@ -80,8 +79,8 @@ func TestProjectAssignmentToStatusAndCASReassignment(t *testing.T) {
 }
 
 func TestEffectiveAssignmentRejectsStatusOnlyPlacement(t *testing.T) {
-	assignment := testAssignmentEnvelope().StatusAssignment()
-	sandbox := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Assignment: &assignment}}
+	placement := testAssignmentEnvelope().StatusPlacement()
+	sandbox := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Placement: placement}}
 	_, err := EffectiveAssignment(sandbox)
 	require.ErrorIs(t, err, ErrAssignmentAnnotationMissing)
 }

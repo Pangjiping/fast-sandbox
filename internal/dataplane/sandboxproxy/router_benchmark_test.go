@@ -23,13 +23,7 @@ func BenchmarkIndexResolveParallel(b *testing.B) {
 		podUID := "pod-" + suffix
 		index.UpsertSandbox(&apiv1alpha2.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: sandboxUID, Namespace: "default", UID: types.UID(sandboxUID)},
-			Status: apiv1alpha2.SandboxStatus{
-				DataPlaneState:  apiv1alpha2.ObservedStateReady,
-				RouteGeneration: int64(routeIndex + 1),
-				Assignment: &apiv1alpha2.SandboxAssignment{
-					FastletName: podUID, FastletPodUID: podUID, Attempt: int64(routeIndex + 1),
-				},
-			},
+			Status:     readyRouteStatus(podUID, podUID, int64(routeIndex+1), int64(routeIndex+1)),
 		})
 		index.UpsertPod(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: podUID, Namespace: "default", UID: types.UID(podUID)},

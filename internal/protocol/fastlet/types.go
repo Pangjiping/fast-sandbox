@@ -1,6 +1,9 @@
 package fastlet
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type UserProcessStartSource string
 
@@ -11,18 +14,9 @@ const (
 	UserProcessStartUnknown               UserProcessStartSource = "unknown"
 )
 
-// SandboxSpec describes the desired state of a sandbox on a fastlet.
+// SandboxSpec is the desired runtime configuration sent to a Fastlet. Runtime
+// identity and fencing are owned exclusively by SandboxIdentity.
 type SandboxSpec struct {
-	SandboxID           string            `json:"sandboxId"`
-	RequestID           string            `json:"requestId,omitempty"`
-	ClaimUID            string            `json:"claimUid"`
-	ClaimNamespace      string            `json:"claimNamespace,omitempty"`
-	ClaimName           string            `json:"claimName"`
-	InstanceGeneration  int64             `json:"instanceGeneration,omitempty"`
-	RuntimeInstanceID   string            `json:"runtimeInstanceId,omitempty"`
-	AssignmentAttempt   int64             `json:"assignmentAttempt,omitempty"`
-	RouteGeneration     int64             `json:"routeGeneration,omitempty"`
-	FastletPodUID       string            `json:"fastletPodUid,omitempty"`
 	Image               string            `json:"image"`
 	CPU                 string            `json:"cpu,omitempty"`
 	Memory              string            `json:"memory,omitempty"`
@@ -34,28 +28,112 @@ type SandboxSpec struct {
 	Args                []string          `json:"args,omitempty"`
 	Env                 map[string]string `json:"env,omitempty"`
 	WorkingDir          string            `json:"workingDir,omitempty"`
-	// Network fields are Fastlet-local runtime material. They are populated
-	// only after admission and are never accepted from the public/RPC API.
-	NetworkSlotID        string `json:"-"`
-	NetworkNamespacePath string `json:"-"`
-	NetworkIP            string `json:"-"`
-	NetworkGateway       string `json:"-"`
-	NetworkDNSPath       string `json:"-"`
 }
 
-// SandboxStatus represents the observed state of a sandbox on a fastlet.
+// RuntimeSandboxConfig is the stable runtime identity and desired
+// configuration. The two authorities remain explicitly nested so runtime
+// implementations cannot silently merge or overwrite duplicate fields.
+type RuntimeSandboxConfig struct {
+	Identity SandboxIdentity `json:"identity"`
+	Spec     SandboxSpec     `json:"spec"`
+}
+
+// EnsureSandboxInput represents one idempotent Ensure call. RequestID
+// correlates the invocation but is not part of the stable runtime identity.
+type EnsureSandboxInput struct {
+	RequestID string               `json:"requestId,omitempty"`
+	Sandbox   RuntimeSandboxConfig `json:"sandbox"`
+}
+
+// NetworkAllocation is produced by a runtime driver after admission. It is
+// never accepted as caller-owned desired configuration.
+type NetworkAllocation struct {
+	SlotID        string `json:"slotId,omitempty"`
+	NamespacePath string `json:"namespacePath,omitempty"`
+	IP            string `json:"ip,omitempty"`
+	Gateway       string `json:"gateway,omitempty"`
+	DNSPath       string `json:"dnsPath,omitempty"`
+	PrivateCIDR   string `json:"privateCidr,omitempty"`
+	HostVeth      string `json:"hostVeth,omitempty"`
+}
+
+// RuntimeAllocation contains resources actually assigned to one runtime.
+// Allocation is observed/persisted state, separate from RuntimeSandboxConfig.
+type RuntimeAllocation struct {
+	Network NetworkAllocation `json:"network"`
+}
+
+type RuntimeState string
+
+const (
+	RuntimeStateUnknown     RuntimeState = "Unknown"
+	RuntimeStatePending     RuntimeState = "Pending"
+	RuntimeStateCreating    RuntimeState = "Creating"
+	RuntimeStateReady       RuntimeState = "Ready"
+	RuntimeStateStopping    RuntimeState = "Stopping"
+	RuntimeStateStopped     RuntimeState = "Stopped"
+	RuntimeStateFailed      RuntimeState = "Failed"
+	RuntimeStateUnavailable RuntimeState = "Unavailable"
+)
+
+type DataPlaneState string
+
+const (
+	DataPlaneStateUnknown     DataPlaneState = "Unknown"
+	DataPlaneStatePending     DataPlaneState = "Pending"
+	DataPlaneStatePublishing  DataPlaneState = "Publishing"
+	DataPlaneStateReady       DataPlaneState = "Ready"
+	DataPlaneStateDraining    DataPlaneState = "Draining"
+	DataPlaneStateFailed      DataPlaneState = "Failed"
+	DataPlaneStateUnavailable DataPlaneState = "Unavailable"
+)
+
+type RuntimeObservation struct {
+	State   RuntimeState `json:"state"`
+	Message string       `json:"message,omitempty"`
+}
+
+type DataPlaneObservation struct {
+	State   DataPlaneState `json:"state"`
+	Message string         `json:"message,omitempty"`
+}
+
+// SandboxStatus is a structured Fastlet observation. Phase remains an
+// implementation detail of SandboxManager and never crosses the wire.
 type SandboxStatus struct {
 	SandboxID          string                     `json:"sandboxId"`
-	ClaimUID           string                     `json:"claimUid"`
 	InstanceGeneration int64                      `json:"instanceGeneration,omitempty"`
 	RuntimeInstanceID  string                     `json:"runtimeInstanceId,omitempty"`
 	AssignmentAttempt  int64                      `json:"assignmentAttempt,omitempty"`
 	RouteGeneration    int64                      `json:"routeGeneration,omitempty"`
-	Phase              string                     `json:"phase"`
-	Message            string                     `json:"message,omitempty"`
-	InfraDiagnostics   []InfraComponentDiagnostic `json:"infraDiagnostics,omitempty"`
+	AcceptedGeneration int64                      `json:"acceptedGeneration,omitempty"`
+	AppliedGeneration  int64                      `json:"appliedGeneration,omitempty"`
+	Runtime            RuntimeObservation         `json:"runtime"`
+	DataPlane          DataPlaneObservation       `json:"dataPlane"`
+	InfraComponents    []InfraComponentDiagnostic `json:"infraComponents,omitempty"`
+	ActionBindings     []ActionBindingStatus      `json:"actionBindings,omitempty"`
 	CreatedAt          int64                      `json:"createdAt"` // Unix timestamp for orphan cleanup
 }
+
+// ActionBindingStatus is Fastlet-local observed state. The digest and fence
+// fields are intentionally internal and are not projected to the public
+// FastPath or Sandbox CRD status.
+type ActionBindingStatus struct {
+	Handler                    string    `json:"handler"`
+	State                      string    `json:"state"`
+	ObservedSpecGeneration     int64     `json:"observedSpecGeneration,omitempty"`
+	DesiredInputDigest         string    `json:"desiredInputDigest,omitempty"`
+	AppliedInputDigest         string    `json:"appliedInputDigest,omitempty"`
+	ObservedAssignmentAttempt  int64     `json:"observedAssignmentAttempt,omitempty"`
+	ObservedInstanceGeneration int64     `json:"observedInstanceGeneration,omitempty"`
+	ObservedNetworkGeneration  int64     `json:"observedNetworkGeneration,omitempty"`
+	LastTransitionTime         time.Time `json:"lastTransitionTime,omitempty"`
+	Message                    string    `json:"message,omitempty"`
+}
+
+// SandboxActionStatus is retained as an internal source compatibility alias
+// while the controller and runtime drivers migrate to ActionBindingStatus.
+type SandboxActionStatus = ActionBindingStatus
 
 type InfraComponentDiagnostic struct {
 	Component               string `json:"component"`
@@ -70,14 +148,13 @@ type InfraComponentDiagnostic struct {
 type FastletStatus struct {
 	FastletID           string           `json:"fastletId"`
 	NodeName            string           `json:"nodeName"`
-	Capacity            int              `json:"capacity"`
-	Images              []string         `json:"images,omitempty"`
 	SandboxStatuses     []SandboxStatus  `json:"sandboxStatuses"`
 	Admission           AdmissionStatus  `json:"admission"`
 	RuntimeReady        bool             `json:"runtimeReady"`
 	Recovering          bool             `json:"recovering"`
 	Draining            bool             `json:"draining"`
 	FastletPodUID       string           `json:"fastletPodUid,omitempty"`
+	RuntimeProfileHash  string           `json:"runtimeProfileHash,omitempty"`
 	ResourceProfileHash string           `json:"resourceProfileHash,omitempty"`
 	InfraRevision       string           `json:"infraRevision,omitempty"`
 	InfraReady          bool             `json:"infraReady"`
@@ -104,28 +181,17 @@ const (
 	ErrorRuntimeUnavailable FastletErrorCode = "RuntimeUnavailable"
 	ErrorNetworkUnavailable FastletErrorCode = "NetworkUnavailable"
 	ErrorInfraUnavailable   FastletErrorCode = "InfraUnavailable"
+	ErrorActionUnavailable  FastletErrorCode = "ActionUnavailable"
 	ErrorUnknownOutcome     FastletErrorCode = "UnknownOutcome"
 	ErrorNotFound           FastletErrorCode = "NotFound"
 	ErrorGenerationFenced   FastletErrorCode = "GenerationFenced"
 	ErrorProfileMismatch    FastletErrorCode = "ProfileMismatch"
 )
 
-type FastletOutcome string
-
-const (
-	OutcomeRejectedBeforeSideEffects FastletOutcome = "RejectedBeforeSideEffects"
-	OutcomeInProgress                FastletOutcome = "InProgress"
-	OutcomeCreated                   FastletOutcome = "Created"
-	OutcomeFailedNeedsCleanup        FastletOutcome = "FailedNeedsCleanup"
-	OutcomeUnknown                   FastletOutcome = "Unknown"
-	OutcomeGenerationFenced          FastletOutcome = "GenerationFenced"
-)
-
 type FastletError struct {
 	Code      FastletErrorCode `json:"code"`
 	Message   string           `json:"message"`
 	Retryable bool             `json:"retryable"`
-	Outcome   FastletOutcome   `json:"outcome"`
 	Cause     error            `json:"-"`
 }
 
@@ -144,8 +210,9 @@ func (e *FastletError) Error() string {
 }
 
 type SandboxIdentity struct {
-	RequestID          string `json:"requestId,omitempty"`
 	SandboxUID         string `json:"sandboxUid"`
+	Namespace          string `json:"namespace"`
+	Name               string `json:"name"`
 	InstanceGeneration int64  `json:"instanceGeneration"`
 	RuntimeInstanceID  string `json:"runtimeInstanceId"`
 	AssignmentAttempt  int64  `json:"assignmentAttempt"`
@@ -162,17 +229,68 @@ type AdmissionStatus struct {
 }
 
 type CreateSandboxRequest struct {
-	Identity SandboxIdentity `json:"identity"`
-	Sandbox  SandboxSpec     `json:"sandbox"`
+	RequestID      string               `json:"requestId,omitempty"`
+	Identity       SandboxIdentity      `json:"identity"`
+	Sandbox        SandboxSpec          `json:"sandbox"`
+	SpecGeneration int64                `json:"specGeneration,omitempty"`
+	ActionBindings []ActionBindingInput `json:"actionBindings,omitempty"`
+	Completion     CreateCompletion     `json:"completion,omitempty"`
 }
 
+type CreateCompletion string
+
+const (
+	CreateCompletionReady        CreateCompletion = "READY"
+	CreateCompletionRuntimeReady CreateCompletion = "RUNTIME_READY"
+)
+
+type CreateDisposition string
+
+const (
+	CreateDispositionCreated                   CreateDisposition = "CREATED"
+	CreateDispositionExisting                  CreateDisposition = "EXISTING"
+	CreateDispositionInProgress                CreateDisposition = "IN_PROGRESS"
+	CreateDispositionRejectedBeforeSideEffects CreateDisposition = "REJECTED_BEFORE_SIDE_EFFECTS"
+	CreateDispositionFailedNeedsCleanup        CreateDisposition = "FAILED_NEEDS_CLEANUP"
+	CreateDispositionUnknown                   CreateDisposition = "UNKNOWN"
+	CreateDispositionGenerationFenced          CreateDisposition = "GENERATION_FENCED"
+)
+
 type CreateSandboxResponse struct {
-	Accepted   bool            `json:"accepted"`
-	Created    bool            `json:"created"`
-	InProgress bool            `json:"inProgress"`
-	Sandbox    *SandboxStatus  `json:"sandbox,omitempty"`
-	Admission  AdmissionStatus `json:"admission"`
-	Error      *FastletError   `json:"error,omitempty"`
+	Disposition CreateDisposition `json:"disposition"`
+	Sandbox     *SandboxStatus    `json:"sandbox,omitempty"`
+	Admission   AdmissionStatus   `json:"admission"`
+	Error       *FastletError     `json:"error,omitempty"`
+}
+
+// CreateCallError attaches the response's single disposition to a decoded
+// Fastlet error without duplicating it in the wire error object.
+type CreateCallError struct {
+	Disposition CreateDisposition
+	Failure     *FastletError
+}
+
+func (e *CreateCallError) Error() string {
+	if e == nil || e.Failure == nil {
+		return "Fastlet Create failed"
+	}
+	return e.Failure.Error()
+}
+
+func (e *CreateCallError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Failure
+}
+
+func CreateDispositionFromError(err error) CreateDisposition {
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if failure, ok := current.(*CreateCallError); ok {
+			return failure.Disposition
+		}
+	}
+	return CreateDispositionUnknown
 }
 
 type InspectSandboxRequest struct {
@@ -184,13 +302,30 @@ type InspectSandboxResponse struct {
 	Error   *FastletError  `json:"error,omitempty"`
 }
 
-type DeleteSandboxV2Request struct {
+type DeleteSandboxRequest struct {
 	Identity SandboxIdentity `json:"identity"`
 }
 
-type DeleteSandboxV2Response struct {
-	Accepted bool          `json:"accepted"`
-	Error    *FastletError `json:"error,omitempty"`
+type DeleteSandboxResponse struct {
+	Error *FastletError `json:"error,omitempty"`
+}
+
+type ActionBindingInput struct {
+	Handler string `json:"handler"`
+	Input   string `json:"input"`
+}
+
+// ReconcileBindingsRequest carries persisted desired Binding state from
+// the Sandbox Controller. Lifecycle Hooks are always dispatched by Fastlet.
+type ReconcileBindingsRequest struct {
+	Identity       SandboxIdentity      `json:"identity"`
+	SpecGeneration int64                `json:"specGeneration"`
+	ActionBindings []ActionBindingInput `json:"actionBindings"`
+}
+
+type ReconcileBindingsResponse struct {
+	Sandbox *SandboxStatus `json:"sandbox,omitempty"`
+	Error   *FastletError  `json:"error,omitempty"`
 }
 
 type SetDrainingRequest struct {
@@ -233,22 +368,6 @@ type SandboxDiagnosticsResponse struct {
 	Error   *FastletError            `json:"error,omitempty"`
 }
 
-// WaitSandboxReadyRequest blocks on Fastlet-owned state transitions. It is
-// deliberately separate from diagnostics so callers do not poll the Fastlet
-// to discover Infra Component or route readiness.
-type WaitSandboxReadyRequest struct {
-	Identity      SandboxIdentity `json:"identity"`
-	ComponentName string          `json:"componentName,omitempty"`
-	DataPlane     bool            `json:"dataPlane,omitempty"`
-	NoWait        bool            `json:"noWait,omitempty"`
-}
-
-type WaitSandboxReadyResponse struct {
-	Sandbox *SandboxStatus `json:"sandbox,omitempty"`
-	Ready   bool           `json:"ready"`
-	Error   *FastletError  `json:"error,omitempty"`
-}
-
 type CacheCursor struct {
 	Epoch     string `json:"epoch,omitempty"`
 	Revision  uint64 `json:"revision,omitempty"`
@@ -269,8 +388,6 @@ type HeartbeatRequest struct {
 
 type HeartbeatResponse struct {
 	FastletStatus
-	Sequence    uint64             `json:"sequence"`
-	ObservedAt  time.Time          `json:"observedAt"`
-	Cache       CacheSnapshot      `json:"cache"`
-	Diagnostics RuntimeDiagnostics `json:"diagnostics"`
+	Sequence uint64        `json:"sequence"`
+	Cache    CacheSnapshot `json:"cache"`
 }

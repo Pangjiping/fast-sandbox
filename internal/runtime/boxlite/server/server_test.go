@@ -20,8 +20,10 @@ func TestServerLifecycleAndStrictContract(t *testing.T) {
 	server := &Server{Backend: backend}
 
 	request := boxliteprotocol.EnsureRequest{
-		Namespace: "ns", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{SandboxID: "uid-a", ClaimNamespace: "ns", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1},
+		FastletNamespace: "ns", TunnelGuestPort: 19090,
+		Input: fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{Identity: fastletapi.SandboxIdentity{
+			SandboxUID: "uid-a", Namespace: "ns", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1,
+		}}},
 	}
 	response := doJSONHandler(t, server, http.MethodPut, "/v1/boxes/uid-a", request)
 	require.Equal(t, http.StatusOK, response.Code)
@@ -76,8 +78,10 @@ func (b *fakeBackend) Capabilities(context.Context) boxliteprotocol.Capabilities
 }
 
 func (b *fakeBackend) Ensure(_ context.Context, request boxliteprotocol.EnsureRequest) (boxliteprotocol.Box, error) {
-	box := boxliteprotocol.Box{Sandbox: request.Sandbox, BoxID: "box-" + request.Sandbox.SandboxID, Phase: "running", CreatedAt: 1}
-	b.boxes[request.Sandbox.SandboxID] = box
+	config := request.Input.Sandbox
+	sandboxUID := config.Identity.SandboxUID
+	box := boxliteprotocol.Box{Config: config, BoxID: "box-" + sandboxUID, Phase: "running", CreatedAt: 1}
+	b.boxes[sandboxUID] = box
 	return box, nil
 }
 
@@ -101,7 +105,7 @@ func (b *fakeBackend) Delete(_ context.Context, id string) error {
 func (b *fakeBackend) List(_ context.Context, namespace string) ([]boxliteprotocol.Box, error) {
 	boxes := make([]boxliteprotocol.Box, 0, len(b.boxes))
 	for _, box := range b.boxes {
-		if namespace == "" || box.Sandbox.ClaimNamespace == namespace {
+		if namespace == "" || box.Config.Identity.Namespace == namespace {
 			boxes = append(boxes, box)
 		}
 	}

@@ -11,30 +11,53 @@ from fast_sandbox.proto import fastpath_pb2
 class FakeFastPathStub:
     def __init__(self):
         self.create_request = None
+        self.delete_requests = []
         self.resolve_requests = []
+        self.update_requests = []
         self.metadata = []
 
     def CreateSandbox(self, request, metadata=()):
         self.metadata.append(tuple(metadata))
         self.create_request = request
-        return fastpath_pb2.SandboxInfo(
-            sandbox_uid="uid-a",
-            sandbox_name=request.request_id,
-            namespace=request.namespace,
-            runtime_state="Ready",
+        return fastpath_pb2.CreateSandboxResponse(
+            sandbox=fastpath_pb2.SandboxInfo(
+                identity=fastpath_pb2.SandboxIdentity(
+                    uid="uid-a", name=request.request_id, namespace=request.namespace
+                ),
+                runtime=fastpath_pb2.RuntimeInfo(state=fastpath_pb2.RUNTIME_STATE_READY),
+                ready=True,
+            ),
+            generation=1,
+            completion=request.completion,
         )
 
     def GetSandbox(self, request, metadata=()):
         self.metadata.append(tuple(metadata))
-        return fastpath_pb2.SandboxInfo(
-            sandbox_uid="uid-a",
-            sandbox_name=request.sandbox_name,
-            namespace=request.namespace,
+        return fastpath_pb2.GetSandboxResponse(
+            sandbox=fastpath_pb2.SandboxInfo(
+                identity=fastpath_pb2.SandboxIdentity(
+                    uid="uid-a",
+                    name=request.sandbox.namespaced_name.name,
+                    namespace=request.sandbox.namespaced_name.namespace,
+                )
+            ),
+            generation=1,
         )
 
-    def DeleteSandbox(self, _request, metadata=()):
+    def DeleteSandbox(self, request, metadata=()):
         self.metadata.append(tuple(metadata))
-        return fastpath_pb2.DeleteResponse(success=True)
+        self.delete_requests.append(request)
+        return fastpath_pb2.DeleteResponse()
+
+    def UpdateSandbox(self, request, metadata=()):
+        self.metadata.append(tuple(metadata))
+        self.update_requests.append(request)
+        return fastpath_pb2.UpdateSandboxResponse(
+            sandbox=fastpath_pb2.SandboxIdentity(
+                uid="uid-a", name=request.sandbox.namespaced_name.name
+            ),
+            committed_generation=2,
+        )
 
     def ResolveEndpoint(self, request, metadata=()):
         self.metadata.append(tuple(metadata))
@@ -47,10 +70,11 @@ class FakeFastPathStub:
             path = f"/v2/sandboxes/uid-a/ports/{port}"
         return fastpath_pb2.ResolveEndpointResponse(
             sandbox_uid="uid-a",
-            target=request.target,
-            component_name=component_name,
-            protocol="HTTP",
-            resolved_port=port,
+            endpoint=fastpath_pb2.ResolvedEndpoint(
+                component_name=component_name,
+                protocol="HTTP",
+                port=port,
+            ),
             proxy_endpoint=f"http://sandbox-proxy.svc{path}",
             required_headers={
                 "X-Fast-Sandbox-Route-Credential": "route-token"
@@ -77,6 +101,7 @@ class SDKTest(unittest.TestCase):
             metadata={"owner": "team-a"},
             failure_policy="AutoRecreate",
             recovery_timeout_seconds=120,
+            action_bindings=[("egress", '{"policy":{"defaultAction":"deny"}}')],
         )
         self.assertEqual("sandbox-a", sandbox.name)
         request = self.stub.create_request
@@ -86,8 +111,43 @@ class SDKTest(unittest.TestCase):
         self.assertEqual({"owner": "team-a"}, dict(request.metadata))
         self.assertEqual(fastpath_pb2.AUTO_RECREATE, request.failure_policy)
         self.assertEqual(120, request.recovery_timeout_seconds)
+        self.assertEqual("egress", request.action_bindings[0].handler)
+        self.assertEqual(
+            '{"policy":{"defaultAction":"deny"}}',
+            request.action_bindings[0].input,
+        )
+        self.assertEqual(fastpath_pb2.CREATE_COMPLETION_READY, request.completion)
 
-    def test_named_component_waits_and_preserves_route_path(self):
+    def test_atomic_ordered_action_binding_replace(self):
+        sandbox = self.client.get("sandbox-a")
+        sandbox.replace_action_bindings(
+            [("audit", "enabled: true"), ("egress", "null")]
+        )
+        request = self.stub.update_requests[-1]
+        self.assertEqual(1, request.expected_generation)
+        self.assertEqual(
+            ["audit", "egress"],
+            [item.handler for item in request.action_bindings.items],
+        )
+        self.assertEqual("null", request.action_bindings.items[1].input)
+        self.assertEqual(2, sandbox.generation)
+
+    def test_sandbox_methods_fence_replacement_uid(self):
+        sandbox = self.client.get("sandbox-a")
+        self.assertTrue(sandbox.delete())
+        request = self.stub.delete_requests[-1]
+        self.assertEqual("sandbox-a", request.sandbox.namespaced_name.name)
+        self.assertEqual("uid-a", request.sandbox.expected_uid)
+
+    def test_action_input_must_be_an_opaque_string(self):
+        with self.assertRaises(TypeError):
+            self.client.create(
+                "sandbox-a",
+                "alpine",
+                action_bindings=[("egress", {"policy": "deny"})],
+            )
+
+    def test_named_component_preserves_route_path(self):
         route = self.client.get("sandbox-a").resolve_component("execd")
         self.assertEqual(
             "http://proxy.test:18080/prefix/v2/sandboxes/uid-a/components/execd",
@@ -99,8 +159,6 @@ class SDKTest(unittest.TestCase):
         )
         request = self.stub.resolve_requests[-1]
         self.assertEqual("execd", request.target.component_name)
-        self.assertTrue(request.wait_until_ready)
-        self.assertEqual(30_000, request.wait_timeout_millis)
         self.assertEqual("tenant-a", request.sandbox.namespaced_name.namespace)
 
     def test_raw_port_does_not_claim_component_readiness(self):
@@ -108,7 +166,6 @@ class SDKTest(unittest.TestCase):
         self.assertEqual(8080, route.resolved_port)
         request = self.stub.resolve_requests[-1]
         self.assertEqual(8080, request.target.port)
-        self.assertFalse(request.wait_until_ready)
 
     def test_optional_opentelemetry_context_reaches_grpc(self):
         def inject(carrier):

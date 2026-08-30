@@ -127,7 +127,7 @@ func (s *Server) handleBox(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, &Error{Code: boxliteprotocol.ErrorInvalid, Message: err.Error(), Cause: err})
 			return
 		}
-		if ensure.Sandbox.SandboxID != id {
+		if ensure.Input.Sandbox.Identity.SandboxUID != id {
 			writeError(writer, &Error{Code: boxliteprotocol.ErrorInvalid, Message: "path and Sandbox UID do not match"})
 			return
 		}

@@ -25,10 +25,7 @@ func (c *fakeEndpointControl) ResolveEndpoint(_ context.Context, request *fastpa
 	}
 	return &fastpathv2.ResolveEndpointResponse{
 		SandboxUid:      "uid-a",
-		Target:          request.Target,
-		ComponentName:   componentName,
-		Protocol:        "HTTP",
-		ResolvedPort:    port,
+		Endpoint:        &fastpathv2.ResolvedEndpoint{ComponentName: componentName, Protocol: "HTTP", Port: port},
 		ProxyEndpoint:   "http://sandbox-proxy.svc" + path,
 		RequiredHeaders: map[string]string{"X-Fast-Sandbox-Route-Credential": "route-token"}, RouteGeneration: 3,
 	}, nil
@@ -43,8 +40,6 @@ func TestEndpointResolverPreservesRoutePathWhenAuthorityIsOverridden(t *testing.
 	require.Equal(t, "tenant-a", control.resolveRequest.GetSandbox().GetNamespacedName().GetNamespace())
 	require.Equal(t, "sandbox-a", control.resolveRequest.GetSandbox().GetNamespacedName().GetName())
 	require.Equal(t, "execd", control.resolveRequest.GetTarget().GetComponentName())
-	require.True(t, control.resolveRequest.GetWaitUntilReady())
-	require.Equal(t, int32(30_000), control.resolveRequest.GetWaitTimeoutMillis())
 	require.Equal(t, "http://127.0.0.1:18080/proxy/v2/sandboxes/uid-a/components/execd", route.Endpoint.String())
 	require.Equal(t, "route-token", route.RequiredHeaders.Get("X-Fast-Sandbox-Route-Credential"))
 
@@ -53,13 +48,12 @@ func TestEndpointResolverPreservesRoutePathWhenAuthorityIsOverridden(t *testing.
 	require.Equal(t, "http://127.0.0.1:18080/proxy/v2/sandboxes/uid-a/components/execd/command", requestURL.String())
 }
 
-func TestEndpointResolverDoesNotApplyComponentWaitToRawPort(t *testing.T) {
+func TestEndpointResolverUsesNonBlockingRawPortResolution(t *testing.T) {
 	control := &fakeEndpointControl{}
 	resolver := &EndpointResolver{Control: control}
 	_, err := resolver.Resolve(context.Background(), SandboxRef{Name: "sandbox-a"}, PortTarget(8080))
 	require.NoError(t, err)
-	require.False(t, control.resolveRequest.GetWaitUntilReady())
-	require.Zero(t, control.resolveRequest.GetWaitTimeoutMillis())
+	require.Equal(t, uint32(8080), control.resolveRequest.GetTarget().GetPort())
 }
 
 func TestEndpointResolverRejectsMismatchedRouteIdentity(t *testing.T) {
@@ -73,6 +67,6 @@ type mismatchedEndpointControl struct{ *fakeEndpointControl }
 
 func (c mismatchedEndpointControl) ResolveEndpoint(ctx context.Context, request *fastpathv2.ResolveEndpointRequest, options ...grpc.CallOption) (*fastpathv2.ResolveEndpointResponse, error) {
 	response, err := c.fakeEndpointControl.ResolveEndpoint(ctx, request, options...)
-	response.ComponentName = "other"
+	response.Endpoint.ComponentName = "other"
 	return response, err
 }

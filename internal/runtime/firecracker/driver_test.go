@@ -182,7 +182,7 @@ type driverFixture struct {
 	killCalls   []int
 	stateRoot   string
 	manager     *fastletnetwork.Manager
-	sandboxSpec fastletapi.SandboxSpec
+	sandboxSpec fastletapi.RuntimeSandboxConfig
 }
 
 func newDriverFixture(t *testing.T) *driverFixture {
@@ -218,13 +218,22 @@ func newDriverFixture(t *testing.T) *driverFixture {
 	}
 	driver.SetNetworkManager(fixture.manager)
 	fixture.driver = driver
-	fixture.sandboxSpec = fastletapi.SandboxSpec{
-		SandboxID: "sandbox-1", ClaimUID: "claim-1", ClaimName: "sandbox-1", ClaimNamespace: "tenant-a",
-		InstanceGeneration: 1, RuntimeInstanceID: "runtime-1", AssignmentAttempt: 1,
-		FastletPodUID: "pod-1", Image: "example.com/app:v1", CPU: "2", Memory: "1Gi",
-		RuntimeProfileHash: "hash", ResourceProfileHash: "r-hash",
+	fixture.sandboxSpec = fastletapi.RuntimeSandboxConfig{
+		Spec: fastletapi.SandboxSpec{
+			Image: "example.com/app:v1", CPU: "2", Memory: "1Gi",
+			RuntimeProfileHash: "hash", ResourceProfileHash: "r-hash",
+		},
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "sandbox-1", Name: "sandbox-1", Namespace: "tenant-a",
+			InstanceGeneration: 1, RuntimeInstanceID: "runtime-1", AssignmentAttempt: 1, FastletPodUID: "pod-1"},
 	}
 	return fixture
+}
+
+func ensureInput(config *fastletapi.RuntimeSandboxConfig) *fastletapi.EnsureSandboxInput {
+	if config == nil {
+		return nil
+	}
+	return &fastletapi.EnsureSandboxInput{RequestID: "test-request", Sandbox: *config}
 }
 
 func (f *driverFixture) prepareCachedImage(t *testing.T, image string) {
@@ -308,12 +317,12 @@ func (fakeFileInfoForTest) Sys() any           { return nil }
 
 func TestEnsureSandboxDeliversInfraComponents(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
 	infraJSON := filepath.Join(t.TempDir(), "infra.json")
 	require.NoError(t, os.WriteFile(infraJSON, []byte(`{"version":1}`), 0o400))
-	fixture.driver.prepareInfra = func(context.Context, *fastletapi.SandboxSpec) (fastletinfra.PreparedInstance, error) {
+	fixture.driver.prepareInfra = func(context.Context, *fastletapi.RuntimeSandboxConfig) (fastletinfra.PreparedInstance, error) {
 		return fastletinfra.PreparedInstance{
 			ConfigHostPath: infraJSON,
 			Mounts: []fastletinfra.Mount{
@@ -327,7 +336,7 @@ func TestEnsureSandboxDeliversInfraComponents(t *testing.T) {
 	}
 	fixture.driver.infraMgr = &fastletinfra.Manager{} // enable the infra path; prepareInfra is faked
 
-	metadata, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	metadata, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	require.Len(t, metadata.InfraServices, 1)
 	require.Equal(t, uint32(44772), metadata.InfraServices[0].Port)
@@ -348,10 +357,10 @@ func TestEnsureSandboxDeliversInfraComponents(t *testing.T) {
 
 func TestEnsureSandboxInfraFailureReleasesResources(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	fixture.driver.prepareInfra = func(context.Context, *fastletapi.SandboxSpec) (fastletinfra.PreparedInstance, error) {
+	fixture.driver.prepareInfra = func(context.Context, *fastletapi.RuntimeSandboxConfig) (fastletinfra.PreparedInstance, error) {
 		return fastletinfra.PreparedInstance{}, errors.New("plan revision mismatch")
 	}
 	root := t.TempDir()
@@ -360,7 +369,7 @@ func TestEnsureSandboxInfraFailureReleasesResources(t *testing.T) {
 	fixture.driver.infraMgr, err = fastletinfra.NewManagerWithConfig(fastletinfra.ManagerConfig{Store: store, Resolver: fakeResolver{}})
 	require.NoError(t, err)
 
-	_, err = fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err = fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.ErrorIs(t, err, ErrInfraUnavailable)
 	require.Empty(t, fixture.launcher.started)
 	require.Equal(t, 0, fixture.manager.Snapshot().Bound)
@@ -376,15 +385,18 @@ func (fakeResolver) Prepare(context.Context, infracatalog.ArtifactSource, *fastl
 
 func TestEnsureSandboxBootsVM(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	metadata, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	metadata, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	require.Equal(t, "sandbox-1", metadata.ContainerID)
 	require.Equal(t, 4242, metadata.PID)
 	require.Equal(t, string(PhaseRunning), metadata.Phase)
 	require.Empty(t, metadata.InfraServices)
+	require.Equal(t, "sandbox-1", metadata.Config.Identity.SandboxUID)
+	require.Equal(t, "172.30.0.2", metadata.Allocation.Network.IP)
+	require.NotEmpty(t, metadata.Allocation.Network.SlotID)
 
 	require.Len(t, fixture.launcher.started, 1)
 	require.Equal(t, "/usr/local/bin/firecracker", fixture.launcher.started[0][0])
@@ -407,6 +419,7 @@ func TestEnsureSandboxBootsVM(t *testing.T) {
 	state, err := loadState(directory)
 	require.NoError(t, err)
 	require.Equal(t, PhaseRunning, state.Phase)
+	require.Equal(t, metadata.Allocation, state.Allocation, "network allocation must be durable driver state")
 
 	instanceRootfs := filepath.Join(directory, instanceRootfsName)
 	content, err := os.ReadFile(instanceRootfs)
@@ -416,10 +429,10 @@ func TestEnsureSandboxBootsVM(t *testing.T) {
 
 func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	metadata, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	metadata, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	require.Equal(t, string(PhaseRunning), metadata.Phase)
 
@@ -434,7 +447,7 @@ func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 	// explicit PATCH /vm resume.
 	loads := fixture.server.recordedSnapshotLoads()
 	require.Len(t, loads, 1)
-	imageDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image))
+	imageDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Spec.Image))
 	require.Equal(t, filepath.Join(imageDir, vmstateSnapshotName), loads[0].SnapshotPath)
 	require.Equal(t, "File", loads[0].MemBackend.BackendType)
 	require.Equal(t, filepath.Join(imageDir, memorySnapshotName), loads[0].MemBackend.BackendPath)
@@ -446,19 +459,21 @@ func TestEnsureSandboxRestoresGoldenSnapshot(t *testing.T) {
 
 func TestEnsureSandboxRestoreMachineConfigFromManifest(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
 	// The fixture manifest records {vcpu: 2, memory: 1Gi}; the fixture spec
 	// requests the same so restore succeeds with the manifest machine.
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 
 	// A request memory below the snapshot memory fails restore explicitly.
-	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), fixture.sandboxSpec.SandboxID))
+	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), fixture.sandboxSpec.Identity.SandboxUID))
+	require.Eventually(t, func() bool { return fixture.manager.Snapshot().Clean == 1 }, time.Second, time.Millisecond,
+		"network slot replenishment is asynchronous after delete")
 	small := fixture.sandboxSpec
-	small.Memory = "256Mi"
-	_, err = fixture.driver.EnsureSandbox(context.Background(), &small)
+	small.Spec.Memory = "256Mi"
+	_, err = fixture.driver.EnsureSandbox(context.Background(), ensureInput(&small))
 	require.ErrorIs(t, err, ErrInvalidConfig)
 	require.Contains(t, err.Error(), "below the template snapshot memory")
 }
@@ -468,11 +483,11 @@ func TestEnsureSandboxMissingSnapshotFilesReleasesSlot(t *testing.T) {
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
 	// Only the rootfs exists; the golden snapshot set is incomplete.
-	dir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image))
+	dir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Spec.Image))
 	require.NoError(t, os.MkdirAll(dir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, rootfsImageName), []byte("rootfs-image-data"), 0o640))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.ErrorIs(t, err, ErrImageNotReady)
 	require.Empty(t, fixture.launcher.started)
 	require.Equal(t, 0, fixture.manager.Snapshot().Bound)
@@ -480,15 +495,45 @@ func TestEnsureSandboxMissingSnapshotFilesReleasesSlot(t *testing.T) {
 
 func TestEnsureSandboxIsIdempotent(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	first, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	firstInput := ensureInput(&fixture.sandboxSpec)
+	firstInput.RequestID = "invocation-1"
+	first, err := fixture.driver.EnsureSandbox(context.Background(), firstInput)
 	require.NoError(t, err)
-	second, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	secondInput := ensureInput(&fixture.sandboxSpec)
+	secondInput.RequestID = "invocation-2"
+	second, err := fixture.driver.EnsureSandbox(context.Background(), secondInput)
 	require.NoError(t, err)
 	require.Equal(t, first.ContainerID, second.ContainerID)
 	require.Len(t, fixture.launcher.started, 1)
+}
+
+func TestEnsureSandboxReplacesDifferentRuntimeIdentity(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	first, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	require.NoError(t, err)
+
+	replacement := fixture.sandboxSpec
+	replacement.Identity.RuntimeInstanceID = "runtime-2"
+	replacement.Identity.AssignmentAttempt = 2
+	replacement.Identity.RouteGeneration = 2
+	second, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&replacement))
+	require.NoError(t, err)
+	require.Equal(t, replacement.Identity, second.Config.Identity)
+	require.Equal(t, first.Allocation.Network.SlotID, second.Allocation.Network.SlotID)
+	require.Len(t, fixture.launcher.started, 2)
+	require.Equal(t, 1, fixture.manager.Snapshot().Bound)
+
+	directory, err := sandboxDir(fixture.stateRoot, replacement.Identity.SandboxUID)
+	require.NoError(t, err)
+	persisted, err := loadState(directory)
+	require.NoError(t, err)
+	require.Equal(t, replacement.Identity, persisted.Config.Identity)
 }
 
 func TestEnsureSandboxValidatesIdentity(t *testing.T) {
@@ -496,8 +541,8 @@ func TestEnsureSandboxValidatesIdentity(t *testing.T) {
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
 	spec := fixture.sandboxSpec
-	spec.AssignmentAttempt = 0
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &spec)
+	spec.Identity.AssignmentAttempt = 0
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&spec))
 	require.ErrorIs(t, err, ErrInvalidConfig)
 
 	_, err = fixture.driver.EnsureSandbox(context.Background(), nil)
@@ -508,7 +553,7 @@ func TestEnsureSandboxMissingImageReleasesSlot(t *testing.T) {
 	fixture := newDriverFixture(t)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.ErrorIs(t, err, ErrImageNotReady)
 	require.Empty(t, fixture.launcher.started)
 	require.Equal(t, 0, fixture.manager.Snapshot().Bound)
@@ -516,14 +561,14 @@ func TestEnsureSandboxMissingImageReleasesSlot(t *testing.T) {
 
 func TestEnsureSandboxCleansStaleRecord(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
 	// Plant a stale record whose process is dead.
 	directory, err := ensureSandboxDir(fixture.stateRoot, "sandbox-1")
 	require.NoError(t, err)
 	require.NoError(t, saveState(directory, &SandboxState{
-		Spec: fixture.sandboxSpec, Phase: PhaseRunning, PID: 999, APIAddress: filepath.Join(directory, "dead.sock"),
+		Config: fixture.sandboxSpec, Phase: PhaseRunning, PID: 999, APIAddress: filepath.Join(directory, "dead.sock"),
 	}))
 	fixture.driver.probeProcess = func(pid int) error {
 		if pid == 999 {
@@ -532,7 +577,7 @@ func TestEnsureSandboxCleansStaleRecord(t *testing.T) {
 		return nil
 	}
 
-	metadata, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	metadata, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	require.Equal(t, "sandbox-1", metadata.ContainerID)
 	require.Len(t, fixture.launcher.started, 1)
@@ -541,10 +586,10 @@ func TestEnsureSandboxCleansStaleRecord(t *testing.T) {
 
 func TestInspectSandbox(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 
 	metadata, err := fixture.driver.InspectSandbox(context.Background(), "sandbox-1")
@@ -557,10 +602,10 @@ func TestInspectSandbox(t *testing.T) {
 
 func TestDeleteSandboxIsIdempotent(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), "sandbox-1"))
 	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), "sandbox-1"))
@@ -574,17 +619,17 @@ func TestDeleteSandboxIsIdempotent(t *testing.T) {
 
 func TestListManagedSandboxesFiltersNamespace(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	fixture.driver.SetNamespace("tenant-a")
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 
 	managed, err := fixture.driver.ListManagedSandboxes(context.Background())
 	require.NoError(t, err)
 	require.Len(t, managed, 1)
-	require.Equal(t, "sandbox-1", managed[0].SandboxID)
+	require.Equal(t, "sandbox-1", managed[0].Config.Identity.SandboxUID)
 
 	fixture.driver.SetNamespace("tenant-b")
 	managed, err = fixture.driver.ListManagedSandboxes(context.Background())
@@ -600,7 +645,7 @@ func TestRecoverRuntimeResourcesCleansDeadVM(t *testing.T) {
 	directory, err := ensureSandboxDir(fixture.stateRoot, "sandbox-1")
 	require.NoError(t, err)
 	require.NoError(t, saveState(directory, &SandboxState{
-		Spec: fixture.sandboxSpec, Phase: PhaseRunning, PID: 777, APIAddress: filepath.Join(directory, "dead.sock"),
+		Config: fixture.sandboxSpec, Phase: PhaseRunning, PID: 777, APIAddress: filepath.Join(directory, "dead.sock"),
 	}))
 
 	require.NoError(t, fixture.driver.RecoverRuntimeResources(context.Background(), nil))
@@ -612,24 +657,26 @@ func TestRecoverRuntimeResourcesCleansDeadVM(t *testing.T) {
 
 func TestRecoverRuntimeResourcesKeepsAliveVM(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 
 	require.NoError(t, fixture.driver.RecoverRuntimeResources(context.Background(), nil))
 	managed, err := fixture.driver.ListManagedSandboxes(context.Background())
 	require.NoError(t, err)
 	require.Len(t, managed, 1)
+	require.Equal(t, "172.30.0.2", managed[0].Allocation.Network.IP)
+	require.NotEmpty(t, managed[0].Allocation.Network.SlotID)
 }
 
 func TestGetAccessDescriptor(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 
 	access, err := fixture.driver.GetAccessDescriptor("sandbox-1")
@@ -656,10 +703,10 @@ func TestRuntimeResourceAvailable(t *testing.T) {
 
 func TestCloseKillsManagedProcesses(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 
 	fixture.driver.mu.Lock()
@@ -781,10 +828,10 @@ func (f *driverFixture) enableJailer() {
 func TestEnsureSandboxJailerMode(t *testing.T) {
 	fixture := newDriverFixture(t)
 	fixture.enableJailer()
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	metadata, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	metadata, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	require.Equal(t, string(PhaseRunning), metadata.Phase)
 
@@ -812,7 +859,7 @@ func TestEnsureSandboxJailerMode(t *testing.T) {
 	for _, name := range []string{vmstateSnapshotName, memorySnapshotName} {
 		inJail, statErr := os.Stat(filepath.Join(jailRoot, jailerChrootSnapshotsDir, name))
 		require.NoError(t, statErr)
-		inCache, statErr := os.Stat(filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Image), name))
+		inCache, statErr := os.Stat(filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Spec.Image), name))
 		require.NoError(t, statErr)
 		require.True(t, os.SameFile(inJail, inCache), "%s must be hard-linked into the jail root", name)
 	}
@@ -837,10 +884,10 @@ func TestEnsureSandboxJailerMode(t *testing.T) {
 func TestDeleteSandboxRemovesJailRoot(t *testing.T) {
 	fixture := newDriverFixture(t)
 	fixture.enableJailer()
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 
-	_, err := fixture.driver.EnsureSandbox(context.Background(), &fixture.sandboxSpec)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	jailDir := filepath.Dir(jailerRoot(filepath.Join(fixture.stateRoot, jailerChrootBaseDir), "firecracker", "sandbox-1"))
 	_, err = os.Stat(jailDir)
@@ -860,7 +907,7 @@ func TestRecoverRuntimeResourcesRemovesJailRoot(t *testing.T) {
 	directory, err := ensureSandboxDir(fixture.stateRoot, "sandbox-1")
 	require.NoError(t, err)
 	require.NoError(t, saveState(directory, &SandboxState{
-		Spec: fixture.sandboxSpec, Phase: PhaseRunning, PID: 777, APIAddress: filepath.Join(directory, "dead.sock"),
+		Config: fixture.sandboxSpec, Phase: PhaseRunning, PID: 777, APIAddress: filepath.Join(directory, "dead.sock"),
 	}))
 	jailDir := filepath.Dir(jailerRoot(filepath.Join(fixture.stateRoot, jailerChrootBaseDir), "firecracker", "sandbox-1"))
 	require.NoError(t, os.MkdirAll(filepath.Join(jailDir, "root"), 0o750))

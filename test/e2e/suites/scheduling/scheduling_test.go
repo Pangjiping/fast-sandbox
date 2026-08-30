@@ -69,7 +69,7 @@ func TestResourceSlotCapacity(t *testing.T) {
 			pendingCtx, cancelPending := context.WithTimeout(ctx, 30*time.Second)
 			defer cancelPending()
 			if _, err := fixture.WaitForSandbox(pendingCtx, types.NamespacedName{Name: "sb-slot-3", Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-				return sb.Status.Assignment != nil &&
+				return sb.Status.Placement.FastletName != "" &&
 					sb.Annotations["sandbox.fast.io/assignment"] != ""
 			}); err != nil {
 				t.Fatalf("wait for capacity-rejected Sandbox to retain its durable assignment: %v", err)
@@ -94,10 +94,10 @@ func ensureSandboxRemainsCapacityBlocked(ctx context.Context, k8sClient client.C
 		if err := k8sClient.Get(ctx, name, &sandbox); err != nil {
 			return err
 		}
-		if sandbox.Status.Assignment == nil || sandbox.Annotations["sandbox.fast.io/assignment"] == "" {
+		if sandbox.Status.Placement.FastletName == "" || sandbox.Annotations["sandbox.fast.io/assignment"] == "" {
 			return fmt.Errorf("durable assignment disappeared")
 		}
-		if sandbox.Status.RuntimeState == apiv1alpha2.ObservedStateReady {
+		if sandbox.Status.Runtime.State == apiv1alpha2.RuntimeReady {
 			return fmt.Errorf("runtime became Ready despite exhausted capacity")
 		}
 		select {
@@ -155,8 +155,8 @@ func TestAutoScaling(t *testing.T) {
 			assigned1 := waitForAssignedSandbox(ctx, t, fixture, namespace, "sb-scale-1")
 			assigned2 := waitForAssignedSandbox(ctx, t, fixture, namespace, "sb-scale-2")
 
-			if assigned1.Status.Assignment.FastletName == assigned2.Status.Assignment.FastletName {
-				t.Fatalf("both sandboxes on same pod %s, expected different pods", assigned1.Status.Assignment.FastletName)
+			if assigned1.Status.Placement.FastletName == assigned2.Status.Placement.FastletName {
+				t.Fatalf("both sandboxes on same pod %s, expected different pods", assigned1.Status.Placement.FastletName)
 			}
 
 			return ctx
@@ -220,7 +220,7 @@ func waitForAssignedSandbox(ctx context.Context, t *testing.T, fixture *fixtures
 	defer cancel()
 
 	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-		return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+		return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 	})
 	if err != nil {
 		t.Fatalf("wait for assigned sandbox %s/%s: %v", namespace, name, err)

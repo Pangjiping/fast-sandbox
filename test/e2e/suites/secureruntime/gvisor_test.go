@@ -74,7 +74,7 @@ func TestGVisorSandbox(t *testing.T) {
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			defer cancelRunWait()
 			_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+				return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 			})
 			if err != nil {
 				t.Fatalf("wait for running sandbox: %v", err)
@@ -148,8 +148,8 @@ func TestGVisorIsolation(t *testing.T) {
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			defer cancelRunWait()
 			createdSandbox, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady &&
-					sb.Status.DataPlaneState == apiv1alpha2.ObservedStateReady
+				return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady &&
+					sb.Status.DataPlane.State == apiv1alpha2.DataPlaneReady
 			})
 			if err != nil {
 				t.Fatalf("wait for running sandbox: %v", err)
@@ -157,7 +157,7 @@ func TestGVisorIsolation(t *testing.T) {
 
 			// Get the fastlet pod where the sandbox runs
 			fastletPod := &corev1.Pod{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: createdSandbox.Status.Assignment.FastletName, Namespace: namespace}, fastletPod); err != nil {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: createdSandbox.Status.Placement.FastletName, Namespace: namespace}, fastletPod); err != nil {
 				t.Fatalf("get fastlet pod: %v", err)
 			}
 
@@ -192,8 +192,11 @@ func TestGVisorIsolation(t *testing.T) {
 			}
 			defer connection.Close()
 			access, err := fastpathv2.NewFastPathServiceClient(connection).ResolveEndpoint(ctx, &fastpathv2.ResolveEndpointRequest{
-				Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: string(createdSandbox.UID)}},
-				Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: 18080}},
+				Sandbox: &fastpathv2.SandboxReference{
+					NamespacedName: &fastpathv2.NamespacedName{Namespace: namespace, Name: createdSandbox.Name},
+					ExpectedUid:    string(createdSandbox.UID),
+				},
+				Target: &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: 18080}},
 			})
 			if err != nil {
 				t.Fatalf("resolve gVisor proxy endpoint: %v", err)
@@ -351,7 +354,7 @@ func assertSecureRuntimeProxyResponse(ctx context.Context, t *testing.T, proxyBa
 	}
 }
 
-func verifySecureRuntimeProxy(ctx context.Context, t *testing.T, sandboxUID string, port uint32, want string) {
+func verifySecureRuntimeProxy(ctx context.Context, t *testing.T, namespace, name, sandboxUID string, port uint32, want string) {
 	t.Helper()
 	proxyBase, proxyForward, err := e2eenv.StartSandboxProxyPortForward(ctx, testSuite.ControllerNamespace())
 	if err != nil {
@@ -371,8 +374,11 @@ func verifySecureRuntimeProxy(ctx context.Context, t *testing.T, sandboxUID stri
 	}
 	defer connection.Close()
 	access, err := fastpathv2.NewFastPathServiceClient(connection).ResolveEndpoint(ctx, &fastpathv2.ResolveEndpointRequest{
-		Sandbox: &fastpathv2.SandboxReference{Reference: &fastpathv2.SandboxReference_SandboxUid{SandboxUid: sandboxUID}},
-		Target:  &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: port}},
+		Sandbox: &fastpathv2.SandboxReference{
+			NamespacedName: &fastpathv2.NamespacedName{Namespace: namespace, Name: name},
+			ExpectedUid:    sandboxUID,
+		},
+		Target: &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: port}},
 	})
 	if err != nil {
 		t.Fatalf("resolve secure runtime proxy endpoint: %v", err)
@@ -477,7 +483,7 @@ func TestGVisorMultipleSandboxes(t *testing.T) {
 			defer cancelRunWait()
 			for _, name := range sandboxNames {
 				_, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-					return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+					return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 				})
 				if err != nil {
 					t.Fatalf("wait for running sandbox %s: %v", name, err)

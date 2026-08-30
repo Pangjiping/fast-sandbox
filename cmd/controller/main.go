@@ -135,15 +135,6 @@ func main() {
 		klog.ErrorS(err, "Create controller-runtime manager")
 		os.Exit(1)
 	}
-	if err := manager.GetFieldIndexer().IndexField(context.Background(), &apiv1alpha2.Sandbox{}, fastpath.SandboxUIDIndexField, func(object client.Object) []string {
-		if object.GetUID() == "" {
-			return nil
-		}
-		return []string{string(object.GetUID())}
-	}); err != nil {
-		klog.ErrorS(err, "Register Sandbox UID route index")
-		os.Exit(1)
-	}
 	durableClient, err := client.New(manager.GetConfig(), client.Options{Scheme: manager.GetScheme()})
 	if err != nil {
 		klog.ErrorS(err, "Create direct API-server client")

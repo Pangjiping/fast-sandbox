@@ -105,6 +105,17 @@ func TestFastletImagePrefersFastSandboxSpecificEnv(t *testing.T) {
 	}
 }
 
+func TestActionFixtureImage(t *testing.T) {
+	t.Setenv("FAST_SANDBOX_ACTION_FIXTURE_IMAGE", "")
+	if got := ActionFixtureImage(); got != "fast-sandbox/sandbox-action-fixture:dev" {
+		t.Fatalf("unexpected default Action fixture image %q", got)
+	}
+	t.Setenv("FAST_SANDBOX_ACTION_FIXTURE_IMAGE", "registry.example/action-fixture:test")
+	if got := ActionFixtureImage(); got != "registry.example/action-fixture:test" {
+		t.Fatalf("expected Action fixture override, got %q", got)
+	}
+}
+
 func TestSmallSandboxResourceProfileIsComplete(t *testing.T) {
 	profile := SmallSandboxResourceProfile()
 	if profile.CPU.Sign() <= 0 || profile.Memory.Sign() <= 0 || profile.PIDs <= 0 {

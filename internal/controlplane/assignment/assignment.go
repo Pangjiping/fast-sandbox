@@ -33,21 +33,19 @@ func ProjectAssignmentToStatus(
 		if envelope == nil {
 			return ErrAssignmentAnnotationMissing
 		}
-		assignment := envelope.StatusAssignment()
-		if current.Status.Assignment != nil && assignmentsEqual(*current.Status.Assignment, assignment) &&
-			current.Status.AssignmentAttempt == envelope.Attempt &&
-			current.Status.InstanceGeneration == envelope.InstanceGeneration &&
-			current.Status.RouteGeneration == envelope.RouteGeneration {
+		placement := envelope.StatusPlacement()
+		if placementsEqual(current.Status.Placement, placement) &&
+			current.Status.Runtime.Generation == envelope.InstanceGeneration &&
+			current.Status.DataPlane.RouteGeneration == envelope.RouteGeneration {
 			result = current.DeepCopy()
 			return nil
 		}
 		patchBody, err := json.Marshal(map[string]any{
 			"metadata": map[string]any{"resourceVersion": current.ResourceVersion},
 			"status": map[string]any{
-				"assignment":         assignment,
-				"assignmentAttempt":  envelope.Attempt,
-				"instanceGeneration": envelope.InstanceGeneration,
-				"routeGeneration":    envelope.RouteGeneration,
+				"placement": placement,
+				"runtime":   map[string]any{"generation": envelope.InstanceGeneration},
+				"dataPlane": map[string]any{"routeGeneration": envelope.RouteGeneration},
 			},
 		})
 		if err != nil {
@@ -70,10 +68,8 @@ func ProjectAssignmentToStatus(
 	return result, err
 }
 
-func assignmentsEqual(a, b apiv1alpha2.SandboxAssignment) bool {
+func placementsEqual(a, b apiv1alpha2.PlacementStatus) bool {
 	return a.FastletName == b.FastletName &&
 		a.FastletPodUID == b.FastletPodUID &&
-		a.NodeName == b.NodeName &&
-		a.Attempt == b.Attempt &&
-		a.InfraRevision == b.InfraRevision
+		a.Attempt == b.Attempt
 }

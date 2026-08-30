@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	Version               = 1
+	Version               = 2
 	OwnerFileName         = "fast-sandbox-owner.json"
 	MetadataDirectoryName = "fast-sandbox-metadata"
 	BundleDirectoryName   = "fast-sandbox-bundles"

@@ -18,13 +18,13 @@ func TestValidateRequestID(t *testing.T) {
 }
 
 func TestCreateSpecHashIsDeterministic(t *testing.T) {
-	a := &fastpathv2.CreateRequest{
+	a := &fastpathv2.CreateSandboxRequest{
 		RequestId: "request-a",
 		Image:     "example/image:v1",
 		PoolRef:   "default",
 		Envs:      map[string]string{"B": "2", "A": "1"},
 	}
-	b := &fastpathv2.CreateRequest{
+	b := &fastpathv2.CreateSandboxRequest{
 		RequestId: "request-b",
 		Image:     "example/image:v1",
 		PoolRef:   "default",

@@ -10,7 +10,7 @@ The projects retain separate responsibilities:
 | Layer | Responsibility |
 | --- | --- |
 | OpenSandbox | Public Sandbox API, SDK contract, public ingress, secure access, and Execd protocol |
-| Fast Sandbox FastPath | Lifecycle intent, low-latency Create, Pool discovery, readiness wait, and endpoint resolution |
+| Fast Sandbox FastPath | Lifecycle intent, low-latency Create, Pool discovery, live observation, and endpoint resolution |
 | Fastlet | Admission, runtime, private network, Infra processes, and local readiness |
 | Fastlet Proxy | Pod-local named routing and assignment fencing |
 | Sandbox Proxy | Optional central Fast Sandbox data-plane entry |
@@ -61,7 +61,6 @@ OpenSandbox can call `GetPool` or `ListPools` before Create to discover:
 - total, Ready, and idle Fastlets;
 - component names, protocols, ports, and health kinds;
 - the active Infra revision and prepared Fastlet count;
-- Registry rollout state;
 - aggregated warm-image state.
 
 Pool reads never return Secret content, artifact credentials, or route
@@ -95,7 +94,8 @@ different image, command, expiry, metadata, Pool, or failure settings returns a
 conflict. Retry processing never recalculates or extends an absolute expiry.
 
 Create persists the complete Sandbox CRD and assignment before calling the
-selected Fastlet. It returns when that Fastlet reports `RuntimeReady`.
+selected Fastlet. Omitted completion defaults to aggregate `READY`; callers
+that only need the started process may explicitly request `RUNTIME_READY`.
 
 ## Readiness mapping
 
@@ -103,25 +103,21 @@ Fast Sandbox deliberately separates runtime creation from service readiness:
 
 | Fast Sandbox milestone | OpenSandbox use |
 | --- | --- |
-| `RuntimeReady` | FastPath Create can return |
+| `RuntimeReady` | FastPath Create can return only when explicitly requested |
 | `ComponentReady("execd")` | Execd health passed and its local route is published |
-| `DataPlaneReady` | Every Pool-declared component is ready |
+| aggregate `Ready` | Runtime, DataPlane, every component, and every Action Binding are Ready |
 | CRD status projection | Durable observation for declarative clients and auditing |
 
 OpenSandbox should report the Sandbox as Running only after
-`DataPlaneReady`. This wait does not need to poll CRD status.
+aggregate `Ready`. The simplest path is `CreateCompletion=READY`, which waits
+inside the existing Fastlet create RPC and does not round-trip through CRD
+Status. After an explicit `RUNTIME_READY` create or an update, poll
+`GetSandbox` until `ready=true` and `applied_generation` reaches the committed
+generation.
 
-Use `WaitSandboxReady` for the complete data plane, or resolve `execd` with:
-
-```text
-component_name = "execd"
-wait_until_ready = true
-```
-
-Fast-Path reads the durable assignment and waits directly on the exact
-Fastlet, fenced by Sandbox UID, Fastlet Pod UID, instance generation,
-assignment attempt, runtime instance ID, and route generation. Reset,
-reassignment, deletion, and Pod replacement terminate a stale wait.
+`ResolveEndpoint(component_name="execd")` is non-blocking. It performs one
+live Fastlet inspection and returns `FailedPrecondition` until aggregate Ready;
+it does not provide a separate wait mode.
 
 ## Execd
 
@@ -241,7 +237,8 @@ non-idempotent or streaming request after refreshing a route.
 OpenSandbox metadata maps to user Kubernetes labels:
 
 - labels under `sandbox.fast.io/` are reserved;
-- `GetSandbox` and `ListSandboxes` return user metadata;
+- user metadata remains on CRD labels and is not duplicated into live
+  `SandboxInfo` or `SandboxSummary`;
 - list metadata filters use AND semantics;
 - filtering happens before bounded pagination;
 - metadata updates use explicit upsert and delete-key fields.
@@ -251,8 +248,8 @@ Lifecycle operations remain declarative:
 - expiry updates `spec.expireTime`;
 - reset advances `spec.resetRevision`;
 - delete starts finalizer-driven cleanup;
-- the Reconciler projects runtime, data-plane, user-process, recovery, and
-  component states.
+- the Reconciler projects placement/recovery, runtime, data-plane, component,
+  Action Binding, and aggregate Ready states.
 
 Delete acceptance does not mean runtime cleanup has already completed.
 
@@ -294,7 +291,7 @@ A complete integration test should cover:
 
 ```text
 Create with expiry and metadata
--> wait for DataPlaneReady directly through FastPath
+-> default Create returns at aggregate Ready
 -> resolve component execd
 -> OpenSandbox exec and file operations
 -> metadata add, replace, delete, and filter

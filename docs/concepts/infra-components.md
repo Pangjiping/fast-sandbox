@@ -103,13 +103,14 @@ The milestones are independent:
 
 | Milestone | Meaning |
 | --- | --- |
-| `RuntimeReady` | Runtime, private network, component processes, and user process were created |
+| `RuntimeReady` | Runtime and user process started; component convergence may continue |
 | `ComponentReady` | One component passed health and its local named route was published |
-| `DataPlaneReady` | Every Pool component is `ComponentReady` |
+| `DataPlaneReady` | The interaction route and every Pool component are Ready |
+| aggregate `Ready` | Runtime, DataPlane, every component, and every Action Binding are Ready |
 
-Create returns at `RuntimeReady`. FastPath can wait directly on the assigned
-Fastlet for one component or the complete data plane without waiting for CRD
-status propagation.
+Create defaults to aggregate `READY`; explicit `RUNTIME_READY` is the
+early-return mode. Later convergence is observed by polling the assigned
+Fastlet through `GetSandbox`, without waiting for CRD status propagation.
 
 Health continues after initial readiness. When a component becomes unhealthy,
 Fastlet revokes the instance-fenced route and reports the data plane

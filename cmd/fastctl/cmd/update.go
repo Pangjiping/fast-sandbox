@@ -20,6 +20,8 @@ var (
 	updateRecoveryTimeout int32
 	updateMetadata        []string
 	deleteMetadata        []string
+	updateActionBindings  []string
+	clearActionBindings   bool
 )
 
 // updateCmd represents the update command
@@ -54,9 +56,8 @@ Examples:
 			defer conn.Close()
 		}
 
-		req := &fastpathv2.UpdateRequest{
-			SandboxName:    sandboxName,
-			Namespace:      namespace,
+		req := &fastpathv2.UpdateSandboxRequest{
+			Sandbox:        fastPathSandboxReference(sandboxName, namespace),
 			MetadataUpsert: make(map[string]string),
 		}
 
@@ -67,7 +68,7 @@ Examples:
 				log.Fatalf("Error: invalid expire-time: %v", err)
 			}
 			klog.V(4).InfoS("Updating expire-time", "sandboxName", sandboxName, "expireTime", seconds)
-			req.Update = &fastpathv2.UpdateRequest_ExpiresAtUnixSeconds{
+			req.Update = &fastpathv2.UpdateSandboxRequest_ExpiresAtUnixSeconds{
 				ExpiresAtUnixSeconds: seconds,
 			}
 		}
@@ -79,15 +80,32 @@ Examples:
 				log.Fatalf("Error: invalid failure-policy: %v", err)
 			}
 			klog.V(4).InfoS("Updating failure-policy", "sandboxName", sandboxName, "failurePolicy", policy)
-			req.Update = &fastpathv2.UpdateRequest_FailurePolicy{
+			req.Update = &fastpathv2.UpdateSandboxRequest_FailurePolicy{
 				FailurePolicy: policy,
 			}
 		}
 
 		if cmd.Flags().Changed("recovery-timeout") {
 			klog.V(4).InfoS("Updating recovery-timeout", "sandboxName", sandboxName, "recoveryTimeout", updateRecoveryTimeout)
-			req.Update = &fastpathv2.UpdateRequest_RecoveryTimeoutSeconds{
+			req.Update = &fastpathv2.UpdateSandboxRequest_RecoveryTimeoutSeconds{
 				RecoveryTimeoutSeconds: updateRecoveryTimeout,
+			}
+		}
+
+		if cmd.Flags().Changed("action") || clearActionBindings {
+			if cmd.Flags().Changed("action") && clearActionBindings {
+				log.Fatal("Error: --action and --clear-actions cannot be used together")
+			}
+			bindings, err := parseActionBindings(updateActionBindings)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			items := make([]*fastpathv2.ActionBinding, 0, len(bindings))
+			for _, binding := range bindings {
+				items = append(items, &fastpathv2.ActionBinding{Handler: binding.Handler, Input: binding.Input})
+			}
+			req.Update = &fastpathv2.UpdateSandboxRequest_ActionBindings{
+				ActionBindings: &fastpathv2.ReplaceActionBindings{Items: items},
 			}
 		}
 
@@ -105,7 +123,7 @@ Examples:
 
 		if req.Update == nil && len(req.MetadataUpsert) == 0 && len(req.MetadataDeleteKeys) == 0 {
 			klog.ErrorS(nil, "No update field specified")
-			log.Fatal("Error: at least one update field must be specified (--expire-time, --failure-policy, --recovery-timeout, --metadata, or --delete-metadata)")
+			log.Fatal("Error: at least one update field must be specified (--expire-time, --failure-policy, --recovery-timeout, --action, --clear-actions, --metadata, or --delete-metadata)")
 		}
 
 		klog.V(4).InfoS("Sending UpdateSandbox request", "sandboxName", sandboxName)
@@ -115,18 +133,9 @@ Examples:
 			log.Fatalf("Error: %v", err)
 		}
 
-		if !resp.Success {
-			klog.ErrorS(nil, "UpdateSandbox request returned failure", "sandboxName", sandboxName, "message", resp.Message)
-			log.Fatalf("Error: %s", resp.Message)
-		}
-
 		klog.V(4).InfoS("UpdateSandbox request succeeded", "sandboxName", sandboxName)
-		fmt.Printf("✓ Sandbox %s updated successfully\n", sandboxName)
-		if resp.Sandbox != nil {
-			fmt.Printf("  Runtime: %s\n", resp.Sandbox.RuntimeState)
-			fmt.Printf("  Data plane: %s\n", resp.Sandbox.DataPlaneState)
-			fmt.Printf("  Fastlet: %s\n", resp.Sandbox.FastletPod)
-		}
+		fmt.Printf("✓ Sandbox %s update committed\n", sandboxName)
+		fmt.Printf("  Committed generation: %d\n", resp.CommittedGeneration)
 	},
 }
 
@@ -138,6 +147,8 @@ func init() {
 	updateCmd.Flags().Int32Var(&updateRecoveryTimeout, "recovery-timeout", 0, "Recovery timeout in seconds")
 	updateCmd.Flags().StringSliceVar(&updateMetadata, "metadata", nil, "Metadata to set (key=value)")
 	updateCmd.Flags().StringSliceVar(&deleteMetadata, "delete-metadata", nil, "Metadata keys to delete")
+	updateCmd.Flags().StringArrayVar(&updateActionBindings, "action", nil, "Replace ordered Action Bindings with handler=opaque-input; repeat for multiple Bindings")
+	updateCmd.Flags().BoolVar(&clearActionBindings, "clear-actions", false, "Replace the Action Binding list with an empty list")
 }
 
 func parseExpireTime(input string) (int64, error) {
