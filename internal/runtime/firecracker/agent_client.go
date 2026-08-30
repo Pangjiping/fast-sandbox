@@ -44,7 +44,7 @@ type AgentClient interface {
 	UnpinImage(ctx context.Context, requestID, image string) error
 	// LeaseDevices creates a device lease for a Sandbox. The native stage
 	// returns the shared cache file paths.
-	LeaseDevices(ctx context.Context, requestID string, spec *fastletapi.RuntimeSandboxSpec) (Lease, error)
+	LeaseDevices(ctx context.Context, requestID string, config *fastletapi.RuntimeSandboxConfig) (Lease, error)
 	// ReleaseDevices drops a device lease owned by this pod.
 	ReleaseDevices(ctx context.Context, requestID, leaseID string) error
 	// ListLeases returns every lease on the node.
@@ -99,19 +99,21 @@ func (c *agentHTTPClient) UnpinImage(ctx context.Context, requestID, image strin
 	}, nil)
 }
 
-func (c *agentHTTPClient) LeaseDevices(ctx context.Context, requestID string, spec *fastletapi.RuntimeSandboxSpec) (Lease, error) {
-	if spec == nil {
+func (c *agentHTTPClient) LeaseDevices(ctx context.Context, requestID string, config *fastletapi.RuntimeSandboxConfig) (Lease, error) {
+	if config == nil {
 		return Lease{}, fmt.Errorf("%w: sandbox spec is required", runtimecontract.ErrInvalidConfig)
 	}
+	identity := config.Identity
+	spec := config.Spec
 	var response agentprotocol.LeaseDevicesResponse
 	if err := c.doJSON(ctx, agentprotocol.RouteLeaseDevices, agentprotocol.LeaseDevicesRequest{
-		Identity: c.identity(requestID), SandboxID: spec.SandboxID, Image: spec.Image,
+		Identity: c.identity(requestID), SandboxID: identity.SandboxUID, Image: spec.Image,
 		MemSizeMiB: defaultMemoryMiB(spec.Memory), RootfsWritable: false,
 	}, &response); err != nil {
 		return Lease{}, err
 	}
 	return Lease{
-		LeaseID: response.LeaseID, SandboxID: spec.SandboxID, Image: spec.Image,
+		LeaseID: response.LeaseID, SandboxID: identity.SandboxUID, Image: spec.Image,
 		PodUID: c.podUID, Namespace: c.namespace,
 		RootfsDev: response.RootfsDev, MemDev: response.MemDev, CreatedAt: time.Now(),
 	}, nil

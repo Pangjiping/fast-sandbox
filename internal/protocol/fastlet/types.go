@@ -30,29 +30,37 @@ type SandboxSpec struct {
 	WorkingDir          string            `json:"workingDir,omitempty"`
 }
 
-// RuntimeSandboxSpec is the single Fastlet-local input assembled from one
-// wire identity and one desired spec. Runtime drivers persist and consume this
-// object; it never crosses the Controller-to-Fastlet API boundary.
-type RuntimeSandboxSpec struct {
-	SandboxSpec
-	SandboxID          string `json:"sandboxId"`
-	RequestID          string `json:"requestId,omitempty"`
-	ClaimNamespace     string `json:"claimNamespace,omitempty"`
-	ClaimName          string `json:"claimName"`
-	InstanceGeneration int64  `json:"instanceGeneration,omitempty"`
-	RuntimeInstanceID  string `json:"runtimeInstanceId,omitempty"`
-	AssignmentAttempt  int64  `json:"assignmentAttempt,omitempty"`
-	RouteGeneration    int64  `json:"routeGeneration,omitempty"`
-	FastletPodUID      string `json:"fastletPodUid,omitempty"`
-	// Network fields are Fastlet-local runtime material. They are populated
-	// only after admission and are never accepted from the public/RPC API.
-	NetworkSlotID        string `json:"-"`
-	NetworkNamespacePath string `json:"-"`
-	NetworkIP            string `json:"-"`
-	NetworkGateway       string `json:"-"`
-	NetworkDNSPath       string `json:"-"`
-	NetworkPrivateCIDR   string `json:"-"`
-	NetworkHostVeth      string `json:"-"`
+// RuntimeSandboxConfig is the stable runtime identity and desired
+// configuration. The two authorities remain explicitly nested so runtime
+// implementations cannot silently merge or overwrite duplicate fields.
+type RuntimeSandboxConfig struct {
+	Identity SandboxIdentity `json:"identity"`
+	Spec     SandboxSpec     `json:"spec"`
+}
+
+// EnsureSandboxInput represents one idempotent Ensure call. RequestID
+// correlates the invocation but is not part of the stable runtime identity.
+type EnsureSandboxInput struct {
+	RequestID string               `json:"requestId,omitempty"`
+	Sandbox   RuntimeSandboxConfig `json:"sandbox"`
+}
+
+// NetworkAllocation is produced by a runtime driver after admission. It is
+// never accepted as caller-owned desired configuration.
+type NetworkAllocation struct {
+	SlotID        string `json:"slotId,omitempty"`
+	NamespacePath string `json:"namespacePath,omitempty"`
+	IP            string `json:"ip,omitempty"`
+	Gateway       string `json:"gateway,omitempty"`
+	DNSPath       string `json:"dnsPath,omitempty"`
+	PrivateCIDR   string `json:"privateCidr,omitempty"`
+	HostVeth      string `json:"hostVeth,omitempty"`
+}
+
+// RuntimeAllocation contains resources actually assigned to one runtime.
+// Allocation is observed/persisted state, separate from RuntimeSandboxConfig.
+type RuntimeAllocation struct {
+	Network NetworkAllocation `json:"network"`
 }
 
 type RuntimeState string

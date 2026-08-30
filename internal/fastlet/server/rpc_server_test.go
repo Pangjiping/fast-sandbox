@@ -33,11 +33,11 @@ func (*serverRuntime) Close() error                             { return nil }
 func (*serverRuntime) ProbeCapabilities(context.Context) runtimecontract.CapabilityReport {
 	return runtimecontract.CapabilityReport{State: runtimecatalog.CapabilityReady, Reason: "TestRuntimeReady"}
 }
-func (r *serverRuntime) EnsureSandbox(_ context.Context, spec *fastletapi.RuntimeSandboxSpec) (*runtimecontract.Metadata, error) {
+func (r *serverRuntime) EnsureSandbox(_ context.Context, input *fastletapi.EnsureSandboxInput) (*runtimecontract.Metadata, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	metadata := &runtimecontract.Metadata{RuntimeSandboxSpec: *spec, Phase: "running"}
-	r.sandboxes[spec.SandboxID] = metadata
+	metadata := &runtimecontract.Metadata{Config: input.Sandbox, Phase: "running"}
+	r.sandboxes[input.Sandbox.Identity.SandboxUID] = metadata
 	copy := *metadata
 	return &copy, nil
 }

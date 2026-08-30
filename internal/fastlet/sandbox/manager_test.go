@@ -55,7 +55,7 @@ func (m *MockRuntime) ProbeCapabilities(context.Context) CapabilityReport {
 
 func (m *MockRuntime) SetNamespace(ns string) {}
 
-func (m *MockRuntime) EnsureSandbox(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec) (*SandboxMetadata, error) {
+func (m *MockRuntime) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput) (*SandboxMetadata, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createCalled = true
@@ -64,15 +64,17 @@ func (m *MockRuntime) EnsureSandbox(ctx context.Context, spec *fastletapi.Runtim
 		return nil, m.createError
 	}
 
+	config := input.Sandbox
+	sandboxUID := config.Identity.SandboxUID
 	metadata := &SandboxMetadata{
-		RuntimeSandboxSpec: *spec,
-		ContainerID:        "container-" + spec.SandboxID,
-		PID:                1234,
-		Phase:              "created",
-		CreatedAt:          time.Now().Unix(),
+		Config:      config,
+		ContainerID: "container-" + sandboxUID,
+		PID:         1234,
+		Phase:       "created",
+		CreatedAt:   time.Now().Unix(),
 	}
-	m.sandboxes[spec.SandboxID] = metadata
-	m.containers[spec.SandboxID] = metadata.ContainerID
+	m.sandboxes[sandboxUID] = metadata
+	m.containers[sandboxUID] = metadata.ContainerID
 
 	return metadata, nil
 }
@@ -111,7 +113,7 @@ func (m *MockRuntime) InspectSandbox(ctx context.Context, sandboxID string) (*Sa
 		copy.Phase = status
 		return &copy, nil
 	}
-	return &SandboxMetadata{RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{SandboxID: sandboxID}, Phase: status}, nil
+	return &SandboxMetadata{Config: fastletapi.RuntimeSandboxConfig{Identity: fastletapi.SandboxIdentity{SandboxUID: sandboxID}}, Phase: status}, nil
 }
 
 func (m *MockRuntime) ListManagedSandboxes(context.Context) ([]*SandboxMetadata, error) {
@@ -142,7 +144,19 @@ func (m *MockRuntime) Close() error {
 
 // Helper methods for testing
 
-func ensureSandboxForTest(ctx context.Context, manager *SandboxManager, spec *fastletapi.RuntimeSandboxSpec) (*fastletapi.CreateSandboxResponse, error) {
+type sandboxCreateFixture struct {
+	fastletapi.SandboxSpec
+	SandboxID          string
+	ClaimNamespace     string
+	ClaimName          string
+	FastletPodUID      string
+	InstanceGeneration int64
+	RuntimeInstanceID  string
+	AssignmentAttempt  int64
+	RouteGeneration    int64
+}
+
+func ensureSandboxForTest(ctx context.Context, manager *SandboxManager, spec *sandboxCreateFixture) (*fastletapi.CreateSandboxResponse, error) {
 	namespace := spec.ClaimNamespace
 	if namespace == "" {
 		namespace = "default"
@@ -163,8 +177,8 @@ func ensureSandboxForTest(ctx context.Context, manager *SandboxManager, spec *fa
 	})
 }
 
-func runtimeSpecForTest(sandboxID, claimName, image string) *fastletapi.RuntimeSandboxSpec {
-	return &fastletapi.RuntimeSandboxSpec{
+func runtimeSpecForTest(sandboxID, claimName, image string) *sandboxCreateFixture {
+	return &sandboxCreateFixture{
 		SandboxSpec: fastletapi.SandboxSpec{Image: image},
 		SandboxID:   sandboxID,
 		ClaimName:   claimName,
@@ -361,27 +375,27 @@ func TestSandboxManagerRejectsProfileOverrides(t *testing.T) {
 		Capacity: 5, RuntimeProfileHash: "runtime-hash", ResourceProfile: &profile,
 	})
 	require.NoError(t, err)
-	valid := &fastletapi.RuntimeSandboxSpec{
+	valid := &sandboxCreateFixture{
 		SandboxSpec: fastletapi.SandboxSpec{
 			CPU: "500m", Memory: "256Mi", PIDs: 128,
 			RuntimeProfileHash: "runtime-hash", ResourceProfileHash: profile.Hash(),
 		},
 		SandboxID: "sandbox-a",
 	}
-	require.NoError(t, manager.validateProfiles(valid))
+	require.NoError(t, manager.validateProfiles(&valid.SandboxSpec))
 
-	tests := map[string]func(*fastletapi.RuntimeSandboxSpec){
-		"runtime hash":    func(spec *fastletapi.RuntimeSandboxSpec) { spec.RuntimeProfileHash = "other" },
-		"resource hash":   func(spec *fastletapi.RuntimeSandboxSpec) { spec.ResourceProfileHash = "other" },
-		"cpu override":    func(spec *fastletapi.RuntimeSandboxSpec) { spec.CPU = "1" },
-		"memory override": func(spec *fastletapi.RuntimeSandboxSpec) { spec.Memory = "1Gi" },
-		"pids override":   func(spec *fastletapi.RuntimeSandboxSpec) { spec.PIDs = 256 },
+	tests := map[string]func(*sandboxCreateFixture){
+		"runtime hash":    func(spec *sandboxCreateFixture) { spec.RuntimeProfileHash = "other" },
+		"resource hash":   func(spec *sandboxCreateFixture) { spec.ResourceProfileHash = "other" },
+		"cpu override":    func(spec *sandboxCreateFixture) { spec.CPU = "1" },
+		"memory override": func(spec *sandboxCreateFixture) { spec.Memory = "1Gi" },
+		"pids override":   func(spec *sandboxCreateFixture) { spec.PIDs = 256 },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			candidate := *valid
 			mutate(&candidate)
-			require.ErrorIs(t, manager.validateProfiles(&candidate), ErrSandboxProfileMismatch)
+			require.ErrorIs(t, manager.validateProfiles(&candidate.SandboxSpec), ErrSandboxProfileMismatch)
 		})
 	}
 }
@@ -480,7 +494,7 @@ func TestSandboxManager_CreateSandbox_MultipleSandboxes(t *testing.T) {
 
 	ctx := context.Background()
 
-	sandboxes := []fastletapi.RuntimeSandboxSpec{
+	sandboxes := []sandboxCreateFixture{
 		*runtimeSpecForTest("sb-1", "claim-1", "alpine:latest"),
 		*runtimeSpecForTest("sb-2", "claim-2", "nginx:latest"),
 		*runtimeSpecForTest("sb-3", "claim-3", "ubuntu:latest"),
@@ -701,7 +715,7 @@ func TestSandboxManager_GetSandboxStatuses_MultiplePhases(t *testing.T) {
 	ctx := context.Background()
 
 	// Create sandboxes
-	specs := []*fastletapi.RuntimeSandboxSpec{
+	specs := []*sandboxCreateFixture{
 		runtimeSpecForTest("sb-1", "claim-1", "alpine:latest"),
 		runtimeSpecForTest("sb-2", "claim-2", "nginx:latest"),
 		runtimeSpecForTest("sb-3", "claim-3", "ubuntu:latest"),

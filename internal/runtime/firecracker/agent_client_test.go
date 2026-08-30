@@ -165,8 +165,8 @@ func TestAgentClientLeaseDevicesBuildsRequestFromSpec(t *testing.T) {
 	client, err := NewAgentClient(server.socket, "tenant-a", "pod-1")
 	require.NoError(t, err)
 
-	lease, err := client.LeaseDevices(context.Background(), "req-1", &fastletapi.RuntimeSandboxSpec{
-		SandboxSpec: fastletapi.SandboxSpec{Image: "img", Memory: "2Gi"}, SandboxID: "sandbox-1",
+	lease, err := client.LeaseDevices(context.Background(), "req-1", &fastletapi.RuntimeSandboxConfig{
+		Spec: fastletapi.SandboxSpec{Image: "img", Memory: "2Gi"}, Identity: fastletapi.SandboxIdentity{SandboxUID: "sandbox-1"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, "lease-1", lease.LeaseID)

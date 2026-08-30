@@ -226,7 +226,7 @@ func TestUserProcessStartAfterTaskStartDoesNotTreatSupervisorAsUserProcess(t *te
 }
 
 func TestSandboxResourceSpecOptsEnforceCPUAndMemory(t *testing.T) {
-	opts, err := sandboxResourceSpecOpts(&fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "500m", Memory: "256Mi", PIDs: 128}})
+	opts, err := sandboxResourceSpecOpts(&fastletapi.SandboxSpec{CPU: "500m", Memory: "256Mi", PIDs: 128})
 	require.NoError(t, err)
 	spec := &specs.Spec{Linux: &specs.Linux{}}
 	for _, opt := range opts {
@@ -240,45 +240,22 @@ func TestSandboxResourceSpecOptsEnforceCPUAndMemory(t *testing.T) {
 }
 
 func TestSandboxResourceSpecOptsRejectInvalidValues(t *testing.T) {
-	_, err := sandboxResourceSpecOpts(&fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{CPU: "not-cpu"}})
+	_, err := sandboxResourceSpecOpts(&fastletapi.SandboxSpec{CPU: "not-cpu"})
 	require.Error(t, err)
-	_, err = sandboxResourceSpecOpts(&fastletapi.RuntimeSandboxSpec{SandboxSpec: fastletapi.SandboxSpec{Memory: "0"}})
+	_, err = sandboxResourceSpecOpts(&fastletapi.SandboxSpec{Memory: "0"})
 	require.Error(t, err)
 }
 
 func TestValidateExistingRuntimeProfile(t *testing.T) {
-	existing := &SandboxMetadata{RuntimeSandboxSpec: fastletapi.RuntimeSandboxSpec{
-		SandboxSpec: fastletapi.SandboxSpec{CPU: "500m", Memory: "256Mi", PIDs: 128,
+	existing := &SandboxMetadata{Config: fastletapi.RuntimeSandboxConfig{
+		Spec: fastletapi.SandboxSpec{CPU: "500m", Memory: "256Mi", PIDs: 128,
 			RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash"},
-		SandboxID: "sandbox-a",
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "sandbox-a"},
 	}}
-	requested := existing.RuntimeSandboxSpec
+	requested := existing.Config
 	require.NoError(t, validateExistingRuntimeProfile(existing, &requested))
-	requested.CPU = "1"
+	requested.Spec.CPU = "1"
 	require.ErrorIs(t, validateExistingRuntimeProfile(existing, &requested), ErrSandboxProfileMismatch)
-}
-
-func TestSameRuntimeIdentityIncludesPodAndGenerationFences(t *testing.T) {
-	requested := fastletapi.RuntimeSandboxSpec{
-		SandboxID: "sandbox-a", RequestID: "request-a",
-		ClaimNamespace: "default", ClaimName: "sandbox-a", FastletPodUID: "pod-a",
-		InstanceGeneration: 2, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 3,
-	}
-	existing := &SandboxMetadata{RuntimeSandboxSpec: requested}
-	require.True(t, sameRuntimeIdentity(existing, &requested))
-
-	for name, mutate := range map[string]func(*fastletapi.RuntimeSandboxSpec){
-		"Fastlet Pod":         func(spec *fastletapi.RuntimeSandboxSpec) { spec.FastletPodUID = "pod-b" },
-		"instance generation": func(spec *fastletapi.RuntimeSandboxSpec) { spec.InstanceGeneration++ },
-		"runtime instance":    func(spec *fastletapi.RuntimeSandboxSpec) { spec.RuntimeInstanceID = "runtime-b" },
-		"assignment attempt":  func(spec *fastletapi.RuntimeSandboxSpec) { spec.AssignmentAttempt++ },
-	} {
-		t.Run(name, func(t *testing.T) {
-			changed := requested
-			mutate(&changed)
-			require.False(t, sameRuntimeIdentity(existing, &changed))
-		})
-	}
 }
 
 // ============================================================================
@@ -509,31 +486,30 @@ func TestContainerdRuntime_CreateSandbox_Validation(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		config      *fastletapi.RuntimeSandboxSpec
+		input       *fastletapi.EnsureSandboxInput
 		expectError string
 	}{
 		{
 			name: "empty sandbox ID",
-			config: &fastletapi.RuntimeSandboxSpec{
-				SandboxSpec: fastletapi.SandboxSpec{Image: "alpine:latest"},
-				ClaimName:   "test-claim",
-			},
+			input: &fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{
+				Spec: fastletapi.SandboxSpec{Image: "alpine:latest"}, Identity: fastletapi.SandboxIdentity{Name: "test-claim"},
+			}},
 			expectError: "sandbox ID cannot be empty",
 		},
 		{
 			name: "empty image",
-			config: &fastletapi.RuntimeSandboxSpec{
-				SandboxID: "sb-123", ClaimName: "test-claim",
-			},
+			input: &fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{
+				Identity: fastletapi.SandboxIdentity{SandboxUID: "sb-123", Name: "test-claim"},
+			}},
 			expectError: "image cannot be empty",
 		},
 		{
 			name: "valid config",
-			config: &fastletapi.RuntimeSandboxSpec{
-				SandboxSpec: fastletapi.SandboxSpec{Image: "alpine:latest", Command: []string{"/bin/sh"},
+			input: &fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{
+				Spec: fastletapi.SandboxSpec{Image: "alpine:latest", Command: []string{"/bin/sh"},
 					Args: []string{"-c", "echo hello"}, WorkingDir: "/tmp", Env: map[string]string{"PATH": "/usr/bin", "HOME": "/root"}},
-				SandboxID: "sb-123", ClaimName: "test-claim",
-			},
+				Identity: fastletapi.SandboxIdentity{SandboxUID: "sb-123", Name: "test-claim"},
+			}},
 			expectError: "", // Should fail at client access, not validation
 		},
 	}
@@ -549,7 +525,7 @@ func TestContainerdRuntime_CreateSandbox_Validation(t *testing.T) {
 				}
 			}()
 
-			_, err := cr.CreateSandbox(ctx, tt.config)
+			_, err := cr.CreateSandbox(ctx, tt.input, fastletapi.RuntimeAllocation{})
 
 			// Should either panic or error due to nil client
 			assert.True(t, panicked || err != nil, "CreateSandbox should panic or error without initialized client")
@@ -594,19 +570,21 @@ func TestContainerdRuntime_prepareLabels(t *testing.T) {
 		fastletNamespace: "default-ns",
 	}
 
-	config := &fastletapi.RuntimeSandboxSpec{
-		SandboxSpec: fastletapi.SandboxSpec{
+	config := &fastletapi.RuntimeSandboxConfig{
+		Spec: fastletapi.SandboxSpec{
 			Image: "alpine:latest", CPU: "500m", Memory: "256Mi", PIDs: 128,
 			RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash", InfraRevision: "infra-hash",
 		},
-		SandboxID: "sb-123", ClaimNamespace: "tenant-a", ClaimName: "test-claim",
-		RequestID: "request-1", InstanceGeneration: 2, RuntimeInstanceID: "runtime-1", AssignmentAttempt: 3,
-		NetworkSlotID: "slot-1", NetworkNamespacePath: "/run/fast-sandbox/netns/fsb1",
-		NetworkIP: "172.30.0.2", NetworkGateway: "172.30.0.1", NetworkDNSPath: "/run/fast-sandbox/network/pod/slot-1.resolv.conf",
-		NetworkPrivateCIDR: "172.30.0.0/24", NetworkHostVeth: "fh1234",
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "sb-123", Namespace: "tenant-a", Name: "test-claim",
+			InstanceGeneration: 2, RuntimeInstanceID: "runtime-1", AssignmentAttempt: 3},
 	}
+	allocation := fastletapi.RuntimeAllocation{Network: fastletapi.NetworkAllocation{
+		SlotID: "slot-1", NamespacePath: "/run/fast-sandbox/netns/fsb1", IP: "172.30.0.2",
+		Gateway: "172.30.0.1", DNSPath: "/run/fast-sandbox/network/pod/slot-1.resolv.conf",
+		PrivateCIDR: "172.30.0.0/24", HostVeth: "fh1234",
+	}}
 
-	labels := cr.prepareLabels(config)
+	labels := cr.prepareLabels(config, allocation)
 
 	expectedLabels := map[string]string{
 		"fast-sandbox.io/managed":               "true",
@@ -614,7 +592,7 @@ func TestContainerdRuntime_prepareLabels(t *testing.T) {
 		"fast-sandbox.io/fastlet-uid":           "fastlet-uid-123",
 		"fast-sandbox.io/namespace":             "default-ns",
 		"fast-sandbox.io/id":                    "sb-123",
-		"fast-sandbox.io/claim-namespace":       "tenant-a",
+		"fast-sandbox.io/sandbox-namespace":     "tenant-a",
 		"fast-sandbox.io/sandbox-name":          "test-claim",
 		"fast-sandbox.io/runtime-profile-hash":  "runtime-hash",
 		"fast-sandbox.io/resource-profile-hash": "resource-hash",
@@ -622,7 +600,6 @@ func TestContainerdRuntime_prepareLabels(t *testing.T) {
 		"fast-sandbox.io/resource-cpu":          "500m",
 		"fast-sandbox.io/resource-memory":       "256Mi",
 		"fast-sandbox.io/resource-pids":         "128",
-		"fast-sandbox.io/request-id":            "request-1",
 		"fast-sandbox.io/instance-generation":   "2",
 		"fast-sandbox.io/runtime-instance-id":   "runtime-1",
 		"fast-sandbox.io/assignment-attempt":    "3",
@@ -647,12 +624,11 @@ func TestContainerdRuntime_prepareLabels_EmptyFastletFields(t *testing.T) {
 		fastletNamespace: "",
 	}
 
-	config := &fastletapi.RuntimeSandboxSpec{
-		SandboxID: "sb-123",
-		ClaimName: "test-claim",
+	config := &fastletapi.RuntimeSandboxConfig{
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "sb-123", Name: "test-claim"},
 	}
 
-	labels := cr.prepareLabels(config)
+	labels := cr.prepareLabels(config, fastletapi.RuntimeAllocation{})
 
 	assert.Equal(t, "true", labels["fast-sandbox.io/managed"])
 	assert.Equal(t, "", labels["fast-sandbox.io/fastlet-name"])
@@ -660,7 +636,7 @@ func TestContainerdRuntime_prepareLabels_EmptyFastletFields(t *testing.T) {
 	assert.Equal(t, "sb-123", labels["fast-sandbox.io/id"])
 	assert.NotContains(t, labels, "fast-sandbox.io/claim-uid")
 	assert.Equal(t, "test-claim", labels["fast-sandbox.io/sandbox-name"])
-	assert.Equal(t, "", labels["fast-sandbox.io/request-id"])
+	assert.NotContains(t, labels, "fast-sandbox.io/request-id")
 	assert.Equal(t, "0", labels["fast-sandbox.io/instance-generation"])
 	assert.Equal(t, "0", labels["fast-sandbox.io/assignment-attempt"])
 }

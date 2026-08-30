@@ -46,7 +46,7 @@ func (m *SandboxManager) ReconcileBindings(ctx context.Context, req *fastletapi.
 	if actionManager == nil {
 		if len(req.ActionBindings) == 0 {
 			m.mu.Lock()
-			if m.sandboxes[metadata.SandboxID] != metadata {
+			if m.sandboxes[metadata.Config.Identity.SandboxUID] != metadata {
 				m.mu.Unlock()
 				failure := fastletError(fastletapi.ErrorStaleGeneration, "Sandbox changed while Actions were reconciling", true)
 				return &fastletapi.ReconcileBindingsResponse{Error: failure}, failure
@@ -68,7 +68,7 @@ func (m *SandboxManager) ReconcileBindings(ctx context.Context, req *fastletapi.
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.sandboxes[metadata.SandboxID] != metadata {
+	if m.sandboxes[metadata.Config.Identity.SandboxUID] != metadata {
 		failure := fastletError(fastletapi.ErrorStaleGeneration, "Sandbox changed while Actions were reconciling", true)
 		return &fastletapi.ReconcileBindingsResponse{Error: failure}, failure
 	}
@@ -79,10 +79,10 @@ func (m *SandboxManager) ReconcileBindings(ctx context.Context, req *fastletapi.
 		if metadata.Phase == "running" || metadata.Phase == "action-pending" || metadata.Phase == "action-unavailable" {
 			metadata.Phase = "action-unavailable"
 		}
-		m.recordDiagnosticLocked(metadata.SandboxID, "error", "action", "action-unavailable", reconcileErr.Error())
+		m.recordDiagnosticLocked(metadata.Config.Identity.SandboxUID, "error", "action", "action-unavailable", reconcileErr.Error())
 	} else if (len(statuses) == 0 || actionStatusesReady(statuses)) && (metadata.Phase == "action-pending" || metadata.Phase == "action-unavailable") {
 		metadata.Phase = "running"
-		m.recordDiagnosticLocked(metadata.SandboxID, "info", "action", "running", "all Sandbox Actions are ready")
+		m.recordDiagnosticLocked(metadata.Config.Identity.SandboxUID, "info", "action", "running", "all Sandbox Actions are ready")
 	}
 	status := m.sandboxStatusLocked(metadata)
 	m.signalReadinessChangedLocked()
@@ -102,11 +102,13 @@ func desiredActionInputs(bindings []fastletapi.ActionBindingInput) []fastletacti
 }
 
 func actionAttachment(metadata *SandboxMetadata) fastletaction.Attachment {
+	identity := metadata.Config.Identity
+	network := metadata.Allocation.Network
 	return fastletaction.Attachment{
-		ID: actionAttachmentID(metadata), InstanceGeneration: metadata.InstanceGeneration,
-		AssignmentAttempt: metadata.AssignmentAttempt, RuntimeInstanceID: metadata.RuntimeInstanceID, RouteGeneration: metadata.RouteGeneration,
-		SandboxUID: metadata.SandboxID, SandboxName: metadata.ClaimName, Namespace: metadata.ClaimNamespace,
-		IP: metadata.NetworkIP, Gateway: metadata.NetworkGateway, PrivateCIDR: metadata.NetworkPrivateCIDR, HostVeth: metadata.NetworkHostVeth,
+		ID: actionAttachmentID(metadata), InstanceGeneration: identity.InstanceGeneration,
+		AssignmentAttempt: identity.AssignmentAttempt, RuntimeInstanceID: identity.RuntimeInstanceID, RouteGeneration: identity.RouteGeneration,
+		SandboxUID: identity.SandboxUID, SandboxName: identity.Name, Namespace: identity.Namespace,
+		IP: network.IP, Gateway: network.Gateway, PrivateCIDR: network.PrivateCIDR, HostVeth: network.HostVeth,
 	}
 }
 
@@ -124,17 +126,19 @@ func (m *SandboxManager) recordActionHook(metadata *SandboxMetadata, hook action
 	if m.actionManager == nil {
 		return
 	}
-	if err := m.actionManager.RecordHook(metadata.SandboxID, actionAttachment(metadata), hook, sequence); err != nil {
-		m.recordDiagnostic(metadata.SandboxID, "error", "action", "hook-pending", fmt.Sprintf("record lifecycle Hook %s: %v", hook, err))
+	sandboxUID := metadata.Config.Identity.SandboxUID
+	if err := m.actionManager.RecordHook(sandboxUID, actionAttachment(metadata), hook, sequence); err != nil {
+		m.recordDiagnostic(sandboxUID, "error", "action", "hook-pending", fmt.Sprintf("record lifecycle Hook %s: %v", hook, err))
 	}
 }
 
 // actionAttachmentID is deliberately opaque outside Fastlet. It changes when
 // the concrete runtime, assignment, or published route is replaced.
 func actionAttachmentID(metadata *SandboxMetadata) string {
+	identity := metadata.Config.Identity
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d\x00%d\x00%s",
-		metadata.FastletPodUID, metadata.AssignmentAttempt, metadata.InstanceGeneration,
-		metadata.RouteGeneration, metadata.RuntimeInstanceID)))
+		identity.FastletPodUID, identity.AssignmentAttempt, identity.InstanceGeneration,
+		identity.RouteGeneration, identity.RuntimeInstanceID)))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 

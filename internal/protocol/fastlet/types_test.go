@@ -15,7 +15,7 @@ func TestCreateRequestSerializesIdentityDesiredSpecAndRequestMetadataOnce(t *tes
 			InstanceGeneration: 2, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 3,
 			RouteGeneration: 4, FastletPodUID: "pod-a",
 		},
-		Sandbox: SandboxSpec{Image: "alpine:latest", CPU: "500m", Memory: "256Mi"},
+		Sandbox:        SandboxSpec{Image: "alpine:latest", CPU: "500m", Memory: "256Mi"},
 		ActionBindings: []ActionBindingInput{{Handler: "egress", Input: "allow: example.com"}},
 	}
 	encoded, err := json.Marshal(request)
@@ -41,11 +41,38 @@ func TestCreateRequestSerializesIdentityDesiredSpecAndRequestMetadataOnce(t *tes
 	require.Equal(t, map[string]any{"handler": "egress", "input": "allow: example.com"}, binding)
 }
 
+func TestEnsureSandboxInputKeepsInvocationConfigAndAllocationSeparate(t *testing.T) {
+	input := EnsureSandboxInput{
+		RequestID: "invocation-a",
+		Sandbox: RuntimeSandboxConfig{
+			Identity: SandboxIdentity{SandboxUID: "uid-a", Namespace: "tenant-a", Name: "sandbox-a"},
+			Spec:     SandboxSpec{Image: "alpine:latest"},
+		},
+	}
+	encoded, err := json.Marshal(input)
+	require.NoError(t, err)
+	var object map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &object))
+	require.Equal(t, "invocation-a", object["requestId"])
+	sandbox := object["sandbox"].(map[string]any)
+	require.Equal(t, "uid-a", sandbox["identity"].(map[string]any)["sandboxUid"])
+	require.Equal(t, "alpine:latest", sandbox["spec"].(map[string]any)["image"])
+	for _, key := range []string{"sandboxId", "claimNamespace", "claimName", "requestId", "network", "networkIp", "networkSlotId"} {
+		require.NotContains(t, sandbox, key)
+	}
+
+	allocation := RuntimeAllocation{Network: NetworkAllocation{SlotID: "slot-a", IP: "10.42.0.2"}}
+	allocationJSON, err := json.Marshal(allocation)
+	require.NoError(t, err)
+	require.NotContains(t, string(allocationJSON), "invocation-a")
+	require.Contains(t, string(allocationJSON), `"slotId":"slot-a"`)
+}
+
 func TestHeartbeatUsesAdmissionAndCacheAsSingleAuthorities(t *testing.T) {
 	encoded, err := json.Marshal(HeartbeatResponse{
 		FastletStatus: FastletStatus{RuntimeProfileHash: "runtime-a", Admission: AdmissionStatus{Capacity: 8, Running: 2, Used: 2}},
-		Sequence: 7,
-		Cache: CacheSnapshot{Epoch: "epoch-a", Revision: 9, Full: true, Complete: true, Images: []string{"alpine:latest"}},
+		Sequence:      7,
+		Cache:         CacheSnapshot{Epoch: "epoch-a", Revision: 9, Full: true, Complete: true, Images: []string{"alpine:latest"}},
 	})
 	require.NoError(t, err)
 	var object map[string]any

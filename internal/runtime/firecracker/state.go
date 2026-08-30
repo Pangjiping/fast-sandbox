@@ -36,11 +36,12 @@ const (
 	PhaseStopped  VMPhase = "Stopped"
 )
 
-// SandboxState is the durable per-Sandbox driver record. It keeps the full
-// immutable SandboxSpec so Fastlet restart recovery can validate that a
-// re-admitted request matches the existing VM identity.
+// SandboxState is the durable per-Sandbox driver record. It keeps stable
+// runtime configuration separate from Driver-produced allocation state so
+// restart recovery preserves both authority boundaries.
 type SandboxState struct {
-	Spec             fastletapi.RuntimeSandboxSpec       `json:"spec"`
+	Config           fastletapi.RuntimeSandboxConfig     `json:"config"`
+	Allocation       fastletapi.RuntimeAllocation        `json:"allocation"`
 	Phase            VMPhase                             `json:"phase"`
 	PID              int                                 `json:"pid,omitempty"`
 	APIAddress       string                              `json:"apiAddress,omitempty"`
@@ -124,7 +125,7 @@ func loadState(directory string) (*SandboxState, error) {
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return nil, fmt.Errorf("decode sandbox state %s: %w", directory, err)
 	}
-	if state.Spec.SandboxID == "" || state.Phase == "" {
+	if state.Config.Identity.SandboxUID == "" || state.Phase == "" {
 		return nil, fmt.Errorf("%w: incomplete sandbox state in %s", ErrInvalidConfig, directory)
 	}
 	return &state, nil

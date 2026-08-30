@@ -16,7 +16,8 @@ import (
 )
 
 type Metadata struct {
-	fastletapi.RuntimeSandboxSpec
+	Config                 fastletapi.RuntimeSandboxConfig
+	Allocation             fastletapi.RuntimeAllocation
 	ContainerID            string
 	PID                    int
 	Phase                  string
@@ -34,7 +35,7 @@ type Driver interface {
 	Initialize(ctx context.Context, socketPath string) error
 	SetNamespace(ns string)
 	ProbeCapabilities(ctx context.Context) CapabilityReport
-	EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSandboxSpec) (*Metadata, error)
+	EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput) (*Metadata, error)
 	InspectSandbox(ctx context.Context, sandboxID string) (*Metadata, error)
 	DeleteSandbox(ctx context.Context, sandboxID string) error
 	ListManagedSandboxes(ctx context.Context) ([]*Metadata, error)
@@ -85,15 +86,29 @@ type CapabilityProber interface {
 	Probe(ctx context.Context, profile runtimecatalog.RuntimeProfile, socketPath string) CapabilityReport
 }
 
-func ValidateProfile(existing *Metadata, requested *fastletapi.RuntimeSandboxSpec) error {
+func ValidateProfile(existing *Metadata, requested *fastletapi.RuntimeSandboxConfig) error {
 	if existing == nil || requested == nil {
 		return fmt.Errorf("%w: existing and requested runtime specs are required", ErrSandboxProfileMismatch)
 	}
-	if existing.RuntimeProfileHash != requested.RuntimeProfileHash ||
-		existing.ResourceProfileHash != requested.ResourceProfileHash ||
-		existing.InfraRevision != requested.InfraRevision ||
-		existing.CPU != requested.CPU || existing.Memory != requested.Memory || existing.PIDs != requested.PIDs {
-		return fmt.Errorf("%w: existing runtime identity %q has different runtime/resource profile", ErrSandboxProfileMismatch, requested.SandboxID)
+	if existing.Config.Spec.RuntimeProfileHash != requested.Spec.RuntimeProfileHash ||
+		existing.Config.Spec.ResourceProfileHash != requested.Spec.ResourceProfileHash ||
+		existing.Config.Spec.InfraRevision != requested.Spec.InfraRevision ||
+		existing.Config.Spec.CPU != requested.Spec.CPU || existing.Config.Spec.Memory != requested.Spec.Memory || existing.Config.Spec.PIDs != requested.Spec.PIDs {
+		return fmt.Errorf("%w: existing runtime identity %q has different runtime/resource profile", ErrSandboxProfileMismatch, requested.Identity.SandboxUID)
 	}
 	return nil
+}
+
+// SameRuntimeIdentity reports whether an observed runtime belongs to the exact
+// Sandbox incarnation and placement represented by requested. Desired runtime
+// configuration is intentionally excluded and validated separately.
+func SameRuntimeIdentity(existing, requested fastletapi.SandboxIdentity) bool {
+	return existing.SandboxUID == requested.SandboxUID &&
+		existing.Namespace == requested.Namespace &&
+		existing.Name == requested.Name &&
+		existing.FastletPodUID == requested.FastletPodUID &&
+		existing.InstanceGeneration == requested.InstanceGeneration &&
+		existing.RuntimeInstanceID == requested.RuntimeInstanceID &&
+		existing.AssignmentAttempt == requested.AssignmentAttempt &&
+		existing.RouteGeneration == requested.RouteGeneration
 }

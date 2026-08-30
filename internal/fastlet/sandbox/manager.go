@@ -304,7 +304,7 @@ func capacityFromEnvironment() int {
 	return capVal
 }
 
-func (m *SandboxManager) validateProfiles(spec *fastletapi.RuntimeSandboxSpec) error {
+func (m *SandboxManager) validateProfiles(spec *fastletapi.SandboxSpec) error {
 	if m.runtimeProfileHash != "" && spec.RuntimeProfileHash != m.runtimeProfileHash {
 		return fmt.Errorf("%w: runtime profile hash %q does not match Fastlet profile %q", ErrSandboxProfileMismatch, spec.RuntimeProfileHash, m.runtimeProfileHash)
 	}
@@ -337,7 +337,7 @@ func (m *SandboxManager) validateProfiles(spec *fastletapi.RuntimeSandboxSpec) e
 	return m.validateInfraRevision(spec)
 }
 
-func (m *SandboxManager) validateInfraRevision(spec *fastletapi.RuntimeSandboxSpec) error {
+func (m *SandboxManager) validateInfraRevision(spec *fastletapi.SandboxSpec) error {
 	if m.infraRevision != "" && spec.InfraRevision != m.infraRevision {
 		return fmt.Errorf("%w: Infra revision %q does not match Fastlet revision %q", ErrSandboxProfileMismatch, spec.InfraRevision, m.infraRevision)
 	}
@@ -398,14 +398,15 @@ func (m *SandboxManager) asyncDelete(sandboxID string, expected *SandboxMetadata
 	// A delayed delete from an old generation must never erase a newer
 	// manager entry for the same logical Sandbox.
 	if m.sandboxes[sandboxID] == expected {
+		identity := expected.Config.Identity
 		m.recordTombstoneLocked(fastletapi.SandboxIdentity{
-			SandboxUID: sandboxID, InstanceGeneration: expected.InstanceGeneration,
-			RuntimeInstanceID: expected.RuntimeInstanceID, AssignmentAttempt: expected.AssignmentAttempt,
-			FastletPodUID: expected.FastletPodUID,
+			SandboxUID: sandboxID, InstanceGeneration: identity.InstanceGeneration,
+			RuntimeInstanceID: identity.RuntimeInstanceID, AssignmentAttempt: identity.AssignmentAttempt,
+			FastletPodUID: identity.FastletPodUID,
 		})
 		delete(m.sandboxes, sandboxID)
-		m.cacheProtection.Unprotect(expected.Image, fastletcache.ProtectActive)
-		m.cacheProtection.ProtectHotUntil(expected.Image, m.clock.Now().Add(time.Hour))
+		m.cacheProtection.Unprotect(expected.Config.Spec.Image, fastletcache.ProtectActive)
+		m.cacheProtection.ProtectHotUntil(expected.Config.Spec.Image, m.clock.Now().Add(time.Hour))
 		m.recordDiagnosticLocked(sandboxID, "info", "fastlet", "deleted", "proxy route and runtime resources were deleted")
 		klog.InfoS("Sandbox deletion completed", "sandboxID", sandboxID)
 	}
@@ -434,6 +435,7 @@ func (m *SandboxManager) GetSandboxStatuses(ctx context.Context) []fastletapi.Sa
 
 	result := make([]fastletapi.SandboxStatus, 0, len(snapshots))
 	for sandboxID, meta := range snapshots {
+		identity := meta.Config.Identity
 		dataPlaneReady := proxyReady && routeReadyForPhase(meta.Phase)
 		runtimeObservation, dataPlaneObservation := observationsForPhase(meta.Phase, dataPlaneReady)
 		if inspected, err := m.runtime.InspectSandbox(ctx, sandboxID); err == nil {
@@ -441,15 +443,15 @@ func (m *SandboxManager) GetSandboxStatuses(ctx context.Context) []fastletapi.Sa
 		}
 		result = append(result, fastletapi.SandboxStatus{
 			SandboxID:          sandboxID,
-			InstanceGeneration: meta.InstanceGeneration,
-			RuntimeInstanceID:  meta.RuntimeInstanceID,
-			AssignmentAttempt:  meta.AssignmentAttempt,
-			RouteGeneration:    meta.RouteGeneration,
+			InstanceGeneration: identity.InstanceGeneration,
+			RuntimeInstanceID:  identity.RuntimeInstanceID,
+			AssignmentAttempt:  identity.AssignmentAttempt,
+			RouteGeneration:    identity.RouteGeneration,
 			AcceptedGeneration: meta.AcceptedGeneration,
 			AppliedGeneration:  meta.AppliedGeneration,
 			Runtime:            runtimeObservation,
 			DataPlane:          dataPlaneObservation,
-			InfraComponents:    apiInfraDiagnostics(meta.InfraDiagnostics, meta.InfraServices, meta.RouteGeneration, dataPlaneReady),
+			InfraComponents:    apiInfraDiagnostics(meta.InfraDiagnostics, meta.InfraServices, identity.RouteGeneration, dataPlaneReady),
 			ActionBindings:     append([]fastletapi.ActionBindingStatus(nil), meta.ActionBindingStatuses...),
 			CreatedAt:          meta.CreatedAt,
 		})

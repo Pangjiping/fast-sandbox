@@ -73,15 +73,16 @@ func (m *SandboxManager) routePublication(metadata *SandboxMetadata) (RoutePubli
 	if !ok {
 		return RoutePublication{}, fmt.Errorf("runtime does not provide an AccessDescriptor")
 	}
-	access, err := provider.GetAccessDescriptor(metadata.SandboxID)
+	identity := metadata.Config.Identity
+	access, err := provider.GetAccessDescriptor(identity.SandboxUID)
 	if err != nil {
 		return RoutePublication{}, fmt.Errorf("resolve runtime AccessDescriptor: %w", err)
 	}
-	routeGeneration := metadata.RouteGeneration
+	routeGeneration := identity.RouteGeneration
 	if routeGeneration <= 0 {
 		routeGeneration = 1
 	}
-	if metadata.ClaimNamespace == "" || metadata.SandboxID == "" || metadata.FastletPodUID == "" || metadata.AssignmentAttempt <= 0 {
+	if identity.Namespace == "" || identity.SandboxUID == "" || identity.FastletPodUID == "" || identity.AssignmentAttempt <= 0 {
 		return RoutePublication{}, fmt.Errorf("incomplete Sandbox route identity")
 	}
 	components := make(map[string]dataplane.ComponentRoute, len(metadata.InfraServices))
@@ -91,8 +92,8 @@ func (m *SandboxManager) routePublication(metadata *SandboxMetadata) (RoutePubli
 		}
 	}
 	return RoutePublication{
-		Namespace: metadata.ClaimNamespace, SandboxUID: metadata.SandboxID,
-		FastletPodUID: metadata.FastletPodUID, AssignmentAttempt: metadata.AssignmentAttempt,
+		Namespace: identity.Namespace, SandboxUID: identity.SandboxUID,
+		FastletPodUID: identity.FastletPodUID, AssignmentAttempt: identity.AssignmentAttempt,
 		RouteGeneration: routeGeneration, Access: access, Components: components,
 	}, nil
 }
@@ -122,10 +123,11 @@ func (m *SandboxManager) removeRoute(ctx context.Context, metadata *SandboxMetad
 	// failed later (for example while releasing a network slot). Re-resolving
 	// runtime access here would turn an otherwise idempotent retry into a
 	// permanent delete-failed loop.
+	identity := metadata.Config.Identity
 	publication := RoutePublication{
-		Namespace: metadata.ClaimNamespace, SandboxUID: metadata.SandboxID,
-		FastletPodUID: metadata.FastletPodUID, AssignmentAttempt: metadata.AssignmentAttempt,
-		RouteGeneration: metadata.RouteGeneration,
+		Namespace: identity.Namespace, SandboxUID: identity.SandboxUID,
+		FastletPodUID: identity.FastletPodUID, AssignmentAttempt: identity.AssignmentAttempt,
+		RouteGeneration: identity.RouteGeneration,
 	}
 	if publication.RouteGeneration <= 0 {
 		publication.RouteGeneration = 1

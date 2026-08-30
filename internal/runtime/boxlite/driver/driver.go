@@ -139,15 +139,20 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 	return report
 }
 
-func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSandboxSpec) (*SandboxMetadata, error) {
-	if config == nil || config.SandboxID == "" || config.FastletPodUID == "" || config.InstanceGeneration <= 0 || config.RuntimeInstanceID == "" || config.AssignmentAttempt <= 0 {
+func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput) (*SandboxMetadata, error) {
+	if input == nil {
+		return nil, fmt.Errorf("%w: BoxLite Sandbox input is required", ErrInvalidConfig)
+	}
+	config := &input.Sandbox
+	identity := config.Identity
+	if identity.SandboxUID == "" || identity.FastletPodUID == "" || identity.InstanceGeneration <= 0 || identity.RuntimeInstanceID == "" || identity.AssignmentAttempt <= 0 {
 		return nil, fmt.Errorf("%w: complete BoxLite Sandbox identity is required", ErrInvalidConfig)
 	}
 	d.mu.RLock()
 	namespace := d.namespace
 	infraManager := d.infraMgr
 	d.mu.RUnlock()
-	request := boxLiteEnsureRequest{Namespace: namespace, Sandbox: *config, TunnelGuestPort: d.config.TunnelGuestPort}
+	request := boxLiteEnsureRequest{FastletNamespace: namespace, Input: *input, TunnelGuestPort: d.config.TunnelGuestPort}
 	if infraManager != nil {
 		instance, err := infraManager.PrepareInstance(ctx, config)
 		if err != nil {
@@ -164,7 +169,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSa
 		}
 	}
 	var box boxLiteBox
-	if err := d.doJSON(ctx, http.MethodPut, "/v1/boxes/"+url.PathEscape(config.SandboxID), request, &box); err != nil {
+	if err := d.doJSON(ctx, http.MethodPut, "/v1/boxes/"+url.PathEscape(identity.SandboxUID), request, &box); err != nil {
 		return nil, err
 	}
 	metadata, err := d.metadataFromBox(box)
@@ -174,7 +179,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.RuntimeSa
 	if err := validateExistingRuntimeProfile(metadata, config); err != nil {
 		return nil, err
 	}
-	d.rememberAccess(metadata.SandboxID, box.Access)
+	d.rememberAccess(metadata.Config.Identity.SandboxUID, box.Access)
 	return metadata, nil
 }
 
@@ -190,7 +195,7 @@ func (d *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 	if err != nil {
 		return nil, err
 	}
-	d.rememberAccess(metadata.SandboxID, box.Access)
+	d.rememberAccess(metadata.Config.Identity.SandboxUID, box.Access)
 	return metadata, nil
 }
 
@@ -224,7 +229,7 @@ func (d *Driver) ListManagedSandboxes(ctx context.Context) ([]*SandboxMetadata, 
 		if err != nil {
 			return nil, err
 		}
-		d.rememberAccess(metadata.SandboxID, box.Access)
+		d.rememberAccess(metadata.Config.Identity.SandboxUID, box.Access)
 		managed = append(managed, metadata)
 	}
 	return managed, nil
@@ -234,17 +239,18 @@ func (d *Driver) ListManagedSandboxes(ctx context.Context) ([]*SandboxMetadata, 
 // restores the guest LocalForward tunnel before Fastlet routes are published.
 func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*SandboxMetadata) error {
 	for _, metadata := range managed {
-		if metadata == nil || metadata.SandboxID == "" {
+		if metadata == nil || metadata.Config.Identity.SandboxUID == "" {
 			continue
 		}
+		sandboxUID := metadata.Config.Identity.SandboxUID
 		var box boxLiteBox
-		if err := d.doJSON(ctx, http.MethodPost, "/v1/boxes/"+url.PathEscape(metadata.SandboxID), nil, &box); err != nil {
-			return fmt.Errorf("recover BoxLite Sandbox %s: %w", metadata.SandboxID, err)
+		if err := d.doJSON(ctx, http.MethodPost, "/v1/boxes/"+url.PathEscape(sandboxUID), nil, &box); err != nil {
+			return fmt.Errorf("recover BoxLite Sandbox %s: %w", sandboxUID, err)
 		}
-		if box.Sandbox.SandboxID != metadata.SandboxID {
+		if box.Config.Identity.SandboxUID != sandboxUID {
 			return fmt.Errorf("%w: recovered BoxLite Sandbox identity mismatch", ErrSandboxProfileMismatch)
 		}
-		d.rememberAccess(metadata.SandboxID, box.Access)
+		d.rememberAccess(sandboxUID, box.Access)
 	}
 	return nil
 }
@@ -293,7 +299,7 @@ func (d *Driver) Close() error {
 }
 
 func (d *Driver) metadataFromBox(box boxLiteBox) (*SandboxMetadata, error) {
-	if box.Sandbox.SandboxID == "" || box.BoxID == "" {
+	if box.Config.Identity.SandboxUID == "" || box.BoxID == "" {
 		return nil, errors.New("BoxLite sidecar returned incomplete Box identity")
 	}
 	if box.Access.Kind != dataplane.AccessKindLocalForward {
@@ -303,7 +309,7 @@ func (d *Driver) metadataFromBox(box boxLiteBox) (*SandboxMetadata, error) {
 		return nil, fmt.Errorf("%w: invalid BoxLite LocalForward endpoint: %v", ErrNetworkUnavailable, err)
 	}
 	return &SandboxMetadata{
-		RuntimeSandboxSpec: box.Sandbox, ContainerID: box.BoxID, PID: box.PID, Phase: box.Phase, CreatedAt: box.CreatedAt,
+		Config: box.Config, Allocation: box.Allocation, ContainerID: box.BoxID, PID: box.PID, Phase: box.Phase, CreatedAt: box.CreatedAt,
 		UserProcessStartedAt:   box.UserProcessStartedAt,
 		UserProcessStartSource: box.UserProcessStartSource,
 		InfraServices:          append([]fastletinfra.ServiceEndpoint(nil), box.InfraServices...),

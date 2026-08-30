@@ -169,7 +169,7 @@ func garbageCollectImages(stateRoot string, limitBytes int64, useCount map[strin
 			}
 			return nil, fmt.Errorf("read Sandbox state %s for image GC: %w", directory, err)
 		}
-		referenced[imageKey(state.Spec.Image)] = struct{}{}
+		referenced[imageKey(state.Config.Spec.Image)] = struct{}{}
 	}
 	cached, err := listCachedImages(stateRoot)
 	if err != nil {

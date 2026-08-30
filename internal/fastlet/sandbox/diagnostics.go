@@ -105,7 +105,7 @@ func sandboxObservationReady(status *fastletapi.SandboxStatus, metadata *Sandbox
 		return false
 	}
 	for _, component := range status.InfraComponents {
-		if component.State != string(apiv1alpha2.InfraComponentReady) || component.ObservedRouteGeneration != metadata.RouteGeneration {
+		if component.State != string(apiv1alpha2.InfraComponentReady) || component.ObservedRouteGeneration != metadata.Config.Identity.RouteGeneration {
 			return false
 		}
 	}

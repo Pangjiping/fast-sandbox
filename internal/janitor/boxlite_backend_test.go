@@ -56,7 +56,7 @@ func TestBoxLiteBackendFailsClosedOnRecordFenceChange(t *testing.T) {
 	require.Len(t, resources, 1)
 
 	record := readTestBoxLiteRecord(t, recordPath)
-	record.Request.Sandbox.AssignmentAttempt++
+	record.Request.Input.Sandbox.Identity.AssignmentAttempt++
 	writeTestJSON(t, recordPath, record)
 	require.ErrorContains(t, backend.Cleanup(context.Background(), resources[0]), "identity changed")
 }
@@ -94,10 +94,11 @@ func writeBoxLiteState(t *testing.T, root, podUID, sandboxUID string) (string, s
 	record := boxlitestate.SandboxRecord{
 		Version: boxlitestate.Version, Namespace: "default", SpecHash: "spec-hash", HostPort: 21000,
 		CreatedAt: createdAt, BundleRoot: bundleRoot,
-		Request: boxliteprotocol.EnsureRequest{Namespace: "default", TunnelGuestPort: 19090, Sandbox: fastletapi.RuntimeSandboxSpec{
-			SandboxID: sandboxUID, ClaimName: "sandbox-a", ClaimNamespace: "default",
-			FastletPodUID: podUID, InstanceGeneration: 2, AssignmentAttempt: 3, RouteGeneration: 4,
-		}},
+		Request: boxliteprotocol.EnsureRequest{FastletNamespace: "default", TunnelGuestPort: 19090,
+			Input: fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{Identity: fastletapi.SandboxIdentity{
+				SandboxUID: sandboxUID, Name: "sandbox-a", Namespace: "default",
+				FastletPodUID: podUID, InstanceGeneration: 2, AssignmentAttempt: 3, RouteGeneration: 4,
+			}}}},
 	}
 	recordPath := filepath.Join(metadataRoot, boxlitestate.RecordFileName(sandboxUID))
 	writeTestJSON(t, recordPath, record)

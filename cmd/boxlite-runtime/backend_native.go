@@ -223,7 +223,8 @@ func (b *nativeBackend) Ensure(ctx context.Context, request boxliteprotocol.Ensu
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	record := b.records[request.Sandbox.SandboxID]
+	sandboxUID := request.Input.Sandbox.Identity.SandboxUID
+	record := b.records[sandboxUID]
 	if record != nil && record.SpecHash != hash {
 		return boxliteprotocol.Box{}, immutableSpecConflict("Sandbox UID is already bound to a different immutable BoxLite create spec")
 	}
@@ -236,10 +237,12 @@ func (b *nativeBackend) Ensure(ctx context.Context, request boxliteprotocol.Ensu
 		if err != nil {
 			return boxliteprotocol.Box{}, internal(fmt.Errorf("generate LocalForward credential: %w", err))
 		}
+		persistedRequest := request
+		persistedRequest.Input.RequestID = ""
 		record = &nativeRecord{
-			Version: boxlitestate.Version, Namespace: request.Namespace, SpecHash: hash, Request: request,
+			Version: boxlitestate.Version, Namespace: request.FastletNamespace, SpecHash: hash, Request: persistedRequest,
 			HostPort: hostPort, TunnelCredential: tunnelCredential, CreatedAt: time.Now().Unix(),
-			BundleRoot: b.expectedBundleRoot(request.Sandbox.SandboxID, hash),
+			BundleRoot: b.expectedBundleRoot(sandboxUID, hash),
 		}
 		if err := b.prepareBundle(record); err != nil {
 			return boxliteprotocol.Box{}, invalid(err)
@@ -247,7 +250,7 @@ func (b *nativeBackend) Ensure(ctx context.Context, request boxliteprotocol.Ensu
 		if err := b.persistRecord(record); err != nil {
 			return boxliteprotocol.Box{}, internal(err)
 		}
-		b.records[request.Sandbox.SandboxID] = record
+		b.records[sandboxUID] = record
 	}
 	box, err := b.ensureBoxLocked(ctx, record)
 	if err != nil {
@@ -329,7 +332,7 @@ func (b *nativeBackend) List(ctx context.Context, namespace string) ([]boxlitepr
 		}
 		boxes = append(boxes, wireBox(record, info))
 	}
-	sort.Slice(boxes, func(i, j int) bool { return boxes[i].Sandbox.SandboxID < boxes[j].Sandbox.SandboxID })
+	sort.Slice(boxes, func(i, j int) bool { return boxes[i].Config.Identity.SandboxUID < boxes[j].Config.Identity.SandboxUID })
 	return boxes, nil
 }
 
@@ -382,7 +385,7 @@ func (b *nativeBackend) ensureBoxLocked(ctx context.Context, record *nativeRecor
 	if err != nil {
 		return boxliteprotocol.Box{}, err
 	}
-	box, created, err := b.runtime.GetOrCreate(ctx, record.Request.Sandbox.Image, options...)
+	box, created, err := b.runtime.GetOrCreate(ctx, record.Request.Input.Sandbox.Spec.Image, options...)
 	if err != nil {
 		return boxliteprotocol.Box{}, err
 	}
@@ -421,38 +424,41 @@ func (b *nativeBackend) ensureBoxLocked(ctx context.Context, record *nativeRecor
 
 func boxOptions(record *nativeRecord) ([]boxlite.BoxOption, error) {
 	request := record.Request
-	cpus, memoryMiB, err := resourceOptions(request.Sandbox.CPU, request.Sandbox.Memory)
+	config := request.Input.Sandbox
+	spec := config.Spec
+	sandboxUID := config.Identity.SandboxUID
+	cpus, memoryMiB, err := resourceOptions(spec.CPU, spec.Memory)
 	if err != nil {
 		return nil, err
 	}
 	options := []boxlite.BoxOption{
-		boxlite.WithName(request.Sandbox.SandboxID), boxlite.WithCPUs(cpus), boxlite.WithMemory(memoryMiB),
+		boxlite.WithName(sandboxUID), boxlite.WithCPUs(cpus), boxlite.WithMemory(memoryMiB),
 		boxlite.WithPort(boxlite.PortSpec{Host: int(record.HostPort), Guest: int(request.TunnelGuestPort), Protocol: boxlite.PortProtocolTcp}),
 		boxlite.WithVolumeReadOnly(record.BundleRoot, "/.fast"), boxlite.WithAutoRemove(false), boxlite.WithDetach(true),
 		boxlite.WithNetwork(boxlite.NetworkSpec{Mode: boxlite.NetworkModeEnabled}),
 	}
-	for key, value := range request.Sandbox.Env {
+	for key, value := range spec.Env {
 		options = append(options, boxlite.WithEnv(key, value))
 	}
-	if request.Sandbox.WorkingDir != "" {
-		options = append(options, boxlite.WithWorkDir(request.Sandbox.WorkingDir))
+	if spec.WorkingDir != "" {
+		options = append(options, boxlite.WithWorkDir(spec.WorkingDir))
 	}
 	wrapper := hasArtifact(request.Artifacts, fastletinfra.SandboxInitContainerPath)
 	if wrapper {
-		if len(request.Sandbox.Command) == 0 {
+		if len(spec.Command) == 0 {
 			return nil, errors.New("BoxLite sandbox-init requires an explicit user command until image config introspection is available")
 		}
 		options = append(options, boxlite.WithEntrypoint(fastletinfra.SandboxInitContainerPath))
 		args := []string{"--config", fastletinfra.InstanceConfigPath, "--"}
-		args = append(args, request.Sandbox.Command...)
-		args = append(args, request.Sandbox.Args...)
+		args = append(args, spec.Command...)
+		args = append(args, spec.Args...)
 		options = append(options, boxlite.WithCmd(args...))
 	} else {
-		if len(request.Sandbox.Command) > 0 {
-			options = append(options, boxlite.WithEntrypoint(request.Sandbox.Command...))
+		if len(spec.Command) > 0 {
+			options = append(options, boxlite.WithEntrypoint(spec.Command...))
 		}
-		if len(request.Sandbox.Args) > 0 {
-			options = append(options, boxlite.WithCmd(request.Sandbox.Args...))
+		if len(spec.Args) > 0 {
+			options = append(options, boxlite.WithCmd(spec.Args...))
 		}
 	}
 	return options, nil
@@ -474,7 +480,8 @@ func resourceOptions(cpu, memory string) (int, int, error) {
 }
 
 func (b *nativeBackend) ensureTunnelLocked(ctx context.Context, record *nativeRecord, box *boxlite.Box) error {
-	if b.tunnels[record.Request.Sandbox.SandboxID] != nil {
+	sandboxUID := record.Request.Input.Sandbox.Identity.SandboxUID
+	if b.tunnels[sandboxUID] != nil {
 		return nil
 	}
 	execution, err := box.StartExecution(ctx, fastletinfra.SandboxTunnelContainerPath,
@@ -485,8 +492,7 @@ func (b *nativeBackend) ensureTunnelLocked(ctx context.Context, record *nativeRe
 	if err != nil {
 		return err
 	}
-	b.tunnels[record.Request.Sandbox.SandboxID] = execution
-	sandboxUID := record.Request.Sandbox.SandboxID
+	b.tunnels[sandboxUID] = execution
 	go func() {
 		waitCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -595,7 +601,7 @@ func copyArtifact(source, destination string) error {
 
 func wireBox(record *nativeRecord, info *boxlite.BoxInfo) boxliteprotocol.Box {
 	return boxliteprotocol.Box{
-		Sandbox: record.Request.Sandbox, BoxID: info.ID, PID: info.PID, Phase: string(info.State),
+		Config: record.Request.Input.Sandbox, BoxID: info.ID, PID: info.PID, Phase: string(info.State),
 		CreatedAt: record.CreatedAt,
 		Access: dataplane.AccessDescriptor{
 			Kind: dataplane.AccessKindLocalForward, Address: net.JoinHostPort("127.0.0.1", strconv.Itoa(int(record.HostPort))),
@@ -632,10 +638,11 @@ func (b *nativeBackend) loadRecords() error {
 		if err := validateCreateRequest(record.Request); err != nil {
 			return fmt.Errorf("invalid BoxLite metadata record %s: %w", entry.Name(), err)
 		}
-		sandboxUID := record.Request.Sandbox.SandboxID
+		identity := record.Request.Input.Sandbox.Identity
+		sandboxUID := identity.SandboxUID
 		if entry.Name() != boxlitestate.RecordFileName(sandboxUID) ||
-			record.Request.Sandbox.FastletPodUID != b.podUID ||
-			record.Namespace != record.Request.Namespace {
+			identity.FastletPodUID != b.podUID ||
+			record.Namespace != record.Request.FastletNamespace {
 			return fmt.Errorf("BoxLite metadata owner fence mismatch for %s", sandboxUID)
 		}
 		hash, err := ensureHash(record.Request)
@@ -676,7 +683,7 @@ func (b *nativeBackend) persistRecord(record *nativeRecord) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporaryPath, b.recordPath(record.Request.Sandbox.SandboxID))
+	return os.Rename(temporaryPath, b.recordPath(record.Request.Input.Sandbox.Identity.SandboxUID))
 }
 
 func (b *nativeBackend) recordPath(sandboxUID string) string {
@@ -695,7 +702,9 @@ func (b *nativeBackend) closeTunnelLocked(sandboxUID string) {
 }
 
 func ensureHash(request boxliteprotocol.EnsureRequest) (string, error) {
-	payload, err := json.Marshal(request)
+	stable := request
+	stable.Input.RequestID = ""
+	payload, err := json.Marshal(stable)
 	if err != nil {
 		return "", err
 	}
@@ -704,8 +713,10 @@ func ensureHash(request boxliteprotocol.EnsureRequest) (string, error) {
 }
 
 func validateCreateRequest(request boxliteprotocol.EnsureRequest) error {
-	spec := request.Sandbox
-	if request.Namespace == "" || spec.SandboxID == "" || spec.FastletPodUID == "" || spec.InstanceGeneration <= 0 || spec.RuntimeInstanceID == "" || spec.AssignmentAttempt <= 0 {
+	config := request.Input.Sandbox
+	identity := config.Identity
+	spec := config.Spec
+	if request.FastletNamespace == "" || identity.SandboxUID == "" || identity.FastletPodUID == "" || identity.InstanceGeneration <= 0 || identity.RuntimeInstanceID == "" || identity.AssignmentAttempt <= 0 {
 		return errors.New("complete namespace and Sandbox owner fence are required")
 	}
 	if spec.Image == "" || spec.CPU == "" || spec.Memory == "" || request.TunnelGuestPort == 0 || request.TunnelGuestPort > 65535 {
@@ -740,7 +751,7 @@ func allocateHostPort() (uint32, error) {
 }
 
 func recordIdentity(record *nativeRecord) string {
-	return record.Request.Sandbox.SandboxID
+	return record.Request.Input.Sandbox.Identity.SandboxUID
 }
 
 func safePathSegment(value string) string {

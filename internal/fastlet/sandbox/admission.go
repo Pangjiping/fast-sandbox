@@ -39,14 +39,14 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 		recordAdmission("create", resultErr)
 	}()
 	_, finishValidation := startFastletCreateStage(ctx, m.runtimeName, "validation")
-	spec, validationFailure := m.prepareCreateSpec(req)
+	input, validationFailure := m.prepareCreateInput(req)
 	finishValidation(validationFailure)
 	if validationFailure != nil {
 		return createFailure(validationFailure, fastletapi.AdmissionStatus{})
 	}
 
 	_, finishAdmission := startFastletCreateStage(ctx, m.runtimeName, "admission")
-	reservation, admissionErr := m.reserveSandboxForCreate(req, spec)
+	reservation, admissionErr := m.reserveSandboxForCreate(req, input)
 	finishAdmission(admissionErr)
 	if admissionErr != nil {
 		if reservation.existing != nil {
@@ -59,22 +59,23 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 		return createFailureWithDisposition(failure, reservation.admission, reservation.disposition)
 	}
 	if reservation.cleanupExisting != nil {
-		return m.retryFailedCreateCleanup(ctx, req, &spec, reservation.cleanupExisting)
+		return m.retryFailedCreateCleanup(ctx, req, &input, reservation.cleanupExisting)
 	}
 	if reservation.existing != nil {
 		return m.finishCreate(ctx, req, reservation.existing)
 	}
 	placeholder := reservation.placeholder
 	admission := reservation.admission
-	m.recordDiagnostic(spec.SandboxID, "info", "admission", "creating", "Fastlet admission accepted; atomic runtime creation started")
+	sandboxUID := input.Sandbox.Identity.SandboxUID
+	m.recordDiagnostic(sandboxUID, "info", "admission", "creating", "Fastlet admission accepted; atomic runtime creation started")
 	if bindingFailure, currentAdmission := m.registerDesiredBindings(placeholder, req); bindingFailure != nil {
 		return createFailureWithDisposition(bindingFailure, currentAdmission, fastletapi.CreateDispositionRejectedBeforeSideEffects)
 	}
-	metadata, err := m.ensureRuntimeForCreate(ctx, started, &spec)
+	metadata, err := m.ensureRuntimeForCreate(ctx, started, &input)
 	if err != nil {
-		return m.handleRuntimeCreateFailure(ctx, &spec, placeholder, err)
+		return m.handleRuntimeCreateFailure(ctx, &input, placeholder, err)
 	}
-	status, admission, dataPlaneReady, commitFailure := m.commitRuntimeCreate(req, spec, placeholder, metadata)
+	status, admission, dataPlaneReady, commitFailure := m.commitRuntimeCreate(req, input, placeholder, metadata)
 	if commitFailure != nil {
 		return createFailure(commitFailure, admission)
 	}
@@ -95,30 +96,25 @@ func withCreateIdentity(ctx context.Context, req *fastletapi.CreateSandboxReques
 	})
 }
 
-func (m *SandboxManager) prepareCreateSpec(req *fastletapi.CreateSandboxRequest) (fastletapi.RuntimeSandboxSpec, *fastletapi.FastletError) {
+func (m *SandboxManager) prepareCreateInput(req *fastletapi.CreateSandboxRequest) (fastletapi.EnsureSandboxInput, *fastletapi.FastletError) {
 	if failure := m.validateCreateRequest(req); failure != nil {
-		return fastletapi.RuntimeSandboxSpec{}, failure
+		return fastletapi.EnsureSandboxInput{}, failure
 	}
-	spec := fastletapi.RuntimeSandboxSpec{
-		SandboxSpec:    req.Sandbox,
-		SandboxID:      req.Identity.SandboxUID,
-		RequestID:      req.RequestID,
-		ClaimNamespace: req.Identity.Namespace,
-		ClaimName:      req.Identity.Name,
+	identity := req.Identity
+	if identity.RouteGeneration <= 0 {
+		identity.RouteGeneration = 1
 	}
-	spec.InstanceGeneration, spec.RuntimeInstanceID = req.Identity.InstanceGeneration, req.Identity.RuntimeInstanceID
-	spec.AssignmentAttempt, spec.RouteGeneration = req.Identity.AssignmentAttempt, req.Identity.RouteGeneration
-	if spec.RouteGeneration <= 0 {
-		spec.RouteGeneration = 1
+	input := fastletapi.EnsureSandboxInput{
+		RequestID: req.RequestID,
+		Sandbox:   fastletapi.RuntimeSandboxConfig{Identity: identity, Spec: req.Sandbox},
 	}
-	spec.FastletPodUID = req.Identity.FastletPodUID
-	if err := m.validateProfiles(&spec); err != nil {
-		return fastletapi.RuntimeSandboxSpec{}, fastletError(fastletapi.ErrorProfileMismatch, err.Error(), false)
+	if err := m.validateProfiles(&input.Sandbox.Spec); err != nil {
+		return fastletapi.EnsureSandboxInput{}, fastletError(fastletapi.ErrorProfileMismatch, err.Error(), false)
 	}
-	return spec, nil
+	return input, nil
 }
 
-func (m *SandboxManager) reserveSandboxForCreate(req *fastletapi.CreateSandboxRequest, spec fastletapi.RuntimeSandboxSpec) (createReservation, error) {
+func (m *SandboxManager) reserveSandboxForCreate(req *fastletapi.CreateSandboxRequest, input fastletapi.EnsureSandboxInput) (createReservation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	result := createReservation{admission: m.admissionStatusLocked()}
@@ -140,16 +136,17 @@ func (m *SandboxManager) reserveSandboxForCreate(req *fastletapi.CreateSandboxRe
 	if len(req.ActionBindings) > 0 && m.actionManager == nil {
 		return reject(fastletError(fastletapi.ErrorActionUnavailable, "Fastlet has no Action Handler configuration", false), fastletapi.CreateDispositionRejectedBeforeSideEffects)
 	}
-	if existing := m.sandboxes[spec.SandboxID]; existing != nil {
+	identity := input.Sandbox.Identity
+	if existing := m.sandboxes[identity.SandboxUID]; existing != nil {
 		if existing.Phase == "create-cleanup-failed" {
 			result.cleanupExisting = existing
 			return result, nil
 		}
-		response, err := m.createExistingLocked(existing, &spec)
+		response, err := m.createExistingLocked(existing, &input.Sandbox)
 		result.existing = response
 		return result, err
 	}
-	if tombstone, found := m.tombstones[spec.SandboxID]; found && identityAtOrBefore(spec.InstanceGeneration, spec.AssignmentAttempt, tombstone) {
+	if tombstone, found := m.tombstones[identity.SandboxUID]; found && identityAtOrBefore(identity.InstanceGeneration, identity.AssignmentAttempt, tombstone) {
 		return reject(fastletError(fastletapi.ErrorGenerationFenced, "Sandbox generation was already deleted", false), fastletapi.CreateDispositionGenerationFenced)
 	}
 	if m.draining {
@@ -162,10 +159,10 @@ func (m *SandboxManager) reserveSandboxForCreate(req *fastletapi.CreateSandboxRe
 		return reject(fastletError(fastletapi.ErrorNetworkUnavailable, "Fastlet has no clean runtime/network resource available", true), fastletapi.CreateDispositionRejectedBeforeSideEffects)
 	}
 	result.placeholder = &SandboxMetadata{
-		RuntimeSandboxSpec: spec, Phase: "creating", CreatedAt: m.clock.Now().Unix(), AcceptedGeneration: req.SpecGeneration,
+		Config: input.Sandbox, Phase: "creating", CreatedAt: m.clock.Now().Unix(), AcceptedGeneration: req.SpecGeneration,
 		ActionBindingStatuses: pendingActionBindingStatuses(req.ActionBindings),
 	}
-	m.sandboxes[spec.SandboxID] = result.placeholder
+	m.sandboxes[identity.SandboxUID] = result.placeholder
 	result.admission = m.admissionStatusLocked()
 	return result, nil
 }
@@ -173,8 +170,9 @@ func (m *SandboxManager) reserveSandboxForCreate(req *fastletapi.CreateSandboxRe
 func (m *SandboxManager) registerDesiredBindings(placeholder *SandboxMetadata, req *fastletapi.CreateSandboxRequest) (*fastletapi.FastletError, fastletapi.AdmissionStatus) {
 	if err := m.registerDesiredActions(placeholder, req.SpecGeneration, req.ActionBindings); err != nil {
 		m.mu.Lock()
-		if m.sandboxes[placeholder.SandboxID] == placeholder {
-			delete(m.sandboxes, placeholder.SandboxID)
+		sandboxUID := placeholder.Config.Identity.SandboxUID
+		if m.sandboxes[sandboxUID] == placeholder {
+			delete(m.sandboxes, sandboxUID)
 		}
 		admission := m.admissionStatusLocked()
 		m.mu.Unlock()
@@ -183,29 +181,30 @@ func (m *SandboxManager) registerDesiredBindings(placeholder *SandboxMetadata, r
 	return nil, fastletapi.AdmissionStatus{}
 }
 
-func (m *SandboxManager) ensureRuntimeForCreate(ctx context.Context, createStarted time.Time, spec *fastletapi.RuntimeSandboxSpec) (*SandboxMetadata, error) {
+func (m *SandboxManager) ensureRuntimeForCreate(ctx context.Context, createStarted time.Time, input *fastletapi.EnsureSandboxInput) (*SandboxMetadata, error) {
 	runtimeStarted := time.Now()
 	runtimeContext, finishRuntime := startFastletCreateStage(ctx, m.runtimeName, "runtime_ensure")
-	metadata, err := m.runtime.EnsureSandbox(runtimeContext, spec)
+	metadata, err := m.runtime.EnsureSandbox(runtimeContext, input)
 	finishRuntime(err)
 	observeRuntimeCreate(m.runtimeName, runtimeStarted, err)
 	observeUserProcessStart(m.runtimeName, m.infraRevision, createStarted, metadata)
 	return metadata, err
 }
 
-func (m *SandboxManager) handleRuntimeCreateFailure(ctx context.Context, spec *fastletapi.RuntimeSandboxSpec, placeholder *SandboxMetadata, runtimeErr error) (*fastletapi.CreateSandboxResponse, error) {
-	m.cacheProtection.ProtectHotUntil(spec.Image, m.clock.Now().Add(time.Hour))
-	cleanupErr := m.runtime.DeleteSandbox(ctx, spec.SandboxID)
+func (m *SandboxManager) handleRuntimeCreateFailure(ctx context.Context, input *fastletapi.EnsureSandboxInput, placeholder *SandboxMetadata, runtimeErr error) (*fastletapi.CreateSandboxResponse, error) {
+	sandboxUID := input.Sandbox.Identity.SandboxUID
+	m.cacheProtection.ProtectHotUntil(input.Sandbox.Spec.Image, m.clock.Now().Add(time.Hour))
+	cleanupErr := m.runtime.DeleteSandbox(ctx, sandboxUID)
 	if m.actionManager != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		cleanupErr = errors.Join(cleanupErr, m.actionManager.Delete(cleanupCtx, spec.SandboxID))
+		cleanupErr = errors.Join(cleanupErr, m.actionManager.Delete(cleanupCtx, sandboxUID))
 		cancel()
 	}
 	m.mu.Lock()
 	disposition := fastletapi.CreateDispositionRejectedBeforeSideEffects
-	if cleanupErr == nil && m.sandboxes[spec.SandboxID] == placeholder {
-		delete(m.sandboxes, spec.SandboxID)
-	} else if m.sandboxes[spec.SandboxID] == placeholder {
+	if cleanupErr == nil && m.sandboxes[sandboxUID] == placeholder {
+		delete(m.sandboxes, sandboxUID)
+	} else if m.sandboxes[sandboxUID] == placeholder {
 		placeholder.Phase = "create-cleanup-failed"
 		disposition = fastletapi.CreateDispositionFailedNeedsCleanup
 	}
@@ -221,40 +220,36 @@ func (m *SandboxManager) handleRuntimeCreateFailure(ctx context.Context, spec *f
 	if cleanupErr != nil {
 		message = fmt.Sprintf("%s; cleanup failed: %v", message, cleanupErr)
 	}
-	m.recordDiagnostic(spec.SandboxID, "error", "runtime", string(disposition), message)
+	m.recordDiagnostic(sandboxUID, "error", "runtime", string(disposition), message)
 	return createFailureWithDisposition(fastletErrorWithCause(code, message, true, errors.Join(runtimeErr, cleanupErr)), admission, disposition)
 }
 
-func (m *SandboxManager) commitRuntimeCreate(req *fastletapi.CreateSandboxRequest, spec fastletapi.RuntimeSandboxSpec, placeholder, metadata *SandboxMetadata) (fastletapi.SandboxStatus, fastletapi.AdmissionStatus, bool, *fastletapi.FastletError) {
-	runtimeSpec := metadata.RuntimeSandboxSpec
-	metadata.Phase, metadata.RuntimeSandboxSpec = "infra-pending", spec
-	metadata.NetworkSlotID, metadata.NetworkNamespacePath = runtimeSpec.NetworkSlotID, runtimeSpec.NetworkNamespacePath
-	metadata.NetworkIP, metadata.NetworkGateway = runtimeSpec.NetworkIP, runtimeSpec.NetworkGateway
-	metadata.NetworkDNSPath, metadata.NetworkPrivateCIDR = runtimeSpec.NetworkDNSPath, runtimeSpec.NetworkPrivateCIDR
-	metadata.NetworkHostVeth = runtimeSpec.NetworkHostVeth
+func (m *SandboxManager) commitRuntimeCreate(req *fastletapi.CreateSandboxRequest, input fastletapi.EnsureSandboxInput, placeholder, metadata *SandboxMetadata) (fastletapi.SandboxStatus, fastletapi.AdmissionStatus, bool, *fastletapi.FastletError) {
+	metadata.Phase, metadata.Config = "infra-pending", input.Sandbox
 	metadata.ActionBindingStatuses = pendingActionBindingStatuses(req.ActionBindings)
 	metadata.AcceptedGeneration = req.SpecGeneration
 	if len(req.ActionBindings) == 0 {
 		metadata.AppliedGeneration = req.SpecGeneration
 	}
-	m.cacheProtection.Protect(spec.Image, fastletcache.ProtectActive)
+	m.cacheProtection.Protect(input.Sandbox.Spec.Image, fastletcache.ProtectActive)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	sandboxUID := input.Sandbox.Identity.SandboxUID
 	if placeholder.Phase == "terminating" {
 		metadata.Phase = "terminating"
-		m.sandboxes[spec.SandboxID] = metadata
+		m.sandboxes[sandboxUID] = metadata
 		admission := m.admissionStatusLocked()
-		go m.asyncDelete(spec.SandboxID, metadata)
+		go m.asyncDelete(sandboxUID, metadata)
 		return fastletapi.SandboxStatus{}, admission, false, fastletError(fastletapi.ErrorConflict, "Sandbox was deleted while creation was in progress", false)
 	}
-	m.sandboxes[spec.SandboxID] = metadata
+	m.sandboxes[sandboxUID] = metadata
 	if m.infraManager == nil && m.routePublisher == nil {
 		if len(req.ActionBindings) > 0 {
 			metadata.Phase = "action-pending"
 		} else {
 			metadata.Phase = "running"
 		}
-		m.recordDiagnosticLocked(spec.SandboxID, "info", "fastlet", "running", "runtime is ready; no asynchronous data-plane initialization is required")
+		m.recordDiagnosticLocked(sandboxUID, "info", "fastlet", "running", "runtime is ready; no asynchronous data-plane initialization is required")
 	}
 	status := m.sandboxStatusLocked(metadata)
 	return status, m.admissionStatusLocked(), metadata.Phase == "running", nil
@@ -262,7 +257,7 @@ func (m *SandboxManager) commitRuntimeCreate(req *fastletapi.CreateSandboxReques
 
 func (m *SandboxManager) recordRuntimeReadyAndDispatchHooks(metadata *SandboxMetadata, req *fastletapi.CreateSandboxRequest, dataPlaneReady bool) {
 	if err := m.registerDesiredActions(metadata, req.SpecGeneration, req.ActionBindings); err != nil {
-		m.recordDiagnostic(metadata.SandboxID, "error", "action", "binding-pending", err.Error())
+		m.recordDiagnostic(metadata.Config.Identity.SandboxUID, "error", "action", "binding-pending", err.Error())
 	}
 	m.recordActionHook(metadata, actionapi.LifecycleHookRuntimeReady, 1)
 	if dataPlaneReady {
@@ -274,10 +269,10 @@ func (m *SandboxManager) continueDataPlaneCreation(metadata *SandboxMetadata, st
 	if dataPlaneReady {
 		observeDataPlaneReady(m.runtimeName, m.infraRevision, started, nil)
 	} else if dataPlaneWorkPending(metadata.Phase) {
-		m.recordDiagnostic(metadata.SandboxID, "info", "runtime", "infra-pending", "runtime and private network are ready; Infra Component initialization continues asynchronously")
+		m.recordDiagnostic(metadata.Config.Identity.SandboxUID, "info", "runtime", "infra-pending", "runtime and private network are ready; Infra Component initialization continues asynchronously")
 		m.startDataPlaneReconcile(metadata, started)
 	} else {
-		m.recordDiagnostic(metadata.SandboxID, "info", "action", "action-pending", "runtime and private network are ready; Sandbox Actions are pending")
+		m.recordDiagnostic(metadata.Config.Identity.SandboxUID, "info", "action", "action-pending", "runtime and private network are ready; Sandbox Actions are pending")
 	}
 }
 
@@ -321,20 +316,16 @@ func (m *SandboxManager) finishCreate(ctx context.Context, req *fastletapi.Creat
 // retryFailedCreateCleanup resumes only cleanup that belongs to a failed
 // Create attempt. A user-requested delete uses the distinct delete-failed
 // phase and can never be resurrected by a delayed Create retry.
-func (m *SandboxManager) retryFailedCreateCleanup(ctx context.Context, req *fastletapi.CreateSandboxRequest, requested *fastletapi.RuntimeSandboxSpec, existing *SandboxMetadata) (*fastletapi.CreateSandboxResponse, error) {
+func (m *SandboxManager) retryFailedCreateCleanup(ctx context.Context, req *fastletapi.CreateSandboxRequest, input *fastletapi.EnsureSandboxInput, existing *SandboxMetadata) (*fastletapi.CreateSandboxResponse, error) {
+	requested := &input.Sandbox
+	sandboxUID := requested.Identity.SandboxUID
 	m.mu.Lock()
-	if m.sandboxes[requested.SandboxID] != existing {
+	if m.sandboxes[sandboxUID] != existing {
 		admission := m.admissionStatusLocked()
 		m.mu.Unlock()
 		return createFailure(fastletError(fastletapi.ErrorConflict, "Sandbox changed before failed Create cleanup retry", true), admission)
 	}
-	identity := fastletapi.SandboxIdentity{
-		SandboxUID: requested.SandboxID, Namespace: requested.ClaimNamespace, Name: requested.ClaimName,
-		InstanceGeneration: requested.InstanceGeneration, RuntimeInstanceID: requested.RuntimeInstanceID,
-		AssignmentAttempt: requested.AssignmentAttempt, RouteGeneration: requested.RouteGeneration,
-		FastletPodUID: requested.FastletPodUID,
-	}
-	if failure := validateIdentityFence(m.fastletPodUID, existing, identity); failure != nil {
+	if failure := validateIdentityFence(m.fastletPodUID, existing, requested.Identity); failure != nil {
 		response, err := createFailure(failure, m.admissionStatusLocked())
 		m.mu.Unlock()
 		return response, err
@@ -347,9 +338,9 @@ func (m *SandboxManager) retryFailedCreateCleanup(ctx context.Context, req *fast
 	existing.Phase = "create-cleanup"
 	m.mu.Unlock()
 
-	cleanupErr := m.runtime.DeleteSandbox(ctx, requested.SandboxID)
+	cleanupErr := m.runtime.DeleteSandbox(ctx, sandboxUID)
 	m.mu.Lock()
-	if m.sandboxes[requested.SandboxID] != existing {
+	if m.sandboxes[sandboxUID] != existing {
 		admission := m.admissionStatusLocked()
 		m.mu.Unlock()
 		return createFailure(fastletError(fastletapi.ErrorConflict, "Sandbox changed while failed Create cleanup was retried", true), admission)
@@ -359,12 +350,12 @@ func (m *SandboxManager) retryFailedCreateCleanup(ctx context.Context, req *fast
 		admission := m.admissionStatusLocked()
 		m.mu.Unlock()
 		message := fmt.Sprintf("retry failed Create cleanup: %v", cleanupErr)
-		m.recordDiagnostic(requested.SandboxID, "error", "runtime", string(fastletapi.CreateDispositionFailedNeedsCleanup), message)
+		m.recordDiagnostic(sandboxUID, "error", "runtime", string(fastletapi.CreateDispositionFailedNeedsCleanup), message)
 		return createFailureWithDisposition(fastletErrorWithCause(fastletapi.ErrorRuntimeUnavailable, message, true, cleanupErr), admission, fastletapi.CreateDispositionFailedNeedsCleanup)
 	}
-	delete(m.sandboxes, requested.SandboxID)
+	delete(m.sandboxes, sandboxUID)
 	m.mu.Unlock()
-	m.recordDiagnostic(requested.SandboxID, "info", "runtime", "cleanup-recovered", "failed Create cleanup converged; retrying the same runtime identity")
+	m.recordDiagnostic(sandboxUID, "info", "runtime", "cleanup-recovered", "failed Create cleanup converged; retrying the same runtime identity")
 	return m.CreateSandbox(ctx, req)
 }
 
@@ -467,36 +458,37 @@ func (m *SandboxManager) Recover(ctx context.Context) error {
 	}
 	recovered := make(map[string]*SandboxMetadata, len(managed))
 	for _, metadata := range managed {
-		if metadata == nil || metadata.SandboxID == "" {
+		if metadata == nil || metadata.Config.Identity.SandboxUID == "" {
 			continue
 		}
-		if m.fastletPodUID != "" && metadata.FastletPodUID != "" && metadata.FastletPodUID != m.fastletPodUID {
+		identity := &metadata.Config.Identity
+		if m.fastletPodUID != "" && identity.FastletPodUID != "" && identity.FastletPodUID != m.fastletPodUID {
 			continue
 		}
-		if metadata.InstanceGeneration <= 0 {
-			metadata.InstanceGeneration = 1
+		if identity.InstanceGeneration <= 0 {
+			identity.InstanceGeneration = 1
 		}
-		if metadata.RuntimeInstanceID == "" {
-			metadata.RuntimeInstanceID = "legacy-" + metadata.SandboxID
+		if identity.RuntimeInstanceID == "" {
+			identity.RuntimeInstanceID = "legacy-" + identity.SandboxUID
 		}
-		if metadata.AssignmentAttempt <= 0 {
-			metadata.AssignmentAttempt = 1
+		if identity.AssignmentAttempt <= 0 {
+			identity.AssignmentAttempt = 1
 		}
-		if metadata.RouteGeneration <= 0 {
-			metadata.RouteGeneration = 1
+		if identity.RouteGeneration <= 0 {
+			identity.RouteGeneration = 1
 		}
 		if metadata.Phase == "" {
 			metadata.Phase = "unknown"
 		}
 		if m.infraManager != nil {
-			if metadata.InfraRevision != m.infraRevision {
-				return fmt.Errorf("recovered Sandbox %s Infra revision does not match Fastlet", metadata.SandboxID)
+			if metadata.Config.Spec.InfraRevision != m.infraRevision {
+				return fmt.Errorf("recovered Sandbox %s Infra revision does not match Fastlet", identity.SandboxUID)
 			}
 			metadata.Phase = "infra-pending"
 		} else if m.actionManager != nil && m.actionManager.Required() {
 			metadata.Phase = "action-pending"
 		}
-		recovered[metadata.SandboxID] = metadata
+		recovered[identity.SandboxUID] = metadata
 	}
 	if len(recovered) > m.capacity {
 		return fmt.Errorf("recovered %d Sandboxes exceeds Fastlet capacity %d", len(recovered), m.capacity)
@@ -510,7 +502,7 @@ func (m *SandboxManager) Recover(ctx context.Context) error {
 		}
 		publication, err := m.routePublication(metadata)
 		if err != nil {
-			return fmt.Errorf("recover route for Sandbox %s: %w", metadata.SandboxID, err)
+			return fmt.Errorf("recover route for Sandbox %s: %w", metadata.Config.Identity.SandboxUID, err)
 		}
 		if m.routePublisher != nil {
 			publications = append(publications, publication)
@@ -523,7 +515,7 @@ func (m *SandboxManager) Recover(ctx context.Context) error {
 	}
 	activeImages := make([]string, 0, len(recovered))
 	for _, metadata := range recovered {
-		activeImages = append(activeImages, metadata.Image)
+		activeImages = append(activeImages, metadata.Config.Spec.Image)
 	}
 	m.cacheProtection.Replace(fastletcache.ProtectActive, activeImages)
 	m.mu.Lock()
@@ -571,13 +563,8 @@ func (m *SandboxManager) State() (fastletapi.AdmissionStatus, bool, bool) {
 	return m.admissionStatusLocked(), m.recovering, m.draining
 }
 
-func (m *SandboxManager) createExistingLocked(existing *SandboxMetadata, requested *fastletapi.RuntimeSandboxSpec) (*fastletapi.CreateSandboxResponse, error) {
-	identity := fastletapi.SandboxIdentity{
-		SandboxUID: requested.SandboxID, Namespace: requested.ClaimNamespace, Name: requested.ClaimName,
-		InstanceGeneration: requested.InstanceGeneration, RuntimeInstanceID: requested.RuntimeInstanceID, AssignmentAttempt: requested.AssignmentAttempt,
-		RouteGeneration: requested.RouteGeneration, FastletPodUID: requested.FastletPodUID,
-	}
-	if failure := validateIdentityFence(m.fastletPodUID, existing, identity); failure != nil {
+func (m *SandboxManager) createExistingLocked(existing *SandboxMetadata, requested *fastletapi.RuntimeSandboxConfig) (*fastletapi.CreateSandboxResponse, error) {
+	if failure := validateIdentityFence(m.fastletPodUID, existing, requested.Identity); failure != nil {
 		return createFailure(failure, m.admissionStatusLocked())
 	}
 	if !sameSandboxClaim(existing, requested) {
@@ -629,33 +616,34 @@ func validateIdentityFence(expectedPodUID string, existing *SandboxMetadata, req
 	if expectedPodUID != "" && requested.FastletPodUID != expectedPodUID {
 		return fastletError(fastletapi.ErrorStaleAssignment, "request targets a different Fastlet Pod UID", false)
 	}
-	if requested.InstanceGeneration < existing.InstanceGeneration ||
-		(requested.InstanceGeneration == existing.InstanceGeneration && requested.AssignmentAttempt < existing.AssignmentAttempt) {
+	existingIdentity := existing.Config.Identity
+	if requested.InstanceGeneration < existingIdentity.InstanceGeneration ||
+		(requested.InstanceGeneration == existingIdentity.InstanceGeneration && requested.AssignmentAttempt < existingIdentity.AssignmentAttempt) {
 		return fastletError(fastletapi.ErrorStaleGeneration, "request generation/assignment attempt is older than the managed Sandbox", false)
 	}
-	if requested.InstanceGeneration > existing.InstanceGeneration || requested.AssignmentAttempt > existing.AssignmentAttempt {
+	if requested.InstanceGeneration > existingIdentity.InstanceGeneration || requested.AssignmentAttempt > existingIdentity.AssignmentAttempt {
 		return fastletError(fastletapi.ErrorConflict, "newer generation/assignment requires the old runtime to be deleted first", true)
 	}
-	if requested.RuntimeInstanceID != existing.RuntimeInstanceID {
+	if requested.RuntimeInstanceID != existingIdentity.RuntimeInstanceID {
 		return fastletError(fastletapi.ErrorConflict, "runtimeInstanceId conflicts with the managed Sandbox", false)
 	}
 	requestedRouteGeneration := requested.RouteGeneration
 	if requestedRouteGeneration <= 0 {
-		requestedRouteGeneration = existing.RouteGeneration
+		requestedRouteGeneration = existingIdentity.RouteGeneration
 	}
-	if requestedRouteGeneration < existing.RouteGeneration {
+	if requestedRouteGeneration < existingIdentity.RouteGeneration {
 		return fastletError(fastletapi.ErrorStaleGeneration, "request route generation is older than the managed Sandbox", false)
 	}
-	if requestedRouteGeneration > existing.RouteGeneration {
+	if requestedRouteGeneration > existingIdentity.RouteGeneration {
 		return fastletError(fastletapi.ErrorConflict, "newer route generation requires the old runtime to be deleted first", true)
 	}
 	return nil
 }
 
-func sameSandboxClaim(existing *SandboxMetadata, requested *fastletapi.RuntimeSandboxSpec) bool {
-	return existing.ClaimNamespace == requested.ClaimNamespace && existing.ClaimName == requested.ClaimName &&
-		existing.RuntimeProfileHash == requested.RuntimeProfileHash && existing.ResourceProfileHash == requested.ResourceProfileHash &&
-		existing.InfraRevision == requested.InfraRevision
+func sameSandboxClaim(existing *SandboxMetadata, requested *fastletapi.RuntimeSandboxConfig) bool {
+	return existing.Config.Identity.Namespace == requested.Identity.Namespace && existing.Config.Identity.Name == requested.Identity.Name &&
+		existing.Config.Spec.RuntimeProfileHash == requested.Spec.RuntimeProfileHash && existing.Config.Spec.ResourceProfileHash == requested.Spec.ResourceProfileHash &&
+		existing.Config.Spec.InfraRevision == requested.Spec.InfraRevision
 }
 
 func identityAtOrBefore(generation, attempt int64, highWater fastletapi.SandboxIdentity) bool {
@@ -705,11 +693,11 @@ func (m *SandboxManager) sandboxStatusLocked(metadata *SandboxMetadata) fastleta
 	dataPlaneReady := (m.routePublisher == nil || m.routeReady) && routeReadyForPhase(metadata.Phase)
 	runtime, dataPlane := observationsForPhase(metadata.Phase, dataPlaneReady)
 	return fastletapi.SandboxStatus{
-		SandboxID:          metadata.SandboxID,
-		InstanceGeneration: metadata.InstanceGeneration, RuntimeInstanceID: metadata.RuntimeInstanceID, AssignmentAttempt: metadata.AssignmentAttempt,
-		RouteGeneration: metadata.RouteGeneration, AcceptedGeneration: metadata.AcceptedGeneration, AppliedGeneration: metadata.AppliedGeneration,
+		SandboxID:          metadata.Config.Identity.SandboxUID,
+		InstanceGeneration: metadata.Config.Identity.InstanceGeneration, RuntimeInstanceID: metadata.Config.Identity.RuntimeInstanceID, AssignmentAttempt: metadata.Config.Identity.AssignmentAttempt,
+		RouteGeneration: metadata.Config.Identity.RouteGeneration, AcceptedGeneration: metadata.AcceptedGeneration, AppliedGeneration: metadata.AppliedGeneration,
 		Runtime: runtime, DataPlane: dataPlane, CreatedAt: metadata.CreatedAt,
-		InfraComponents: apiInfraDiagnostics(metadata.InfraDiagnostics, metadata.InfraServices, metadata.RouteGeneration, dataPlaneReady),
+		InfraComponents: apiInfraDiagnostics(metadata.InfraDiagnostics, metadata.InfraServices, metadata.Config.Identity.RouteGeneration, dataPlaneReady),
 		ActionBindings:  append([]fastletapi.ActionBindingStatus(nil), metadata.ActionBindingStatuses...),
 	}
 }

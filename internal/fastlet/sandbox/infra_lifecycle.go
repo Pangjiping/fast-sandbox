@@ -31,18 +31,20 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 	}
 	var instance fastletinfra.PreparedInstance
 	var err error
-	if metadata.NetworkIP != "" {
-		instance, err = m.infraManager.InitializeInstance(ctx, &metadata.RuntimeSandboxSpec, metadata.NetworkIP)
+	identity := metadata.Config.Identity
+	network := metadata.Allocation.Network
+	if network.IP != "" {
+		instance, err = m.infraManager.InitializeInstance(ctx, &metadata.Config, network.IP)
 	} else if provider, ok := m.runtime.(AccessDescriptorProvider); ok {
 		var access dataplane.AccessDescriptor
-		access, err = provider.GetAccessDescriptor(metadata.SandboxID)
+		access, err = provider.GetAccessDescriptor(identity.SandboxUID)
 		if err == nil {
 			switch access.Kind {
 			case dataplane.AccessKindDirectIP:
-				instance, err = m.infraManager.InitializeInstance(ctx, &metadata.RuntimeSandboxSpec, access.Address)
+				instance, err = m.infraManager.InitializeInstance(ctx, &metadata.Config, access.Address)
 			case dataplane.AccessKindLocalForward:
 				endpoint := access.Address
-				instance, err = m.infraManager.InitializeInstanceWithDialer(ctx, &metadata.RuntimeSandboxSpec, func(ctx context.Context, targetPort uint32) (net.Conn, error) {
+				instance, err = m.infraManager.InitializeInstanceWithDialer(ctx, &metadata.Config, func(ctx context.Context, targetPort uint32) (net.Conn, error) {
 					connection, dialErr := (&net.Dialer{}).DialContext(ctx, "tcp", endpoint)
 					if dialErr != nil {
 						return nil, dialErr
@@ -65,7 +67,7 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 		err = errors.New("runtime did not provide an Infra access descriptor")
 	}
 	m.mu.Lock()
-	current := m.sandboxes[metadata.SandboxID]
+	current := m.sandboxes[identity.SandboxUID]
 	if current != metadata || metadata.Phase == "terminating" || metadata.Phase == "deleting" {
 		m.mu.Unlock()
 		return errors.New("Sandbox changed while Infra Components were initializing")
@@ -84,13 +86,14 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 // pointer plus instance fencing prevents an old worker from mutating a newer
 // generation.
 func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, started time.Time) {
+	sandboxUID := metadata.Config.Identity.SandboxUID
 	m.mu.Lock()
-	if m.sandboxes[metadata.SandboxID] != metadata ||
+	if m.sandboxes[sandboxUID] != metadata ||
 		(!dataPlaneWorkPending(metadata.Phase) && !(metadata.Phase == "running" && m.infraManager != nil)) {
 		m.mu.Unlock()
 		return
 	}
-	if worker, found := m.dataPlaneWorkers[metadata.SandboxID]; found {
+	if worker, found := m.dataPlaneWorkers[sandboxUID]; found {
 		if worker.metadata == metadata {
 			m.mu.Unlock()
 			return
@@ -98,14 +101,14 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 		worker.cancel()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m.dataPlaneWorkers[metadata.SandboxID] = dataPlaneWorker{metadata: metadata, cancel: cancel}
+	m.dataPlaneWorkers[sandboxUID] = dataPlaneWorker{metadata: metadata, cancel: cancel}
 	m.mu.Unlock()
 
 	go func() {
 		defer func() {
 			m.mu.Lock()
-			if worker, found := m.dataPlaneWorkers[metadata.SandboxID]; found && worker.metadata == metadata {
-				delete(m.dataPlaneWorkers, metadata.SandboxID)
+			if worker, found := m.dataPlaneWorkers[sandboxUID]; found && worker.metadata == metadata {
+				delete(m.dataPlaneWorkers, sandboxUID)
 			}
 			m.mu.Unlock()
 		}()
@@ -116,7 +119,7 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 			ready, err := m.reconcileDataPlaneOnce(ctx, metadata)
 			if ready {
 				m.mu.RLock()
-				completed := m.sandboxes[metadata.SandboxID] == metadata && metadata.Phase == "running"
+				completed := m.sandboxes[sandboxUID] == metadata && metadata.Phase == "running"
 				m.mu.RUnlock()
 				if err == nil && completed {
 					if !readyObserved {
@@ -173,14 +176,15 @@ func (m *SandboxManager) monitorDataPlaneHealth(ctx context.Context, metadata *S
 }
 
 func (m *SandboxManager) markDataPlaneUnhealthy(metadata *SandboxMetadata, healthErr error) {
+	sandboxUID := metadata.Config.Identity.SandboxUID
 	m.mu.Lock()
-	if m.sandboxes[metadata.SandboxID] != metadata || metadata.Phase != "running" {
+	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != "running" {
 		m.mu.Unlock()
 		return
 	}
 	metadata.Phase = "infra-unavailable"
 	m.recordDiagnosticLocked(
-		metadata.SandboxID,
+		sandboxUID,
 		"error",
 		"infra",
 		"infra-unavailable",
@@ -193,7 +197,7 @@ func (m *SandboxManager) markDataPlaneUnhealthy(metadata *SandboxMetadata, healt
 	// resolution and the same worker immediately starts readiness recovery.
 	removeContext, cancel := context.WithTimeout(context.Background(), time.Second)
 	if err := m.removeRoute(removeContext, metadata); err != nil {
-		m.recordDiagnostic(metadata.SandboxID, "error", "route", "route-remove-failed", err.Error())
+		m.recordDiagnostic(sandboxUID, "error", "route", "route-remove-failed", err.Error())
 	}
 	cancel()
 }
@@ -208,11 +212,12 @@ func dataPlaneWorkPending(phase string) bool {
 }
 
 func (m *SandboxManager) cancelDataPlaneReconcileLocked(metadata *SandboxMetadata) {
-	worker, found := m.dataPlaneWorkers[metadata.SandboxID]
+	sandboxUID := metadata.Config.Identity.SandboxUID
+	worker, found := m.dataPlaneWorkers[sandboxUID]
 	if !found || worker.metadata != metadata {
 		return
 	}
-	delete(m.dataPlaneWorkers, metadata.SandboxID)
+	delete(m.dataPlaneWorkers, sandboxUID)
 	worker.cancel()
 }
 
@@ -220,8 +225,9 @@ func (m *SandboxManager) cancelDataPlaneReconcileLocked(metadata *SandboxMetadat
 // route publication attempt. A retryable failure is surfaced through the local
 // phase while the runtime remains ready.
 func (m *SandboxManager) reconcileDataPlaneOnce(ctx context.Context, metadata *SandboxMetadata) (bool, error) {
+	sandboxUID := metadata.Config.Identity.SandboxUID
 	m.mu.Lock()
-	if m.sandboxes[metadata.SandboxID] != metadata {
+	if m.sandboxes[sandboxUID] != metadata {
 		m.mu.Unlock()
 		return true, nil
 	}
@@ -253,25 +259,26 @@ func (m *SandboxManager) reconcileDataPlaneOnce(ctx context.Context, metadata *S
 
 	infraErr := m.initializeInfraInstance(ctx, metadata)
 	m.mu.Lock()
-	if m.sandboxes[metadata.SandboxID] != metadata || metadata.Phase != "initializing-infra" {
+	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != "initializing-infra" {
 		m.mu.Unlock()
 		return true, nil
 	}
 	if infraErr != nil {
 		metadata.Phase = "infra-unavailable"
-		m.recordDiagnosticLocked(metadata.SandboxID, "error", "infra", "infra-unavailable", infraErr.Error())
+		m.recordDiagnosticLocked(sandboxUID, "error", "infra", "infra-unavailable", infraErr.Error())
 		m.mu.Unlock()
 		return false, infraErr
 	}
 	metadata.Phase = "route-pending"
-	m.recordDiagnosticLocked(metadata.SandboxID, "info", "infra", "route-pending", "required Infra Components are ready; proxy route publication continues asynchronously")
+	m.recordDiagnosticLocked(sandboxUID, "info", "infra", "route-pending", "required Infra Components are ready; proxy route publication continues asynchronously")
 	m.mu.Unlock()
 	return m.publishDataPlaneRoute(ctx, metadata)
 }
 
 func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *SandboxMetadata) (bool, error) {
+	sandboxUID := metadata.Config.Identity.SandboxUID
 	m.mu.Lock()
-	if m.sandboxes[metadata.SandboxID] != metadata {
+	if m.sandboxes[sandboxUID] != metadata {
 		m.mu.Unlock()
 		return true, nil
 	}
@@ -294,7 +301,7 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 		}
 	}
 	m.mu.Lock()
-	if m.sandboxes[metadata.SandboxID] != metadata || metadata.Phase != "publishing-route" {
+	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != "publishing-route" {
 		m.mu.Unlock()
 		if routeApplied {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -305,16 +312,16 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 	}
 	if publishErr != nil {
 		metadata.Phase = "route-unavailable"
-		m.recordDiagnosticLocked(metadata.SandboxID, "error", "route", "route-unavailable", publishErr.Error())
+		m.recordDiagnosticLocked(sandboxUID, "error", "route", "route-unavailable", publishErr.Error())
 		m.mu.Unlock()
 		return false, publishErr
 	}
 	if len(metadata.ActionBindingStatuses) > 0 {
 		metadata.Phase = "action-pending"
-		m.recordDiagnosticLocked(metadata.SandboxID, "info", "action", "action-pending", "runtime data plane is ready; subscribed lifecycle Hooks are pending")
+		m.recordDiagnosticLocked(sandboxUID, "info", "action", "action-pending", "runtime data plane is ready; subscribed lifecycle Hooks are pending")
 	} else {
 		metadata.Phase = "running"
-		m.recordDiagnosticLocked(metadata.SandboxID, "info", "fastlet", "running", "runtime, private network, Infra Components, proxy route, and Sandbox Actions are ready")
+		m.recordDiagnosticLocked(sandboxUID, "info", "fastlet", "running", "runtime, private network, Infra Components, proxy route, and Sandbox Actions are ready")
 	}
 	m.mu.Unlock()
 	m.recordActionHook(metadata, actionapi.LifecycleHookDataPlaneReady, 2)
@@ -346,9 +353,9 @@ func (m *SandboxManager) ReconcilePendingInfra(ctx context.Context) error {
 	for _, metadata := range pending {
 		ready, err := m.reconcileDataPlaneOnce(ctx, metadata)
 		if err != nil {
-			result = errors.Join(result, fmt.Errorf("Sandbox %s: %w", metadata.SandboxID, err))
+			result = errors.Join(result, fmt.Errorf("Sandbox %s: %w", metadata.Config.Identity.SandboxUID, err))
 		} else if !ready {
-			result = errors.Join(result, fmt.Errorf("Sandbox %s data plane is still initializing", metadata.SandboxID))
+			result = errors.Join(result, fmt.Errorf("Sandbox %s data plane is still initializing", metadata.Config.Identity.SandboxUID))
 		}
 	}
 	m.mu.RLock()

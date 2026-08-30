@@ -63,9 +63,9 @@ func TestReadinessProbeUsesFastExponentialBackoff(t *testing.T) {
 func TestComponentReadinessFailureIsReportedAndFailsDataPlaneReady(t *testing.T) {
 	manager, _ := testManager(t, apiv1alpha2.RuntimeContainer)
 	require.NoError(t, manager.Prepare(context.Background()))
-	spec := &fastletapi.RuntimeSandboxSpec{
-		SandboxSpec: fastletapi.SandboxSpec{InfraRevision: manager.Revision()},
-		SandboxID:   "uid-a", InstanceGeneration: 1, AssignmentAttempt: 1,
+	spec := &fastletapi.RuntimeSandboxConfig{
+		Spec:     fastletapi.SandboxSpec{InfraRevision: manager.Revision()},
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "uid-a", InstanceGeneration: 1, AssignmentAttempt: 1},
 	}
 	_, err := manager.PrepareInstance(context.Background(), spec)
 	require.NoError(t, err)

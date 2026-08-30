@@ -43,12 +43,12 @@ func TestDriverSidecarContract(t *testing.T) {
 		case request.Method == http.MethodPut && request.URL.Path == "/v1/boxes/uid-a":
 			require.NoError(t, json.NewDecoder(request.Body).Decode(&ensured))
 			writeBoxLiteTestJSON(t, writer, boxLiteBox{
-				Sandbox: ensured.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
+				Config: ensured.Input.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
 				Access: testAccess, UserProcessStartedAt: userProcessStartedAt, UserProcessStartSource: fastletapi.UserProcessStartRuntimeDirect,
 			})
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/boxes/uid-a":
 			writeBoxLiteTestJSON(t, writer, boxLiteBox{
-				Sandbox: ensured.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
+				Config: ensured.Input.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
 				Access: testAccess,
 			})
 		case request.Method == http.MethodPost && request.URL.Path == "/v1/boxes/uid-a":
@@ -56,13 +56,13 @@ func TestDriverSidecarContract(t *testing.T) {
 			recovered = true
 			mu.Unlock()
 			writeBoxLiteTestJSON(t, writer, boxLiteBox{
-				Sandbox: ensured.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
+				Config: ensured.Input.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
 				Access: testAccess,
 			})
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/boxes":
 			require.Equal(t, "tenant-a", request.URL.Query().Get("namespace"))
 			writeBoxLiteTestJSON(t, writer, boxLiteListResponse{Boxes: []boxLiteBox{{
-				Sandbox: ensured.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
+				Config: ensured.Input.Sandbox, BoxID: "box-a", PID: 42, Phase: "running", CreatedAt: 1700000000,
 				Access: testAccess,
 			}}})
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/images":
@@ -89,22 +89,23 @@ func TestDriverSidecarContract(t *testing.T) {
 	report := driver.ProbeCapabilities(context.Background())
 	require.True(t, report.Ready(), report.Message)
 
-	spec := &fastletapi.RuntimeSandboxSpec{
-		SandboxSpec: fastletapi.SandboxSpec{
+	input := &fastletapi.EnsureSandboxInput{RequestID: "request-a", Sandbox: fastletapi.RuntimeSandboxConfig{
+		Spec: fastletapi.SandboxSpec{
 			Image: "alpine:latest", CPU: "1", Memory: "256Mi", PIDs: 128,
 			RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash", InfraRevision: "infra-hash",
 		},
-		SandboxID: "uid-a", ClaimNamespace: "tenant-a", ClaimName: "sandbox-a", FastletPodUID: "pod-a",
-		InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 2, RouteGeneration: 3,
-	}
-	metadata, err := driver.EnsureSandbox(context.Background(), spec)
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "uid-a", Namespace: "tenant-a", Name: "sandbox-a", FastletPodUID: "pod-a",
+			InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 2, RouteGeneration: 3},
+	}}
+	metadata, err := driver.EnsureSandbox(context.Background(), input)
 	require.NoError(t, err)
 	require.Equal(t, "box-a", metadata.ContainerID)
 	require.Equal(t, 42, metadata.PID)
 	require.True(t, userProcessStartedAt.Equal(metadata.UserProcessStartedAt))
 	require.Equal(t, fastletapi.UserProcessStartRuntimeDirect, metadata.UserProcessStartSource)
 	require.Equal(t, uint32(19090), ensured.TunnelGuestPort)
-	require.Equal(t, "tenant-a", ensured.Namespace)
+	require.Equal(t, "tenant-a", ensured.FastletNamespace)
+	require.Equal(t, "request-a", ensured.Input.RequestID)
 
 	access, err := driver.GetAccessDescriptor("uid-a")
 	require.NoError(t, err)
@@ -112,7 +113,7 @@ func TestDriverSidecarContract(t *testing.T) {
 
 	inspected, err := driver.InspectSandbox(context.Background(), "uid-a")
 	require.NoError(t, err)
-	require.Equal(t, metadata.SandboxID, inspected.SandboxID)
+	require.Equal(t, metadata.Config.Identity.SandboxUID, inspected.Config.Identity.SandboxUID)
 	managed, err := driver.ListManagedSandboxes(context.Background())
 	require.NoError(t, err)
 	require.Len(t, managed, 1)
@@ -157,9 +158,9 @@ func TestDriverCapabilityAndIdentityFailClosed(t *testing.T) {
 	require.Equal(t, "BoxLiteSidecarCapabilityMissing", report.Reason)
 	require.Contains(t, report.Missing, "local-forward-v1")
 
-	_, err := driver.EnsureSandbox(context.Background(), &fastletapi.RuntimeSandboxSpec{
-		SandboxID: "uid-conflict", FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-conflict", AssignmentAttempt: 1,
-	})
+	_, err := driver.EnsureSandbox(context.Background(), &fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{Identity: fastletapi.SandboxIdentity{
+		SandboxUID: "uid-conflict", FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-conflict", AssignmentAttempt: 1,
+	}}})
 	require.ErrorIs(t, err, ErrSandboxProfileMismatch)
 }
 
