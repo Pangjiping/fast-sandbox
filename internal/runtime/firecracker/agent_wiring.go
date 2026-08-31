@@ -71,11 +71,16 @@ func (d *Driver) agentClientOrNil() (AgentClient, error) {
 	return client, nil
 }
 
-// warmPullRequestID is the stable idempotency key of the warm pull of an
-// image: retries and repeated warm pulls of the same reference replay the
-// first pin instead of double-counting.
-func warmPullRequestID(image string) string {
-	return "warm-pull-" + imageKey(image)
+// warmPullRequestID is the idempotency key of the warm pull of an image,
+// scoped to the fastlet Pod: retries of the same Pod replay the first pin
+// instead of double-counting, while a second fastlet Pod warming the same
+// image on the node (pool scale-out) gets its own key — the agent journal
+// rejects a request id committed by a different pod UID.
+func (d *Driver) warmPullRequestID(image string) string {
+	if d.podUID == "" {
+		return "warm-pull-" + imageKey(image)
+	}
+	return "warm-pull-" + d.podUID + "-" + imageKey(image)
 }
 
 // rememberLease records the runtime-agent lease of a Sandbox (populated

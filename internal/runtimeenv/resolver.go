@@ -9,6 +9,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
@@ -97,6 +98,10 @@ func applyEnvironment(profile *runtimecatalog.RuntimeProfile, environment NodeRu
 	}
 	paths := append([]runtimecatalog.HostPathRequirement(nil), profile.Deployment.HostPaths...)
 	paths = append(paths, environment.HostPaths...)
+	if profile.Firecracker != nil {
+		applyFirecrackerBinding(profile.Firecracker, binding.Firecracker)
+		paths = replaceFirecrackerHostPaths(paths, profile.Firecracker)
+	}
 	if profile.Driver == runtimecatalog.DriverKindContainerd {
 		if profile.Containerd == nil {
 			return errors.New("containerd runtime definition has no configuration")
@@ -139,6 +144,53 @@ func applyEnvironment(profile *runtimecatalog.RuntimeProfile, environment NodeRu
 	}
 	profile.Deployment.HostPaths = merged
 	return nil
+}
+
+// applyFirecrackerBinding overrides the builtin Firecracker configuration
+// with the environment's installation values; empty override fields keep the
+// builtin default. A nil binding is a no-op.
+func applyFirecrackerBinding(config *runtimecatalog.FirecrackerConfig, binding *FirecrackerBinding) {
+	if config == nil || binding == nil {
+		return
+	}
+	if binding.BinaryPath != "" {
+		config.BinaryPath = binding.BinaryPath
+	}
+	if binding.JailerPath != "" {
+		config.JailerPath = binding.JailerPath
+	}
+	if binding.KernelPath != "" {
+		config.KernelPath = binding.KernelPath
+	}
+	if binding.RootfsPath != "" {
+		config.RootfsPath = binding.RootfsPath
+	}
+	if binding.StateRoot != "" {
+		config.StateRoot = binding.StateRoot
+	}
+}
+
+// replaceFirecrackerHostPaths drops the builtin firecracker-* host path
+// requirements from values and appends the ones derived from the resolved
+// configuration, so the fastlet pod mounts exactly the installed paths
+// (binary, jailer, kernel, rootfs, state root).
+func replaceFirecrackerHostPaths(values []runtimecatalog.HostPathRequirement, config *runtimecatalog.FirecrackerConfig) []runtimecatalog.HostPathRequirement {
+	kept := values[:0]
+	for _, requirement := range values {
+		if !strings.HasPrefix(requirement.Name, "firecracker-") {
+			kept = append(kept, requirement)
+		}
+	}
+	kept = append(kept,
+		runtimecatalog.HostPathRequirement{Name: "firecracker-bin", HostPath: config.BinaryPath, MountPath: config.BinaryPath, Type: corev1.HostPathFile, ReadOnly: true},
+		runtimecatalog.HostPathRequirement{Name: "firecracker-kernel", HostPath: config.KernelPath, MountPath: config.KernelPath, Type: corev1.HostPathFile, ReadOnly: true},
+		runtimecatalog.HostPathRequirement{Name: "firecracker-rootfs", HostPath: config.RootfsPath, MountPath: config.RootfsPath, Type: corev1.HostPathDirectoryOrCreate},
+		runtimecatalog.HostPathRequirement{Name: "firecracker-state", HostPath: config.StateRoot, MountPath: config.StateRoot, Type: corev1.HostPathDirectoryOrCreate},
+	)
+	if config.JailerPath != "" {
+		kept = append(kept, runtimecatalog.HostPathRequirement{Name: "firecracker-jailer", HostPath: config.JailerPath, MountPath: config.JailerPath, Type: corev1.HostPathFile, ReadOnly: true})
+	}
+	return kept
 }
 
 func resolvedContainerdEnvironment(environment ContainerdEnvironment, profile runtimecatalog.RuntimeProfile) ResolvedContainerdEnvironment {

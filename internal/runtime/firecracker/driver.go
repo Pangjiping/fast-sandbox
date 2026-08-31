@@ -16,6 +16,7 @@ import (
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	infracontract "fast-sandbox/internal/infra/contract"
+	"fast-sandbox/internal/nodecleanup"
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
@@ -69,6 +70,10 @@ type Driver struct {
 	// in memory: the GC evicts by this instead of filesystem timestamps.
 	// Guarded by mu.
 	imageUseCount map[string]int64
+	// nodeCleanup is the node janitor client for residual VMM cleanup after
+	// DeleteSandbox (set by fastlet when the profile requires it; nil in
+	// local/host mode).
+	nodeCleanup nodecleanup.RuntimeProcessCleaner
 }
 
 // defaultImageGCInterval bounds the image cache by usage without coupling GC
@@ -242,6 +247,31 @@ func (d *Driver) SetInfraManager(manager *fastletinfra.Manager) {
 	d.infraMgr = manager
 	d.prepareInfra = manager.PrepareInstance
 	d.mu.Unlock()
+}
+
+// SetNodeCleanupClient wires the node janitor for residual VMM cleanup.
+// Fastlet calls it when the runtime profile requires node process cleanup
+// (ResidualProcessFirecracker); local/host runs leave it nil.
+func (d *Driver) SetNodeCleanupClient(client nodecleanup.RuntimeProcessCleaner) {
+	d.mu.Lock()
+	d.nodeCleanup = client
+	d.mu.Unlock()
+}
+
+// ensureResidualProcessAbsent asks the node janitor to terminate any
+// firecracker VMM of this Sandbox that survived the driver's own teardown
+// (identified by --id <sandboxID>). Best-effort: the driver already stopped
+// the VM, so a cleanup failure is logged, not fatal.
+func (d *Driver) ensureResidualProcessAbsent(ctx context.Context, sandboxID string) {
+	d.mu.RLock()
+	client := d.nodeCleanup
+	d.mu.RUnlock()
+	if client == nil {
+		return
+	}
+	if err := client.EnsureRuntimeProcessesAbsent(ctx, runtimecatalog.ResidualProcessFirecracker, truncatedSandboxID(sandboxID)); err != nil {
+		klog.V(2).InfoS("firecracker residual process cleanup skipped", "sandboxId", sandboxID, "err", err)
+	}
 }
 
 // ProbeCapabilities reports host dependencies (KVM, tap device, binary,
@@ -632,6 +662,7 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 	}
 	d.releaseAgentSandbox(ctx, sandboxID, state.Config.Spec.Image)
 	d.removeJailRoot(sandboxID)
+	d.ensureResidualProcessAbsent(ctx, sandboxID)
 	_ = removeSandboxDir(directory)
 	klog.Infof("firecracker sandbox %s deleted", sandboxID)
 	return nil

@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
@@ -40,6 +41,13 @@ type SandboxReconciler struct {
 	Scheme       *runtime.Scheme
 	Orchestrator *orchestration.Orchestrator
 	Now          func() time.Time
+	// MaxConcurrentReconciles is the controller-runtime worker count for
+	// Sandbox reconciles. Different Sandboxes are disjoint objects, and
+	// the workqueue guarantees a single in-flight reconcile per key, so
+	// raising it past 1 only parallelizes independent sandboxes (the
+	// per-sandbox control-plane cycle dominates batch ready latency).
+	// 0 keeps controller-runtime's default (1).
+	MaxConcurrentReconciles int
 }
 
 func (r *SandboxReconciler) Reconcile(ctx context.Context, request ctrl.Request) (_ ctrl.Result, resultErr error) {
@@ -488,6 +496,7 @@ func (r *SandboxReconciler) SetupWithManager(manager ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(manager).
 		For(&apiv1alpha2.Sandbox{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToSandboxes)).
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		Complete(r)
 }
 

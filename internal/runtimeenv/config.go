@@ -86,6 +86,19 @@ func (c Config) Validate() error {
 			if err := validateHostPaths(binding.HostPaths); err != nil {
 				return fmt.Errorf("environment %s runtime %s: %w", name, runtimeName, err)
 			}
+			if binding.Firecracker != nil {
+				for _, value := range []struct{ field, path string }{
+					{"firecracker.binaryPath", binding.Firecracker.BinaryPath},
+					{"firecracker.jailerPath", binding.Firecracker.JailerPath},
+					{"firecracker.kernelPath", binding.Firecracker.KernelPath},
+					{"firecracker.rootfsPath", binding.Firecracker.RootfsPath},
+					{"firecracker.stateRoot", binding.Firecracker.StateRoot},
+				} {
+					if value.path != "" && !filepath.IsAbs(value.path) {
+						return fmt.Errorf("environment %s runtime %s: %s must be absolute", name, runtimeName, value.field)
+					}
+				}
+			}
 		}
 	}
 	return nil

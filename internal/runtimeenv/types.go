@@ -64,6 +64,23 @@ type RuntimeBinding struct {
 	OptionsType string                               `json:"optionsType,omitempty"`
 	NeedsTTY    *bool                                `json:"needsTTY,omitempty"`
 	HostPaths   []runtimecatalog.HostPathRequirement `json:"hostPaths,omitempty"`
+	// Firecracker carries the installation values of the Firecracker
+	// runtime driver (binary/jailer/kernel paths and the state root). Only
+	// non-empty fields override the builtin profile defaults; the profile's
+	// Deployment.HostPaths are regenerated from the resolved configuration.
+	// +optional
+	Firecracker *FirecrackerBinding `json:"firecracker,omitempty"`
+}
+
+// FirecrackerBinding is the environment-side override of the Firecracker
+// driver configuration (internal/catalog/runtime.FirecrackerConfig). Every
+// field is optional; empty values keep the builtin profile default.
+type FirecrackerBinding struct {
+	BinaryPath string `json:"binaryPath,omitempty"`
+	JailerPath string `json:"jailerPath,omitempty"`
+	KernelPath string `json:"kernelPath,omitempty"`
+	RootfsPath string `json:"rootfsPath,omitempty"`
+	StateRoot  string `json:"stateRoot,omitempty"`
 }
 
 // ResolvedContainerdEnvironment is the per-runtime view consumed by Fastlet.

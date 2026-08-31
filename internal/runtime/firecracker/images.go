@@ -256,7 +256,7 @@ func (d *Driver) PullImage(ctx context.Context, image string) error {
 	d.mu.RUnlock()
 	client, err := d.agentClientOrNil()
 	if err == nil && client != nil {
-		if _, err := client.PinImage(ctx, warmPullRequestID(image), image); err != nil {
+		if _, err := client.PinImage(ctx, d.warmPullRequestID(image), image); err != nil {
 			if errors.Is(err, errAgentUnreachable) {
 				// The agent is absent: fall through to the local cache.
 			} else {

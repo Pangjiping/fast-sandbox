@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -12,6 +13,40 @@ import (
 
 	"k8s.io/klog/v2"
 )
+
+// ensureLoopDevices creates the loop device nodes the rootfs loop mount
+// needs. A CRI Pod's /dev is not populated from the host even when
+// privileged (unlike docker --privileged), so the driver creates the nodes
+// itself with CAP_MKNOD; losetup attaches them through the shared kernel.
+// Existing nodes (e.g. mounted via hostPath) are left untouched.
+func ensureLoopDevices() error {
+	devices := []struct {
+		path  string
+		kind  string
+		major int
+		minor int
+	}{
+		{"/dev/loop-control", "c", 10, 237},
+		{"/dev/loop0", "b", 7, 0},
+		{"/dev/loop1", "b", 7, 1},
+		{"/dev/loop2", "b", 7, 2},
+		{"/dev/loop3", "b", 7, 3},
+		{"/dev/loop4", "b", 7, 4},
+		{"/dev/loop5", "b", 7, 5},
+		{"/dev/loop6", "b", 7, 6},
+		{"/dev/loop7", "b", 7, 7},
+	}
+	for _, device := range devices {
+		if _, err := os.Stat(device.path); err == nil {
+			continue
+		}
+		// mknod must not fail the mount on read-only /dev: the mount below
+		// reports the authoritative error if a loop device is missing.
+		_ = exec.Command("mknod", device.path, device.kind,
+			fmt.Sprintf("%d", device.major), fmt.Sprintf("%d", device.minor)).Run()
+	}
+	return nil
+}
 
 // deliverGuestInfra performs the GuestCopy Infra delivery by loop-mounting the
 // per-instance rootfs and copying every prepared artifact to its guest
@@ -31,6 +66,9 @@ func deliverGuestInfra(ctx context.Context, runner fastletnetwork.CommandRunner,
 		return err
 	}
 	defer os.RemoveAll(mountpoint)
+	if err := ensureLoopDevices(); err != nil {
+		return err
+	}
 
 	// Per-step timing isolates the GuestCopy cost: mounting a multi-GiB
 	// sparse ext4 image read-write can initialize metadata/journal regions

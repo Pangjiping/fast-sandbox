@@ -135,6 +135,78 @@ environments:
 	require.Equal(t, "blockfile", plan.Containerd.Snapshotter)
 }
 
+func TestFirecrackerBindingOverridesPathsAndHostPaths(t *testing.T) {
+	config, err := Parse([]byte(`
+version: v1alpha2
+environments:
+  default:
+    containerd:
+      defaultSnapshotter: overlayfs
+    runtimes:
+      firecracker:
+        firecracker:
+          binaryPath: /opt/fast-sandbox/firecracker/firecracker
+          jailerPath: /opt/fast-sandbox/firecracker/jailer
+          kernelPath: /opt/fast-sandbox/firecracker/vmlinux.bin
+          rootfsPath: /srv/fast-sandbox/firecracker/rootfs
+          stateRoot: /srv/fast-sandbox/firecracker
+`))
+	require.NoError(t, err)
+
+	plan, err := Resolve(runtimecatalog.Builtin(), config, apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	require.NotNil(t, plan.Profile.Firecracker)
+	require.Equal(t, "/opt/fast-sandbox/firecracker/firecracker", plan.Profile.Firecracker.BinaryPath)
+	require.Equal(t, "/opt/fast-sandbox/firecracker/jailer", plan.Profile.Firecracker.JailerPath)
+	require.Equal(t, "/opt/fast-sandbox/firecracker/vmlinux.bin", plan.Profile.Firecracker.KernelPath)
+	require.Equal(t, "/srv/fast-sandbox/firecracker/rootfs", plan.Profile.Firecracker.RootfsPath)
+	require.Equal(t, "/srv/fast-sandbox/firecracker", plan.Profile.Firecracker.StateRoot)
+	// The Deployment.HostPaths follow the overridden paths, not the builtin
+	// defaults; the jailer requirement appears because the override set it.
+	require.False(t, hasHostPath(plan.Profile, "/usr/local/bin/firecracker"))
+	require.True(t, hasHostPath(plan.Profile, "/opt/fast-sandbox/firecracker/firecracker"))
+	require.True(t, hasHostPath(plan.Profile, "/opt/fast-sandbox/firecracker/jailer"))
+	require.True(t, hasHostPath(plan.Profile, "/srv/fast-sandbox/firecracker"))
+}
+
+func TestFirecrackerBindingKeepsBuiltinDefaultsWhenEmpty(t *testing.T) {
+	config, err := Parse([]byte(`
+version: v1alpha2
+environments:
+  default:
+    containerd:
+      defaultSnapshotter: overlayfs
+    runtimes:
+      firecracker:
+        firecracker:
+          jailerPath: /usr/local/bin/jailer
+`))
+	require.NoError(t, err)
+
+	plan, err := Resolve(runtimecatalog.Builtin(), config, apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	require.Equal(t, "/usr/local/bin/firecracker", plan.Profile.Firecracker.BinaryPath)
+	require.Equal(t, "/usr/local/bin/jailer", plan.Profile.Firecracker.JailerPath)
+	require.Equal(t, "/opt/fast-sandbox/firecracker/vmlinux.bin", plan.Profile.Firecracker.KernelPath)
+	require.True(t, hasHostPath(plan.Profile, "/usr/local/bin/firecracker"))
+	require.True(t, hasHostPath(plan.Profile, "/usr/local/bin/jailer"))
+}
+
+func TestFirecrackerBindingRejectsRelativePaths(t *testing.T) {
+	_, err := Parse([]byte(`
+version: v1alpha2
+environments:
+  default:
+    containerd:
+      defaultSnapshotter: overlayfs
+    runtimes:
+      firecracker:
+        firecracker:
+          jailerPath: relative/jailer
+`))
+	require.ErrorContains(t, err, "firecracker.jailerPath must be absolute")
+}
+
 func TestDecodePlanRejectsMutation(t *testing.T) {
 	plan, err := ResolveDefault(runtimecatalog.Builtin(), apiv1alpha2.RuntimeContainer)
 	require.NoError(t, err)
