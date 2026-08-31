@@ -1156,10 +1156,13 @@ report_create_tail() { # name t0-ns t-run-done-ns
 	fp_line="$(kubectl -n "$NS" logs --request-timeout=10s --tail=500 deploy/fast-sandbox-controller 2>/dev/null | grep 'fastpath sandbox created' | grep "requestId=\"$name\"" | tail -1)"
 	[[ -n "$fp_line" ]] || return 0
 	fp_total="$(klog_field "$fp_line" total | tr -d 'ms')"
+	fp_total="${fp_total%%.*}"
+	[[ -n "$fp_total" ]] || return 0
 	fastlet="$(kubectl_get "sandbox/$name" '{.status.placement.fastletName}')"
 	[[ -n "$fastlet" ]] || return 0
 	dr_line="$(kubectl -n "$NS" logs --request-timeout=10s --tail=300 "$fastlet" 2>/dev/null | grep 'firecracker sandbox created' | tail -1)"
 	dr_total="$(klog_field "$dr_line" total | tr -d 'ms')"
+	dr_total="${dr_total%%.*}"
 	[[ -n "$dr_total" ]] || dr_total=0
 	highlight "  key node: end-to-end create tail of '$name' (post-restore)"
 	printf '    create tail = %sms   fastlet-side = %sms   client gap = %sms   (run RPC %sms + restore %sms)\n' \
