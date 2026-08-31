@@ -1144,6 +1144,28 @@ show_restore_timings() { # sandbox-name
 		"$(klog_field "$line" boot)" "$(klog_field "$line" vmStatePolls)"
 }
 
+# report_create_tail derives the end-to-end create tail from three
+# independent clocks: fastctl run RPC (client), fastpath create (controller),
+# golden restore (fastlet driver). tail = everything after the VM resumed
+# until the client sees READY. restore_total and fastpath_total are parsed
+# from their own components' logs (no shared instrumentation).
+report_create_tail() { # name t0-ns t-run-done-ns
+	local name="$1" t0="$2" t_done="$3"
+	local run_rpc fp_total dr_total fp_line dr_line fastlet
+	run_rpc=$(( (t_done - t0) / 1000000 ))
+	fp_line="$(kubectl -n "$NS" logs --request-timeout=10s --tail=500 deploy/controller 2>/dev/null | grep 'fastpath sandbox created' | grep "requestId=\"$name\"" | tail -1)"
+	[[ -n "$fp_line" ]] || return 0
+	fp_total="$(klog_field "$fp_line" total | tr -d 'ms')"
+	fastlet="$(kubectl_get "sandbox/$name" '{.status.placement.fastletName}')"
+	dr_line="$(kubectl -n "$NS" logs --request-timeout=10s --tail=300 "$fastlet" 2>/dev/null | grep 'firecracker sandbox created' | tail -1)"
+	dr_total="$(klog_field "$dr_line" total | tr -d 'ms')"
+	[[ -n "$dr_total" ]] || dr_total=0
+	highlight "  key node: end-to-end create tail of '$name' (post-restore)"
+	printf '    create tail = %sms   fastlet-side = %sms   client gap = %sms   (run RPC %sms + restore %sms)\n' \
+		"$(( run_rpc - dr_total ))" "$(( fp_total - dr_total ))" "$(( run_rpc - fp_total ))" \
+		"$run_rpc" "$dr_total" | tee -a "$WORK/run.log"
+}
+
 # show_e2e_latency reports the true end-to-end timeline of one sandbox:
 # fastctl run (fastpath create + fastlet restore, completion=READY blocks
 # until the runtime reports ready) -> first successful execd /ping through
@@ -1241,6 +1263,7 @@ verify_concurrent() {
 		t_ping="$(now_ms)"
 		show_e2e_latency "$name" "${t0s[$((i - 1))]}" "${t_dones[$((i - 1))]}" "$t_ping" "$t_probe_start"
 		show_restore_timings "$name"
+		report_create_tail "$name" "${t0s[$((i - 1))]}" "${t_dones[$((i - 1))]}"
 		show_ping_latency "$name"
 	done
 	pass "$CONCURRENCY sandboxes Ready (concurrent VMs from the shared snapshot)"
@@ -1261,6 +1284,7 @@ verify_sandbox() { # sandbox-name
 	t_ping="$(now_ms)"
 	show_e2e_latency "$name" "$t0" "$t_run_done" "$t_ping" "$t_probe_start"
 	show_restore_timings "$name"
+	report_create_tail "$name" "$t0" "$t_run_done"
 	show_ping_latency "$name"
 	if sandbox_ready "$name"; then
 		log "    CR status Ready confirmed (eventual consistency)"

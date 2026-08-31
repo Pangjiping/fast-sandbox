@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/klog/v2"
 )
 
 type Server struct {
@@ -85,6 +86,7 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	if err := s.validateCreateRequest(request); err != nil {
 		return nil, err
 	}
+	prepStarted := time.Now()
 	completion, err := parseCreateCompletion(request.Completion)
 	if err != nil {
 		return nil, err
@@ -122,11 +124,19 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 		observeCreateAccepted("idempotent", started, nil)
 	}
 	acceptedObserved = true
+	prepDur := time.Since(prepStarted)
 
 	observed, err := s.provisionRuntime(ctx, accepted, completion.fastlet)
+	runtimeDur := time.Since(prepStarted)
 	if err != nil {
 		return nil, err
 	}
+	klog.InfoS("fastpath sandbox created",
+		"requestId", request.RequestId,
+		"total", time.Since(started).String(),
+		"prep", prepDur.String(),
+		"runtime", runtimeDur.String(),
+	)
 	return &fastpathv2.CreateSandboxResponse{
 		Sandbox: sandboxInfoFromFastlet(accepted.sandbox, observed), Generation: accepted.sandbox.Generation, Completion: completion.api,
 	}, nil
