@@ -18,7 +18,7 @@ SandboxTemplate (builder Job, in-cluster)
   → node runtime-agent (DaemonSet) pulls + caches
   → SandboxPool schedules fastlet Pods (×2, 5 slots each)
   → per-sandbox Firecracker VM restore (jailer --netns, shared snapshot)
-  → execd :44772 /ping delivered through the central proxy chain
+  → execd :44772 /ping verified end-to-end (direct fastlet-proxy route)
 ```
 
 One-liners:
@@ -71,24 +71,38 @@ SandboxTemplate controller) and `fast-sandbox.io/firecracker-node=true`
 ## 4. Verification and the delivery baseline
 
 `verify` creates 2 probe sandboxes, then a 5-sandbox batch (7 total across
-two fastlets), probes execd /ping **end-to-end through the central proxy**
-(sandbox-proxy → fastlet-proxy → guest), then deletes everything and
-asserts leases drained + jails cleaned.
+two fastlets). Every sandbox is probed **end-to-end** by resolving the port
+route with `DIRECT_FASTLET_PROXY` (the assigned fastlet-proxy, resolved from
+the durable assignment annotation) and curling execd /ping straight to it —
+no central sandbox-proxy, no dependency on the eventually-consistent
+`status.placement` projection. Finally everything is deleted and leases
+drained + jails cleaned are asserted.
 
 Key timing nodes (all in ms, logged to `$WORK/run.log`):
 
 ```
 key node: golden restore of '<sbx>'            (driver-internal, precise)
   total=33ms  rootfs=0.6ms (reflink)  launch=20ms (VMM exec)
-key node: end-to-end latency (run → Ready → execd /ping)
-  t(run)/t(ready)/t(ping) epoch-ms; run→Ready / Ready→/ping / total
+key node: end-to-end latency (run → execd /ping)
+  t(run)/t(run-done)/t(probe)/t(ping) epoch-ms
+  run RPC = 55ms   queue-to-probe = ...   first-200 = ...   total = ...
 key node: proxy-chain /ping latency (same route reused)
   cold /ping / warm /ping    (chain setup vs steady state)
 ```
 
-Baseline on the reference node (XFS StateRoot): restore ≈ 33 ms; the
-proxy-chain /ping cold ≈ 40 ms, warm ≈ 6 ms. `run → Ready` is only
-meaningful on a **cold** sandbox (see §6.3).
+Baseline on the reference node (XFS StateRoot):
+
+- **run RPC ≈ 55 ms** (control plane create + VM restore 33 ms), flat under
+  concurrency.
+- **first-200 ≈ 0.2-0.8 s on a cold sandbox**: the guest's first request
+  after a snapshot resume. The VM and execd resume instantly (33 ms), but
+  the guest's network stack takes roughly a second to serve — this is a
+  guest-side post-restore settle window, not control plane, proxy, or host
+  behavior (a gateway-ARP refresh attempt was measured and falsified). The
+  second request is single-digit ms.
+- **warm chain ≈ 7-9 ms** (direct fastlet-proxy path).
+- `queue-to-probe` grows under sequential batch probing: it is the probe
+  order, not system latency.
 
 ## 5. Key implementation decisions (learned the hard way)
 
@@ -105,8 +119,18 @@ meaningful on a **cold** sandbox (see §6.3).
 - **fastctl `exec`** is a subcommand of `opensandbox` and requires a
   declared `execd` Infra Component. This environment has **no
   infraComponents** (execd is baked into the golden snapshot), so the probe
-  uses the **port route** (`/v1/sandboxes/{uid}/ports/44772`) via
-  `gen-endpoint` + curl.
+  uses the **port route** (`/v1/sandboxes/{uid}/ports/44772`) with
+  `DIRECT_FASTLET_PROXY` access mode: fastpath resolves the assigned
+  fastlet from the durable assignment annotation (written synchronously at
+  create), and curl goes straight to that fastlet-proxy — this bypasses the
+  sandbox-proxy's `status.placement` dependency entirely.
+- **The central sandbox-proxy route resolution depends on the serialized
+  controller status projection**: `Index.UpsertSandbox` and
+  `ResolveFresh` read `status.placement`, which the sandbox controller
+  (single worker at the time) projected one sandbox at a time — batch
+  first-requests through the central proxy grew ~0.5 s per sandbox. See
+  the integration environment measurements: with DIRECT_FASTLET_PROXY the
+  batch first-200 is flat, no serialization.
 - **A full pool is rejected before the CR exists**: fastpath
   `CreateSandbox` returns `ResourceExhausted` when no fastlet has capacity,
   so demand-driven scale-out can never trigger through the API — the pool
@@ -114,6 +138,12 @@ meaningful on a **cold** sandbox (see §6.3).
 - **warm-pull idempotency is per-fastlet**: two fastlets warming the same
   image collided in the agent journal ("request id committed by pod X");
   the key is now `warm-pull-<podUID>-<image-sha>`.
+- **The first request after a snapshot resume takes ~0.5-1 s** even though
+  the VM and execd resume in ~33 ms: the guest's network stack needs a
+  settle window before serving. A gateway-ARP refresh (raw-socket announce)
+  was implemented and measured — no effect, the mechanism is guest-kernel
+  post-restore processing, not a stale neighbour table. Compressing it
+  requires guest-side work, not host data-plane changes.
 
 ## 6. Issues to watch in a REAL deployment
 
@@ -139,12 +169,18 @@ meaningful on a **cold** sandbox (see §6.3).
   monitor real usage (`du`, not `ls` — sparse).
 
 ### 6.3 Cold-start measurement pitfalls
-- Reusing an already-Ready sandbox makes `run → Ready` meaningless
-  (idempotent skip + first-poll hit). Measure cold starts only.
+- Reusing an already-Ready sandbox makes `run → first-200` meaningless
+  (the create is skipped and the warm guest answers in ms). The verify
+  deletes leftovers first — a 9 ms run RPC with a 33 ms restore is the
+  tell-tale of a reused warm sandbox.
 - 2s-poll waits drown sub-second numbers: use the 10 ms `wait_until` for
   baseline waits.
-- Distinguish VM cost (driver `total`, ~33 ms) from measurement-path cost
-  (route resolution + proxy-chain cold ~40 ms, warm ~6 ms).
+- Distinguish VM cost (driver `total`, ~33 ms) from the guest's
+  post-restore settle (~0.5-1 s, first request only) and the steady-state
+  chain (~8 ms).
+- Sequential probing: report first-200 from each sandbox's own probe start
+  (`t(probe)`), not from its create return — the latter accumulates the
+  earlier sandboxes' probe/reporting time and fakes linear growth.
 
 ### 6.4 Node asset installation (installer)
 - The DaemonSet downloads firecracker from GitHub releases and the kernel
@@ -215,5 +251,6 @@ meaningful on a **cold** sandbox (see §6.3).
 | `MINIO_PORT` / `MINIO_AK` / `MINIO_SK` / `MINIO_ENDPOINT` | 9000 / ... | store credentials; endpoint auto = container IP |
 | `SBX_IMAGE` / `EXECD` / `FC_VERSION` | alpine:3.19 / execd:1.1.0 / v1.16.1 | the chain keys |
 | `CONCURRENCY` | 5 | per-fastlet slot capacity for the batch |
+| `DEBUG_PROBE` | 0 | print every probe attempt (resolve/host/curl code) for the batch window |
 | `XFS_STATEROOT` / `XFS_SIZE` | 1 / 16G | reflink layer on/off, virtual size |
 | `SKIP_TOOL_INSTALL` / `SKIP_LEFTOVER_CLEAN` | 0 | manual tooling / refuse auto-rebuild |
