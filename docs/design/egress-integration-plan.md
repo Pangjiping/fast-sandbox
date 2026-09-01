@@ -113,7 +113,23 @@ OSEP-0022 原方案：egress 通过**观察 fastlet slot-store 文件**（
 | A3 UID 传播 | proxy 注入 `X-Fast-Sandbox-Uid`（对 egress route；不参与 stripRouteHeaders） | 单测：头注入 + 不剥离 |
 | A4 egress route parsing | `parseTarget` 增加 `/v1/sandboxfleets/{id}/egress/*` 分支：解析 sandbox 路由、校验 route credential、目标 egress listener | 单测：路由匹配/凭据/目标 |
 
-### B. Pool 声明（集成环境样例）
+### B. egress 构建与集成（直接集成，非 mock）
+
+**直接用 PR #1678 head 分支构建真实 egress**（已确认可构建）：
+
+```text
+repo:    Pangjiping/OpenSandbox @ feat/egress-actions-handler（pin commit 460b1cb）
+路径:    components/egress/（fleet.go / fleet_actions.go / pkg/actionhandler / pkg/fleetnft）
+产物:    egress 镜像（集成环境 `kind load docker-image`）
+```
+
+- **pin commit 缓解 PR 未合入的演进风险**：PR 合并后切官方 tag/镜像；
+- **交叉验证（mock 无法替代的核心价值）**：fast-sandbox
+  `internal/protocol/action` 与 OpenSandbox `pkg/actionhandler` 是两侧
+  独立实现的同一协议——集成测试第一项即字节级一致性核对
+  （apiVersion/operation 枚举/attachment 字段/错误语义）。
+
+### C. Pool 声明（集成环境样例）
 
 ```yaml
 spec:
@@ -127,14 +143,14 @@ spec:
   基础上 + actionHandlers + egress 容器进 fastletTemplate）；
 - fastlet 已有投递逻辑（#30），声明即生效。
 
-### C. egress 侧（OpenSandbox，跨仓库）
+### D. egress 侧（OpenSandbox，跨仓库）
 
-- 依赖 PR #1678 合并；egress 二进制/镜像（fleet profile）由 OpenSandbox
-  侧产出；
+- egress 构建：`Pangjiping/OpenSandbox @ feat/egress-actions-handler`
+  （pin `460b1cb`）的 `components/egress/`——直接集成，见 B 节；
 - 集成环境部署：egress 容器进 fastlet pod（host-process 交付，共享 Pod
   netns），监听 18080 + DNS 网关端口。
 
-### D. firecracker 衔接验证
+### E. firecracker 衔接验证
 
 - **data-plane-ready 时机**：restore 完成 + 网络就绪（guest eth0 + slot
   netns 数据面 #28）后投递——确认 infra 生命周期在 firecracker 模式下
@@ -198,15 +214,15 @@ spec:
 
 | 项 | 影响 | 缓解 |
 |----|------|------|
-| OpenSandbox PR #1678 未合并 | 集成联调阻塞 | 先用 fast-sandbox 侧 mock egress（actions handler 的 Go mock，验证四内部新增与 fastlet 投递），PR 合并后替换真 egress |
+| OpenSandbox PR #1678 未合并 | 代码演进风险 | **直接集成**（pin commit 460b1cb 构建，已确认可构建）；PR 合并后切官方 tag |
+| 两侧独立实现同一协议（fast-sandbox action vs egress actionhandler） | 字节级不一致 | **交叉验证列为集成测试第一项**（apiVersion/枚举/attachment/错误语义核对）——mock 无法发现的问题，真实联调直接暴露 |
 | 四内部新增跨两个子系统（catalog/proxy） | 改动面 | 单测先行，每项独立提交 |
 | data-plane-ready 在 firecracker 模式的时机语义 | egress 生效窗口 | 集成测试断言（fail-closed 窗口验证） |
 | firecracker clone 网络与 egress dispatch 联调 | source-IP 唯一性 | #28 已保证；集成测试 nft 观测确认 |
 
 ## 待决策项
 
-1. **egress 联调归属**（设计待决策项 1）：mock egress（fast-sandbox 侧）
-   先行 vs 等 PR #1678 合并后直接联调（推荐：mock 先行，不阻塞）；
-2. **四内部新增的落地顺序**：A1→A4 顺序 vs 按 egress 集成优先级；
-3. **egress 容器形态**：进 fastlet pod（共享 Pod netns，host-process）
-   vs 独立 DaemonSet——host-process 交付模式定义后定。
+1. **四内部新增的落地顺序**：A1→A4 顺序 vs 按 egress 集成优先级；
+2. **egress 容器形态**：进 fastlet pod（共享 Pod netns，host-process）
+   vs 独立 DaemonSet——host-process 交付模式定义后定；
+3. **egress 镜像来源**：直接构建 PR head（起步）vs 等官方镜像发布。
