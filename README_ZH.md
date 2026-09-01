@@ -265,4 +265,4 @@ Create 延迟终止于 `RuntimeReady`。Component 健康检查和路由发布独
 
 ## License
 
-[MIT](LICENSE)
+[Apache-2.0](LICENSE)

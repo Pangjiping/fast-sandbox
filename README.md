@@ -314,4 +314,4 @@ ConfigMap and referenced Secrets; Pools do not embed credentials. See
 
 ## License
 
-[MIT](LICENSE)
+[Apache-2.0](LICENSE)
