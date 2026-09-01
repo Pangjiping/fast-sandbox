@@ -91,6 +91,18 @@ func listBuilderPods(t *testing.T, r *SandboxTemplateReconciler, namespace strin
 	return pods.Items
 }
 
+// builderPodOwnerRefs returns the controller owner reference the reconcile
+// loop stamps on build Pods (same shape as ctrl.SetControllerReference).
+func builderPodOwnerRefs(template *apiv1alpha2.SandboxTemplate) []metav1.OwnerReference {
+	return []metav1.OwnerReference{{
+		APIVersion: apiv1alpha2.GroupVersion.String(),
+		Kind:       "SandboxTemplate",
+		Name:       template.Name,
+		UID:        template.UID,
+		Controller: ptr(true),
+	}}
+}
+
 func TestSandboxTemplateReconcileCreatesPodAndTracksPhase(t *testing.T) {
 	namespace, name := "tenant-a", "golden"
 	template := newSandboxTemplate(namespace, name)
@@ -423,6 +435,7 @@ func TestSandboxTemplateReconcileFailsStuckPendingPod(t *testing.T) {
 				sandboxTemplateNamespaceLabel:  namespace,
 				sandboxTemplateGenerationLabel: "1",
 			},
+			OwnerReferences: builderPodOwnerRefs(template),
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-podPendingTimeout - time.Minute)),
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "build"}}},
@@ -465,6 +478,7 @@ func TestSandboxTemplateReconcileSelfHealsPendingPhase(t *testing.T) {
 				sandboxTemplateNamespaceLabel:  namespace,
 				sandboxTemplateGenerationLabel: "1",
 			},
+			OwnerReferences: builderPodOwnerRefs(template),
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "build"}}},
 	}
@@ -493,6 +507,7 @@ func TestSandboxTemplatePendingTimeoutDeletesPod(t *testing.T) {
 				sandboxTemplateNamespaceLabel:  namespace,
 				sandboxTemplateGenerationLabel: "1",
 			},
+			OwnerReferences: builderPodOwnerRefs(template),
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-podPendingTimeout - time.Minute)),
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "build"}}},
@@ -504,5 +519,108 @@ func TestSandboxTemplatePendingTimeoutDeletesPod(t *testing.T) {
 	reconcileOnce(t, reconciler, key)
 	if pods := listBuilderPods(t, reconciler, namespace); len(pods) != 0 {
 		t.Fatalf("expected the stuck Pending pod to be deleted, got %d", len(pods))
+	}
+}
+
+func TestSandboxTemplateEnsureBuilderRBACConvergesDrift(t *testing.T) {
+	namespace, name := "tenant-a", "converge"
+	// A tenant pre-created a same-named Role with broader rules and a
+	// RoleBinding pointing at a different role/subject, plus a builder SA
+	// carrying platform-managed imagePullSecrets.
+	wideRole := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxTemplateBuilderServiceAccount, Namespace: namespace},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"*"},
+		}},
+	}
+	otherBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxTemplateBuilderServiceAccount, Namespace: namespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "some-other-role"},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "someone-else", Namespace: namespace}},
+	}
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxTemplateBuilderServiceAccount, Namespace: namespace},
+		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}},
+	}
+	template := newSandboxTemplate(namespace, name)
+	reconciler := newSandboxTemplateReconciler(t, template, wideRole, otherBinding, sa)
+	key := client.ObjectKey{Namespace: namespace, Name: name}
+
+	reconcileOnce(t, reconciler, key)
+
+	// The Role is converged back onto pods/patch, the RoleBinding onto the
+	// builder SA — drift is corrected, not trusted.
+	var role rbacv1.Role
+	if err := reconciler.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: sandboxTemplateBuilderServiceAccount}, &role); err != nil {
+		t.Fatalf("get role: %v", err)
+	}
+	want := []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"patch"}}}
+	if !reflect.DeepEqual(role.Rules, want) {
+		t.Fatalf("expected the role to be converged to pods/patch, got %+v", role.Rules)
+	}
+	var binding rbacv1.RoleBinding
+	if err := reconciler.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: sandboxTemplateBuilderServiceAccount}, &binding); err != nil {
+		t.Fatalf("get rolebinding: %v", err)
+	}
+	if binding.RoleRef.Name != sandboxTemplateBuilderServiceAccount ||
+		len(binding.Subjects) != 1 || binding.Subjects[0].Name != sandboxTemplateBuilderServiceAccount {
+		t.Fatalf("expected the rolebinding to be converged onto the builder SA, got %+v / %+v", binding.RoleRef, binding.Subjects)
+	}
+	// Platform-managed additions to the SA (imagePullSecrets) survive.
+	var saAfter corev1.ServiceAccount
+	if err := reconciler.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: sandboxTemplateBuilderServiceAccount}, &saAfter); err != nil {
+		t.Fatalf("get serviceaccount: %v", err)
+	}
+	if len(saAfter.ImagePullSecrets) != 1 || saAfter.ImagePullSecrets[0].Name != "regcred" {
+		t.Fatalf("expected SA imagePullSecrets to be preserved, got %+v", saAfter.ImagePullSecrets)
+	}
+}
+
+func TestSandboxTemplateReconcileReplacesLeftoverPodOfDeletedTemplate(t *testing.T) {
+	namespace, name := "tenant-a", "recreate"
+	template := newSandboxTemplate(namespace, name)
+	// A Pod left over by a previously deleted same-named template: same
+	// deterministic name and labels, but a different owner UID. The
+	// recreated template must not adopt it.
+	leftover := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      buildPodName(template),
+			Namespace: namespace,
+			Labels: map[string]string{
+				sandboxTemplateBuildLabel:      name,
+				sandboxTemplateNamespaceLabel:  namespace,
+				sandboxTemplateGenerationLabel: "1",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "sandbox.fast.io/v1alpha2",
+				Kind:       "SandboxTemplate",
+				Name:       name,
+				UID:        "old-template-uid",
+				Controller: ptr(true),
+			}},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "build"}}},
+	}
+	reconciler := newSandboxTemplateReconciler(t, template, leftover)
+	key := client.ObjectKey{Namespace: namespace, Name: name}
+
+	reconcileOnce(t, reconciler, key)
+	pods := listBuilderPods(t, reconciler, namespace)
+	if len(pods) != 1 {
+		t.Fatalf("expected exactly one pod after replacing the leftover, got %d", len(pods))
+	}
+	// The leftover was deleted and replaced by a Pod owned by the new
+	// template UID (fake client deletes synchronously, so one reconcile is
+	// enough to observe the replacement).
+	owned := false
+	for _, ref := range pods[0].OwnerReferences {
+		if ref.UID == template.UID && ref.Controller != nil && *ref.Controller {
+			owned = true
+		}
+	}
+	if !owned {
+		t.Fatalf("expected the leftover to be replaced by a pod owned by the new template, got %+v", pods[0].OwnerReferences)
 	}
 }

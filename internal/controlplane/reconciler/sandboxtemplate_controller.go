@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
@@ -270,7 +271,10 @@ func (r *SandboxTemplateReconciler) mapBuildPod(_ context.Context, obj client.Ob
 // or nil. Build Pods run in the template's own namespace and are linked to
 // the template by labels (and an owner reference). A Pod built for an older
 // generation (spec changed mid-build) is never adopted: its outcome does not
-// apply to the new spec.
+// apply to the new spec. Neither is a Pod that is not owned by this template
+// UID — a same-named Pod left over by a previously deleted template (its
+// name is deterministic, so a recreated template collides on the name while
+// the old Pod is still being garbage-collected) must not be adopted.
 func (r *SandboxTemplateReconciler) findBuildPod(ctx context.Context, template *apiv1alpha2.SandboxTemplate) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(template.Namespace), client.MatchingLabels{
@@ -284,6 +288,9 @@ func (r *SandboxTemplateReconciler) findBuildPod(ctx context.Context, template *
 	for index := range pods.Items {
 		pod := &pods.Items[index]
 		if pod.Labels[sandboxTemplateGenerationLabel] != generation {
+			continue
+		}
+		if !ownedByTemplate(pod, template) {
 			continue
 		}
 		// Pick deterministically: if duplicates ever exist for the same
@@ -329,7 +336,9 @@ func (r *SandboxTemplateReconciler) earliestRetention(ctx context.Context, templ
 
 // cleanupStalePods deletes build Pods of earlier generations once a new
 // generation arrives; a mid-build spec change replaces the in-flight builder
-// instead of letting it run to completion.
+// instead of letting it run to completion. Pods not owned by this template's
+// UID (leftovers of a deleted same-named template) are deleted the same way,
+// so the deterministic name cannot trap the controller on a stale Pod.
 func (r *SandboxTemplateReconciler) cleanupStalePods(ctx context.Context, template *apiv1alpha2.SandboxTemplate) error {
 	pods, err := r.listBuildPods(ctx, template)
 	if err != nil {
@@ -338,6 +347,17 @@ func (r *SandboxTemplateReconciler) cleanupStalePods(ctx context.Context, templa
 	generation := fmt.Sprintf("%d", template.Generation)
 	for index := range pods.Items {
 		pod := &pods.Items[index]
+		if !ownedByTemplate(pod, template) {
+			// Leftover of a deleted same-named template (or a stray):
+			// never adopt, delete immediately. If it is already being
+			// garbage-collected, nothing to do.
+			if pod.DeletionTimestamp == nil {
+				if err := r.Delete(ctx, pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
+					return err
+				}
+			}
+			continue
+		}
 		if pod.Labels[sandboxTemplateGenerationLabel] == generation {
 			continue
 		}
@@ -352,6 +372,20 @@ func (r *SandboxTemplateReconciler) cleanupStalePods(ctx context.Context, templa
 		}
 	}
 	return nil
+}
+
+// ownedByTemplate reports whether the Pod carries a controller owner
+// reference to the given template. buildPodName is deterministic, so a
+// recreated template collides on the Pod name while the old Pod is still
+// being garbage-collected; the UID check is what keeps that leftover from
+// being adopted.
+func ownedByTemplate(pod *corev1.Pod, template *apiv1alpha2.SandboxTemplate) bool {
+	for _, ref := range pod.OwnerReferences {
+		if ref.UID == template.UID && ref.Controller != nil && *ref.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanupFinishedPods removes finished build Pods (any generation, including
@@ -525,12 +559,18 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 	return nil
 }
 
-// ensureBuilderRBAC makes sure the builder ServiceAccount, Role and
-// RoleBinding exist in the given namespace. The build Pod runs in the
-// template's (tenant) namespace and self-reports its outcome by
-// merge-patching its own annotations, so it needs pods/patch there. The
-// RBAC is provisioned per namespace on demand because a privileged platform
-// SA must not be statically bound into arbitrary tenant namespaces.
+// ensureBuilderRBAC converges the builder ServiceAccount, Role and
+// RoleBinding in the given namespace onto exactly the minimal builder
+// privileges (pods/patch). The build Pod runs in the template's (tenant)
+// namespace and self-reports its outcome by merge-patching its own
+// annotations, so it needs pods/patch there. The RBAC is provisioned per
+// namespace on demand because a privileged platform SA must not be
+// statically bound into arbitrary tenant namespaces. Existing objects are
+// not trusted: a same-named Role or RoleBinding with broader content (e.g.
+// pre-created by a tenant) is converged back onto the enforced shape, so
+// the boundary holds by construction rather than by assumption. The
+// ServiceAccount itself is only created, never rewritten, so platform
+// additions such as imagePullSecrets for private registry pulls survive.
 func (r *SandboxTemplateReconciler) ensureBuilderRBAC(ctx context.Context, namespace string) error {
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{Name: sandboxTemplateBuilderServiceAccount, Namespace: namespace},
@@ -546,7 +586,7 @@ func (r *SandboxTemplateReconciler) ensureBuilderRBAC(ctx context.Context, names
 			Verbs:     []string{"patch"},
 		}},
 	}
-	if err := r.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := r.ensureRole(ctx, role); err != nil {
 		return err
 	}
 	binding := &rbacv1.RoleBinding{
@@ -562,10 +602,48 @@ func (r *SandboxTemplateReconciler) ensureBuilderRBAC(ctx context.Context, names
 			Namespace: namespace,
 		}},
 	}
-	if err := r.Create(ctx, binding); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := r.ensureRoleBinding(ctx, binding); err != nil {
 		return err
 	}
 	return nil
+}
+
+// ensureRole creates the Role or, when a same-named one already exists,
+// rewrites its rules onto the desired set. The Role name is reserved for
+// the builder, so any existing content (broader or unrelated rules) is
+// treated as drift to be corrected, never as something to trust.
+func (r *SandboxTemplateReconciler) ensureRole(ctx context.Context, desired *rbacv1.Role) error {
+	if err := r.Create(ctx, desired); err == nil || !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	current := &rbacv1.Role{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(desired), current); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.Rules, desired.Rules) {
+		return nil
+	}
+	current.Rules = desired.Rules
+	return r.Update(ctx, current)
+}
+
+// ensureRoleBinding creates the RoleBinding or, when a same-named one
+// already exists, rewrites its roleRef and subjects onto the desired ones
+// (same rationale as ensureRole: bindings are drift-corrected, not trusted).
+func (r *SandboxTemplateReconciler) ensureRoleBinding(ctx context.Context, desired *rbacv1.RoleBinding) error {
+	if err := r.Create(ctx, desired); err == nil || !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	current := &rbacv1.RoleBinding{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(desired), current); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.RoleRef, desired.RoleRef) && reflect.DeepEqual(current.Subjects, desired.Subjects) {
+		return nil
+	}
+	current.RoleRef = desired.RoleRef
+	current.Subjects = desired.Subjects
+	return r.Update(ctx, current)
 }
 
 // publishCredentialEnvRefs maps the imagePullSecrets-style publish secret

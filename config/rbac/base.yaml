@@ -38,7 +38,9 @@ rules:
   verbs: ["get", "create"]
 - apiGroups: ["rbac.authorization.k8s.io"]
   resources: ["roles", "rolebindings"]
-  verbs: ["get", "create"]
+  # update: ensureBuilderRBAC converges pre-existing same-named Role /
+  # RoleBinding back onto the enforced shape instead of trusting them.
+  verbs: ["get", "create", "update"]
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch", "update"]

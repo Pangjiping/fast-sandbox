@@ -262,7 +262,10 @@ Every build emits a content-addressed `manifest.json`:
   Role). The build Pods run in the **template's namespace** under the
   `sandbox-template-builder` ServiceAccount, which the controller provisions
   per namespace with only `pods/patch` (the builder self-reports its
-  outcome); the controller RBAC (`sandboxtemplates` create/update) and the
+  outcome) and **converges on every reconcile**: a same-named Role or
+  RoleBinding with broader content (e.g. pre-created by a tenant) is
+  rewritten back onto the enforced shape rather than trusted, so the
+  boundary holds by construction, not by assumption; the controller RBAC (`sandboxtemplates` create/update) and the
   builder SA are deliberately scoped, and the controller never reads
   secrets — publish credentials reach the build Pod as SecretKeyRef
   references resolved by the kubelet (secret lives in the template's
