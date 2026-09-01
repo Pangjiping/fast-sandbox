@@ -26,3 +26,16 @@ data:
           kata-dragonball:
             configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml
           boxlite: {}
+          # Firecracker on-demand loading: the node-level runtime-agent pulls
+          # the golden snapshot set from the artifact store into StateRoot,
+          # and the driver restores every Sandbox from it (jailer mode with
+          # per-clone netns). The binary/jailer/kernel are installed on the
+          # node by config/runtime-installers/firecracker.yaml; the paths
+          # below are the environment-side installation values.
+          firecracker:
+            firecracker:
+              binaryPath: /opt/fast-sandbox/firecracker/firecracker
+              jailerPath: /opt/fast-sandbox/firecracker/jailer
+              kernelPath: /opt/fast-sandbox/firecracker/vmlinux.bin
+              rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs
+              stateRoot: /var/lib/fast-sandbox/firecracker

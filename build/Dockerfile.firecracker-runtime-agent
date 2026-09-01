@@ -1,0 +1,9 @@
+# firecracker-runtime-agent — node-level artifact cache + lease service for
+# the Firecracker on-demand loading chain (UDS JSON-over-HTTP API).
+FROM alpine:3.19
+RUN apk add --no-cache curl
+WORKDIR /workspace
+COPY .build/linux-amd64/firecracker-runtime-agent .
+
+EXPOSE 8080
+ENTRYPOINT ["./firecracker-runtime-agent"]

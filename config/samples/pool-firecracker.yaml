@@ -1,0 +1,70 @@
+# pool-firecracker.yaml — SandboxPool backed by the Firecracker runtime.
+#
+# The controller resolves the firecracker runtime plan (config/runtime-
+# environments.yaml), schedules a privileged fastlet on a node labeled
+# fast-sandbox.io/firecracker-node=true, and auto-injects the runtime host
+# paths (KVM, firecracker/jailer/kernel, state root, netns dirs) plus the
+# runtime-plan / registry-config volumes. The fastletTemplate below only
+# declares the fastlet image, the agent UDS socket mount and the agent env.
+#
+# warmImages trigger the agent PinImage pull (golden snapshot set from the
+# artifact store); pool.Status.WarmImages turns Ready once cached on node.
+#
+# Capacity: poolMin=2 keeps TWO fastlet pods resident (10 slots total). This
+# is required for the verify 7-sandbox batch: the fastpath create path
+# rejects (ResourceExhausted) BEFORE creating the Sandbox CR when every
+# fastlet is full, so a full pool can never trigger the controller's
+# demand-driven scale-out (poolMax=2 is still the ceiling).
+#
+# Prerequisites:
+#   - fast-sandbox-registry ConfigMap + dockerconfigjson Secret in this
+#     namespace for the OCI registry of the warm image (optional for
+#     firecracker; the snapshot pull goes through the agent/MinIO instead).
+#   - Agent DaemonSet + installer (config/dev/agent-daemonset.yaml,
+#     config/runtime-installers/firecracker.yaml).
+#
+# Apply with:
+#   kubectl apply -f config/samples/pool-firecracker.yaml
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxPool
+metadata:
+  name: firecracker-pool
+  namespace: fast-sandbox-system
+spec:
+  fastletTemplate:
+    spec:
+      containers:
+      - name: fastlet
+        image: fast-sandbox/fastlet:dev
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
+          value: /run/fast-sandbox/firecracker/runtime.sock
+        volumeMounts:
+        - name: agent-socket
+          mountPath: /run/fast-sandbox/firecracker
+      volumes:
+      - name: agent-socket
+        hostPath:
+          path: /run/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      nodeSelector:
+        fast-sandbox.io/firecracker-node: "true"
+  capacity:
+    poolMin: 2
+    poolMax: 2
+    bufferMin: 0
+    bufferMax: 0
+  maxSandboxesPerPod: 5
+  runtime: firecracker
+  # No infraComponents: execd is already BAKED into the golden snapshot by
+  # the SandboxTemplate builder (spec.execd), so no GuestCopy delivery (and
+  # no containerd pull) is needed. The proxy e2e probes execd /ping via the
+  # PORT route (ResolveEndpoint port 44772 -> sandbox-proxy -> fastlet-proxy
+  # -> guest), which does not require a declared component.
+  sandboxResources:
+    cpu: "1"
+    memory: 512Mi
+    pids: 128
+  warmImages:
+  - alpine:3.19

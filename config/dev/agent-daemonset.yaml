@@ -1,0 +1,86 @@
+# agent-daemonset.yaml — node-level firecracker runtime-agent.
+#
+# Serves the UDS management API (artifact pull + lease state) that the
+# fastlet firecracker driver talks to. The socket directory and the state
+# root are shared with fastlet pods via hostPath.
+#
+# Prerequisites (created by scripts/integration-env.sh):
+#   - Secret fast-sandbox-agent-registry: the compiled registry
+#     configuration (registryconfig.Compiled JSON) whose credential carries
+#     the MinIO read-only key and endpoint for FAST_SANDBOX_ARTIFACT_STORE.
+#
+# Apply with:
+#   kubectl apply -f config/dev/agent-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: firecracker-runtime-agent
+  namespace: fast-sandbox-system
+  labels:
+    app: fast-sandbox
+    component: firecracker-runtime-agent
+spec:
+  selector:
+    matchLabels:
+      app: fast-sandbox
+      component: firecracker-runtime-agent
+  template:
+    metadata:
+      labels:
+        app: fast-sandbox
+        component: firecracker-runtime-agent
+    spec:
+      nodeSelector:
+        fast-sandbox.io/firecracker-node: "true"
+      hostNetwork: true
+      containers:
+      - name: agent
+        image: fast-sandbox/firecracker-runtime-agent:dev
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
+          value: /run/fast-sandbox/firecracker/runtime.sock
+        - name: FAST_SANDBOX_ARTIFACT_STORE
+          value: s3://sandbox-images/publish
+        - name: FAST_SANDBOX_ARTIFACT_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: fast-sandbox-agent-config
+              key: artifact-endpoint
+              optional: true
+        - name: FAST_SANDBOX_STATE_ROOT
+          value: /var/lib/fast-sandbox/firecracker
+        - name: FAST_SANDBOX_REGISTRY_CONFIG_PATH
+          value: /etc/fast-sandbox/agent/registry.json
+        securityContext:
+          privileged: true
+        readinessProbe:
+          exec:
+            command: ["/bin/sh", "-ec", "curl -fsS -X POST --unix-socket /run/fast-sandbox/firecracker/runtime.sock -H 'Content-Type: application/json' -d '{\"podUid\":\"$POD_UID\",\"namespace\":\"fast-sandbox-system\"}' http://firecracker-agent/v1/health | grep -q '\"ok\":true'"]
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 3
+        volumeMounts:
+        - name: agent-socket
+          mountPath: /run/fast-sandbox/firecracker
+        - name: agent-state
+          mountPath: /var/lib/fast-sandbox/firecracker
+        - name: agent-registry
+          mountPath: /etc/fast-sandbox/agent
+          readOnly: true
+      volumes:
+      - name: agent-socket
+        hostPath:
+          path: /run/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      - name: agent-state
+        hostPath:
+          path: /var/lib/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      - name: agent-registry
+        secret:
+          secretName: fast-sandbox-agent-registry

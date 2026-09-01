@@ -56,6 +56,7 @@ func main() {
 	var fastletProxyImage string
 	var boxLiteRuntimeImage string
 	var sandboxTemplateBuilderImage string
+	var sandboxReconcileWorkers int
 	var routeVerifyPublicKey string
 	var routeSigningPrivateKey string
 	var routeCredentialTTL time.Duration
@@ -79,6 +80,7 @@ func main() {
 	flag.StringVar(&routeSigningPrivateKey, "route-signing-private-key", os.Getenv("FAST_SANDBOX_ROUTE_SIGNING_PRIVATE_KEY"), "Base64 Ed25519 seed/private key used only by FastPath.")
 	flag.DurationVar(&routeCredentialTTL, "route-credential-ttl", 5*time.Minute, "Lifetime of a Sandbox route credential.")
 	flag.StringVar(&sandboxProxyBaseURL, "sandbox-proxy-base-url", envOrDefault("FAST_SANDBOX_PROXY_BASE_URL", "http://fast-sandbox-proxy.fast-sandbox-system.svc:8080"), "Client-visible Sandbox Proxy base URL.")
+	flag.IntVar(&sandboxReconcileWorkers, "sandbox-reconcile-workers", 4, "Concurrent Sandbox reconcilers (per-key serialization is guaranteed by the workqueue).")
 	flag.StringVar(&runtimeEnvironmentNamespace, "runtime-environment-namespace", envOrDefault("FAST_SANDBOX_RUNTIME_ENVIRONMENT_NAMESPACE", runtimeenv.SystemNamespace), "Namespace containing the platform runtime environment ConfigMap.")
 	flag.StringVar(&runtimeEnvironmentConfigMap, "runtime-environment-configmap", envOrDefault("FAST_SANDBOX_RUNTIME_ENVIRONMENT_CONFIGMAP", runtimeenv.ConfigMapName), "Platform runtime environment ConfigMap name.")
 	flag.Parse()
@@ -151,6 +153,7 @@ func main() {
 	if role.RunsControllers() {
 		if err := (&reconciler.SandboxReconciler{
 			Client: manager.GetClient(), Scheme: manager.GetScheme(), Orchestrator: orchestrator,
+			MaxConcurrentReconciles: sandboxReconcileWorkers,
 		}).SetupWithManager(manager); err != nil {
 			klog.ErrorS(err, "Register Sandbox controller")
 			os.Exit(1)

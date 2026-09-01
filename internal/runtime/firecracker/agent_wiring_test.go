@@ -82,9 +82,12 @@ func TestPullImageProxiesToPinImage(t *testing.T) {
 
 	pins, _, _ := agent.snapshot()
 	require.Equal(t, []string{fixture.sandboxSpec.Spec.Image}, pins)
-	// The request id is the stable warm-pull key of the image, so retries
-	// replay the first pin instead of double-counting.
-	require.Equal(t, "warm-pull-"+imageKey(fixture.sandboxSpec.Spec.Image), agent.pinReqs[0])
+	// The request id is the pod-scoped warm-pull key of the image, so
+	// retries of THIS fastlet replay the first pin instead of double-
+	// counting, while another fastlet pod on the same node keeps its own
+	// key (the agent journal rejects a request id committed by a different
+	// pod UID).
+	require.Equal(t, "warm-pull-pod-1-"+imageKey(fixture.sandboxSpec.Spec.Image), agent.pinReqs[0])
 }
 
 func TestPullImageIdempotentAcrossCalls(t *testing.T) {

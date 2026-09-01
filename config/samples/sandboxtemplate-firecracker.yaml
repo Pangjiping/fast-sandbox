@@ -1,0 +1,37 @@
+# sandboxtemplate-firecracker.yaml — golden-image build for the Firecracker
+# on-demand loading chain.
+#
+# The controller runs a privileged builder Job on a node labeled
+# sandbox.fast.io/kvm=true; the builder bakes the golden snapshot set
+# (rootfs.ext4 / vmstate.snap / memory.snap + manifest) and publishes it to
+# the artifact store (MinIO). The runtime-agent then pulls it per node.
+#
+# Prerequisites:
+#   - Secret <publishSecretRef.name> in namespace fast-sandbox-system with
+#     keys accessKeyId / secretAccessKey / endpoint / region
+#     (see scripts/integration-env.sh for the generated values).
+#   - Node label: kubectl label node <node> sandbox.fast.io/kvm=true
+#
+# Apply with:
+#   kubectl apply -f config/samples/sandboxtemplate-firecracker.yaml
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxTemplate
+metadata:
+  name: ai-office-sandbox
+  namespace: fast-sandbox-system
+spec:
+  image: alpine:3.19
+  execd: opensandbox/execd:1.1.0
+  kernel: vmlinux.bin
+  machine:
+    vcpu: "1"
+    memory: "512Mi"
+  init: /usr/local/sbin/sandbox-init
+  readiness:
+    warmupSeconds: 15
+  output:
+    rootfsSize: "2Gi"
+    format: native
+    publish: s3://sandbox-images/publish
+    publishSecretRef:
+      name: sandbox-oss-credentials
