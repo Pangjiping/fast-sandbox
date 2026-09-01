@@ -32,7 +32,9 @@ SandboxTemplate CR (spec)
 |------|-------------|
 | KVM build nodes | Nodes labeled `sandbox.fast.io/kvm=true`, exposing `/dev/kvm` and `/dev/net/tun`; the build Pod is pinned to them via nodeSelector |
 | Object store | S3-compatible bucket (MinIO/OSS/S3); reachable from the builder |
-| Publish secret | `imagePullSecrets`-style Secret in the **platform namespace** (`fast-sandbox-system`) with keys `accessKeyId`, `secretAccessKey`, `endpoint`, `region` |
+| Publish secret | `imagePullSecrets`-style Secret in the **template's namespace** with keys `accessKeyId`, `secretAccessKey`, `endpoint`, `region` |
+| Builder RBAC | Provisioned automatically: the controller creates the `sandbox-template-builder` ServiceAccount + Role (`pods/patch`) + RoleBinding in the template's namespace on first build |
+| Pod security | The template's namespace must permit **privileged** Pods (e.g. PodSecurityAdmission `allow` privileged), so the builder can mount `/dev/kvm` and `/dev/net/tun` |
 | Controller | The SandboxTemplate reconciler must be running (it drives the build Pod and status) |
 
 The builder image is `build/Dockerfile.sandboxtemplate-builder` (oci2rootfs,
@@ -154,7 +156,7 @@ Precedence: custom `probe` → execd `/ping` (when execd is injected) →
 | `output.rootfsSize` | Yes | `"30Gi"` | Logical capacity of the produced `rootfs.ext4` (Kubernetes quantity). Rounded **up** to SI GiB for oci2rootfs (`30Gi` → 33G → ~30.7 GiB sparse file) |
 | `output.format` | Yes | `overlaybd` | `native` (raw snapshot files only) or `overlaybd` (plus LSMT layers for on-demand range reads); both contain the full artifact set |
 | `output.publish` | Yes | — | S3-compatible target, e.g. `s3://sandbox-images/publish`. Digest-addressed publication; without it the build has no durable artifacts (the builder refuses to run unless `SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1`) |
-| `output.publishSecretRef` | No | — | Name of the write-credential Secret in the platform namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`). Without it the build relies on platform-level credentials (IRSA/node metadata). Runtime nodes read with a **separate** read-only credential — write keys never reach them |
+| `output.publishSecretRef` | No | — | Name of the write-credential Secret in the template's namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`). Without it the build relies on platform-level credentials (IRSA/node metadata). Runtime nodes read with a **separate** read-only credential — write keys never reach them |
 | `output.prime` | No | — | Reserved: seed-node cache priming after a successful build; not yet implemented |
 
 ## Build lifecycle
@@ -166,13 +168,15 @@ Precedence: custom `probe` → execd `/ping` (when execd is injected) →
 - **Rebuild**: edit the spec — the generation bump triggers a new build. A
   mid-build spec change deletes the stale build Pod immediately (concurrent
   privileged builds cannot stack up).
-- **Build Pods** run in the platform namespace as
-  `<template>-build-<generation>`, pinned to `sandbox.fast.io/kvm=true` nodes
-  with `/dev/kvm` and `/dev/net/tun` passed through; they have a 2 h deadline
-  and a 10 min Pending timeout (a missing KVM node fails the build instead of
-  hanging forever). Deleting the template reaps its build Pods via a finalizer.
+- **Build Pods** run in the template's own namespace as
+  `<template>-build-<generation>`, owned by the template (deleting the
+  template cascades to its Pods via the garbage collector), pinned to
+  `sandbox.fast.io/kvm=true` nodes with `/dev/kvm` and `/dev/net/tun` passed
+  through; they have a 2 h deadline and a 10 min Pending timeout (a missing
+  KVM node fails the build instead of hanging forever). Finished Pods are
+  kept 24 h for annotation inspection, then reaped by the controller.
 - **Diagnostics**: failed builds surface the container exit reason/message in
-  the condition; the Pod logs (`kubectl -n fast-sandbox logs <build-pod>`)
+  the condition; the Pod logs (`kubectl -n <namespace> logs <build-pod>`)
   carry per-stage timings (`pullMs`, `bootToReadyMs`, `snapshotCreateMs`,
   `restoreToHeartbeatMs`, `importRootfsMs`, …).
 

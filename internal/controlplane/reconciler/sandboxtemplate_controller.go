@@ -10,6 +10,7 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,13 +31,12 @@ const (
 	workdirEnvName                       = "SANDBOX_TEMPLATE_WORKDIR"
 	sandboxTemplateBuildDir              = "/build"
 	sandboxTemplateBuilderServiceAccount = "sandbox-template-builder"
-	// builderNamespace is where build Pods run: the platform namespace, not
-	// the tenant namespace, so the privileged builder and its RBAC stay
-	// confined to the control plane.
-	builderNamespace = "fast-sandbox-system"
-	// sandboxTemplateFinalizer lets the controller clean up build Pods when
-	// a template is deleted (build Pods cannot carry an owner reference
-	// across namespaces).
+	// sandboxTemplateFinalizer is a legacy cleanup finalizer from the era
+	// when build Pods ran in the platform namespace and could not carry an
+	// owner reference. Build Pods now live in the template's namespace and
+	// are owned by the template (cascading GC), so the finalizer is only
+	// stripped from templates created before the owner-reference change;
+	// nothing new ever sets it.
 	sandboxTemplateFinalizer = "sandbox.fast.io/sandboxtemplate-cleanup"
 	// buildDeadlineSeconds bounds a single build run; podPendingTimeout
 	// fails a build whose Pod never leaves Pending (e.g. no KVM node).
@@ -46,10 +46,10 @@ const (
 const builderImageEnv = "SANDBOX_TEMPLATE_SPEC"
 
 // sandboxTemplateBuildLabel links a build Pod to its SandboxTemplate (name
-// and namespace; build Pods run in the platform namespace, so ownership is
-// by labels, not owner references); sandboxTemplateGenerationLabel carries
-// the template generation the Pod was created for so a mid-build spec change
-// is never adopted.
+// and namespace; the Pod also carries an owner reference — the labels let
+// the controller adopt, watch and prune builds cheaply);
+// sandboxTemplateGenerationLabel carries the template generation the Pod
+// was created for so a mid-build spec change is never adopted.
 const (
 	sandboxTemplateBuildLabel        = "sandbox.fast.io/sandboxtemplate"
 	sandboxTemplateNamespaceLabel    = "sandbox.fast.io/template-namespace"
@@ -75,7 +75,10 @@ const (
 // validate-boot → snapshot → package) and publishes the content-addressed
 // artifacts; this controller tracks the Pod and records the outcome (phase,
 // conditions, manifestRef, artifactDigest) in status. `output.prime` is
-// reserved but not implemented (see the PrimeSpec doc comment).
+// reserved but not implemented (see the PrimeSpec doc comment). Build Pods
+// run in the template's own namespace and carry a controller owner
+// reference, so deleting a template cascades to its build Pods via the
+// garbage collector; finished Pods are additionally reaped after BuildTTL.
 type SandboxTemplateReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -97,20 +100,16 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Deletion: the template owns privileged build Pods it cannot reference
-	// (owner refs cannot cross namespaces), so clean them up before the
-	// finalizer is removed.
+	// Deletion: build Pods are owned by the template (same namespace, owner
+	// reference), so the garbage collector cascades the delete. The only
+	// remaining job here is stripping the legacy cleanup finalizer from
+	// templates created before the owner-reference change.
 	if !template.DeletionTimestamp.IsZero() {
-		if err := r.cleanupTemplate(ctx, &template); err != nil {
-			return ctrl.Result{}, err
+		if controllerutil.ContainsFinalizer(&template, sandboxTemplateFinalizer) {
+			controllerutil.RemoveFinalizer(&template, sandboxTemplateFinalizer)
+			return ctrl.Result{}, r.Update(ctx, &template)
 		}
 		return ctrl.Result{}, nil
-	}
-	if !controllerutil.ContainsFinalizer(&template, sandboxTemplateFinalizer) {
-		controllerutil.AddFinalizer(&template, sandboxTemplateFinalizer)
-		if err := r.Update(ctx, &template); err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 
 	// A build already applied to the current generation is terminal. The
@@ -235,17 +234,18 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 }
 
 // SetupWithManager registers the controller for SandboxTemplate objects.
-// Build Pods are watched by label: they live in the platform namespace and
-// carry no owner reference (it cannot cross namespaces), so the controller
-// maps their events back to the owning template.
+// Build Pods run in the template's namespace and carry an owner reference;
+// they are also watched by label so the controller can drive the build
+// lifecycle (phase tracking, stale-generation replacement, TTL reaping)
+// that owner references alone do not cover.
 func (r *SandboxTemplateReconciler) SetupWithManager(manager ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(manager).
 		For(&apiv1alpha2.SandboxTemplate{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapBuildPod),
 			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				// Only platform-namespace Pods can be builders; drop the
-				// cluster-wide watch noise.
-				return obj.GetNamespace() == builderNamespace
+				// Only builder Pods (tagged with the template build label)
+				// trigger reconciles; drop the cluster-wide watch noise.
+				return obj.GetLabels()[sandboxTemplateBuildLabel] != ""
 			}))).
 		Complete(r)
 }
@@ -255,7 +255,7 @@ func (r *SandboxTemplateReconciler) SetupWithManager(manager ctrl.Manager) error
 // a builder.
 func (r *SandboxTemplateReconciler) mapBuildPod(_ context.Context, obj client.Object) []reconcile.Request {
 	pod, ok := obj.(*corev1.Pod)
-	if !ok || pod.Namespace != builderNamespace {
+	if !ok {
 		return nil
 	}
 	name := pod.Labels[sandboxTemplateBuildLabel]
@@ -266,32 +266,14 @@ func (r *SandboxTemplateReconciler) mapBuildPod(_ context.Context, obj client.Ob
 	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: namespace, Name: name}}}
 }
 
-// cleanupTemplate deletes every build Pod of a deleted template, then
-// removes the finalizer so the object can disappear.
-func (r *SandboxTemplateReconciler) cleanupTemplate(ctx context.Context, template *apiv1alpha2.SandboxTemplate) error {
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(builderNamespace), client.MatchingLabels{
-		sandboxTemplateBuildLabel:     templateLabelValue(template.Name),
-		sandboxTemplateNamespaceLabel: template.Namespace,
-	}); err != nil {
-		return err
-	}
-	for index := range pods.Items {
-		if err := r.Delete(ctx, &pods.Items[index], client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	controllerutil.RemoveFinalizer(template, sandboxTemplateFinalizer)
-	return r.Update(ctx, template)
-}
-
 // findBuildPod returns the build Pod for the template's current generation,
-// or nil. Build Pods run in the platform namespace and are linked to the
-// template by labels. A Pod built for an older generation (spec changed
-// mid-build) is never adopted: its outcome does not apply to the new spec.
+// or nil. Build Pods run in the template's own namespace and are linked to
+// the template by labels (and an owner reference). A Pod built for an older
+// generation (spec changed mid-build) is never adopted: its outcome does not
+// apply to the new spec.
 func (r *SandboxTemplateReconciler) findBuildPod(ctx context.Context, template *apiv1alpha2.SandboxTemplate) (*corev1.Pod, error) {
 	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(builderNamespace), client.MatchingLabels{
+	if err := r.List(ctx, &pods, client.InNamespace(template.Namespace), client.MatchingLabels{
 		sandboxTemplateBuildLabel:     templateLabelValue(template.Name),
 		sandboxTemplateNamespaceLabel: template.Namespace,
 	}); err != nil {
@@ -395,7 +377,7 @@ func (r *SandboxTemplateReconciler) cleanupFinishedPods(ctx context.Context, tem
 
 func (r *SandboxTemplateReconciler) listBuildPods(ctx context.Context, template *apiv1alpha2.SandboxTemplate) (*corev1.PodList, error) {
 	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(builderNamespace), client.MatchingLabels{
+	if err := r.List(ctx, &pods, client.InNamespace(template.Namespace), client.MatchingLabels{
 		sandboxTemplateBuildLabel:     templateLabelValue(template.Name),
 		sandboxTemplateNamespaceLabel: template.Namespace,
 	}); err != nil {
@@ -407,9 +389,17 @@ func (r *SandboxTemplateReconciler) listBuildPods(ctx context.Context, template 
 // createBuildPod launches the builder Pod that executes the pipeline. The
 // template spec is serialized into the environment; the builder image runs
 // the stages (convert → validate-boot → snapshot → package) and publishes
-// the artifacts. The Pod has a deterministic name (<template>-build-<gen>)
-// so concurrent reconciles dedupe via AlreadyExists.
+// the artifacts. The Pod runs in the template's namespace (so it can carry
+// an owner reference and the publish secret can be SecretKeyRef'd from the
+// same namespace) and has a deterministic name (<template>-build-<gen>) so
+// concurrent reconciles dedupe via AlreadyExists.
 func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template *apiv1alpha2.SandboxTemplate) error {
+	// The build Pod self-reports its outcome by merge-patching its own
+	// annotations; provision the minimal builder RBAC (SA + Role + RoleBinding,
+	// pods/patch only) in the template's namespace, idempotently.
+	if err := r.ensureBuilderRBAC(ctx, template.Namespace); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(template.Spec)
 	if err != nil {
 		return err
@@ -464,7 +454,7 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      buildPodName(template),
-			Namespace: builderNamespace,
+			Namespace: template.Namespace,
 			Labels: map[string]string{
 				sandboxTemplateBuildLabel:      templateLabelValue(template.Name),
 				sandboxTemplateNamespaceLabel:  template.Namespace,
@@ -524,10 +514,55 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 			},
 		},
 	}
-	// No owner reference: build Pods live in the platform namespace while the
-	// template lives in the tenant namespace, and owner references cannot
-	// cross namespaces. Association is by the labels above.
+	// The Pod is owned by the template, so deleting the template cascades
+	// to it via the garbage collector.
+	if err := ctrl.SetControllerReference(template, pod, r.Scheme); err != nil {
+		return err
+	}
 	if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
+// ensureBuilderRBAC makes sure the builder ServiceAccount, Role and
+// RoleBinding exist in the given namespace. The build Pod runs in the
+// template's (tenant) namespace and self-reports its outcome by
+// merge-patching its own annotations, so it needs pods/patch there. The
+// RBAC is provisioned per namespace on demand because a privileged platform
+// SA must not be statically bound into arbitrary tenant namespaces.
+func (r *SandboxTemplateReconciler) ensureBuilderRBAC(ctx context.Context, namespace string) error {
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxTemplateBuilderServiceAccount, Namespace: namespace},
+	}
+	if err := r.Create(ctx, sa); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxTemplateBuilderServiceAccount, Namespace: namespace},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"patch"},
+		}},
+	}
+	if err := r.Create(ctx, role); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxTemplateBuilderServiceAccount, Namespace: namespace},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     sandboxTemplateBuilderServiceAccount,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      sandboxTemplateBuilderServiceAccount,
+			Namespace: namespace,
+		}},
+	}
+	if err := r.Create(ctx, binding); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
@@ -537,11 +572,11 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 // (keys accessKeyId/secretAccessKey/endpoint/region) onto AWS_* env vars via
 // SecretKeyRef: the credentials are never copied into the Pod spec, and the
 // controller does not read tenant secrets during reconcile. The secret must
-// exist in the PLATFORM namespace (builderNamespace) — SecretKeyRef resolves
-// against the Pod's own namespace, so a tenant-namespace secret cannot be
-// referenced. All keys are required (Optional=false): a missing key fails
-// the Pod at container start with CreateContainerConfigError instead of
-// degrading silently.
+// exist in the template's namespace — SecretKeyRef resolves against the
+// Pod's own namespace, and the build Pod now runs next to its template. All
+// keys are required (Optional=false): a missing key fails the Pod at
+// container start with CreateContainerConfigError instead of degrading
+// silently.
 func publishCredentialEnvRefs(ref *corev1.LocalObjectReference) []corev1.EnvVar {
 	key := func(secretKey, envName string) corev1.EnvVar {
 		return corev1.EnvVar{Name: envName, ValueFrom: &corev1.EnvVarSource{
@@ -626,14 +661,12 @@ func podCompletionTime(pod *corev1.Pod) *time.Time {
 	return nil
 }
 
-// buildPodName derives the deterministic build Pod name from the template's
-// namespace AND name (two tenants can create same-named templates; without
-// the namespace the second build would collide on the same Pod name, its
-// Create would be swallowed by AlreadyExists, and the tenant would stay
-// stuck in Building forever). Long names are truncated with a sha256
-// prefix, keeping the result within a sane 63-char budget.
+// buildPodName derives the deterministic build Pod name from the template
+// name (Pods run in the template's own namespace, so names cannot collide
+// across tenants). Long names are truncated with a sha256 prefix, keeping
+// the result within a sane 63-char budget.
 func buildPodName(template *apiv1alpha2.SandboxTemplate) string {
-	seed := template.Namespace + "-" + template.Name
+	seed := template.Name
 	if len(seed) > 40 {
 		sum := sha256.Sum256([]byte(seed))
 		seed = fmt.Sprintf("%s-%x", seed[:40], sum[:8])

@@ -204,7 +204,7 @@ spec:
 | `output.rootfsSize` | Yes | `"30Gi"` | Logical rootfs capacity (minimum, rounded up to SI GiB) |
 | `output.format` | Yes | `overlaybd` | `native` or `overlaybd` (both contain the full snapshot set) |
 | `output.publish` | Yes | — | S3-compatible digest-addressed publish target, e.g. `s3://bucket/prefix` |
-| `output.publishSecretRef` | No | — | Write-credential Secret name in the platform namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`) |
+| `output.publishSecretRef` | No | — | Write-credential Secret name in the template's namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`) |
 | `output.prime` | No | — | Reserved: seed-node cache priming; not yet implemented |
 
 Readiness precedence: custom `probe` → execd `/ping` → `warmupSeconds` +
@@ -221,9 +221,11 @@ Readiness precedence: custom `probe` → execd `/ping` → `warmupSeconds` +
 | `lastBuildTime` | When the latest build completed |
 | `observedGeneration` | Generation of the last applied build |
 
-Build Pods run in the platform namespace as `<template>-build-<generation>`,
-pinned to `sandbox.fast.io/kvm=true` nodes; editing the spec triggers a
-rebuild (generation bump), and deleting the template reaps its Pods.
+Build Pods run in the template's own namespace as
+`<template>-build-<generation>`, owned by the template (deleting the
+template cascades to its Pods via the garbage collector), pinned to
+`sandbox.fast.io/kvm=true` nodes; editing the spec triggers a rebuild
+(generation bump). Finished Pods are reaped after the build TTL (24 h).
 
 See the [SandboxTemplate guide](../guides/sandboxtemplate-golden-images.md)
 for the end-to-end workflow, artifact layout, and consumption contract.

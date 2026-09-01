@@ -259,29 +259,37 @@ Every build emits a content-addressed `manifest.json`:
 - **Privileged-build entry point**: a SandboxTemplate is effectively
   "run an arbitrary OCI image as root on a KVM host" — creating templates
   must be restricted to trusted operators (cluster-admin or a dedicated
-  Role), while the *build Pods* themselves run under the platform's
-  `sandbox-template-builder` ServiceAccount confined to the platform
-  namespace. The controller RBAC (`sandboxtemplates` create/update +
-  `sandboxtemplates/finalizers`) and the builder SA (`pods/patch` only) are
-  deliberately scoped; the controller never reads secrets — publish
-  credentials reach the build Pod as SecretKeyRef references resolved by
-  the kubelet (secret lives in the platform namespace).
+  Role). The build Pods run in the **template's namespace** under the
+  `sandbox-template-builder` ServiceAccount, which the controller provisions
+  per namespace with only `pods/patch` (the builder self-reports its
+  outcome); the controller RBAC (`sandboxtemplates` create/update) and the
+  builder SA are deliberately scoped, and the controller never reads
+  secrets — publish credentials reach the build Pod as SecretKeyRef
+  references resolved by the kubelet (secret lives in the template's
+  namespace, next to the Pod). Because the builder is privileged (host
+  `/dev/kvm` passthrough), the tenant namespace must allow privileged Pods
+  (PodSecurityAdmission); this moves the privilege boundary from "control
+  plane only" to "template namespace", in exchange for native cascading
+  deletion: the build Pod carries a controller owner reference to the
+  template, so deleting a template garbage-collects its build Pods without
+  a finalizer.
 - **Publish credentials**: `output.publish` is required; when
   `output.publishSecretRef` names an imagePullSecrets-style secret
   (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`), the controller
   injects them as `AWS_*` env vars (SecretKeyRef) into the build Pod. The
-  secret MUST live in the platform namespace (`fast-sandbox-system`) — a
-  SecretKeyRef resolves against the Pod's own namespace and cannot cross
-  namespaces; the platform operator manages it out of band. Without the
-  secret, the build relies on platform-level credentials (e.g. IRSA / node
-  metadata), which must be present on KVM nodes.
+  secret MUST live in the template's namespace — a SecretKeyRef resolves
+  against the Pod's own namespace; the platform operator manages it out of
+  band. Without the secret, the build relies on platform-level credentials
+  (e.g. IRSA / node metadata), which must be present on KVM nodes.
 - **Build lifecycle safety**: build Pods have `activeDeadlineSeconds`
   (2 h), deterministic names (`<template>-build-<generation>`, so
-  concurrent reconciles dedupe), a finalizer on the template that reaps
-  Pods on deletion, and a Pending timeout (10 min) that fails builds which
+  concurrent reconciles dedupe), an owner reference to the template (GC
+  cascades deletion), and a Pending timeout (10 min) that fails builds which
   never get scheduled (e.g. no node labeled `sandbox.fast.io/kvm=true`).
-  KVM/tun devices are passed through as hostPath CharDevice mounts, and the
-  Pod is pinned to KVM nodes via nodeSelector.
+  Finished Pods are retained for `BuildTTL` (24 h) so their annotations stay
+  inspectable, then reaped by the controller. KVM/tun devices are passed
+  through as hostPath CharDevice mounts, and the Pod is pinned to KVM nodes
+  via nodeSelector.
 
 ### Risks and Mitigations
 
