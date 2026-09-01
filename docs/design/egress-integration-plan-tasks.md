@@ -8,8 +8,8 @@
 > （本清单每一项对应方案章节；分歧以方案文档为准）。
 >
 > 依赖：OpenSandbox PR #1678（egress 实现，未合并）；fast-sandbox #30
-> （Actions 协议/CRD，已合入）。**egress 镜像由需求方构建提供**
-> （`Pangjiping/OpenSandbox @ feat/egress-actions-handler` pin `460b1cb`），
+> （Actions 协议/CRD，已合入）。**egress 镜像固定为
+> `docker.io/opensandbox/egress:latest`（需求方提供，直接写死使用）**，
 > 本清单不包含镜像构建。
 
 ---
@@ -115,7 +115,7 @@
   - `actionHandlers: [{name: egress, targetHTTPPort: 18080,
     hooks: [sandbox.runtime-ready, sandbox.data-plane-ready]}]`
   - egress 容器进 fastletTemplate（host-process，共享 Pod netns，
-    **egress 镜像 tag 由需求方提供后填入**）
+    镜像 **`docker.io/opensandbox/egress:latest`** 直接写死）
   - egress 的 host-process 组件声明（infra 组件 + DeliveryMode）
 - [ ] 确认 fastlet 对 actionHandlers 的投递在 firecracker runtime 下生效
   （#30 已实现，声明即用——验证 `recordActionHook` 的 data-plane-ready
@@ -128,7 +128,8 @@
 
 ## 任务 6：集成测试（verify-egress，扩展 integration-env.sh）
 
-**前置**：需求方提供 egress 镜像 tag；`kind load docker-image` 进集群。
+**前置**：`docker.io/opensandbox/egress:latest`（需求方提供）；
+`kind load docker-image` 进集群（或在 fastlet pod 中直接可拉取）。
 
 - [ ] `integration-env.sh` 新增 `verify-egress` 阶段（复用现有 up 环境）：
   - **0. 协议一致性实测**：SET_BINDING 被 egress 正确解析（egress 日志/
