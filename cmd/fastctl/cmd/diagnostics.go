@@ -64,9 +64,9 @@ func printSandboxDiagnostics(writer io.Writer, response *fastpathv2.SandboxDiagn
 	}
 
 	if response.Sandbox != nil {
-		fmt.Fprintf(writer, "Sandbox:   %s (%s)\n", response.Sandbox.SandboxName, response.Sandbox.SandboxUid)
-		fmt.Fprintf(writer, "States:    runtime=%s data-plane=%s user-process=%s\n", response.Sandbox.RuntimeState, response.Sandbox.DataPlaneState, response.Sandbox.UserProcessState)
-		fmt.Fprintf(writer, "Fastlet:   %s\n", response.Sandbox.FastletPod)
+		fmt.Fprintf(writer, "Sandbox:   %s (%s)\n", response.Sandbox.GetIdentity().GetName(), response.Sandbox.GetIdentity().GetUid())
+		fmt.Fprintf(writer, "States:    runtime=%s data-plane=%s ready=%t applied-generation=%d\n",
+			response.Sandbox.GetRuntime().GetState(), response.Sandbox.GetDataPlane().GetState(), response.Sandbox.GetReady(), response.Sandbox.GetAppliedGeneration())
 	}
 	fmt.Fprintf(writer, "Assignment: %s attempt=%d runtime-instance=%s\n", response.AssignmentState, response.AssignmentAttempt, response.RuntimeInstanceId)
 	if response.FastletReachable {

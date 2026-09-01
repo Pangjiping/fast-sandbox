@@ -1,0 +1,6 @@
+FROM alpine:3.22
+
+COPY .build/linux-amd64/sandbox-action-fixture /usr/local/bin/sandbox-action-fixture
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/sandbox-action-fixture"]

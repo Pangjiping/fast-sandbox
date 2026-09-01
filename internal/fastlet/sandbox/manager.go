@@ -11,6 +11,7 @@ import (
 	"time"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	fastletaction "fast-sandbox/internal/fastlet/action"
 	fastletcache "fast-sandbox/internal/fastlet/cache"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
@@ -35,6 +36,7 @@ type SandboxManagerConfig struct {
 	InfraRevision      string
 	InfraManager       *fastletinfra.Manager
 	RegistryProvider   registryconfig.Provider
+	ActionManager      *fastletaction.Manager
 }
 
 type SandboxManager struct {
@@ -47,6 +49,7 @@ type SandboxManager struct {
 	resourceProfileHash string
 	infraRevision       string
 	infraManager        *fastletinfra.Manager
+	actionManager       *fastletaction.Manager
 	infraReady          bool
 	infraMessage        string
 	fastletPodUID       string
@@ -119,12 +122,13 @@ func NewSandboxManagerWithConfig(runtime RuntimeDriver, config SandboxManagerCon
 			return nil, fmt.Errorf("Infra revision %s does not match manager revision %s", config.InfraRevision, config.InfraManager.Revision())
 		}
 	}
-	return &SandboxManager{
+	manager := &SandboxManager{
 		runtime: runtime, runtimeName: string(config.RuntimeName), capacity: config.Capacity,
 		runtimeProfileHash: config.RuntimeProfileHash,
 		resourceProfile:    profile, resourceProfileHash: resourceHash,
 		infraRevision: config.InfraRevision,
 		infraManager:  config.InfraManager, infraReady: config.InfraManager == nil,
+		actionManager: config.ActionManager,
 		fastletPodUID: config.FastletPodUID,
 		clock:         config.Clock,
 		recovering:    config.RecoverOnStart, runtimeReady: !config.RecoverOnStart,
@@ -139,7 +143,11 @@ func NewSandboxManagerWithConfig(runtime RuntimeDriver, config SandboxManagerCon
 		routePublisher:   config.RoutePublisher,
 		dataPlaneWorkers: make(map[string]dataPlaneWorker),
 		sandboxes:        make(map[string]*SandboxMetadata),
-	}, nil
+	}
+	if manager.actionManager != nil {
+		manager.actionManager.SetChangeNotifier(manager.actionStateChanged)
+	}
+	return manager, nil
 }
 
 func (m *SandboxManager) RegistryRevision() string {
@@ -282,6 +290,10 @@ func (m *SandboxManager) ResourceProfileHash() string {
 	return m.resourceProfileHash
 }
 
+func (m *SandboxManager) RuntimeProfileHash() string {
+	return m.runtimeProfileHash
+}
+
 func capacityFromEnvironment() int {
 	capVal := 5
 	if capStr := os.Getenv("FASTLET_CAPACITY"); capStr != "" {
@@ -386,14 +398,15 @@ func (m *SandboxManager) asyncDelete(sandboxID string, expected *SandboxMetadata
 	// A delayed delete from an old generation must never erase a newer
 	// manager entry for the same logical Sandbox.
 	if m.sandboxes[sandboxID] == expected {
+		identity := expected.Config.Identity
 		m.recordTombstoneLocked(fastletapi.SandboxIdentity{
-			SandboxUID: sandboxID, InstanceGeneration: expected.InstanceGeneration,
-			RuntimeInstanceID: expected.RuntimeInstanceID, AssignmentAttempt: expected.AssignmentAttempt,
-			FastletPodUID: expected.FastletPodUID,
+			SandboxUID: sandboxID, InstanceGeneration: identity.InstanceGeneration,
+			RuntimeInstanceID: identity.RuntimeInstanceID, AssignmentAttempt: identity.AssignmentAttempt,
+			FastletPodUID: identity.FastletPodUID,
 		})
 		delete(m.sandboxes, sandboxID)
-		m.cacheProtection.Unprotect(expected.Image, fastletcache.ProtectActive)
-		m.cacheProtection.ProtectHotUntil(expected.Image, m.clock.Now().Add(time.Hour))
+		m.cacheProtection.Unprotect(expected.Config.Spec.Image, fastletcache.ProtectActive)
+		m.cacheProtection.ProtectHotUntil(expected.Config.Spec.Image, m.clock.Now().Add(time.Hour))
 		m.recordDiagnosticLocked(sandboxID, "info", "fastlet", "deleted", "proxy route and runtime resources were deleted")
 		klog.InfoS("Sandbox deletion completed", "sandboxID", sandboxID)
 	}
@@ -417,23 +430,29 @@ func (m *SandboxManager) GetSandboxStatuses(ctx context.Context) []fastletapi.Sa
 	for sandboxID, metadata := range m.sandboxes {
 		snapshots[sandboxID] = *metadata
 	}
+	proxyReady := m.routePublisher == nil || m.routeReady
 	m.mu.RUnlock()
 
 	result := make([]fastletapi.SandboxStatus, 0, len(snapshots))
 	for sandboxID, meta := range snapshots {
-		runtimeStatus := "unknown"
+		identity := meta.Config.Identity
+		dataPlaneReady := proxyReady && routeReadyForPhase(meta.Phase)
+		runtimeObservation, dataPlaneObservation := observationsForPhase(meta.Phase, dataPlaneReady)
 		if inspected, err := m.runtime.InspectSandbox(ctx, sandboxID); err == nil {
-			runtimeStatus = inspected.Phase
+			runtimeObservation.Message = inspected.Phase
 		}
 		result = append(result, fastletapi.SandboxStatus{
 			SandboxID:          sandboxID,
-			ClaimUID:           meta.ClaimUID,
-			InstanceGeneration: meta.InstanceGeneration,
-			RuntimeInstanceID:  meta.RuntimeInstanceID,
-			AssignmentAttempt:  meta.AssignmentAttempt,
-			Phase:              meta.Phase,
-			Message:            runtimeStatus,
-			InfraDiagnostics:   apiInfraDiagnostics(meta.InfraDiagnostics, meta.InfraServices, meta.RouteGeneration, meta.Phase == "running"),
+			InstanceGeneration: identity.InstanceGeneration,
+			RuntimeInstanceID:  identity.RuntimeInstanceID,
+			AssignmentAttempt:  identity.AssignmentAttempt,
+			RouteGeneration:    identity.RouteGeneration,
+			AcceptedGeneration: meta.AcceptedGeneration,
+			AppliedGeneration:  meta.AppliedGeneration,
+			Runtime:            runtimeObservation,
+			DataPlane:          dataPlaneObservation,
+			InfraComponents:    apiInfraDiagnostics(meta.InfraDiagnostics, meta.InfraServices, identity.RouteGeneration, dataPlaneReady),
+			ActionBindings:     append([]fastletapi.ActionBindingStatus(nil), meta.ActionBindingStatuses...),
 			CreatedAt:          meta.CreatedAt,
 		})
 	}

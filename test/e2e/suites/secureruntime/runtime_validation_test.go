@@ -255,7 +255,7 @@ func TestRuntimeValidationContainerDefault(t *testing.T) {
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 60*time.Second)
 			defer cancelRunWait()
 			running, err := fixture.WaitForSandbox(runCtx, types.NamespacedName{Name: sandbox.Name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-				return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+				return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 			})
 			if err != nil {
 				t.Fatalf("wait for running sandbox: %v", err)

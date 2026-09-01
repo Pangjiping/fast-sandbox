@@ -60,8 +60,11 @@ func TestSandboxProxyFallsBackOnStaleWatchAndForwardsToAssignedFastlet(t *testin
 	require.NoError(t, err)
 	store := fastletproxy.NewStore()
 	localRoute := fastletproxy.Route{
-		Namespace: "default", SandboxUID: "uid-a", FastletPodUID: "pod-new", AssignmentAttempt: 2, RouteGeneration: 2,
-		Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: backendURL.Hostname()}, State: fastletproxy.RouteReady,
+		RouteKey: fastletproxy.RouteKey{SandboxUID: "uid-a", RouteGeneration: 2},
+		RouteSpec: fastletproxy.RouteSpec{
+			Namespace: "default", FastletPodUID: "pod-new", AssignmentAttempt: 2,
+			Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: backendURL.Hostname()}, State: fastletproxy.RouteReady,
+		},
 	}
 	_, err = store.Apply(localRoute)
 	require.NoError(t, err)

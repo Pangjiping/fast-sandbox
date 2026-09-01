@@ -144,7 +144,7 @@ func seedControllerRegistry(t *testing.T, registry *placement.InMemoryRegistry, 
 	require.NoError(t, registry.ApplyHeartbeat(info.ID, info.PodUID, &fastletapi.HeartbeatResponse{
 		FastletStatus: fastletapi.FastletStatus{
 			FastletPodUID: info.PodUID, RuntimeReady: info.RuntimeReady, InfraReady: info.InfraReady,
-			Capacity: info.Capacity, Admission: info.Admission, SandboxStatuses: statuses,
+			RuntimeProfileHash: info.RuntimeProfileHash, Admission: info.Admission, SandboxStatuses: statuses,
 			InfraRevision: info.InfraRevision, RegistryRevision: info.RegistryRevision,
 			PreparedArtifacts: info.PreparedArtifacts, WarmImages: info.WarmImages,
 		},
@@ -458,7 +458,7 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 	newPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 	seedControllerRegistry(t, registry, placement.FastletInfo{
 		ID: placement.FastletID(newPod.Name), Namespace: newPod.Namespace, PodName: newPod.Name, PodUID: string(newPod.UID),
-		PodReady: true, RuntimeReady: true, InfraReady: true, LastHeartbeat: time.Now(), Capacity: 1,
+		PodReady: true, RuntimeReady: true, InfraReady: true, LastHeartbeat: time.Now(),
 		Admission: fastletapi.AdmissionStatus{Capacity: 1},
 	})
 	_, handled, err = reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha2.Sandbox{
@@ -477,17 +477,20 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 
 func TestSandboxNeedsPlacementExcludesTerminalAndAssignedStates(t *testing.T) {
 	require.True(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{}))
-	expired := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
-		Type: orchestration.ConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonExpired,
-	}}}}
+	expired := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{
+		Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeStopped},
+		Conditions: []metav1.Condition{{
+			Type: orchestration.ConditionReady, Status: metav1.ConditionFalse, Reason: "arbitrary-diagnostic",
+		}},
+	}}
 	require.False(t, sandboxNeedsPlacement(expired))
-	lost := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
-		Type: orchestration.ConditionRuntimeReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonFastletPodLost,
+	diagnosticOnly := &apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Conditions: []metav1.Condition{{
+		Type: orchestration.ConditionReady, Status: metav1.ConditionFalse, Reason: orchestration.ReasonFastletPodLost,
 	}}}}
-	require.False(t, sandboxNeedsPlacement(lost))
-	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{RuntimeState: apiv1alpha2.ObservedStateDraining}}))
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
-	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Assignment: &assignment}}))
+	require.True(t, sandboxNeedsPlacement(diagnosticOnly), "Condition Reason is not state-machine input")
+	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeStopping}}}))
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+	require.False(t, sandboxNeedsPlacement(&apiv1alpha2.Sandbox{Status: apiv1alpha2.SandboxStatus{Placement: placementStatus}}))
 }
 
 func newDrainHarness(t *testing.T, sandboxes []apiv1alpha2.Sandbox) (*SandboxPoolReconciler, client.Client, *recordingDrainer, *apiv1alpha2.SandboxPool) {
@@ -530,11 +533,12 @@ func fastletPod(name, uid, ip string) *corev1.Pod {
 }
 
 func assignedSandbox(name, fastletName, podUID string) apiv1alpha2.Sandbox {
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: fastletName, FastletPodUID: podUID, Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: fastletName, FastletPodUID: types.UID(podUID), Attempt: 1}
 	return apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")},
 		Spec:       apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
-		Status:     apiv1alpha2.SandboxStatus{Assignment: &assignment, AssignmentAttempt: 1, InstanceGeneration: 1},
+		Status: apiv1alpha2.SandboxStatus{Placement: placementStatus,
+			Runtime: apiv1alpha2.RuntimeStatus{Generation: 1}},
 	}
 }
 
@@ -746,7 +750,7 @@ func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
 	seedControllerRegistry(t, registry, placement.FastletInfo{
 		ID: "tenant-a/fastlet-a", Namespace: "tenant-a", PoolName: "pool-a",
 		PodName: "fastlet-a", PodUID: "uid-a", PodReady: true, RuntimeReady: true, InfraReady: true,
-		Capacity: 4, Admission: fastletapi.AdmissionStatus{Capacity: 4},
+		Admission:        fastletapi.AdmissionStatus{Capacity: 4},
 		RegistryRevision: compiled.Revision, LastHeartbeat: now,
 		WarmImages: []fastletapi.WarmImageState{
 			{Image: "alpine:latest", State: "Cached"},
@@ -756,7 +760,7 @@ func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
 	seedControllerRegistry(t, registry, placement.FastletInfo{
 		ID: "tenant-a/fastlet-b", Namespace: "tenant-a", PoolName: "pool-a",
 		PodName: "fastlet-b", PodUID: "uid-b", PodReady: true, RuntimeReady: true, InfraReady: true,
-		Capacity: 4, Admission: fastletapi.AdmissionStatus{Capacity: 4, Used: 1, Running: 1},
+		Admission:        fastletapi.AdmissionStatus{Capacity: 4, Used: 1, Running: 1},
 		RegistryRevision: "stale-revision", LastHeartbeat: now,
 		WarmImages: []fastletapi.WarmImageState{{
 			Image: "alpine:latest", State: "Failed", Message: "pull denied",
@@ -781,10 +785,6 @@ func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
 			ObservedGeneration: 9,
 		},
 	}, warm)
-	registryStatus := reconciler.aggregateRegistryStatus(pool, compiled, pods)
-	require.Equal(t, int32(2), registryStatus.TotalFastlets)
-	require.Equal(t, int32(1), registryStatus.AppliedFastlets)
-	require.Equal(t, registryGeneration(compiled.Revision), registryStatus.TargetGeneration)
 	idle, busy := reconciler.fastletUtilizationCounts(pool, pods)
 	require.Equal(t, int32(1), idle)
 	require.Equal(t, int32(1), busy)

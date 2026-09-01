@@ -55,7 +55,7 @@ func (m *MockRuntime) ProbeCapabilities(context.Context) CapabilityReport {
 
 func (m *MockRuntime) SetNamespace(ns string) {}
 
-func (m *MockRuntime) EnsureSandbox(ctx context.Context, spec *fastletapi.SandboxSpec) (*SandboxMetadata, error) {
+func (m *MockRuntime) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput) (*SandboxMetadata, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createCalled = true
@@ -64,15 +64,17 @@ func (m *MockRuntime) EnsureSandbox(ctx context.Context, spec *fastletapi.Sandbo
 		return nil, m.createError
 	}
 
+	config := input.Sandbox
+	sandboxUID := config.Identity.SandboxUID
 	metadata := &SandboxMetadata{
-		SandboxSpec: *spec,
-		ContainerID: "container-" + spec.SandboxID,
+		Config:      config,
+		ContainerID: "container-" + sandboxUID,
 		PID:         1234,
 		Phase:       "created",
 		CreatedAt:   time.Now().Unix(),
 	}
-	m.sandboxes[spec.SandboxID] = metadata
-	m.containers[spec.SandboxID] = metadata.ContainerID
+	m.sandboxes[sandboxUID] = metadata
+	m.containers[sandboxUID] = metadata.ContainerID
 
 	return metadata, nil
 }
@@ -111,7 +113,7 @@ func (m *MockRuntime) InspectSandbox(ctx context.Context, sandboxID string) (*Sa
 		copy.Phase = status
 		return &copy, nil
 	}
-	return &SandboxMetadata{SandboxSpec: fastletapi.SandboxSpec{SandboxID: sandboxID}, Phase: status}, nil
+	return &SandboxMetadata{Config: fastletapi.RuntimeSandboxConfig{Identity: fastletapi.SandboxIdentity{SandboxUID: sandboxID}}, Phase: status}, nil
 }
 
 func (m *MockRuntime) ListManagedSandboxes(context.Context) ([]*SandboxMetadata, error) {
@@ -142,19 +144,49 @@ func (m *MockRuntime) Close() error {
 
 // Helper methods for testing
 
-func ensureSandboxForTest(ctx context.Context, manager *SandboxManager, spec *fastletapi.SandboxSpec) (*fastletapi.CreateSandboxResponse, error) {
+type sandboxCreateFixture struct {
+	fastletapi.SandboxSpec
+	SandboxID          string
+	ClaimNamespace     string
+	ClaimName          string
+	FastletPodUID      string
+	InstanceGeneration int64
+	RuntimeInstanceID  string
+	AssignmentAttempt  int64
+	RouteGeneration    int64
+}
+
+func ensureSandboxForTest(ctx context.Context, manager *SandboxManager, spec *sandboxCreateFixture) (*fastletapi.CreateSandboxResponse, error) {
+	namespace := spec.ClaimNamespace
+	if namespace == "" {
+		namespace = "default"
+	}
+	name := spec.ClaimName
+	if name == "" {
+		name = spec.SandboxID
+	}
 	return manager.CreateSandbox(ctx, &fastletapi.CreateSandboxRequest{
+		RequestID:      "test-" + spec.SandboxID,
+		SpecGeneration: 1,
 		Identity: fastletapi.SandboxIdentity{
-			RequestID: "test-" + spec.SandboxID, SandboxUID: spec.SandboxID,
+			SandboxUID: spec.SandboxID, Namespace: namespace, Name: name,
 			InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + spec.SandboxID,
 			AssignmentAttempt: 1, FastletPodUID: manager.fastletPodUID,
 		},
-		Sandbox: *spec,
+		Sandbox: spec.SandboxSpec,
 	})
 }
 
-func deleteSandboxForTest(manager *SandboxManager, sandboxID string) (*fastletapi.DeleteSandboxV2Response, error) {
-	return manager.DeleteSandboxV2(&fastletapi.DeleteSandboxV2Request{Identity: fastletapi.SandboxIdentity{
+func runtimeSpecForTest(sandboxID, claimName, image string) *sandboxCreateFixture {
+	return &sandboxCreateFixture{
+		SandboxSpec: fastletapi.SandboxSpec{Image: image},
+		SandboxID:   sandboxID,
+		ClaimName:   claimName,
+	}
+}
+
+func deleteSandboxForTest(manager *SandboxManager, sandboxID string) (*fastletapi.DeleteSandboxResponse, error) {
+	return manager.DeleteSandbox(&fastletapi.DeleteSandboxRequest{Identity: fastletapi.SandboxIdentity{
 		SandboxUID: sandboxID, InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + sandboxID,
 		AssignmentAttempt: 1, FastletPodUID: manager.fastletPodUID,
 	}})
@@ -343,24 +375,27 @@ func TestSandboxManagerRejectsProfileOverrides(t *testing.T) {
 		Capacity: 5, RuntimeProfileHash: "runtime-hash", ResourceProfile: &profile,
 	})
 	require.NoError(t, err)
-	valid := &fastletapi.SandboxSpec{
-		SandboxID: "sandbox-a", CPU: "500m", Memory: "256Mi", PIDs: 128,
-		RuntimeProfileHash: "runtime-hash", ResourceProfileHash: profile.Hash(),
+	valid := &sandboxCreateFixture{
+		SandboxSpec: fastletapi.SandboxSpec{
+			CPU: "500m", Memory: "256Mi", PIDs: 128,
+			RuntimeProfileHash: "runtime-hash", ResourceProfileHash: profile.Hash(),
+		},
+		SandboxID: "sandbox-a",
 	}
-	require.NoError(t, manager.validateProfiles(valid))
+	require.NoError(t, manager.validateProfiles(&valid.SandboxSpec))
 
-	tests := map[string]func(*fastletapi.SandboxSpec){
-		"runtime hash":    func(spec *fastletapi.SandboxSpec) { spec.RuntimeProfileHash = "other" },
-		"resource hash":   func(spec *fastletapi.SandboxSpec) { spec.ResourceProfileHash = "other" },
-		"cpu override":    func(spec *fastletapi.SandboxSpec) { spec.CPU = "1" },
-		"memory override": func(spec *fastletapi.SandboxSpec) { spec.Memory = "1Gi" },
-		"pids override":   func(spec *fastletapi.SandboxSpec) { spec.PIDs = 256 },
+	tests := map[string]func(*sandboxCreateFixture){
+		"runtime hash":    func(spec *sandboxCreateFixture) { spec.RuntimeProfileHash = "other" },
+		"resource hash":   func(spec *sandboxCreateFixture) { spec.ResourceProfileHash = "other" },
+		"cpu override":    func(spec *sandboxCreateFixture) { spec.CPU = "1" },
+		"memory override": func(spec *sandboxCreateFixture) { spec.Memory = "1Gi" },
+		"pids override":   func(spec *sandboxCreateFixture) { spec.PIDs = 256 },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			candidate := *valid
 			mutate(&candidate)
-			require.ErrorIs(t, manager.validateProfiles(&candidate), ErrSandboxProfileMismatch)
+			require.ErrorIs(t, manager.validateProfiles(&candidate.SandboxSpec), ErrSandboxProfileMismatch)
 		})
 	}
 }
@@ -375,18 +410,13 @@ func TestSandboxManager_CreateSandbox_Success(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-1",
-		ClaimUID:  "claim-uid-1",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-		Command:   []string{"/bin/sh"},
-	}
+	spec := runtimeSpecForTest("test-sandbox-1", "test-claim", "alpine:latest")
+	spec.Command = []string{"/bin/sh"}
 
 	resp, err := ensureSandboxForTest(ctx, manager, spec)
 
 	require.NoError(t, err, "CreateSandbox should succeed")
-	assert.True(t, resp.Accepted, "Response should indicate acceptance")
+	assert.Equal(t, fastletapi.CreateDispositionCreated, resp.Disposition)
 	require.NotNil(t, resp.Sandbox)
 	assert.Equal(t, spec.SandboxID, resp.Sandbox.SandboxID, "SandboxID should match")
 	assert.Greater(t, resp.Sandbox.CreatedAt, int64(0), "CreatedAt should be set")
@@ -395,8 +425,8 @@ func TestSandboxManager_CreateSandbox_Success(t *testing.T) {
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1, "Should have one sandbox status")
 	assert.Equal(t, spec.SandboxID, statuses[0].SandboxID)
-	assert.Equal(t, "running", statuses[0].Phase)
-	assert.Equal(t, spec.ClaimUID, statuses[0].ClaimUID)
+	assert.Equal(t, fastletapi.RuntimeStateReady, statuses[0].Runtime.State)
+	assert.Equal(t, fastletapi.DataPlaneStateReady, statuses[0].DataPlane.State)
 }
 
 func TestSandboxManager_CreateSandbox_Idempotent(t *testing.T) {
@@ -405,17 +435,12 @@ func TestSandboxManager_CreateSandbox_Idempotent(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-idempotent",
-		ClaimUID:  "claim-uid-2",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sandbox-idempotent", "test-claim", "alpine:latest")
 
 	// First creation
 	resp1, err1 := ensureSandboxForTest(ctx, manager, spec)
 	require.NoError(t, err1, "First creation should succeed")
-	assert.True(t, resp1.Accepted)
+	assert.Equal(t, fastletapi.CreateDispositionCreated, resp1.Disposition)
 
 	// Reset mock to track if CreateSandbox is called again
 	mockRuntime.Reset()
@@ -423,7 +448,7 @@ func TestSandboxManager_CreateSandbox_Idempotent(t *testing.T) {
 	// Second creation of same sandbox
 	resp2, err2 := ensureSandboxForTest(ctx, manager, spec)
 	require.NoError(t, err2, "Second creation should succeed (idempotent)")
-	assert.True(t, resp2.Accepted, "Second creation should be accepted")
+	assert.Equal(t, fastletapi.CreateDispositionExisting, resp2.Disposition)
 	require.NotNil(t, resp2.Sandbox)
 	assert.Equal(t, spec.SandboxID, resp2.Sandbox.SandboxID)
 
@@ -437,12 +462,7 @@ func TestSandboxManager_CreateSandbox_RuntimeFailure(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-fail",
-		ClaimUID:  "claim-uid-3",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sandbox-fail", "test-claim", "alpine:latest")
 
 	// Set mock to return error
 	expectedErr := errors.New("runtime create failed")
@@ -451,7 +471,7 @@ func TestSandboxManager_CreateSandbox_RuntimeFailure(t *testing.T) {
 	resp, err := ensureSandboxForTest(ctx, manager, spec)
 
 	require.Error(t, err, "CreateSandbox should return error")
-	assert.False(t, resp.Accepted, "Response should indicate failure")
+	assert.Equal(t, fastletapi.CreateDispositionRejectedBeforeSideEffects, resp.Disposition)
 	require.NotNil(t, resp.Error)
 	assert.Contains(t, resp.Error.Message, "create failed", "Error message should contain details")
 	require.ErrorIs(t, err, expectedErr, "Structured Fastlet error should preserve the runtime cause")
@@ -474,31 +494,16 @@ func TestSandboxManager_CreateSandbox_MultipleSandboxes(t *testing.T) {
 
 	ctx := context.Background()
 
-	sandboxes := []fastletapi.SandboxSpec{
-		{
-			SandboxID: "sb-1",
-			ClaimUID:  "claim-1",
-			ClaimName: "claim-1",
-			Image:     "alpine:latest",
-		},
-		{
-			SandboxID: "sb-2",
-			ClaimUID:  "claim-2",
-			ClaimName: "claim-2",
-			Image:     "nginx:latest",
-		},
-		{
-			SandboxID: "sb-3",
-			ClaimUID:  "claim-3",
-			ClaimName: "claim-3",
-			Image:     "ubuntu:latest",
-		},
+	sandboxes := []sandboxCreateFixture{
+		*runtimeSpecForTest("sb-1", "claim-1", "alpine:latest"),
+		*runtimeSpecForTest("sb-2", "claim-2", "nginx:latest"),
+		*runtimeSpecForTest("sb-3", "claim-3", "ubuntu:latest"),
 	}
 
 	for _, spec := range sandboxes {
 		resp, err := ensureSandboxForTest(ctx, manager, &spec)
 		require.NoError(t, err, "CreateSandbox for %s should succeed", spec.SandboxID)
-		assert.True(t, resp.Accepted)
+		assert.Equal(t, fastletapi.CreateDispositionCreated, resp.Disposition)
 	}
 
 	// Verify all sandboxes are in status
@@ -514,8 +519,8 @@ func TestSandboxManager_CreateSandbox_MultipleSandboxes(t *testing.T) {
 	for _, spec := range sandboxes {
 		status, exists := statusMap[spec.SandboxID]
 		assert.True(t, exists, "Sandbox %s should exist in statuses", spec.SandboxID)
-		assert.Equal(t, spec.ClaimUID, status.ClaimUID)
-		assert.Equal(t, "running", status.Phase)
+		assert.Equal(t, fastletapi.RuntimeStateReady, status.Runtime.State)
+		assert.Equal(t, fastletapi.DataPlaneStateReady, status.DataPlane.State)
 	}
 }
 
@@ -529,12 +534,7 @@ func TestSandboxManager_DeleteSandbox_Success(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-delete",
-		ClaimUID:  "claim-uid-delete",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sandbox-delete", "test-claim", "alpine:latest")
 
 	// Create sandbox first
 	_, err := ensureSandboxForTest(ctx, manager, spec)
@@ -544,13 +544,14 @@ func TestSandboxManager_DeleteSandbox_Success(t *testing.T) {
 	resp, err := deleteSandboxForTest(manager, spec.SandboxID)
 
 	require.NoError(t, err, "DeleteSandbox should succeed")
-	assert.True(t, resp.Accepted, "Response should indicate acceptance")
+	assert.NotNil(t, resp)
 
 	// Sandbox should be in terminating phase
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1, "Should have one status")
 	assert.Equal(t, spec.SandboxID, statuses[0].SandboxID)
-	assert.Equal(t, "terminating", statuses[0].Phase)
+	assert.Equal(t, fastletapi.RuntimeStateStopping, statuses[0].Runtime.State)
+	assert.Equal(t, fastletapi.DataPlaneStateDraining, statuses[0].DataPlane.State)
 
 	// Wait for async deletion to complete
 	time.Sleep(100 * time.Millisecond)
@@ -566,12 +567,7 @@ func TestSandboxManager_DeleteSandbox_Idempotent(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-delete-idempotent",
-		ClaimUID:  "claim-uid-delete-2",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sandbox-delete-idempotent", "test-claim", "alpine:latest")
 
 	// Create sandbox first
 	_, err := ensureSandboxForTest(ctx, manager, spec)
@@ -580,7 +576,7 @@ func TestSandboxManager_DeleteSandbox_Idempotent(t *testing.T) {
 	// First delete
 	resp1, err1 := deleteSandboxForTest(manager, spec.SandboxID)
 	require.NoError(t, err1, "First delete should succeed")
-	assert.True(t, resp1.Accepted)
+	assert.NotNil(t, resp1)
 
 	// Reset mock to track if DeleteSandbox is called again
 	mockRuntime.Reset()
@@ -588,7 +584,7 @@ func TestSandboxManager_DeleteSandbox_Idempotent(t *testing.T) {
 	// Second delete (should be idempotent)
 	resp2, err2 := deleteSandboxForTest(manager, spec.SandboxID)
 	require.NoError(t, err2, "Second delete should succeed (idempotent)")
-	assert.True(t, resp2.Accepted, "Second delete should be accepted")
+	assert.NotNil(t, resp2)
 
 	// The runtime DeleteSandbox might be called again by asyncDelete goroutine
 	// but the manager's DeleteSandbox should return immediately without queuing another delete
@@ -603,7 +599,7 @@ func TestSandboxManager_DeleteSandbox_NonExistent(t *testing.T) {
 	// Deleting a non-existent sandbox should succeed (idempotent behavior)
 	resp, err := deleteSandboxForTest(manager, "non-existent-sandbox")
 	assert.NoError(t, err)
-	assert.True(t, resp.Accepted)
+	assert.NotNil(t, resp)
 }
 
 func TestSandboxManager_DeleteSandbox_MultipleDeletes(t *testing.T) {
@@ -612,12 +608,7 @@ func TestSandboxManager_DeleteSandbox_MultipleDeletes(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-multiple-delete",
-		ClaimUID:  "claim-uid-multiple",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sandbox-multiple-delete", "test-claim", "alpine:latest")
 
 	// Create sandbox first
 	_, err := ensureSandboxForTest(ctx, manager, spec)
@@ -626,13 +617,13 @@ func TestSandboxManager_DeleteSandbox_MultipleDeletes(t *testing.T) {
 	// First delete
 	resp1, err1 := deleteSandboxForTest(manager, spec.SandboxID)
 	require.NoError(t, err1)
-	assert.True(t, resp1.Accepted)
+	assert.NotNil(t, resp1)
 
 	// Second delete while in "terminating" phase (before async completes)
 	// This should be idempotent and return success
 	resp2, err2 := deleteSandboxForTest(manager, spec.SandboxID)
 	require.NoError(t, err2)
-	assert.True(t, resp2.Accepted, "Second delete during terminating phase should be accepted")
+	assert.NotNil(t, resp2)
 
 	// Wait for async delete to complete
 	time.Sleep(100 * time.Millisecond)
@@ -654,18 +645,8 @@ func TestSandboxManager_GetSandboxStatuses(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two active sandboxes
-	spec1 := &fastletapi.SandboxSpec{
-		SandboxID: "active-sb-1",
-		ClaimUID:  "claim-1",
-		ClaimName: "claim-1",
-		Image:     "alpine:latest",
-	}
-	spec2 := &fastletapi.SandboxSpec{
-		SandboxID: "active-sb-2",
-		ClaimUID:  "claim-2",
-		ClaimName: "claim-2",
-		Image:     "nginx:latest",
-	}
+	spec1 := runtimeSpecForTest("active-sb-1", "claim-1", "alpine:latest")
+	spec2 := runtimeSpecForTest("active-sb-2", "claim-2", "nginx:latest")
 
 	_, err := ensureSandboxForTest(ctx, manager, spec1)
 	require.NoError(t, err)
@@ -688,8 +669,7 @@ func TestSandboxManager_GetSandboxStatuses(t *testing.T) {
 	// Check active sandbox is still running
 	activeStatus := statuses[0]
 	assert.Equal(t, spec2.SandboxID, activeStatus.SandboxID)
-	assert.Equal(t, "running", activeStatus.Phase, "Active sandbox should be running")
-	assert.Equal(t, spec2.ClaimUID, activeStatus.ClaimUID)
+	assert.Equal(t, fastletapi.RuntimeStateReady, activeStatus.Runtime.State, "Active sandbox should be running")
 }
 
 func TestSandboxManager_GetSandboxStatuses_Empty(t *testing.T) {
@@ -710,12 +690,7 @@ func TestSandboxManager_GetSandboxStatuses_RuntimeStatus(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sb-status",
-		ClaimUID:  "claim-status",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sb-status", "test-claim", "alpine:latest")
 
 	_, err := ensureSandboxForTest(ctx, manager, spec)
 	require.NoError(t, err)
@@ -723,8 +698,9 @@ func TestSandboxManager_GetSandboxStatuses_RuntimeStatus(t *testing.T) {
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1)
 
-	// Message should contain runtime status
-	assert.NotEmpty(t, statuses[0].Message, "Message should contain runtime status")
+	// Runtime observation carries the driver's diagnostic without flattening it
+	// into an ambiguous top-level message.
+	assert.NotEmpty(t, statuses[0].Runtime.Message, "runtime message should contain driver status")
 
 	// Verify GetSandboxStatus was called on runtime
 	callCount := mockRuntime.GetStatusCallCount(spec.SandboxID)
@@ -739,10 +715,10 @@ func TestSandboxManager_GetSandboxStatuses_MultiplePhases(t *testing.T) {
 	ctx := context.Background()
 
 	// Create sandboxes
-	specs := []*fastletapi.SandboxSpec{
-		{SandboxID: "sb-1", ClaimUID: "claim-1", ClaimName: "claim-1", Image: "alpine:latest"},
-		{SandboxID: "sb-2", ClaimUID: "claim-2", ClaimName: "claim-2", Image: "nginx:latest"},
-		{SandboxID: "sb-3", ClaimUID: "claim-3", ClaimName: "claim-3", Image: "ubuntu:latest"},
+	specs := []*sandboxCreateFixture{
+		runtimeSpecForTest("sb-1", "claim-1", "alpine:latest"),
+		runtimeSpecForTest("sb-2", "claim-2", "nginx:latest"),
+		runtimeSpecForTest("sb-3", "claim-3", "ubuntu:latest"),
 	}
 
 	for _, spec := range specs {
@@ -767,13 +743,13 @@ func TestSandboxManager_GetSandboxStatuses_MultiplePhases(t *testing.T) {
 
 	// First sandbox might be terminating or gone (async may have completed)
 	if firstStatus, exists := statusMap[specs[0].SandboxID]; exists {
-		assert.Equal(t, "terminating", firstStatus.Phase, "First sandbox should be terminating if still present")
+		assert.Equal(t, fastletapi.RuntimeStateStopping, firstStatus.Runtime.State, "First sandbox should be terminating if still present")
 	}
 
 	// Other sandboxes should be running
 	for i := 1; i < 3; i++ {
 		status := statusMap[specs[i].SandboxID]
-		assert.Equal(t, "running", status.Phase, "Sandbox %s should be running", specs[i].SandboxID)
+		assert.Equal(t, fastletapi.RuntimeStateReady, status.Runtime.State, "Sandbox %s should be running", specs[i].SandboxID)
 	}
 }
 
@@ -882,12 +858,7 @@ func TestSandboxManager_AsyncDelete_Timeout(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-timeout",
-		ClaimUID:  "claim-uid-timeout",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sandbox-timeout", "test-claim", "alpine:latest")
 
 	// Create sandbox first
 	_, err := ensureSandboxForTest(ctx, manager, spec)
@@ -896,7 +867,7 @@ func TestSandboxManager_AsyncDelete_Timeout(t *testing.T) {
 	// Delete sandbox (async)
 	resp, err := deleteSandboxForTest(manager, spec.SandboxID)
 	require.NoError(t, err)
-	assert.True(t, resp.Accepted)
+	assert.NotNil(t, resp)
 
 	// Wait for async delete to complete (should complete within timeout)
 	time.Sleep(200 * time.Millisecond)
@@ -912,12 +883,7 @@ func TestSandboxManager_AsyncDelete_RuntimeError(t *testing.T) {
 	manager := NewSandboxManager(mockRuntime)
 
 	ctx := context.Background()
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: "test-sandbox-delete-error",
-		ClaimUID:  "claim-uid-delete-error",
-		ClaimName: "test-claim",
-		Image:     "alpine:latest",
-	}
+	spec := runtimeSpecForTest("test-sandbox-delete-error", "test-claim", "alpine:latest")
 
 	// Create sandbox first
 	_, err := ensureSandboxForTest(ctx, manager, spec)
@@ -929,7 +895,7 @@ func TestSandboxManager_AsyncDelete_RuntimeError(t *testing.T) {
 	// Delete sandbox (async)
 	resp, err := deleteSandboxForTest(manager, spec.SandboxID)
 	require.NoError(t, err)
-	assert.True(t, resp.Accepted)
+	assert.NotNil(t, resp)
 
 	// Wait for async delete
 	time.Sleep(100 * time.Millisecond)
@@ -938,7 +904,8 @@ func TestSandboxManager_AsyncDelete_RuntimeError(t *testing.T) {
 	// retry cannot over-admit while an orphan may still exist.
 	statuses := manager.GetSandboxStatuses(ctx)
 	require.Len(t, statuses, 1)
-	assert.Equal(t, "delete-failed", statuses[0].Phase)
+	assert.Equal(t, fastletapi.RuntimeStateFailed, statuses[0].Runtime.State)
+	assert.Equal(t, fastletapi.DataPlaneStateFailed, statuses[0].DataPlane.State)
 	admission, _, _ := manager.State()
 	assert.Equal(t, 1, admission.Used)
 

@@ -68,20 +68,20 @@ func (i *Index) UpsertSandbox(sandbox *apiv1alpha2.Sandbox) {
 	if sandbox == nil || sandbox.UID == "" {
 		return
 	}
-	routeGeneration := sandbox.Status.RouteGeneration
+	routeGeneration := sandbox.Status.DataPlane.RouteGeneration
 	if routeGeneration <= 0 {
 		routeGeneration = 1
 	}
 	state := &sandboxRouteState{
 		Namespace:       sandbox.Namespace,
 		SandboxUID:      string(sandbox.UID),
-		DataPlaneReady:  sandbox.Status.DataPlaneState == apiv1alpha2.ObservedStateReady,
+		DataPlaneReady:  sandbox.Status.DataPlane.State == apiv1alpha2.DataPlaneReady,
 		RouteGeneration: routeGeneration,
 	}
-	if assignment := sandbox.Status.Assignment; assignment != nil {
-		state.FastletName = assignment.FastletName
-		state.FastletPodUID = assignment.FastletPodUID
-		state.AssignmentAttempt = assignment.Attempt
+	if placement := sandbox.Status.Placement; placement.FastletName != "" {
+		state.FastletName = placement.FastletName
+		state.FastletPodUID = string(placement.FastletPodUID)
+		state.AssignmentAttempt = placement.Attempt
 	}
 	i.sandboxes.Store(state.SandboxUID, state)
 }
@@ -176,14 +176,14 @@ func (r *KubernetesResolver) ResolveFresh(ctx context.Context, sandboxUID string
 	if sandbox == nil {
 		return Route{}, ErrSandboxNotFound
 	}
-	if sandbox.Status.Assignment == nil {
+	if sandbox.Status.Placement.FastletName == "" {
 		return Route{}, ErrSandboxNotReady
 	}
 	var pod corev1.Pod
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Status.Assignment.FastletName}, &pod); err != nil {
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Status.Placement.FastletName}, &pod); err != nil {
 		return Route{}, fmt.Errorf("%w: %v", ErrFastletUnavailable, err)
 	}
-	if string(pod.UID) != sandbox.Status.Assignment.FastletPodUID || pod.Status.PodIP == "" {
+	if pod.UID != sandbox.Status.Placement.FastletPodUID || pod.Status.PodIP == "" {
 		return Route{}, ErrFastletUnavailable
 	}
 	if r.Index != nil {
@@ -194,17 +194,17 @@ func (r *KubernetesResolver) ResolveFresh(ctx context.Context, sandboxUID string
 }
 
 func routeFromObjects(sandbox *apiv1alpha2.Sandbox, pod *corev1.Pod) (Route, error) {
-	if sandbox.Status.Assignment == nil {
+	if sandbox.Status.Placement.FastletName == "" {
 		return Route{}, ErrSandboxNotReady
 	}
-	generation := sandbox.Status.RouteGeneration
+	generation := sandbox.Status.DataPlane.RouteGeneration
 	if generation <= 0 {
 		generation = 1
 	}
 	return Route{
 		Namespace: sandbox.Namespace, SandboxUID: string(sandbox.UID),
-		FastletName: sandbox.Status.Assignment.FastletName, FastletPodUID: sandbox.Status.Assignment.FastletPodUID,
-		FastletPodIP: pod.Status.PodIP, AssignmentAttempt: sandbox.Status.Assignment.Attempt,
+		FastletName: sandbox.Status.Placement.FastletName, FastletPodUID: string(sandbox.Status.Placement.FastletPodUID),
+		FastletPodIP: pod.Status.PodIP, AssignmentAttempt: sandbox.Status.Placement.Attempt,
 		RouteGeneration: generation,
 	}, nil
 }

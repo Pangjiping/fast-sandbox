@@ -92,7 +92,12 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 						{Name: "firecracker-state", HostPath: "/var/lib/fast-sandbox/firecracker", MountPath: "/var/lib/fast-sandbox/firecracker", Type: corev1.HostPathDirectoryOrCreate},
 					}, linuxNetworkPaths...),
 				},
-				Capabilities:       Capabilities{DefaultState: CapabilityUnsupported, SupportsNetwork: true, SupportsRecovery: true, Reason: "FirecrackerDriverUnimplemented"},
+				// The on-demand loading chain is implemented and E2E-verified
+				// (builder publish -> agent pull -> golden restore), so the
+				// runtime is configured (the pool gate only rejects
+				// Unsupported/Degraded); the driver probes node assets at
+				// fastlet start.
+				Capabilities:       Capabilities{DefaultState: CapabilityConfigured, SupportsNetwork: true, SupportsCache: true, SupportsRecovery: true},
 				NetworkMode:        NetworkModeFirecracker,
 				InfraDeliveryModes: []InfraDeliveryMode{InfraDeliveryTemplateBake, InfraDeliveryPreinstalled, InfraDeliveryGuestCopy},
 			},

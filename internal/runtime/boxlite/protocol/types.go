@@ -52,14 +52,15 @@ type Artifact struct {
 }
 
 type EnsureRequest struct {
-	Namespace       string                 `json:"namespace"`
-	Sandbox         fastletapi.SandboxSpec `json:"sandbox"`
-	TunnelGuestPort uint32                 `json:"tunnelGuestPort"`
-	Artifacts       []Artifact             `json:"artifacts,omitempty"`
+	FastletNamespace string                        `json:"fastletNamespace"`
+	Input            fastletapi.EnsureSandboxInput `json:"input"`
+	TunnelGuestPort  uint32                        `json:"tunnelGuestPort"`
+	Artifacts        []Artifact                    `json:"artifacts,omitempty"`
 }
 
 type Box struct {
-	Sandbox                fastletapi.SandboxSpec              `json:"sandbox"`
+	Config                 fastletapi.RuntimeSandboxConfig     `json:"config"`
+	Allocation             fastletapi.RuntimeAllocation        `json:"allocation"`
 	BoxID                  string                              `json:"boxId"`
 	PID                    int                                 `json:"pid,omitempty"`
 	Phase                  string                              `json:"phase"`

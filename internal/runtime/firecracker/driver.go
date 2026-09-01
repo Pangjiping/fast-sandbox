@@ -16,6 +16,7 @@ import (
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	infracontract "fast-sandbox/internal/infra/contract"
+	"fast-sandbox/internal/nodecleanup"
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
@@ -45,7 +46,7 @@ type Driver struct {
 	waitSocket     func(ctx context.Context, socketPath string, timeout time.Duration) error
 	networkManager *fastletnetwork.Manager
 	infraMgr       *fastletinfra.Manager
-	prepareInfra   func(ctx context.Context, spec *fastletapi.SandboxSpec) (fastletinfra.PreparedInstance, error)
+	prepareInfra   func(ctx context.Context, config *fastletapi.RuntimeSandboxConfig) (fastletinfra.PreparedInstance, error)
 	processes      map[string]Process
 	// agentSocket, newAgentClient, and agentClient wire the node-level
 	// runtime-agent (agent_wiring.go): an empty socket means local mode, a
@@ -69,6 +70,10 @@ type Driver struct {
 	// in memory: the GC evicts by this instead of filesystem timestamps.
 	// Guarded by mu.
 	imageUseCount map[string]int64
+	// nodeCleanup is the node janitor client for residual VMM cleanup after
+	// DeleteSandbox (set by fastlet when the profile requires it; nil in
+	// local/host mode).
+	nodeCleanup nodecleanup.RuntimeProcessCleaner
 }
 
 // defaultImageGCInterval bounds the image cache by usage without coupling GC
@@ -244,6 +249,31 @@ func (d *Driver) SetInfraManager(manager *fastletinfra.Manager) {
 	d.mu.Unlock()
 }
 
+// SetNodeCleanupClient wires the node janitor for residual VMM cleanup.
+// Fastlet calls it when the runtime profile requires node process cleanup
+// (ResidualProcessFirecracker); local/host runs leave it nil.
+func (d *Driver) SetNodeCleanupClient(client nodecleanup.RuntimeProcessCleaner) {
+	d.mu.Lock()
+	d.nodeCleanup = client
+	d.mu.Unlock()
+}
+
+// ensureResidualProcessAbsent asks the node janitor to terminate any
+// firecracker VMM of this Sandbox that survived the driver's own teardown
+// (identified by --id <sandboxID>). Best-effort: the driver already stopped
+// the VM, so a cleanup failure is logged, not fatal.
+func (d *Driver) ensureResidualProcessAbsent(ctx context.Context, sandboxID string) {
+	d.mu.RLock()
+	client := d.nodeCleanup
+	d.mu.RUnlock()
+	if client == nil {
+		return
+	}
+	if err := client.EnsureRuntimeProcessesAbsent(ctx, runtimecatalog.ResidualProcessFirecracker, truncatedSandboxID(sandboxID)); err != nil {
+		klog.V(2).InfoS("firecracker residual process cleanup skipped", "sandboxId", sandboxID, "err", err)
+	}
+}
+
 // ProbeCapabilities reports host dependencies (KVM, tap device, binary,
 // kernel) and the runtime-agent health when one is configured. The profile
 // gate keeps the runtime fail-closed until the KVM E2E suite passes.
@@ -313,15 +343,21 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 
 // EnsureSandbox boots one Firecracker microVM on demand. The call is
 // idempotent and emits an OTel span tree correlated by the Sandbox identity.
-func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSpec) (_ *SandboxMetadata, resultErr error) {
-	if config == nil || config.SandboxID == "" || config.FastletPodUID == "" ||
-		config.InstanceGeneration <= 0 || config.RuntimeInstanceID == "" || config.AssignmentAttempt <= 0 {
+func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput) (_ *SandboxMetadata, resultErr error) {
+	if input == nil {
+		return nil, fmt.Errorf("%w: Firecracker Sandbox input is required", ErrInvalidConfig)
+	}
+	config := &input.Sandbox
+	identity := config.Identity
+	spec := config.Spec
+	if identity.SandboxUID == "" || identity.FastletPodUID == "" ||
+		identity.InstanceGeneration <= 0 || identity.RuntimeInstanceID == "" || identity.AssignmentAttempt <= 0 {
 		return nil, fmt.Errorf("%w: complete Firecracker Sandbox identity is required", ErrInvalidConfig)
 	}
 	ctx = observability.WithIdentity(ctx, observability.Identity{
-		RequestID: config.RequestID, Namespace: config.ClaimNamespace, SandboxName: config.ClaimName,
-		SandboxUID: config.SandboxID, FastletPodUID: config.FastletPodUID,
-		InstanceGeneration: config.InstanceGeneration, AssignmentAttempt: config.AssignmentAttempt,
+		RequestID: input.RequestID, Namespace: identity.Namespace, SandboxName: identity.Name,
+		SandboxUID: identity.SandboxUID, FastletPodUID: identity.FastletPodUID,
+		InstanceGeneration: identity.InstanceGeneration, AssignmentAttempt: identity.AssignmentAttempt,
 	})
 	ctx, createSpan := observability.Start(ctx, "fastlet.firecracker.create")
 	infraPrepared := false
@@ -340,23 +376,31 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		return nil, fmt.Errorf("%w: firecracker requires the Fastlet network manager", ErrNetworkUnavailable)
 	}
 
-	directory, err := ensureSandboxDir(stateRoot, config.SandboxID)
+	directory, err := ensureSandboxDir(stateRoot, identity.SandboxUID)
 	if err != nil {
 		return nil, err
 	}
 
 	if existing, err := loadState(directory); err == nil {
 		if alive, probeErr := d.probeVM(ctx, existing); probeErr == nil && alive {
-			if err := validateExistingRuntimeProfile(existingMetadata(existing), config); err != nil {
-				return nil, err
+			if runtimecontract.SameRuntimeIdentity(existing.Config.Identity, identity) {
+				if err := validateExistingRuntimeProfile(existingMetadata(existing), config); err != nil {
+					return nil, err
+				}
+				return existingMetadata(existing), nil
 			}
-			return existingMetadata(existing), nil
+			klog.InfoS("Replacing stale Firecracker runtime owned by a previous Sandbox instance",
+				"sandbox", identity.SandboxUID,
+				"existingRuntimeInstanceID", existing.Config.Identity.RuntimeInstanceID,
+				"requestedRuntimeInstanceID", identity.RuntimeInstanceID,
+				"existingAssignmentAttempt", existing.Config.Identity.AssignmentAttempt,
+				"requestedAssignmentAttempt", identity.AssignmentAttempt)
 		}
 		if err := d.cleanupStale(ctx, directory, existing); err != nil {
 			return nil, err
 		}
 		// The stale state directory was removed; recreate it for the fresh boot.
-		directory, err = ensureSandboxDir(stateRoot, config.SandboxID)
+		directory, err = ensureSandboxDir(stateRoot, identity.SandboxUID)
 		if err != nil {
 			return nil, err
 		}
@@ -380,7 +424,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	// comes from the cached manifest guestNetwork; the BakedGuestIP
 	// convention is the fallback for hand-seeded caches. Slots are prepared
 	// before the image is known, so the NAT rules are applied now.
-	guestIP, err := resolveBakedGuestIP(stateRoot, config.Image, slot)
+	guestIP, err := resolveBakedGuestIP(stateRoot, spec.Image, slot)
 	if err != nil {
 		releaseSlot()
 		return nil, err
@@ -392,24 +436,26 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
-	vmstatePath, memoryPath, err := resolveRestoreSnapshotFiles(stateRoot, config.Image)
+	vmstatePath, memoryPath, err := resolveRestoreSnapshotFiles(stateRoot, spec.Image)
 	// The machine tuple of the golden snapshot is baked in the vmstate
 	// (v1.16 restores it from the snapshot); the manifest values are only
 	// validated here, not applied via the API (any machine-config call
 	// before snapshot/load is rejected).
 	if err == nil {
-		err = validateRestoreMachineConfig(*config, d.config, stateRoot, config.Image)
+		err = validateRestoreMachineConfig(spec, d.config, stateRoot, spec.Image)
 	}
 	var instanceRootfs, jailRoot, apiAddress string
 	if err == nil {
-		instanceRootfs, jailRoot, apiAddress, err = d.prepareInstance(stateRoot, config.SandboxID, config.Image, directory, vmstatePath, memoryPath)
+		instanceRootfs, jailRoot, apiAddress, err = d.prepareInstance(
+			stateRoot, identity.SandboxUID, spec.Image, directory, vmstatePath, memoryPath,
+		)
 	}
 	observability.End(rootfsSpan, err)
 	if err != nil {
 		releaseSlot()
 		return nil, err
 	}
-	d.touchImage(config.Image)
+	d.touchImage(spec.Image)
 	rootfsDur := time.Since(rootfsStarted)
 	rootfsMiB := float64(0)
 	if info, statErr := os.Stat(instanceRootfs); statErr == nil {
@@ -438,7 +484,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		infraDiagnostics = instance.Diagnostics
 		infraPrepared = true
 		infraDur = time.Since(infraStarted)
-		klog.V(4).InfoS("firecracker Infra Components delivered", "sandboxId", config.SandboxID, "services", len(instance.Services), "duration", infraDur.String())
+		klog.V(4).InfoS("firecracker Infra Components delivered", "sandboxId", identity.SandboxUID, "services", len(instance.Services), "duration", infraDur.String())
 	}
 
 	// Restore-only startup: the golden snapshot carries the guest network
@@ -446,7 +492,12 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	// state), and the NIC host tap is replaced per instance via the load
 	// request's network_overrides. Nothing else is injected into the rootfs.
 	state := &SandboxState{
-		Spec: *config, Phase: PhaseStarting,
+		Config: *config,
+		Allocation: fastletapi.RuntimeAllocation{Network: fastletapi.NetworkAllocation{
+			SlotID: slot.ID, NamespacePath: slot.HostNetNSPath, IP: slot.IP, Gateway: slot.Gateway,
+			DNSPath: slot.DNSPath, PrivateCIDR: slot.PrivateCIDR, HostVeth: slot.HostVeth,
+		}},
+		Phase:      PhaseStarting,
 		APIAddress: apiAddress, CreatedAt: time.Now().Unix(),
 		InfraServices: infraServices, InfraDiagnostics: infraDiagnostics,
 	}
@@ -467,7 +518,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	spawnStarted := time.Now()
 	process, err := d.launchVM(launchCtx, launchConfig{
 		BinaryPath: d.config.BinaryPath,
-		SandboxID:  config.SandboxID,
+		SandboxID:  identity.SandboxUID,
 		APIAddress: apiAddress,
 		WorkingDir: directory,
 		LogPath:    filepath.Join(logDir, processLogName),
@@ -475,9 +526,9 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	spawnDur := time.Since(spawnStarted)
 	if err == nil {
 		state.PID = process.PID()
-		d.rememberProcess(config.SandboxID, process)
+		d.rememberProcess(identity.SandboxUID, process)
 		if saveErr := saveState(directory, state); saveErr != nil {
-			d.killAndForget(config.SandboxID, process.PID())
+			d.killAndForget(identity.SandboxUID, process.PID())
 			releaseSlot()
 			observability.End(launchSpan, saveErr)
 			return nil, saveErr
@@ -487,12 +538,12 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		socketWaitDur := time.Since(socketStarted)
 		if err != nil {
 			detail := readProcessLog(logDir)
-			d.killAndForget(config.SandboxID, process.PID())
+			d.killAndForget(identity.SandboxUID, process.PID())
 			releaseSlot()
 			observability.End(launchSpan, err)
 			return nil, fmt.Errorf("%w: firecracker API socket did not appear: %v%s", ErrRuntimeNotInitialized, err, detail)
 		}
-		klog.V(4).InfoS("firecracker API socket ready", "sandboxId", config.SandboxID, "spawn", spawnDur.String(), "socketWait", socketWaitDur.String())
+		klog.V(4).InfoS("firecracker API socket ready", "sandboxId", identity.SandboxUID, "spawn", spawnDur.String(), "socketWait", socketWaitDur.String())
 	}
 	observability.End(launchSpan, err)
 	if err != nil {
@@ -508,7 +559,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	err = configureRestoreVM(configureCtx, client, slot, vmstatePath, memoryPath, jailRoot != "")
 	observability.End(configureSpan, err)
 	if err != nil {
-		d.killAndForget(config.SandboxID, process.PID())
+		d.killAndForget(identity.SandboxUID, process.PID())
 		releaseSlot()
 		return nil, err
 	}
@@ -519,7 +570,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 	polls, err := resumeVM(bootCtx, client, d.config.BootTimeoutSeconds)
 	observability.End(bootSpan, err)
 	if err != nil {
-		d.killAndForget(config.SandboxID, process.PID())
+		d.killAndForget(identity.SandboxUID, process.PID())
 		releaseSlot()
 		return nil, err
 	}
@@ -531,12 +582,12 @@ func (d *Driver) EnsureSandbox(ctx context.Context, config *fastletapi.SandboxSp
 		"launch": launchDur, "configure": configureDur, "boot": bootDur,
 	}
 	if err := saveState(directory, state); err != nil {
-		d.killAndForget(config.SandboxID, process.PID())
+		d.killAndForget(identity.SandboxUID, process.PID())
 		releaseSlot()
 		return nil, err
 	}
 	klog.InfoS("firecracker sandbox created",
-		"sandboxId", config.SandboxID,
+		"sandboxId", identity.SandboxUID,
 		"total", time.Since(createStarted).String(),
 		"acquire", acquireDur.String(),
 		"rootfs", rootfsDur.String(), "rootfsMiB", fmt.Sprintf("%.1f", rootfsMiB),
@@ -597,9 +648,10 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 		return err
 	}
 	d.killAndForget(sandboxID, state.PID)
-	if manager != nil && state.Spec.SandboxID != "" {
+	stateIdentity := state.Config.Identity
+	if manager != nil && stateIdentity.SandboxUID != "" {
 		if _, exists := manager.Lookup(sandboxID); exists {
-			_ = manager.Release(ctx, d.networkOwner(&state.Spec))
+			_ = manager.Release(ctx, d.networkOwner(&state.Config))
 		}
 	}
 	d.mu.RLock()
@@ -608,8 +660,9 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 	if infraMgr != nil {
 		_ = infraMgr.RemoveSandboxInstances(sandboxID)
 	}
-	d.releaseAgentSandbox(ctx, sandboxID, state.Spec.Image)
+	d.releaseAgentSandbox(ctx, sandboxID, state.Config.Spec.Image)
 	d.removeJailRoot(sandboxID)
+	d.ensureResidualProcessAbsent(ctx, sandboxID)
 	_ = removeSandboxDir(directory)
 	klog.Infof("firecracker sandbox %s deleted", sandboxID)
 	return nil
@@ -629,7 +682,7 @@ func (d *Driver) ListManagedSandboxes(_ context.Context) ([]*SandboxMetadata, er
 	managed := make([]*SandboxMetadata, 0, len(directories))
 	for _, directory := range directories {
 		state, err := loadState(directory)
-		if err != nil || (namespace != "" && state.Spec.ClaimNamespace != namespace) {
+		if err != nil || (namespace != "" && state.Config.Identity.Namespace != namespace) {
 			continue
 		}
 		managed = append(managed, existingMetadata(state))
@@ -657,13 +710,14 @@ func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 		alive, probeErr := d.probeVM(ctx, state)
 		if probeErr != nil || !alive {
 			if manager != nil {
-				if slot, exists := manager.Lookup(state.Spec.SandboxID); exists {
+				sandboxUID := state.Config.Identity.SandboxUID
+				if slot, exists := manager.Lookup(sandboxUID); exists {
 					_ = slot
-					_ = manager.Release(ctx, d.networkOwner(&state.Spec))
+					_ = manager.Release(ctx, d.networkOwner(&state.Config))
 				}
 			}
-			d.killAndForget(state.Spec.SandboxID, state.PID)
-			d.removeJailRoot(state.Spec.SandboxID)
+			d.killAndForget(state.Config.Identity.SandboxUID, state.PID)
+			d.removeJailRoot(state.Config.Identity.SandboxUID)
 			_ = removeSandboxDir(directory)
 		}
 	}
@@ -924,25 +978,26 @@ func defaultMemoryMiB(memory string) int {
 	return mib
 }
 
-func (d *Driver) networkOwner(config *fastletapi.SandboxSpec) fastletnetwork.Owner {
-	generation := config.InstanceGeneration
+func (d *Driver) networkOwner(config *fastletapi.RuntimeSandboxConfig) fastletnetwork.Owner {
+	identity := config.Identity
+	generation := identity.InstanceGeneration
 	if generation <= 0 {
 		generation = 1
 	}
-	attempt := config.AssignmentAttempt
+	attempt := identity.AssignmentAttempt
 	if attempt <= 0 {
 		attempt = 1
 	}
 	return fastletnetwork.Owner{
-		SandboxUID: config.SandboxID, SandboxName: config.ClaimName, SandboxNamespace: config.ClaimNamespace,
-		InstanceGeneration: generation, RuntimeInstanceID: config.RuntimeInstanceID,
+		SandboxUID: identity.SandboxUID, SandboxName: identity.Name, SandboxNamespace: identity.Namespace,
+		InstanceGeneration: generation, RuntimeInstanceID: identity.RuntimeInstanceID,
 		AssignmentAttempt: attempt, ResidualProcess: runtimecatalog.ResidualProcessFirecracker,
 	}
 }
 
 func existingMetadata(state *SandboxState) *SandboxMetadata {
-	metadata := &SandboxMetadata{SandboxSpec: state.Spec}
-	metadata.ContainerID = state.Spec.SandboxID
+	metadata := &SandboxMetadata{Config: state.Config, Allocation: state.Allocation}
+	metadata.ContainerID = state.Config.Identity.SandboxUID
 	metadata.PID = state.PID
 	metadata.Phase = string(state.Phase)
 	metadata.CreatedAt = state.CreatedAt
@@ -984,18 +1039,25 @@ func (d *Driver) killAndForget(sandboxID string, pid int) {
 	}
 }
 
-// cleanupStale removes the state of a dead VM and its network binding.
+// cleanupStale removes an obsolete VM, releases its network binding, and
+// synchronously restores network capacity for the replacement Ensure call.
 func (d *Driver) cleanupStale(ctx context.Context, directory string, state *SandboxState) error {
 	d.mu.RLock()
 	manager := d.networkManager
 	d.mu.RUnlock()
-	if manager != nil && state.Spec.SandboxID != "" {
-		if _, exists := manager.Lookup(state.Spec.SandboxID); exists {
-			_ = manager.Release(ctx, d.networkOwner(&state.Spec))
+	sandboxUID := state.Config.Identity.SandboxUID
+	d.killAndForget(sandboxUID, state.PID)
+	if manager != nil && sandboxUID != "" {
+		if _, exists := manager.Lookup(sandboxUID); exists {
+			if err := manager.Release(ctx, d.networkOwner(&state.Config)); err != nil {
+				return fmt.Errorf("release stale Firecracker network slot: %w", err)
+			}
+			if err := manager.Replenish(ctx); err != nil {
+				return fmt.Errorf("replenish Firecracker network slot: %w", err)
+			}
 		}
 	}
-	d.killAndForget(state.Spec.SandboxID, state.PID)
-	d.removeJailRoot(state.Spec.SandboxID)
+	d.removeJailRoot(sandboxUID)
 	return removeSandboxDir(directory)
 }
 

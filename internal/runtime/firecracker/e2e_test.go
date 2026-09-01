@@ -96,9 +96,9 @@ func runCloneBatch(t *testing.T, env *e2eEnvironment, vmCount int, sequential bo
 	if sequential {
 		for index := 0; index < vmCount; index++ {
 			spec := env.spec(index + 1)
-			ctx, end := env.traceContext(spec.SandboxID)
+			ctx, end := env.traceContext(spec.Identity.SandboxUID)
 			results[index].traceID = trace.SpanContextFromContext(ctx).TraceID()
-			results[index].metadata, results[index].err = env.driver.EnsureSandbox(ctx, spec)
+			results[index].metadata, results[index].err = env.driver.EnsureSandbox(ctx, ensureInput(spec))
 			end()
 		}
 	} else {
@@ -108,11 +108,11 @@ func runCloneBatch(t *testing.T, env *e2eEnvironment, vmCount int, sequential bo
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ctx, end := env.traceContext(spec.SandboxID)
+				ctx, end := env.traceContext(spec.Identity.SandboxUID)
 				defer end()
 				result := &results[index]
 				result.traceID = trace.SpanContextFromContext(ctx).TraceID()
-				result.metadata, result.err = env.driver.EnsureSandbox(ctx, spec)
+				result.metadata, result.err = env.driver.EnsureSandbox(ctx, ensureInput(spec))
 			}()
 		}
 		wg.Wait()
@@ -132,20 +132,20 @@ func runCloneBatch(t *testing.T, env *e2eEnvironment, vmCount int, sequential bo
 	for index := 0; index < vmCount; index++ {
 		spec := env.spec(index + 1)
 		result := results[index]
-		require.NoErrorf(t, result.err, "sandbox %s", spec.SandboxID)
+		require.NoErrorf(t, result.err, "sandbox %s", spec.Identity.SandboxUID)
 		env.assertBooted(result.metadata, spec, result.traceID)
 		if owner, exists := pids[result.metadata.PID]; exists {
-			t.Fatalf("VMs must be distinct processes: pid %d used by both %s and %s", result.metadata.PID, owner, spec.SandboxID)
+			t.Fatalf("VMs must be distinct processes: pid %d used by both %s and %s", result.metadata.PID, owner, spec.Identity.SandboxUID)
 		}
-		pids[result.metadata.PID] = spec.SandboxID
+		pids[result.metadata.PID] = spec.Identity.SandboxUID
 		// NoInfra: no GuestCopy delivery, so no infra services are reported.
 		require.Empty(t, result.metadata.InfraServices)
 		require.Empty(t, result.metadata.InfraDiagnostics)
 		// Per-clone netns isolation: every instance shares the baked guest
 		// MAC/IP but each slot netns NATs its own slot IP to the guest, so
 		// every sandbox is independently reachable (issue #26).
-		env.assertGuestReachable(spec.SandboxID)
-		env.assertSlotDataPlane(spec.SandboxID)
+		env.assertGuestReachable(spec.Identity.SandboxUID)
+		env.assertSlotDataPlane(spec.Identity.SandboxUID)
 		// Full-chain evidence (chain E2E bakes execd into the snapshot):
 		// every clone's execd answers through its own slot DNAT, proving
 		// per-instance business readiness survived the restore. A guest-side
@@ -175,7 +175,7 @@ func (env *e2eEnvironment) logLoadStageSummary(t *testing.T, mode string, vmCoun
 		rows[stage] = &stageStats{}
 	}
 	for index := 1; index <= vmCount; index++ {
-		directory, err := sandboxDir(env.stateRoot, env.spec(index).SandboxID)
+		directory, err := sandboxDir(env.stateRoot, env.spec(index).Identity.SandboxUID)
 		if err != nil {
 			continue
 		}
@@ -205,7 +205,7 @@ func (env *e2eEnvironment) logLoadStageSummary(t *testing.T, mode string, vmCoun
 		t.Logf("  %-10s %s / %s / %s",
 			stage,
 			row.min.Round(time.Microsecond),
-			(row.sum/time.Duration(row.count)).Round(time.Microsecond),
+			(row.sum / time.Duration(row.count)).Round(time.Microsecond),
 			row.max.Round(time.Microsecond))
 	}
 }
@@ -240,16 +240,17 @@ func TestFirecrackerDriverE2ELeak(t *testing.T) {
 		// pool).
 		waitForCleanSlot(t, env.manager, capacity)
 		spec := env.spec(1)
-		ctx, end := env.traceContext(spec.SandboxID)
-		metadata, err := env.driver.EnsureSandbox(ctx, spec)
+		sandboxUID := spec.Identity.SandboxUID
+		ctx, end := env.traceContext(sandboxUID)
+		metadata, err := env.driver.EnsureSandbox(ctx, ensureInput(spec))
 		end()
 		require.NoErrorf(t, err, "round %d: create", round)
 		env.assertBooted(metadata, spec, trace.SpanContextFromContext(ctx).TraceID())
-		env.assertGuestReachable(spec.SandboxID)
+		env.assertGuestReachable(sandboxUID)
 		if os.Getenv("FC_EXECD_PROBE") == "1" {
-			env.assertGuestExecd(spec.SandboxID)
+			env.assertGuestExecd(sandboxUID)
 		}
-		env.delete(spec.SandboxID)
+		env.delete(sandboxUID)
 
 		now := hostLeakSnapshot(t, env.stateRoot)
 		// Per-sandbox resources must be gone immediately after delete.
@@ -369,16 +370,16 @@ func TestFirecrackerDriverE2EImageGC(t *testing.T) {
 	// A live Sandbox pins its cached image even when the cache is over the
 	// limit; booting also records a use for it.
 	spec := env.spec(1)
-	ctx, end := env.traceContext(spec.SandboxID)
+	ctx, end := env.traceContext(spec.Identity.SandboxUID)
 	defer end()
 	metadata := env.boot(ctx, spec)
-	env.assertGuestReachable(spec.SandboxID)
+	env.assertGuestReachable(spec.Identity.SandboxUID)
 	env.driver.TriggerImageGC()
 	waitPresent(t, usedPath)
 
 	// Deleting the Sandbox releases the reference; with the cache over its
 	// limit the now-unreferenced image is evicted on the next collection.
-	env.delete(spec.SandboxID)
+	env.delete(spec.Identity.SandboxUID)
 	env.driver.imageCacheLimitBytes = 1
 	env.driver.TriggerImageGC()
 	waitGone(t, usedPath)
@@ -392,7 +393,7 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 	t.Logf("infra=%t", useInfra)
 
 	spec := env.spec(1)
-	ctx, end := env.traceContext(spec.SandboxID)
+	ctx, end := env.traceContext(spec.Identity.SandboxUID)
 	defer end()
 
 	started := time.Now()
@@ -400,28 +401,28 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 	t.Logf("VM running in %s (pid=%d)", time.Since(started), metadata.PID)
 
 	if useInfra {
-		env.assertInfra(metadata, spec.SandboxID)
+		env.assertInfra(metadata, spec.Identity.SandboxUID)
 	} else {
 		require.Empty(t, metadata.InfraServices)
 		require.Empty(t, metadata.InfraDiagnostics)
 	}
 
-	env.assertGuestReachable(spec.SandboxID)
-	env.assertSlotDataPlane(spec.SandboxID)
+	env.assertGuestReachable(spec.Identity.SandboxUID)
+	env.assertSlotDataPlane(spec.Identity.SandboxUID)
 	// The chain E2E builder bakes execd into the golden snapshot when
 	// CHAIN_EXECD is set; probing its /ping endpoint proves the template's
 	// runtime bootstrap survived the restore (not just ICMP reachability).
 	if os.Getenv("FC_EXECD_PROBE") == "1" {
-		env.assertGuestExecd(spec.SandboxID)
+		env.assertGuestExecd(spec.Identity.SandboxUID)
 	}
 
 	// Inspect reports the running VM.
-	inspected, err := env.driver.InspectSandbox(ctx, spec.SandboxID)
+	inspected, err := env.driver.InspectSandbox(ctx, spec.Identity.SandboxUID)
 	require.NoError(t, err)
 	require.Equal(t, string(PhaseRunning), inspected.Phase)
 
 	// Delete stops the VM, releases the slot, and removes the state.
-	env.delete(spec.SandboxID)
+	env.delete(spec.Identity.SandboxUID)
 }
 
 // e2ePrepVersion marks the golden snapshot set format. It must be bumped
@@ -796,7 +797,7 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 		Name: apiv1alpha2.RuntimeFirecracker, ProfileHash: "e2e-profile",
 		Firecracker: &runtimecatalog.FirecrackerConfig{
 			BinaryPath: binary, KernelPath: kernel, RootfsPath: rootfs, StateRoot: stateRoot,
-			JailerPath: jailer,
+			JailerPath:   jailer,
 			DefaultVCPUs: 1, DefaultMemory: "512Mi", BootTimeoutSeconds: 90,
 			BootArgs: bootArgs,
 		},
@@ -844,16 +845,19 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 }
 
 // spec builds the SandboxSpec for the i-th sandbox ("e2e-sandbox-<i>").
-func (env *e2eEnvironment) spec(index int) *fastletapi.SandboxSpec {
+func (env *e2eEnvironment) spec(index int) *fastletapi.RuntimeSandboxConfig {
 	sandboxID := fmt.Sprintf("e2e-sandbox-%d", index)
-	spec := &fastletapi.SandboxSpec{
-		SandboxID: sandboxID, ClaimUID: fmt.Sprintf("e2e-claim-%d", index), ClaimName: sandboxID, ClaimNamespace: "e2e",
-		InstanceGeneration: 1, RuntimeInstanceID: fmt.Sprintf("e2e-ri-%d", index), AssignmentAttempt: 1,
-		FastletPodUID: env.podUID, Image: env.imageRef, CPU: "1", Memory: "512Mi",
-		RuntimeProfileHash: "e2e-profile", ResourceProfileHash: "e2e-resource",
+	spec := &fastletapi.RuntimeSandboxConfig{
+		Spec: fastletapi.SandboxSpec{
+			Image: env.imageRef, CPU: "1", Memory: "512Mi",
+			RuntimeProfileHash: "e2e-profile", ResourceProfileHash: "e2e-resource",
+		},
+		Identity: fastletapi.SandboxIdentity{SandboxUID: sandboxID, Name: sandboxID, Namespace: "e2e",
+			InstanceGeneration: 1, RuntimeInstanceID: fmt.Sprintf("e2e-ri-%d", index), AssignmentAttempt: 1,
+			FastletPodUID: env.podUID},
 	}
 	if env.infraEnabled {
-		spec.InfraRevision = env.infraMgr.Revision()
+		spec.Spec.InfraRevision = env.infraMgr.Revision()
 	}
 	return spec
 }
@@ -877,9 +881,9 @@ func (env *e2eEnvironment) traceContext(sandboxID string) (context.Context, func
 
 // boot creates one sandbox through the driver and validates the result.
 // It must be called from the test goroutine (it uses require).
-func (env *e2eEnvironment) boot(ctx context.Context, spec *fastletapi.SandboxSpec) *SandboxMetadata {
+func (env *e2eEnvironment) boot(ctx context.Context, spec *fastletapi.RuntimeSandboxConfig) *SandboxMetadata {
 	env.t.Helper()
-	metadata, err := env.driver.EnsureSandbox(ctx, spec)
+	metadata, err := env.driver.EnsureSandbox(ctx, ensureInput(spec))
 	require.NoError(env.t, err)
 	env.assertBooted(metadata, spec, trace.SpanContextFromContext(ctx).TraceID())
 	return metadata
@@ -887,20 +891,20 @@ func (env *e2eEnvironment) boot(ctx context.Context, spec *fastletapi.SandboxSpe
 
 // assertBooted validates the metadata, trace correlation, and process
 // identity of one successful boot.
-func (env *e2eEnvironment) assertBooted(metadata *SandboxMetadata, spec *fastletapi.SandboxSpec, traceID trace.TraceID) {
+func (env *e2eEnvironment) assertBooted(metadata *SandboxMetadata, spec *fastletapi.RuntimeSandboxConfig, traceID trace.TraceID) {
 	t := env.t
 	t.Helper()
-	digest := sha256.Sum256([]byte(spec.SandboxID))
+	digest := sha256.Sum256([]byte(spec.Identity.SandboxUID))
 	require.True(t, traceID.IsValid(), "trace context must carry a valid trace ID")
 	require.Equal(t, trace.TraceID(digest[:16]), traceID, "trace ID must be derived from the sandbox id")
-	t.Logf("traceId=%s sandboxId=%s", traceID.String(), spec.SandboxID)
+	t.Logf("traceId=%s sandboxId=%s", traceID.String(), spec.Identity.SandboxUID)
 	require.Equal(t, string(PhaseRunning), metadata.Phase)
 	require.Positive(t, metadata.PID)
 	// The launched process must match the NodeJanitor residual-process
 	// matcher: binary "firecracker" and --id equal to the truncated sandbox id.
 	cmdline := readProcCmdline(t, metadata.PID)
 	require.Equal(t, "firecracker", filepath.Base(cmdline[0]))
-	require.Equal(t, spec.SandboxID, cmdline[indexOf(cmdline, "--id")+1])
+	require.Equal(t, spec.Identity.SandboxUID, cmdline[indexOf(cmdline, "--id")+1])
 }
 
 // assertInfra verifies the delivered Infra plan: services for route
@@ -1020,15 +1024,16 @@ func (env *e2eEnvironment) probeExecd(sandboxID string) error {
 // recreates the sandbox once and re-probes — mirroring production
 // restore-failure retry scheduling. The failed state is dumped before the
 // recreate.
-func (env *e2eEnvironment) assertGuestExecdWithRecreate(spec *fastletapi.SandboxSpec) {
+func (env *e2eEnvironment) assertGuestExecdWithRecreate(spec *fastletapi.RuntimeSandboxConfig) {
 	t := env.t
 	t.Helper()
-	if err := env.probeExecd(spec.SandboxID); err == nil {
+	sandboxUID := spec.Identity.SandboxUID
+	if err := env.probeExecd(sandboxUID); err == nil {
 		return
 	}
-	t.Logf("execd not ready on %s; recreating the sandbox once (restore retry, mirrors production scheduling)", spec.SandboxID)
-	env.delete(spec.SandboxID)
-	ctx, end := env.traceContext(spec.SandboxID)
+	t.Logf("execd not ready on %s; recreating the sandbox once (restore retry, mirrors production scheduling)", sandboxUID)
+	env.delete(sandboxUID)
+	ctx, end := env.traceContext(sandboxUID)
 	defer end()
 	// Release replenishes the slot pool asynchronously; the recreate retries
 	// until a clean slot is available (transient acquire error) or the wait
@@ -1036,18 +1041,18 @@ func (env *e2eEnvironment) assertGuestExecdWithRecreate(spec *fastletapi.Sandbox
 	var metadata *SandboxMetadata
 	var recreateErr error
 	for attempt := 0; attempt < 5; attempt++ {
-		metadata, recreateErr = env.driver.EnsureSandbox(ctx, spec)
+		metadata, recreateErr = env.driver.EnsureSandbox(ctx, ensureInput(spec))
 		if recreateErr == nil {
 			break
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	require.NoErrorf(t, recreateErr, "recreate %s after execd restore flake", spec.SandboxID)
+	require.NoErrorf(t, recreateErr, "recreate %s after execd restore flake", sandboxUID)
 	env.assertBooted(metadata, spec, trace.SpanContextFromContext(ctx).TraceID())
-	env.assertGuestReachable(spec.SandboxID)
-	env.assertSlotDataPlane(spec.SandboxID)
-	require.NoErrorf(t, env.probeExecd(spec.SandboxID), "execd /ping unreachable on %s after one re-create", spec.SandboxID)
-	t.Logf("execd ready on %s after one re-create", spec.SandboxID)
+	env.assertGuestReachable(sandboxUID)
+	env.assertSlotDataPlane(sandboxUID)
+	require.NoErrorf(t, env.probeExecd(sandboxUID), "execd /ping unreachable on %s after one re-create", sandboxUID)
+	t.Logf("execd ready on %s after one re-create", sandboxUID)
 }
 
 // assertSlotDataPlane asserts the per-restore guest data plane is present

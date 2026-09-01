@@ -23,18 +23,27 @@ var (
 	ErrRouteDraining = errors.New("sandbox route is draining")
 )
 
-// Route is the Fastlet-local, runtime-neutral route authority. Target ports
-// are deliberately absent: one AccessDescriptor admits arbitrary validated
-// ports and the signed credential narrows each external request.
-type Route struct {
+type RouteKey struct {
+	SandboxUID      string `json:"sandboxUid"`
+	RouteGeneration int64  `json:"routeGeneration"`
+}
+
+// RouteSpec is the mutable route value associated with a generation-fenced
+// Sandbox key. Target ports are deliberately absent: one AccessDescriptor
+// admits arbitrary validated ports and the signed credential narrows each
+// external request.
+type RouteSpec struct {
 	Namespace         string                              `json:"namespace"`
-	SandboxUID        string                              `json:"sandboxUid"`
 	FastletPodUID     string                              `json:"fastletPodUid"`
 	AssignmentAttempt int64                               `json:"assignmentAttempt"`
-	RouteGeneration   int64                               `json:"routeGeneration"`
 	Access            dataplane.AccessDescriptor          `json:"access"`
 	State             RouteState                          `json:"state"`
 	Components        map[string]dataplane.ComponentRoute `json:"components,omitempty"`
+}
+
+type Route struct {
+	RouteKey  `json:"key"`
+	RouteSpec `json:"spec"`
 }
 
 func (r Route) validate() error {
@@ -63,11 +72,10 @@ const (
 )
 
 type Event struct {
-	Revision        uint64    `json:"revision"`
-	Type            EventType `json:"type"`
-	Route           *Route    `json:"route,omitempty"`
-	SandboxUID      string    `json:"sandboxUid"`
-	RouteGeneration int64     `json:"routeGeneration"`
+	Revision uint64     `json:"revision"`
+	Type     EventType  `json:"type"`
+	Key      RouteKey   `json:"key"`
+	Spec     *RouteSpec `json:"spec,omitempty"`
 }
 
 type Snapshot struct {
@@ -122,7 +130,7 @@ func (s *Store) Apply(route Route) (uint64, error) {
 	s.highWater[route.SandboxUID] = route.RouteGeneration
 	s.storeRouteLocked(route)
 	s.revision++
-	s.publishLocked(Event{Revision: s.revision, Type: EventApplied, Route: routePtr(route), SandboxUID: route.SandboxUID, RouteGeneration: route.RouteGeneration})
+	s.publishLocked(Event{Revision: s.revision, Type: EventApplied, Key: route.RouteKey, Spec: routeSpecPtr(route.RouteSpec)})
 	return s.revision, nil
 }
 
@@ -148,7 +156,7 @@ func (s *Store) MarkDraining(sandboxUID string, generation int64) (uint64, error
 	route.State = RouteDraining
 	s.storeRouteLocked(route)
 	s.revision++
-	s.publishLocked(Event{Revision: s.revision, Type: EventDraining, Route: routePtr(route), SandboxUID: sandboxUID, RouteGeneration: generation})
+	s.publishLocked(Event{Revision: s.revision, Type: EventDraining, Key: route.RouteKey, Spec: routeSpecPtr(route.RouteSpec)})
 	return s.revision, nil
 }
 
@@ -170,7 +178,7 @@ func (s *Store) Delete(sandboxUID string, generation int64) (uint64, error) {
 	s.highWater[sandboxUID] = generation
 	s.active.Delete(sandboxUID)
 	s.revision++
-	s.publishLocked(Event{Revision: s.revision, Type: EventDeleted, SandboxUID: sandboxUID, RouteGeneration: generation})
+	s.publishLocked(Event{Revision: s.revision, Type: EventDeleted, Key: RouteKey{SandboxUID: sandboxUID, RouteGeneration: generation}})
 	return s.revision, nil
 }
 
@@ -256,7 +264,13 @@ func cloneRoute(route Route) Route {
 	return clone
 }
 
-func routePtr(route Route) *Route {
-	clone := cloneRoute(route)
+func routeSpecPtr(spec RouteSpec) *RouteSpec {
+	clone := spec
+	if spec.Components != nil {
+		clone.Components = make(map[string]dataplane.ComponentRoute, len(spec.Components))
+		for name, component := range spec.Components {
+			clone.Components[name] = component
+		}
+	}
 	return &clone
 }

@@ -32,6 +32,9 @@ spec:
   expireTime: "2026-07-30T00:00:00Z"
   failurePolicy: Manual
   recoveryTimeoutSeconds: 60
+  actionBindings:
+    - handler: egress
+      input: '{"defaultAction":"deny"}'
 ```
 
 ### Spec
@@ -47,6 +50,7 @@ spec:
 | `recoveryTimeoutSeconds` | No | Durable delay before recovery action; default 60 |
 | `resetRevision` | No | Opaque monotonic reset trigger |
 | `poolRef` | Yes | Same-namespace SandboxPool |
+| `actionBindings` | No | Ordered atomic Handler/input list; order defines lifecycle invocation order |
 
 User metadata is stored as ordinary Kubernetes labels. Labels under
 `sandbox.fast.io/` are reserved for the platform.
@@ -55,20 +59,21 @@ User metadata is stored as ordinary Kubernetes labels. Labels under
 
 | Field | Meaning |
 | --- | --- |
-| `assignment` | Fastlet name, Pod UID, node, attempt, and admitted Infra revision |
-| `assignmentAttempt` | Monotonic assignment fence |
-| `instanceGeneration` | Reset/recreate fence |
-| `routeGeneration` | Data-plane route fence |
-| `runtimeState` | Runtime observation |
-| `dataPlaneState` | Complete Infra and route observation |
-| `userProcessState` | User process observation |
-| `components` | Named component state, protocol, port, and observed route generation |
-| `recovery` | Persisted Fastlet-loss detection time and deadline |
-| `conditions` | Canonical `RuntimeReady` and `DataPlaneReady` conditions |
+| `observedGeneration` | Sandbox Spec generation represented by this Controller snapshot |
+| `placement` | Assignment attempt, Fastlet name/Pod UID, and nested recovery deadline |
+| `runtime` | Runtime state, concrete runtime generation, transition time/message, and accepted reset revision |
+| `dataPlane` | Route state, route-generation fence, transition time, and message |
+| `infraComponents` | Per-component name, `Starting`/`Ready`/`Failed`, transition time, and message |
+| `actionBindings` | Per-Binding Handler, `Pending`/`Applying`/`Ready`/`Failed`, transition time, and message |
+| `conditions` | One aggregate standard `Ready` Condition |
 
-Observed subsystem states are `Unknown`, `Pending`, `Creating`, `Ready`,
-`Draining`, `Stopped`, `Failed`, and `Unavailable`. Component states are
-`Starting`, `Ready`, and `Failed`.
+Runtime and DataPlane use separate state enums. Input digests, invocation IDs,
+runtime IDs, and per-Handler fences remain internal and never appear in CRD
+Status. `observedGeneration` means the Controller processed that Spec; current
+convergence requires the aggregate `Ready` Condition to be `True` with its
+`observedGeneration` equal to `metadata.generation`. A Binding transition time
+comes from Fastlet and includes an internally observed `Ready -> Applying ->
+Ready` cycle even if the Controller only polls the final `Ready` state.
 
 ## SandboxPool
 
@@ -92,6 +97,9 @@ spec:
     pids: 256
   warmImages:
     - docker.io/library/alpine:latest
+  actionHandlers:
+    - name: egress
+      targetHTTPPort: 18080
   infraComponents:
     - name: execd
       artifact:
@@ -128,18 +136,21 @@ spec:
 | `sandboxResources` | Yes | Immutable per-Sandbox CPU, memory, and PID limits; their sum may exceed an explicitly lower Fastlet aggregate limit |
 | `warmImages` | No | Asynchronous, GC-protected cache inputs |
 | `infraComponents` | No | Inline immutable artifact/process/health/endpoint definitions |
+| `actionHandlers` | No | Named Pod-loopback Binding receivers and their lifecycle Hook subscriptions |
 | `fastletTemplate` | Yes | Kubernetes Pod template with platform-owned fields protected; runtime-owner limits define the optional aggregate overcommit budget |
 
 Runtime names are `container`, `gvisor`, `kata-qemu`, `kata-clh`, `kata-fc`,
 `kata-dragonball`, and `boxlite`.
 
-Pool status exposes Fastlet capacity, the deterministic Infra revision,
-prepared Fastlet counts, safe component summaries, Registry rollout status, and
-per-image warm-cache aggregation. Conditions are `RuntimeReady`, `InfraReady`,
-and `RegistryReady`.
+Pool status exposes Fastlet capacity, runtime/Infra/Fastlet revisions, prepared
+Fastlet counts, and per-image warm-cache aggregation. Handler and Registry
+rollout details are not duplicated as nested status. Conditions are
+`RuntimeReady`, `InfraReady`, and `RegistryReady`.
 
 See the [Infra Components reference](infra-components.md) for the complete
 artifact, process, health, endpoint, validation, and revision contract.
+See [Sandbox Actions](../concepts/sandbox-actions.md) for Binding, lifecycle
+Hook, ordering, readiness, and recovery semantics.
 
 ## SandboxTemplate
 
@@ -224,14 +235,14 @@ The protobuf contract is
 
 | RPC | Semantics |
 | --- | --- |
-| `CreateSandbox` | Atomic durable intent followed by Fastlet admission; returns at `RuntimeReady` |
-| `GetSandbox`, `ListSandboxes` | Complete metadata, expiry, states, components, and bounded metadata filtering |
-| `UpdateSandbox` | Expiry/reset/failure settings plus explicit metadata upsert/delete |
+| `CreateSandbox` | Atomic durable intent followed by Fastlet admission; omitted completion waits for aggregate `READY`, explicit `RUNTIME_READY` returns early |
+| `GetSandbox` | Fenced point-in-time live view from the assigned Fastlet |
+| `ListSandboxes` | Lightweight CRD-backed identity/generation summaries with metadata filtering |
+| `UpdateSandbox` | Asynchronously commit a typed desired-state mutation, complete ordered Binding replacement, or metadata upsert/delete; the returned generation is not an applied/Ready acknowledgement |
 | `DeleteSandbox` | Submit declarative deletion |
 | `GetSandboxDiagnostics` | Lifecycle and Fastlet diagnostics, not process stdout |
-| `WaitSandboxReady` | Event-driven wait on the assigned Fastlet for one component or all components |
-| `ResolveEndpoint` | Resolve a named component or raw user port in central or direct mode |
-| `GetPool`, `ListPools` | Runtime, fixed resources, components, capacity, Registry, and warm-image discovery |
+| `ResolveEndpoint` | Non-blocking resolution of a named component or raw user port in central/direct mode; requires live aggregate Ready |
+| `GetPool`, `ListPools` | Runtime, fixed resources, components, capacity, and warm-image discovery |
 
 ### Atomic Create
 
@@ -241,6 +252,7 @@ The protobuf contract is
 - absolute `expires_at_unix_seconds`;
 - initial `metadata`;
 - failure policy and recovery timeout.
+- ordered `action_bindings` and a `CreateCompletion` boundary.
 
 The first CRD write contains the complete initial intent. A retry with the same
 normalized intent is idempotent; a changed intent under the same request ID is
@@ -257,15 +269,18 @@ pagination.
 
 ### Endpoint targets
 
-`SandboxReference` accepts a CRD UID or namespace/name. `EndpointTarget` is
+`SandboxReference` uses namespace/name for lookup and accepts an optional
+`expected_uid` identity fence. `EndpointTarget` is
 exactly one of:
 
 - `component_name`; or
 - raw `port`.
 
-A component route can wait directly on Fastlet readiness. The response includes
-the resolved protocol/port, route generation, expiry, proxy URL, and
-`X-Fast-Sandbox-Route-Credential`.
+Resolution never waits. A non-Ready live Sandbox returns
+`FailedPrecondition`; stale/missing assignment state returns `Unavailable`.
+The response contains one nested `endpoint` with the final component identity
+(when applicable), protocol, and port, plus route generation, expiry, proxy URL,
+and `X-Fast-Sandbox-Route-Credential`.
 
 Central mode returns:
 

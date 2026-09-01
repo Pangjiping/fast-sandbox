@@ -82,12 +82,19 @@ func TestNativeBundleCopiesOnlySharedInfraArtifacts(t *testing.T) {
 
 func TestNativeEnsureHashFencesImmutableSpec(t *testing.T) {
 	request := boxliteprotocol.EnsureRequest{
-		Namespace: "ns", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{SandboxID: "uid-a", Image: "alpine:latest", FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1},
+		FastletNamespace: "ns", TunnelGuestPort: 19090,
+		Input: fastletapi.EnsureSandboxInput{RequestID: "request-1", Sandbox: fastletapi.RuntimeSandboxConfig{
+			Spec:     fastletapi.SandboxSpec{Image: "alpine:latest"},
+			Identity: fastletapi.SandboxIdentity{SandboxUID: "uid-a", FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1},
+		}},
 	}
 	first, err := ensureHash(request)
 	require.NoError(t, err)
-	request.Sandbox.Image = "busybox:latest"
+	request.Input.RequestID = "request-2"
+	retry, err := ensureHash(request)
+	require.NoError(t, err)
+	require.Equal(t, first, retry, "invocation request ID must not change the stable BoxLite spec")
+	request.Input.Sandbox.Spec.Image = "busybox:latest"
 	second, err := ensureHash(request)
 	require.NoError(t, err)
 	require.NotEqual(t, first, second)
@@ -95,19 +102,19 @@ func TestNativeEnsureHashFencesImmutableSpec(t *testing.T) {
 
 func TestNativeEnsureReturnsTypedImmutableSpecConflict(t *testing.T) {
 	request := boxliteprotocol.EnsureRequest{
-		Namespace: "default", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{
-			SandboxID: "sandbox-a", Image: "alpine:latest", CPU: "1", Memory: "256Mi",
-			FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1,
-		},
+		FastletNamespace: "default", TunnelGuestPort: 19090,
+		Input: fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{
+			Spec:     fastletapi.SandboxSpec{Image: "alpine:latest", CPU: "1", Memory: "256Mi"},
+			Identity: fastletapi.SandboxIdentity{SandboxUID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1},
+		}},
 		Artifacts: []boxliteprotocol.Artifact{{Destination: fastletinfra.SandboxTunnelContainerPath}},
 	}
 	hash, err := ensureHash(request)
 	require.NoError(t, err)
 	backend := &nativeBackend{records: map[string]*nativeRecord{
-		request.Sandbox.SandboxID: {SpecHash: hash},
+		request.Input.Sandbox.Identity.SandboxUID: {SpecHash: hash},
 	}}
-	request.Sandbox.Image = "busybox:latest"
+	request.Input.Sandbox.Spec.Image = "busybox:latest"
 	_, err = backend.Ensure(context.Background(), request)
 	var typed *boxliteserver.Error
 	require.ErrorAs(t, err, &typed)
@@ -121,11 +128,11 @@ func TestNativeLoadRecordsValidatesOwnerFilenameAndBundleFences(t *testing.T) {
 	require.NoError(t, os.MkdirAll(metadataRoot, 0700))
 	require.NoError(t, os.MkdirAll(bundleRoot, 0700))
 	request := boxliteprotocol.EnsureRequest{
-		Namespace: "default", TunnelGuestPort: 19090,
-		Sandbox: fastletapi.SandboxSpec{
-			SandboxID: "sandbox-a", Image: "alpine:latest", CPU: "250m", Memory: "256Mi",
-			FastletPodUID: "pod-a", InstanceGeneration: 1, AssignmentAttempt: 1,
-		},
+		FastletNamespace: "default", TunnelGuestPort: 19090,
+		Input: fastletapi.EnsureSandboxInput{Sandbox: fastletapi.RuntimeSandboxConfig{
+			Spec:     fastletapi.SandboxSpec{Image: "alpine:latest", CPU: "250m", Memory: "256Mi"},
+			Identity: fastletapi.SandboxIdentity{SandboxUID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1},
+		}},
 		Artifacts: []boxliteprotocol.Artifact{{
 			Source: "/opt/fast-sandbox/infra/tunnel", Destination: fastletinfra.SandboxTunnelContainerPath,
 		}},
@@ -135,23 +142,23 @@ func TestNativeLoadRecordsValidatesOwnerFilenameAndBundleFences(t *testing.T) {
 	credential, err := dataplane.GenerateLocalForwardCredential()
 	require.NoError(t, err)
 	record := nativeRecord{
-		Version: boxlitestate.Version, Namespace: request.Namespace, SpecHash: hash, Request: request,
+		Version: boxlitestate.Version, Namespace: request.FastletNamespace, SpecHash: hash, Request: request,
 		HostPort: 21000, TunnelCredential: credential, CreatedAt: 1,
-		BundleRoot: filepath.Join(bundleRoot, boxlitestate.SafeSegment(request.Sandbox.SandboxID), hash),
+		BundleRoot: filepath.Join(bundleRoot, boxlitestate.SafeSegment(request.Input.Sandbox.Identity.SandboxUID), hash),
 	}
-	recordPath := filepath.Join(metadataRoot, boxlitestate.RecordFileName(request.Sandbox.SandboxID))
+	recordPath := filepath.Join(metadataRoot, boxlitestate.RecordFileName(request.Input.Sandbox.Identity.SandboxUID))
 	writeNativeRecord(t, recordPath, record)
 	backend := &nativeBackend{podUID: "pod-a", metadataRoot: metadataRoot, bundleRoot: bundleRoot, records: map[string]*nativeRecord{}}
 	require.NoError(t, backend.loadRecords())
 
-	record.Request.Sandbox.FastletPodUID = "pod-b"
+	record.Request.Input.Sandbox.Identity.FastletPodUID = "pod-b"
 	record.SpecHash, err = ensureHash(record.Request)
 	require.NoError(t, err)
-	record.BundleRoot = filepath.Join(bundleRoot, boxlitestate.SafeSegment(record.Request.Sandbox.SandboxID), record.SpecHash)
+	record.BundleRoot = filepath.Join(bundleRoot, boxlitestate.SafeSegment(record.Request.Input.Sandbox.Identity.SandboxUID), record.SpecHash)
 	writeNativeRecord(t, recordPath, record)
 	require.ErrorContains(t, backend.loadRecords(), "owner fence mismatch")
 
-	record.Request.Sandbox.FastletPodUID = "pod-a"
+	record.Request.Input.Sandbox.Identity.FastletPodUID = "pod-a"
 	record.SpecHash, err = ensureHash(record.Request)
 	require.NoError(t, err)
 	record.BundleRoot = "/"

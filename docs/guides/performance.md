@@ -44,8 +44,8 @@ changing lifecycle ordering.
   not a throughput result.
 - Images and runtime artifacts were already present. Registry pull and first
   unpack latency are excluded.
-- The public measurement starts before the FastPath Create RPC and ends when
-  Create returns at `RuntimeReady`.
+- The measurement explicitly sets `CreateCompletion=RUNTIME_READY`, starts
+  before the FastPath Create RPC, and ends when that early-return call returns.
 - `RuntimeReady` means the RuntimeDriver created the runtime and started the
   user process. It does not wait for Infra readiness, proxy route publication,
   `DataPlaneReady`, or CRD status projection.
@@ -83,8 +83,7 @@ A later engineering run at revision
 runtime set on a non-nested KVM host and a nested-KVM development VM. Both
 environments used a single-node Kind cluster, containerd 1.7.18, a warm Alpine
 image, pre-created network slots, no Infra Components, and concurrency 1. Each
-row contains 20 measured Creates and ends when the FastPath Create RPC returns
-at `RuntimeReady`. Every runtime was warmed before measurement; the secure
+row contains 20 measured Creates with `CreateCompletion=RUNTIME_READY`. Every runtime was warmed before measurement; the secure
 runtimes used two warm-up requests, while nested runc was combined from two
 separately warmed batches.
 
@@ -197,11 +196,13 @@ remain useful as regression baselines while that path is developed.
 | Request accepted | The request passed client and API validation |
 | Intent persisted | Kubernetes stored the Sandbox and durable assignment |
 | Fastlet admitted | Fastlet accepted capacity and runtime identity |
-| RuntimeReady | RuntimeDriver completed Ensure; Create may return |
+| RuntimeReady | RuntimeDriver completed Ensure; Create may return only in explicit early-return mode |
 | DataPlaneReady | Required Infra services are ready and routes are published |
 | Declarative status ready | The Controller projected observed state to the CRD |
 
-The public Create RPC measures through RuntimeReady. It does not wait for DataPlaneReady or CRD status projection.
+These measurements use the explicit RuntimeReady completion boundary. The API
+default is aggregate Ready and is intentionally not represented by these
+runtime-only numbers.
 
 ## Required benchmark dimensions
 

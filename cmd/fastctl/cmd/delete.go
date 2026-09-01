@@ -29,8 +29,7 @@ var deleteCmd = &cobra.Command{
 
 		klog.V(4).InfoS("Sending DeleteSandbox request", "sandboxName", sandboxName, "namespace", namespace)
 		_, err := client.DeleteSandbox(context.Background(), &fastpathv2.DeleteRequest{
-			SandboxName: sandboxName,
-			Namespace:   namespace,
+			Sandbox: fastPathSandboxReference(sandboxName, namespace),
 		})
 		if err != nil {
 			klog.ErrorS(err, "DeleteSandbox request failed", "sandboxName", sandboxName, "namespace", namespace)

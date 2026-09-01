@@ -12,17 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWaitSandboxReadyUsesStateNotification(t *testing.T) {
+func TestWaitUntilSandboxReadyUsesLocalStateNotification(t *testing.T) {
 	identity := fastletapi.SandboxIdentity{
 		SandboxUID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
 		RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 2,
 	}
 	metadata := &SandboxMetadata{
-		SandboxSpec: fastletapi.SandboxSpec{
-			SandboxID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
-			RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 2,
-		},
-		Phase: "route-pending",
+		Config:            fastletapi.RuntimeSandboxConfig{Identity: identity},
+		Phase:             "route-pending",
+		AppliedGeneration: 6,
 		InfraDiagnostics: []fastletinfra.ComponentDiagnostic{{
 			Component: "execd", State: "Ready",
 		}},
@@ -36,13 +34,11 @@ func TestWaitSandboxReadyUsesStateNotification(t *testing.T) {
 		diagnostics: make(map[string][]fastletapi.SandboxDiagnosticEvent),
 	}
 
-	result := make(chan *fastletapi.WaitSandboxReadyResponse, 1)
+	result := make(chan *fastletapi.SandboxStatus, 1)
 	errors := make(chan error, 1)
 	go func() {
-		response, err := manager.WaitSandboxReady(context.Background(), &fastletapi.WaitSandboxReadyRequest{
-			Identity: identity, ComponentName: "execd",
-		})
-		result <- response
+		status, err := manager.waitUntilSandboxReady(context.Background(), identity, 6)
+		result <- status
 		errors <- err
 	}()
 
@@ -58,16 +54,44 @@ func TestWaitSandboxReadyUsesStateNotification(t *testing.T) {
 	manager.mu.Unlock()
 
 	select {
-	case response := <-result:
+	case status := <-result:
 		require.NoError(t, <-errors)
-		require.True(t, response.Ready)
-		require.Equal(t, int64(2), response.Sandbox.InfraDiagnostics[0].ObservedRouteGeneration)
+		require.Equal(t, fastletapi.RuntimeStateReady, status.Runtime.State)
+		require.Equal(t, fastletapi.DataPlaneStateReady, status.DataPlane.State)
+		require.Equal(t, int64(2), status.InfraComponents[0].ObservedRouteGeneration)
 	case <-time.After(time.Second):
-		t.Fatal("wait was not released by readiness notification")
+		t.Fatal("wait was not released by a local readiness change")
 	}
 }
 
-func TestWaitSandboxReadyNoWaitReturnsCurrentState(t *testing.T) {
+func TestUnknownInternalPhaseProjectsExplicitFailure(t *testing.T) {
+	runtime, dataPlane := observationsForPhase("unexpected-phase", false)
+	require.Equal(t, fastletapi.RuntimeStateFailed, runtime.State)
+	require.Equal(t, fastletapi.DataPlaneStateFailed, dataPlane.State)
+	require.Contains(t, runtime.Message, "unexpected-phase")
+	require.Equal(t, runtime.Message, dataPlane.Message)
+}
+
+func TestWaitUntilSandboxReadyWaitsForExpectedGeneration(t *testing.T) {
+	identity := fastletapi.SandboxIdentity{
+		SandboxUID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
+		RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 1,
+	}
+	metadata := &SandboxMetadata{
+		Config: fastletapi.RuntimeSandboxConfig{Identity: identity},
+		Phase:  "running", AppliedGeneration: 3,
+	}
+	manager := &SandboxManager{
+		fastletPodUID: "pod-a", sandboxes: map[string]*SandboxMetadata{"sandbox-a": metadata},
+		readinessChanged: make(chan struct{}), clock: realClock{}, diagnostics: make(map[string][]fastletapi.SandboxDiagnosticEvent),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := manager.waitUntilSandboxReady(ctx, identity, 4)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestWaitUntilSandboxReadyFailsWhenSandboxTerminates(t *testing.T) {
 	identity := fastletapi.SandboxIdentity{
 		SandboxUID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
 		RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 1,
@@ -75,31 +99,24 @@ func TestWaitSandboxReadyNoWaitReturnsCurrentState(t *testing.T) {
 	manager := &SandboxManager{
 		fastletPodUID: "pod-a",
 		sandboxes: map[string]*SandboxMetadata{"sandbox-a": {
-			SandboxSpec: fastletapi.SandboxSpec{
-				SandboxID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
-				RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 1,
-			},
-			Phase: "infra-pending",
+			Config: fastletapi.RuntimeSandboxConfig{Identity: identity},
+			Phase:  "terminating", AppliedGeneration: 1,
 		}},
-		readinessChanged: make(chan struct{}), clock: realClock{},
-		diagnostics: make(map[string][]fastletapi.SandboxDiagnosticEvent),
+		readinessChanged: make(chan struct{}), clock: realClock{}, diagnostics: make(map[string][]fastletapi.SandboxDiagnosticEvent),
 	}
-	response, err := manager.WaitSandboxReady(context.Background(), &fastletapi.WaitSandboxReadyRequest{
-		Identity: identity, DataPlane: true, NoWait: true,
-	})
-	require.NoError(t, err)
-	require.False(t, response.Ready)
-	require.Equal(t, "infra-pending", response.Sandbox.Phase)
+	_, err := manager.waitUntilSandboxReady(context.Background(), identity, 1)
+	var failure *fastletapi.FastletError
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, fastletapi.ErrorConflict, failure.Code)
 }
 
 func TestHealthRegressionRevokesRouteAndReadiness(t *testing.T) {
 	runtime := newAdmissionRuntime()
 	metadata := &SandboxMetadata{
-		SandboxSpec: fastletapi.SandboxSpec{
-			SandboxID: "sandbox-a", ClaimUID: "claim-a", ClaimNamespace: "fast-sandbox",
-			FastletPodUID: "pod-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a",
-			AssignmentAttempt: 1, RouteGeneration: 2,
-		},
+		Config: fastletapi.RuntimeSandboxConfig{Identity: fastletapi.SandboxIdentity{
+			SandboxUID: "sandbox-a", Namespace: "fast-sandbox", FastletPodUID: "pod-a",
+			InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 2,
+		}},
 		Phase: "running",
 		InfraDiagnostics: []fastletinfra.ComponentDiagnostic{{
 			Component: "execd", State: "Failed", Message: "connection refused",
@@ -120,21 +137,12 @@ func TestHealthRegressionRevokesRouteAndReadiness(t *testing.T) {
 
 	manager.mu.RLock()
 	require.Equal(t, "infra-unavailable", metadata.Phase)
+	status := manager.sandboxStatusLocked(metadata)
 	manager.mu.RUnlock()
+	require.Equal(t, fastletapi.RuntimeStateReady, status.Runtime.State)
+	require.Equal(t, fastletapi.DataPlaneStateUnavailable, status.DataPlane.State)
 	publisher.mu.Lock()
 	require.Len(t, publisher.removed, 1)
 	require.Equal(t, int64(2), publisher.removed[0].RouteGeneration)
 	publisher.mu.Unlock()
-
-	_, err = manager.WaitSandboxReady(context.Background(), &fastletapi.WaitSandboxReadyRequest{
-		Identity: fastletapi.SandboxIdentity{
-			SandboxUID: "sandbox-a", FastletPodUID: "pod-a", InstanceGeneration: 1,
-			RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, RouteGeneration: 2,
-		},
-		ComponentName: "execd",
-	})
-	var failure *fastletapi.FastletError
-	require.ErrorAs(t, err, &failure)
-	require.Equal(t, fastletapi.ErrorInfraUnavailable, failure.Code)
-	require.True(t, failure.Retryable)
 }

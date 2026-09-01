@@ -57,28 +57,28 @@ type instanceIdentity struct {
 	AssignmentAttempt  int64  `json:"assignmentAttempt"`
 }
 
-func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxSpec) (_ PreparedInstance, resultErr error) {
+func (m *Manager) PrepareInstance(ctx context.Context, config *fastletapi.RuntimeSandboxConfig) (_ PreparedInstance, resultErr error) {
 	started := time.Now()
 	ctx, span := observability.Start(ctx, "fastlet.infra.prepare_instance")
 	defer func() {
 		observeInstanceStage("total", started, resultErr)
 		observability.End(span, resultErr)
 	}()
-	if spec == nil || spec.SandboxID == "" || spec.InstanceGeneration <= 0 || spec.AssignmentAttempt <= 0 {
+	if config == nil || config.Identity.SandboxUID == "" || config.Identity.InstanceGeneration <= 0 || config.Identity.AssignmentAttempt <= 0 {
 		return PreparedInstance{}, errors.New("Sandbox UID, instance generation, and assignment attempt are required for Infra init")
 	}
 	plan, err := m.Plan()
 	if err != nil {
 		return PreparedInstance{}, err
 	}
-	if plan.Revision != spec.InfraRevision {
+	if plan.Revision != config.Spec.InfraRevision {
 		return PreparedInstance{}, errors.New("Sandbox Infra revision does not match prepared plan")
 	}
 	if len(plan.Components) == 0 && plan.Tunnel == nil {
-		return PreparedInstance{SandboxUID: spec.SandboxID}, nil
+		return PreparedInstance{SandboxUID: config.Identity.SandboxUID}, nil
 	}
 
-	result := PreparedInstance{SandboxUID: spec.SandboxID}
+	result := PreparedInstance{SandboxUID: config.Identity.SandboxUID}
 	if plan.Tunnel != nil {
 		result.Mounts = append(result.Mounts, Mount{
 			Source: plan.Tunnel.HostPath, GuestSource: plan.Tunnel.PodPath,
@@ -97,7 +97,7 @@ func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxS
 		Destination: SandboxInitContainerPath, Options: []string{"ro", "rbind", "nosuid", "nodev"},
 	})
 
-	initConfig := supervisor.Config{Version: supervisor.ConfigVersion, SandboxUID: spec.SandboxID}
+	initConfig := supervisor.Config{Version: supervisor.ConfigVersion, SandboxUID: config.Identity.SandboxUID}
 	for _, prepared := range plan.Components {
 		component := prepared.Plan
 		for _, mapping := range prepared.Mappings {
@@ -107,9 +107,9 @@ func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxS
 			})
 		}
 		environment := map[string]string{
-			"FAST_SANDBOX_UID":                 spec.SandboxID,
-			"FAST_SANDBOX_INSTANCE_GENERATION": strconv.FormatInt(spec.InstanceGeneration, 10),
-			"FAST_SANDBOX_ASSIGNMENT_ATTEMPT":  strconv.FormatInt(spec.AssignmentAttempt, 10),
+			"FAST_SANDBOX_UID":                 config.Identity.SandboxUID,
+			"FAST_SANDBOX_INSTANCE_GENERATION": strconv.FormatInt(config.Identity.InstanceGeneration, 10),
+			"FAST_SANDBOX_ASSIGNMENT_ATTEMPT":  strconv.FormatInt(config.Identity.AssignmentAttempt, 10),
 		}
 		for name, value := range component.Process.Env {
 			environment[name] = value
@@ -134,12 +134,12 @@ func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxS
 	persisted := persistedInstance{
 		Version: 1,
 		Identity: instanceIdentity{
-			SandboxUID: spec.SandboxID, InstanceGeneration: spec.InstanceGeneration,
-			AssignmentAttempt: spec.AssignmentAttempt,
+			SandboxUID: config.Identity.SandboxUID, InstanceGeneration: config.Identity.InstanceGeneration,
+			AssignmentAttempt: config.Identity.AssignmentAttempt,
 		},
 		Init: initConfig, Prepared: result,
 	}
-	podPath, hostPath := m.instancePaths(spec.SandboxID, spec.InstanceGeneration, spec.AssignmentAttempt)
+	podPath, hostPath := m.instancePaths(config.Identity.SandboxUID, config.Identity.InstanceGeneration, config.Identity.AssignmentAttempt)
 	result.ConfigPodPath = podPath
 	result.ConfigHostPath = hostPath
 	result.Mounts = append(result.Mounts, Mount{
@@ -153,11 +153,11 @@ func (m *Manager) PrepareInstance(ctx context.Context, spec *fastletapi.SandboxS
 	return result, nil
 }
 
-func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.SandboxSpec) (PreparedInstance, error) {
-	if spec == nil {
+func (m *Manager) RecoverInstance(ctx context.Context, config *fastletapi.RuntimeSandboxConfig) (PreparedInstance, error) {
+	if config == nil {
 		return PreparedInstance{}, errors.New("Sandbox spec is required")
 	}
-	file, err := os.Open(m.instanceStatePath(spec.SandboxID, spec.InstanceGeneration, spec.AssignmentAttempt))
+	file, err := os.Open(m.instanceStatePath(config.Identity.SandboxUID, config.Identity.InstanceGeneration, config.Identity.AssignmentAttempt))
 	if err != nil {
 		return PreparedInstance{}, err
 	}
@@ -170,8 +170,8 @@ func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.SandboxS
 		return PreparedInstance{}, err
 	}
 	expected := instanceIdentity{
-		SandboxUID: spec.SandboxID, InstanceGeneration: spec.InstanceGeneration,
-		AssignmentAttempt: spec.AssignmentAttempt,
+		SandboxUID: config.Identity.SandboxUID, InstanceGeneration: config.Identity.InstanceGeneration,
+		AssignmentAttempt: config.Identity.AssignmentAttempt,
 	}
 	if persisted.Version != 1 || persisted.Identity != expected {
 		return PreparedInstance{}, errors.New("persisted Infra instance identity does not match runtime")
@@ -179,11 +179,11 @@ func (m *Manager) RecoverInstance(ctx context.Context, spec *fastletapi.SandboxS
 	return persisted.Prepared, nil
 }
 
-func (m *Manager) RemoveInstance(spec *fastletapi.SandboxSpec) error {
-	if spec == nil {
+func (m *Manager) RemoveInstance(config *fastletapi.RuntimeSandboxConfig) error {
+	if config == nil {
 		return nil
 	}
-	podPath, _ := m.instancePaths(spec.SandboxID, spec.InstanceGeneration, spec.AssignmentAttempt)
+	podPath, _ := m.instancePaths(config.Identity.SandboxUID, config.Identity.InstanceGeneration, config.Identity.AssignmentAttempt)
 	return os.RemoveAll(filepath.Dir(podPath))
 }
 

@@ -168,6 +168,7 @@ func fastletInfoFromPod(pod *corev1.Pod) placement.FastletInfo {
 		RuntimeProfileHash:  pod.Annotations["fast-sandbox.io/runtime-profile-hash"],
 		ResourceProfileHash: pod.Annotations["fast-sandbox.io/resource-profile-hash"],
 		InfraRevision:       pod.Annotations["fast-sandbox.io/infra-revision"],
+		FastletRevision:     pod.Annotations[placement.AnnotationPodTemplateHash],
 		DrainRequested:      placement.PodDrainRequested(pod),
 		Draining:            placement.PodDrainRequested(pod),
 		PodReady:            pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && podConditionTrue(pod.Status.Conditions, corev1.PodReady),

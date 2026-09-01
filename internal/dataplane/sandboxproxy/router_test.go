@@ -23,10 +23,7 @@ func TestKubernetesResolverUsesAuthoritativeFallbackAndWarmsIndex(t *testing.T) 
 	require.NoError(t, corev1.AddToScheme(scheme))
 	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID("uid-a")},
-		Status: apiv1alpha2.SandboxStatus{
-			DataPlaneState: apiv1alpha2.ObservedStateReady, RouteGeneration: 4,
-			Assignment: &apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 3, NodeName: "node-a"},
-		},
+		Status:     readyRouteStatus("fastlet-a", "pod-a", 3, 4),
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "fastlet-a", Namespace: "tenant-a", UID: types.UID("pod-a")},
@@ -49,13 +46,7 @@ func TestIndexPublishesImmutableRouteProjection(t *testing.T) {
 	index := NewIndex()
 	sandbox := &apiv1alpha2.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID("uid-a")},
-		Status: apiv1alpha2.SandboxStatus{
-			DataPlaneState:  apiv1alpha2.ObservedStateReady,
-			RouteGeneration: 4,
-			Assignment: &apiv1alpha2.SandboxAssignment{
-				FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 3,
-			},
-		},
+		Status:     readyRouteStatus("fastlet-a", "pod-a", 3, 4),
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "fastlet-a", Namespace: "tenant-a", UID: types.UID("pod-a")},
@@ -64,8 +55,8 @@ func TestIndexPublishesImmutableRouteProjection(t *testing.T) {
 	index.UpsertSandbox(sandbox)
 	index.UpsertPod(pod)
 
-	sandbox.Status.Assignment.FastletPodUID = "mutated-pod"
-	sandbox.Status.RouteGeneration = 99
+	sandbox.Status.Placement.FastletPodUID = "mutated-pod"
+	sandbox.Status.DataPlane.RouteGeneration = 99
 	pod.Status.PodIP = "10.0.0.99"
 
 	route, err := index.Resolve("uid-a")
@@ -86,13 +77,7 @@ func TestIndexConcurrentUpdatesAndResolves(t *testing.T) {
 		})
 		index.UpsertSandbox(&apiv1alpha2.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a", Namespace: "tenant-a", UID: types.UID(sandboxUID)},
-			Status: apiv1alpha2.SandboxStatus{
-				DataPlaneState:  apiv1alpha2.ObservedStateReady,
-				RouteGeneration: generation,
-				Assignment: &apiv1alpha2.SandboxAssignment{
-					FastletName: "fastlet-" + suffix, FastletPodUID: podUID, Attempt: generation,
-				},
-			},
+			Status:     readyRouteStatus("fastlet-"+suffix, podUID, generation, generation),
 		})
 	}
 	upsert("1", 1)
@@ -139,5 +124,12 @@ func TestIndexConcurrentUpdatesAndResolves(t *testing.T) {
 	case err := <-errorsChannel:
 		require.NoError(t, err)
 	default:
+	}
+}
+
+func readyRouteStatus(fastletName, podUID string, attempt, routeGeneration int64) apiv1alpha2.SandboxStatus {
+	return apiv1alpha2.SandboxStatus{
+		Placement: apiv1alpha2.PlacementStatus{FastletName: fastletName, FastletPodUID: types.UID(podUID), Attempt: attempt},
+		DataPlane: apiv1alpha2.DataPlaneStatus{State: apiv1alpha2.DataPlaneReady, RouteGeneration: routeGeneration},
 	}
 }

@@ -49,7 +49,7 @@ func TestNamespaceAware(t *testing.T) {
 			}
 
 			assigned := waitForAssignedSandbox(ctx, t, fixture, namespace, "sb-ns-test")
-			if assigned.Status.Assignment == nil {
+			if assigned.Status.Placement.FastletName == "" {
 				t.Fatalf("sandbox not assigned")
 			}
 
@@ -204,7 +204,7 @@ func waitForAssignedSandbox(ctx context.Context, t *testing.T, fixture *fixtures
 	defer cancel()
 
 	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: name, Namespace: namespace}, func(sb *apiv1alpha2.Sandbox) bool {
-		return sb.Status.Assignment != nil && sb.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+		return sb.Status.Placement.FastletName != "" && sb.Status.Runtime.State == apiv1alpha2.RuntimeReady
 	})
 	if err != nil {
 		t.Fatalf("wait for assigned sandbox %s/%s: %v", namespace, name, err)

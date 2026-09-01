@@ -17,3 +17,7 @@ func newOpenSandboxExecd(client fastpathv2.FastPathServiceClient) *sandboxclient
 func sandboxReference(name string) sandboxclient.SandboxRef {
 	return sandboxclient.SandboxRef{Name: name, Namespace: viper.GetString("namespace")}
 }
+
+func fastPathSandboxReference(name, namespace string) *fastpathv2.SandboxReference {
+	return &fastpathv2.SandboxReference{NamespacedName: &fastpathv2.NamespacedName{Name: name, Namespace: namespace}}
+}

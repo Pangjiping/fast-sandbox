@@ -1,0 +1,16 @@
+# sandbox-firecracker.yaml — Sandbox CR on the firecracker pool.
+#
+# The controller places the Sandbox on the pool's fastlet; the firecracker
+# driver restores the golden snapshot (per-clone netns, per-instance
+# slot.IP) and the baked execd answers GET /ping on port 44772.
+#
+# Apply with:
+#   kubectl apply -f config/samples/sandbox-firecracker.yaml
+apiVersion: sandbox.fast.io/v1alpha2
+kind: Sandbox
+metadata:
+  name: sandbox-firecracker
+  namespace: fast-sandbox-system
+spec:
+  image: alpine:3.19
+  poolRef: firecracker-pool

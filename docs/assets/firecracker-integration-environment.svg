@@ -1,0 +1,179 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1020" viewBox="0 0 1500 1020" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a-blue"  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#16a34a"/>
+    </marker>
+    <marker id="a-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ea580c"/>
+    </marker>
+    <marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c3aed"/>
+    </marker>
+    <marker id="a-dark"   viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <marker id="a-teal"   viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0d9488"/>
+    </marker>
+  </defs>
+
+  <!-- host -->
+  <rect x="20" y="20" width="1460" height="980" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="40" y="48" font-size="16" font-weight="bold" fill="#0f172a">Bare-metal test node (KVM + Docker · cgroup v2 · root)</text>
+
+  <!-- MinIO: host docker container -->
+  <rect x="1240" y="90" width="220" height="140" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/>
+  <text x="1258" y="116" font-size="13" font-weight="bold" fill="#065f46">MinIO (Docker container)</text>
+  <text x="1258" y="138" font-size="11.5" fill="#0f172a">:9000 · on the kind network</text>
+  <text x="1258" y="158" font-size="11.5" fill="#0f172a">golden snapshot set</text>
+  <text x="1258" y="178" font-size="11" fill="#475569">index/ · &lt;digest16&gt;/ · manifest</text>
+  <text x="1258" y="198" font-size="11" fill="#475569">publish creds / pull creds</text>
+
+  <!-- kind -->
+  <rect x="60" y="90" width="1140" height="790" rx="12" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2"/>
+  <text x="80" y="116" font-size="15" font-weight="bold" fill="#0f172a">Kind cluster = one kindest/node container (/dev/kvm + /dev/net/tun passthrough)</text>
+  <text x="80" y="136" font-size="11" fill="#64748b">kube-system: apiserver · etcd · coredns · kindnet · kube-proxy (K8s platform base)</text>
+
+  <!-- namespace -->
+  <rect x="90" y="150" width="1080" height="610" rx="10" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="106" y="174" font-size="12" font-weight="bold" fill="#475569">Namespace: fast-sandbox-system</text>
+
+  <!-- ================= left column: control plane and workloads ================= -->
+  <!-- controller -->
+  <rect x="120" y="190" width="420" height="85" rx="8" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+  <rect x="132" y="204" width="86" height="20" rx="4" fill="#dbeafe"/>
+  <text x="175" y="218" font-size="10.5" font-weight="bold" fill="#1e40af" text-anchor="middle">Deployment</text>
+  <text x="230" y="218" font-size="12.5" font-weight="bold" fill="#1e40af">controller</text>
+  <text x="136" y="244" font-size="11.5" fill="#0f172a">reconciles Template/Pool/Sandbox CRs</text>
+  <text x="136" y="262" font-size="11.5" fill="#0f172a">creates builder Jobs · drives fastlet scheduling</text>
+
+  <!-- builder Job -->
+  <rect x="120" y="320" width="420" height="75" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="132" y="334" width="44" height="20" rx="4" fill="#e2e8f0"/>
+  <text x="154" y="348" font-size="10.5" font-weight="bold" fill="#475569" text-anchor="middle">Job</text>
+  <text x="188" y="348" font-size="12.5" font-weight="bold" fill="#334155">builder Job</text>
+  <text x="136" y="374" font-size="11.5" fill="#0f172a">bakes the golden snapshot (on-demand)</text>
+
+  <!-- pool -->
+  <rect x="120" y="440" width="420" height="85" rx="8" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+  <rect x="132" y="454" width="110" height="20" rx="4" fill="#dbeafe"/>
+  <text x="187" y="468" font-size="10.5" font-weight="bold" fill="#1e40af" text-anchor="middle">SandboxPool CR</text>
+  <text x="252" y="468" font-size="12.5" font-weight="bold" fill="#1e40af">pool (declarative)</text>
+  <text x="136" y="494" font-size="11.5" fill="#0f172a">poolMin=poolMax=2 · maxSandboxesPerPod=5</text>
+  <text x="136" y="512" font-size="11.5" fill="#0f172a">warmImages: alpine:3.19 (per fastlet)</text>
+
+  <!-- fastlet pod -->
+  <rect x="120" y="570" width="420" height="95" rx="8" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+  <rect x="132" y="584" width="118" height="20" rx="4" fill="#dbeafe"/>
+  <text x="191" y="598" font-size="10.5" font-weight="bold" fill="#1e40af" text-anchor="middle">Pool-managed Pod</text>
+  <text x="258" y="598" font-size="12.5" font-weight="bold" fill="#1e40af">fastlet Pod ×2</text>
+  <text x="136" y="624" font-size="11.5" fill="#0f172a">firecracker driver · privileged · 5 slots each</text>
+  <text x="136" y="642" font-size="11.5" fill="#0f172a">restore-only · jailer --netns</text>
+  <text x="136" y="660" font-size="11" fill="#64748b">BOTH pods share the node cache + agent socket</text>
+
+  <!-- VM -->
+  <rect x="120" y="700" width="420" height="50" rx="8" fill="#f8fafc" stroke="#334155" stroke-width="2" stroke-dasharray="5 3"/>
+  <rect x="132" y="710" width="96" height="20" rx="4" fill="#e2e8f0"/>
+  <text x="180" y="724" font-size="10.5" font-weight="bold" fill="#334155" text-anchor="middle">Per-sandbox VM</text>
+  <text x="238" y="724" font-size="12" font-weight="bold" fill="#1e293b">firecracker VM ×N</text>
+  <text x="136" y="742" font-size="10.5" fill="#475569">guest eth0=172.30.0.3 · execd :44772 /ping (shared snapshot)</text>
+
+  <!-- ================= right column: node-resident components ================= -->
+  <!-- installer -->
+  <rect x="600" y="190" width="520" height="65" rx="8" fill="#ffffff" stroke="#ea580c" stroke-width="2"/>
+  <rect x="612" y="204" width="76" height="20" rx="4" fill="#ffedd5"/>
+  <text x="650" y="218" font-size="10.5" font-weight="bold" fill="#9a3412" text-anchor="middle">DaemonSet</text>
+  <text x="696" y="218" font-size="12.5" font-weight="bold" fill="#9a3412">runtime installer (per-node)</text>
+  <text x="616" y="242" font-size="11" fill="#0f172a">downloads firecracker v1.16.1 + jailer + kernel</text>
+
+  <!-- agent -->
+  <rect x="600" y="300" width="520" height="85" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <rect x="612" y="314" width="76" height="20" rx="4" fill="#ede9fe"/>
+  <text x="650" y="328" font-size="10.5" font-weight="bold" fill="#5b21b6" text-anchor="middle">DaemonSet</text>
+  <text x="696" y="328" font-size="12.5" font-weight="bold" fill="#5b21b6">runtime-agent (per-node)</text>
+  <text x="616" y="354" font-size="11.5" fill="#0f172a">node-level artifact cache · UDS API (pin/lease/list)</text>
+  <text x="616" y="372" font-size="11.5" fill="#0f172a">pulls the golden snapshot once per node (SigV4)</text>
+
+  <!-- node filesystem (binaries + shared StateRoot cache) -->
+  <rect x="600" y="430" width="520" height="185" rx="8" fill="#fff7ed" stroke="#ea580c" stroke-width="2"/>
+  <rect x="612" y="444" width="116" height="20" rx="4" fill="#ffedd5"/>
+  <text x="670" y="458" font-size="10.5" font-weight="bold" fill="#9a3412" text-anchor="middle">Node hostPath dirs</text>
+  <text x="738" y="458" font-size="12.5" font-weight="bold" fill="#9a3412">node filesystem (shared)</text>
+  <text x="616" y="482" font-size="11.5" fill="#0f172a">/opt/fast-sandbox/firecracker/</text>
+  <text x="626" y="498" font-size="11" fill="#0f172a">firecracker · jailer · vmlinux.bin (mounted by fastlets)</text>
+  <text x="616" y="522" font-size="11.5" fill="#0f172a">StateRoot /var/lib/fast-sandbox/firecracker</text>
+  <text x="626" y="540" font-size="11" fill="#0f172a">images/&lt;sha&gt;/ — golden snapshot cache</text>
+  <text x="636" y="556" font-size="11" fill="#475569">written by the agent · read by BOTH fastlet pods</text>
+  <text x="626" y="574" font-size="11" fill="#0f172a">jails/&lt;sandboxID&gt;/ — per-instance rootfs</text>
+  <text x="636" y="590" font-size="11" fill="#475569">CoW reflink of the cached rootfs.ext4 (same FS)</text>
+  <text x="616" y="608" font-size="11" fill="#9a3412">one cache per node: every fastlet shares it</text>
+
+  <!-- UDS shared path -->
+  <rect x="720" y="660" width="400" height="55" rx="8" fill="#faf5ff" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="736" y="684" font-size="12" font-weight="bold" fill="#5b21b6">Shared path (agent ↔ fastlet)</text>
+  <text x="736" y="704" font-size="11" fill="#0f172a">/run/fast-sandbox/firecracker/runtime.sock (UDS)</text>
+
+  <!-- XFS band (host-level, bind-mounted into the node) -->
+  <rect x="90" y="785" width="1080" height="80" rx="8" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <text x="106" y="811" font-size="12.5" font-weight="bold" fill="#115e59">Host XFS filesystem (sparse loop image · reflink-capable)</text>
+  <text x="106" y="831" font-size="11.5" fill="#0f172a">mounted at /var/lib/fast-sandbox on the host → bind-mounted into this node (kind extraMounts)</text>
+  <text x="106" y="851" font-size="11" fill="#115e59">per-sandbox rootfs copy = CoW reflink (~ms) · was a full ~2.5s copy on ext4</text>
+
+  <!-- ================= arrows ================= -->
+  <!-- controller -> builder -->
+  <path d="M 330 275 L 330 318" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#a-blue)"/>
+  <text x="338" y="302" font-size="11" fill="#1e40af">creates</text>
+  <!-- controller -> pool -->
+  <path d="M 540 235 L 580 235 L 580 480 L 542 480" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#a-blue)"/>
+  <text x="588" y="362" font-size="11" fill="#1e40af" transform="rotate(90 588 362)">reconcile</text>
+  <!-- pool -> fastlet -->
+  <path d="M 330 525 L 330 568" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#a-blue)"/>
+  <text x="338" y="552" font-size="11" fill="#1e40af">poolMin=2</text>
+  <!-- fastlet -> VM -->
+  <path d="M 330 665 L 330 698" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#a-dark)"/>
+  <text x="338" y="686" font-size="11" fill="#1e293b">restore</text>
+  <!-- installer -> node filesystem -->
+  <path d="M 600 222 L 570 222 L 570 505 L 598 505" fill="none" stroke="#ea580c" stroke-width="2" marker-end="url(#a-orange)"/>
+  <text x="562" y="370" font-size="11" fill="#9a3412" transform="rotate(90 562 370)">installs binaries</text>
+  <!-- agent -> node filesystem (cache) -->
+  <path d="M 650 385 L 650 428" fill="none" stroke="#7c3aed" stroke-width="2" marker-end="url(#a-purple)"/>
+  <text x="658" y="412" font-size="11" fill="#5b21b6">pull → images/ cache</text>
+  <!-- fastlet -> node filesystem (mount + reflink) -->
+  <path d="M 540 610 L 598 610" fill="none" stroke="#ea580c" stroke-width="2" marker-end="url(#a-orange)"/>
+  <text x="470" y="602" font-size="11" fill="#9a3412" text-anchor="end">mount · reflink copy</text>
+  <!-- fastlet <-> UDS -->
+  <path d="M 540 687 L 718 687" fill="none" stroke="#7c3aed" stroke-width="2.5" marker-end="url(#a-purple)" marker-start="url(#a-purple)"/>
+  <!-- XFS -> node filesystem -->
+  <path d="M 660 785 L 660 617" fill="none" stroke="#0d9488" stroke-width="2.5" marker-end="url(#a-teal)"/>
+  <text x="668" y="700" font-size="11" fill="#115e59" transform="rotate(90 668 700)">bind mount (extraMounts)</text>
+  <!-- builder -> MinIO (publish) -->
+  <path d="M 120 357 L 40 357 L 40 160 L 1238 160" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#a-green)"/>
+  <text x="300" y="348" font-size="11.5" fill="#15803d">publish golden snapshot (SigV4)</text>
+  <!-- agent -> MinIO (pull) -->
+  <path d="M 1120 340 L 1350 340 L 1350 230" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#a-green)"/>
+  <text x="1130" y="332" font-size="11.5" fill="#15803d">pull / PinImage (SigV4)</text>
+
+  <!-- legend -->
+  <g font-size="11.5">
+    <rect x="60" y="940" width="86" height="20" rx="4" fill="#dbeafe"/>
+    <text x="103" y="954" font-size="10.5" font-weight="bold" fill="#1e40af" text-anchor="middle">Deployment</text>
+    <text x="154" y="954" fill="#0f172a">control plane (1 replica)</text>
+    <rect x="330" y="940" width="76" height="20" rx="4" fill="#ffedd5"/>
+    <text x="368" y="954" font-size="10.5" font-weight="bold" fill="#9a3412" text-anchor="middle">DaemonSet</text>
+    <text x="414" y="954" fill="#0f172a">node-resident</text>
+    <rect x="540" y="940" width="44" height="20" rx="4" fill="#e2e8f0"/>
+    <text x="562" y="954" font-size="10.5" font-weight="bold" fill="#475569" text-anchor="middle">Job</text>
+    <text x="592" y="954" fill="#0f172a">on-demand build</text>
+    <rect x="700" y="940" width="118" height="20" rx="4" fill="#dbeafe"/>
+    <text x="759" y="954" font-size="10.5" font-weight="bold" fill="#1e40af" text-anchor="middle">Pool-managed Pod</text>
+    <text x="826" y="954" fill="#0f172a">×2 resident</text>
+    <rect x="940" y="940" width="96" height="20" rx="4" fill="#e2e8f0"/>
+    <text x="988" y="954" font-size="10.5" font-weight="bold" fill="#334155" text-anchor="middle">Per-sandbox VM</text>
+    <rect x="1110" y="940" width="86" height="20" rx="4" fill="#ccfbf1"/>
+    <text x="1153" y="954" font-size="10.5" font-weight="bold" fill="#115e59" text-anchor="middle">XFS</text>
+    <text x="1204" y="954" fill="#0f172a">reflink rootfs</text>
+  </g>
+</svg>

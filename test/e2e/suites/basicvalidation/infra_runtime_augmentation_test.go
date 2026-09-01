@@ -65,7 +65,7 @@ func TestSDKAdapterDataPlane(t *testing.T) {
 			defer connection.Close()
 			fastPath := fastpathv2.NewFastPathServiceClient(connection)
 			created := createInfraSandbox(ctx, t, fastPath, namespace, pool.Name)
-			_ = waitForProxyReady(ctx, t, fixture, namespace, created.SandboxName)
+			_ = waitForProxyReady(ctx, t, fixture, namespace, created.GetIdentity().GetName())
 
 			proxyBase, proxyForward, err := e2eenv.StartSandboxProxyPortForward(ctx, testSuite.ControllerNamespace())
 			if err != nil {
@@ -76,7 +76,7 @@ func TestSDKAdapterDataPlane(t *testing.T) {
 				Resolver:      &sandboxclient.EndpointResolver{Control: fastPath, DefaultNamespace: namespace, ProxyBaseURL: proxyBase},
 				ComponentName: "execd",
 			}
-			execd, _, err := adapter.Client(ctx, sandboxclient.SandboxRef{Name: created.SandboxName, Namespace: namespace})
+			execd, _, err := adapter.Client(ctx, sandboxclient.SandboxRef{Name: created.GetIdentity().GetName(), Namespace: namespace})
 			if err != nil {
 				t.Fatalf("resolve OpenSandbox Execd client: %v", err)
 			}
@@ -171,9 +171,9 @@ func TestInfraRuntimeAugmentation(t *testing.T) {
 			fastPath := fastpathv2.NewFastPathServiceClient(connection)
 
 			created := createInfraSandbox(ctx, t, fastPath, namespace, pool.Name)
-			ready := waitForProxyReady(ctx, t, fixture, namespace, created.SandboxName)
-			if ready.Status.DataPlaneState != apiv1alpha2.ObservedStateReady {
-				t.Fatalf("DataPlane did not converge after RuntimeReady Create: %s", ready.Status.DataPlaneState)
+			ready := waitForProxyReady(ctx, t, fixture, namespace, created.GetIdentity().GetName())
+			if ready.Status.DataPlane.State != apiv1alpha2.DataPlaneReady {
+				t.Fatalf("DataPlane did not converge after RuntimeReady Create: %s", ready.Status.DataPlane.State)
 			}
 
 			proxyBase, proxyForward, err := e2eenv.StartSandboxProxyPortForward(ctx, testSuite.ControllerNamespace())
@@ -181,9 +181,9 @@ func TestInfraRuntimeAugmentation(t *testing.T) {
 				t.Fatalf("start Sandbox Proxy port-forward: %v", err)
 			}
 			defer proxyForward.Cleanup()
-			infraAccess := resolveComponentAccess(ctx, t, fastPath, created.SandboxUid, "execd")
+			infraAccess := resolveComponentAccess(ctx, t, fastPath, namespace, created.GetIdentity().GetName(), created.GetIdentity().GetUid(), "execd")
 			assertProxyPathResponse(ctx, t, proxyBase, infraAccess, "/ping", "")
-			userAccess := resolveProxyAccess(ctx, t, fastPath, created.SandboxUid, 18081)
+			userAccess := resolveProxyAccess(ctx, t, fastPath, namespace, created.GetIdentity().GetName(), created.GetIdentity().GetUid(), 18081)
 			assertProxyPathResponse(ctx, t, proxyBase, userAccess, "/user", "user-started")
 			return ctx
 		}).Feature()
@@ -220,7 +220,7 @@ EOF
 chmod 0700 /tmp/user-serve
 exec nc -lk -p 18081 -e /tmp/user-serve`
 	requestID := namespace + "-infra-sandbox"
-	request := &fastpathv2.CreateRequest{
+	request := &fastpathv2.CreateSandboxRequest{
 		Namespace: namespace, PoolRef: pool, Image: "docker.io/library/alpine:latest",
 		Command: []string{"/bin/sh", "-c", command}, RequestId: requestID,
 	}
@@ -231,7 +231,7 @@ exec nc -lk -p 18081 -e /tmp/user-serve`
 		response, err := fastPath.CreateSandbox(requestContext, request)
 		cancel()
 		if err == nil {
-			return response
+			return response.GetSandbox()
 		}
 		lastErr = err
 		time.Sleep(500 * time.Millisecond)

@@ -23,27 +23,27 @@ const (
 
 // InitializeInstance executes per-instance initialization and local probes.
 // It dials the Sandbox private IP directly and never traverses Sandbox Proxy.
-func (m *Manager) InitializeInstance(ctx context.Context, spec *fastletapi.SandboxSpec, privateIP string) (PreparedInstance, error) {
-	if spec == nil || privateIP == "" {
+func (m *Manager) InitializeInstance(ctx context.Context, config *fastletapi.RuntimeSandboxConfig, privateIP string) (PreparedInstance, error) {
+	if config == nil || privateIP == "" {
 		return PreparedInstance{}, errors.New("Sandbox spec and private IP are required for Infra initialization")
 	}
-	return m.InitializeInstanceWithDialer(ctx, spec, func(ctx context.Context, port uint32) (net.Conn, error) {
+	return m.InitializeInstanceWithDialer(ctx, config, func(ctx context.Context, port uint32) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(privateIP, strconv.Itoa(int(port))))
 	})
 }
 
 // InitializeInstanceWithDialer supports runtimes such as BoxLite whose guest
 // loopback is reached through a runtime-specific LocalForward transport.
-func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, spec *fastletapi.SandboxSpec, dial TargetDialer) (PreparedInstance, error) {
-	if spec == nil || dial == nil {
+func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, config *fastletapi.RuntimeSandboxConfig, dial TargetDialer) (PreparedInstance, error) {
+	if config == nil || dial == nil {
 		return PreparedInstance{}, errors.New("Sandbox spec and target dialer are required for Infra initialization")
 	}
-	instance, err := m.RecoverInstance(ctx, spec)
+	instance, err := m.RecoverInstance(ctx, config)
 	if err != nil {
 		// A newly-created minimal profile intentionally has no instance file.
 		plan, planErr := m.Plan()
 		if planErr == nil && len(plan.Components) == 0 {
-			return PreparedInstance{SandboxUID: spec.SandboxID}, nil
+			return PreparedInstance{SandboxUID: config.Identity.SandboxUID}, nil
 		}
 		return PreparedInstance{}, fmt.Errorf("load Infra instance state: %w", err)
 	}

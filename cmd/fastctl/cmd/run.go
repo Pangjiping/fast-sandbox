@@ -19,16 +19,22 @@ import (
 
 // SandboxConfig for yaml
 type SandboxConfig struct {
-	Image                  string            `yaml:"image"`
-	PoolRef                string            `yaml:"pool_ref"`
-	Command                []string          `yaml:"command,omitempty"`
-	Args                   []string          `yaml:"args,omitempty"`
-	Envs                   map[string]string `yaml:"envs,omitempty"`
-	WorkingDir             string            `yaml:"working_dir,omitempty"`
-	ExpiresAt              int64             `yaml:"expires_at,omitempty"`
-	Metadata               map[string]string `yaml:"metadata,omitempty"`
-	FailurePolicy          string            `yaml:"failure_policy,omitempty"`
-	RecoveryTimeoutSeconds int32             `yaml:"recovery_timeout_seconds,omitempty"`
+	Image                  string                `yaml:"image"`
+	PoolRef                string                `yaml:"pool_ref"`
+	Command                []string              `yaml:"command,omitempty"`
+	Args                   []string              `yaml:"args,omitempty"`
+	Envs                   map[string]string     `yaml:"envs,omitempty"`
+	WorkingDir             string                `yaml:"working_dir,omitempty"`
+	ExpiresAt              int64                 `yaml:"expires_at,omitempty"`
+	Metadata               map[string]string     `yaml:"metadata,omitempty"`
+	FailurePolicy          string                `yaml:"failure_policy,omitempty"`
+	RecoveryTimeoutSeconds int32                 `yaml:"recovery_timeout_seconds,omitempty"`
+	ActionBindings         []ActionBindingConfig `yaml:"action_bindings,omitempty"`
+}
+
+type ActionBindingConfig struct {
+	Handler string `yaml:"handler"`
+	Input   string `yaml:"input"`
 }
 
 var (
@@ -40,6 +46,7 @@ var (
 	runMetadata        []string
 	runFailurePolicy   string
 	runRecoveryTimeout int32
+	runActionBindings  []string
 )
 
 // runCmd represents the run command
@@ -146,7 +153,18 @@ Priority: Flags > Config File > Interactive Input
 		if cmd.Flags().Changed("recovery-timeout") {
 			recoveryTimeout = runRecoveryTimeout
 		}
-		req := &fastpathv2.CreateRequest{
+		actionBindings := config.ActionBindings
+		if cmd.Flags().Changed("action") {
+			actionBindings, err = parseActionBindings(runActionBindings)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+		}
+		apiBindings := make([]*fastpathv2.ActionBinding, 0, len(actionBindings))
+		for _, binding := range actionBindings {
+			apiBindings = append(apiBindings, &fastpathv2.ActionBinding{Handler: binding.Handler, Input: binding.Input})
+		}
+		req := &fastpathv2.CreateSandboxRequest{
 			Image:                config.Image,
 			PoolRef:              config.PoolRef,
 			Namespace:            viper.GetString("namespace"),
@@ -157,6 +175,8 @@ Priority: Flags > Config File > Interactive Input
 			RequestId:            createRequestID,
 			ExpiresAtUnixSeconds: expiresAt, Metadata: metadata,
 			FailurePolicy: failurePolicy, RecoveryTimeoutSeconds: recoveryTimeout,
+			ActionBindings: apiBindings,
+			Completion:     fastpathv2.CreateCompletion_CREATE_COMPLETION_READY,
 		}
 		klog.V(4).InfoS("Sending CreateSandbox request", "name", name, "image", config.Image, "pool", config.PoolRef, "namespace", req.Namespace)
 
@@ -166,12 +186,12 @@ Priority: Flags > Config File > Interactive Input
 			log.Fatalf("Error: %v", err)
 		}
 
-		klog.V(4).InfoS("Sandbox runtime created successfully", "name", name, "sandboxUid", resp.SandboxUid, "sandboxName", resp.SandboxName, "fastlet", resp.FastletPod, "duration", time.Since(start))
+		info := resp.GetSandbox()
+		klog.V(4).InfoS("Sandbox created successfully", "name", name, "sandboxUid", info.GetIdentity().GetUid(), "sandboxName", info.GetIdentity().GetName(), "ready", info.GetReady(), "duration", time.Since(start))
 		fmt.Printf("🎉 Sandbox runtime created successfully in %v\n", time.Since(start))
-		fmt.Printf("Name:      %s\n", resp.SandboxName)
-		fmt.Printf("UID:       %s\n", resp.SandboxUid)
-		fmt.Printf("Fastlet:   %s\n", resp.FastletPod)
-		fmt.Println("Data plane: Initializing asynchronously")
+		fmt.Printf("Name:      %s\n", info.GetIdentity().GetName())
+		fmt.Printf("UID:       %s\n", info.GetIdentity().GetUid())
+		fmt.Printf("Ready:     %t\n", info.GetReady())
 	},
 }
 
@@ -186,6 +206,24 @@ func init() {
 	runCmd.Flags().StringSliceVar(&runMetadata, "metadata", nil, "Metadata to persist (key=value)")
 	runCmd.Flags().StringVar(&runFailurePolicy, "failure-policy", "", "Failure policy (Manual|AutoRecreate)")
 	runCmd.Flags().Int32Var(&runRecoveryTimeout, "recovery-timeout", 0, "Recovery delay in seconds")
+	runCmd.Flags().StringArrayVar(&runActionBindings, "action", nil, "Ordered Action Binding as handler=opaque-input; repeat to add Bindings")
+}
+
+func parseActionBindings(values []string) ([]ActionBindingConfig, error) {
+	result := make([]ActionBindingConfig, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		parts := strings.SplitN(value, "=", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			return nil, fmt.Errorf("invalid Action Binding %q; expected handler=opaque-input", value)
+		}
+		if _, found := seen[parts[0]]; found {
+			return nil, fmt.Errorf("duplicate Action Handler %q", parts[0])
+		}
+		seen[parts[0]] = struct{}{}
+		result = append(result, ActionBindingConfig{Handler: parts[0], Input: parts[1]})
+	}
+	return result, nil
 }
 
 func runInteractive(name string, config *SandboxConfig) error {

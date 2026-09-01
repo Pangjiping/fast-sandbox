@@ -8,6 +8,7 @@ import (
 	"time"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
@@ -62,7 +63,10 @@ func (f *controllerFastlet) CreateSandbox(_ context.Context, _ string, request *
 		phase = "running"
 	}
 	f.runtimes[request.Identity.SandboxUID] = phase
-	return &fastletapi.CreateSandboxResponse{Accepted: true, Sandbox: &fastletapi.SandboxStatus{SandboxID: request.Identity.SandboxUID, Phase: phase}}, nil
+	status := controllerObservation(request.Identity.SandboxUID, phase)
+	status.AcceptedGeneration = request.SpecGeneration
+	status.AppliedGeneration = request.SpecGeneration
+	return &fastletapi.CreateSandboxResponse{Disposition: fastletapi.CreateDispositionCreated, Sandbox: status}, nil
 }
 
 func (f *controllerFastlet) InspectSandbox(_ context.Context, _ string, request *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error) {
@@ -76,15 +80,49 @@ func (f *controllerFastlet) InspectSandbox(_ context.Context, _ string, request 
 		failure := &fastletapi.FastletError{Code: fastletapi.ErrorNotFound, Message: "not found"}
 		return &fastletapi.InspectSandboxResponse{Error: failure}, failure
 	}
-	return &fastletapi.InspectSandboxResponse{Sandbox: &fastletapi.SandboxStatus{SandboxID: request.Identity.SandboxUID, Phase: phase}}, nil
+	return &fastletapi.InspectSandboxResponse{Sandbox: controllerObservation(request.Identity.SandboxUID, phase)}, nil
 }
 
-func (f *controllerFastlet) DeleteSandboxV2(_ context.Context, _ string, request *fastletapi.DeleteSandboxV2Request) (*fastletapi.DeleteSandboxV2Response, error) {
+func (f *controllerFastlet) DeleteSandbox(_ context.Context, _ string, request *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleteCall++
 	delete(f.runtimes, request.Identity.SandboxUID)
-	return &fastletapi.DeleteSandboxV2Response{Accepted: true}, nil
+	return &fastletapi.DeleteSandboxResponse{}, nil
+}
+
+func (f *controllerFastlet) ReconcileBindings(_ context.Context, _ string, request *fastletapi.ReconcileBindingsRequest) (*fastletapi.ReconcileBindingsResponse, error) {
+	f.mu.Lock()
+	phase := f.runtimes[request.Identity.SandboxUID]
+	f.mu.Unlock()
+	if phase == "" {
+		phase = "running"
+	}
+	return &fastletapi.ReconcileBindingsResponse{Sandbox: &fastletapi.SandboxStatus{
+		SandboxID:          request.Identity.SandboxUID,
+		Runtime:            controllerObservation(request.Identity.SandboxUID, phase).Runtime,
+		DataPlane:          controllerObservation(request.Identity.SandboxUID, phase).DataPlane,
+		AcceptedGeneration: request.SpecGeneration, AppliedGeneration: request.SpecGeneration,
+	}}, nil
+}
+
+func controllerObservation(sandboxID, phase string) *fastletapi.SandboxStatus {
+	status := &fastletapi.SandboxStatus{SandboxID: sandboxID}
+	switch phase {
+	case "running":
+		status.Runtime.State = fastletapi.RuntimeStateReady
+		status.DataPlane.State = fastletapi.DataPlaneStateReady
+	case "infra-pending", "route-pending":
+		status.Runtime.State = fastletapi.RuntimeStateReady
+		status.DataPlane.State = fastletapi.DataPlaneStatePublishing
+	case "infra-unavailable", "route-unavailable":
+		status.Runtime.State = fastletapi.RuntimeStateReady
+		status.DataPlane.State = fastletapi.DataPlaneStateUnavailable
+	default:
+		status.Runtime.State = fastletapi.RuntimeStateCreating
+		status.DataPlane.State = fastletapi.DataPlaneStatePending
+	}
+	return status
 }
 
 func TestDeclarativeCreateWithoutCapacityStaysPending(t *testing.T) {
@@ -92,19 +130,19 @@ func TestDeclarativeCreateWithoutCapacityStaysPending(t *testing.T) {
 	registry.candidates = nil
 	reconcileTwice(t, reconciler, sandbox.Name)
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
-	require.Nil(t, current.Status.Assignment)
-	require.Equal(t, apiv1alpha2.ObservedStatePending, current.Status.RuntimeState)
+	require.Empty(t, current.Status.Placement.FastletName)
+	require.Equal(t, apiv1alpha2.RuntimePending, current.Status.Runtime.State)
 }
 
 func TestDeclarativeCreateUsesSharedV2Orchestrator(t *testing.T) {
 	reconciler, _, fastlet, sandbox := newControllerHarness(t)
 	reconcileTwice(t, reconciler, sandbox.Name)
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
-	require.NotNil(t, current.Status.Assignment)
-	require.Equal(t, "pod-a", current.Status.Assignment.FastletPodUID)
-	require.Equal(t, int64(1), current.Status.AssignmentAttempt)
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.DataPlaneState)
+	require.NotEmpty(t, current.Status.Placement.FastletName)
+	require.Equal(t, types.UID("pod-a"), current.Status.Placement.FastletPodUID)
+	require.Equal(t, int64(1), current.Status.Placement.Attempt)
+	require.Equal(t, apiv1alpha2.RuntimeReady, current.Status.Runtime.State)
+	require.Equal(t, apiv1alpha2.DataPlaneReady, current.Status.DataPlane.State)
 	fastlet.mu.Lock()
 	require.Equal(t, 1, fastlet.ensureCall)
 	fastlet.mu.Unlock()
@@ -118,30 +156,33 @@ func TestDeclarativeCreatePollsDataPlaneWithoutBlockingRuntimeReady(t *testing.T
 	require.NoError(t, err)
 	result, err := reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
 	require.NoError(t, err)
-	require.Equal(t, DataPlanePollInterval, result.RequeueAfter)
+	require.Equal(t, ObservationPollInterval, result.RequeueAfter)
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.RuntimeState)
-	require.Equal(t, apiv1alpha2.ObservedStateCreating, current.Status.DataPlaneState)
+	require.Equal(t, apiv1alpha2.RuntimeReady, current.Status.Runtime.State)
+	require.Equal(t, apiv1alpha2.DataPlanePublishing, current.Status.DataPlane.State)
 
 	fastlet.ensurePhase = "running"
+	fastlet.mu.Lock()
+	fastlet.runtimes[string(current.UID)] = "running"
+	fastlet.mu.Unlock()
 	result, err = reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
 	require.NoError(t, err)
-	require.Equal(t, DefaultRequeueInterval, result.RequeueAfter)
+	require.Equal(t, ReadyRequeueInterval, result.RequeueAfter)
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	require.Equal(t, apiv1alpha2.ObservedStateReady, current.Status.DataPlaneState)
+	require.Equal(t, apiv1alpha2.DataPlaneReady, current.Status.DataPlane.State)
 }
 
 func TestExplicitCapacityRejectionPreservesDurableAssignmentAndAttemptFence(t *testing.T) {
 	reconciler, _, fastlet, sandbox := newControllerHarness(t)
-	failure := &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true, Outcome: fastletapi.OutcomeRejectedBeforeSideEffects}
+	failure := &fastletapi.CreateCallError{Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects, Failure: &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Message: "full", Retryable: true}}
 	fastlet.ensureErr = failure
 	reconcileTwice(t, reconciler, sandbox.Name)
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
-	require.NotNil(t, current.Status.Assignment)
-	require.Equal(t, "fastlet-a", current.Status.Assignment.FastletName)
+	require.NotEmpty(t, current.Status.Placement.FastletName)
+	require.Equal(t, "fastlet-a", current.Status.Placement.FastletName)
 	require.NotEmpty(t, current.Annotations["sandbox.fast.io/assignment"])
-	require.Equal(t, int64(1), current.Status.AssignmentAttempt)
-	require.Equal(t, apiv1alpha2.ObservedStatePending, current.Status.RuntimeState)
+	require.Equal(t, int64(1), current.Status.Placement.Attempt)
+	require.Equal(t, apiv1alpha2.RuntimePending, current.Status.Runtime.State)
 }
 
 func TestUnknownOutcomePreservesDurableAssignment(t *testing.T) {
@@ -150,8 +191,8 @@ func TestUnknownOutcomePreservesDurableAssignment(t *testing.T) {
 	fastlet.inspectErr = errors.New("connection unavailable")
 	reconcileTwice(t, reconciler, sandbox.Name)
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
-	require.NotNil(t, current.Status.Assignment)
-	require.Equal(t, "fastlet-a", current.Status.Assignment.FastletName)
+	require.NotEmpty(t, current.Status.Placement.FastletName)
+	require.Equal(t, "fastlet-a", current.Status.Placement.FastletName)
 }
 
 func TestPodLostPolicyManualAndAutoRecreate(t *testing.T) {
@@ -167,14 +208,13 @@ func TestPodLostPolicyManualAndAutoRecreate(t *testing.T) {
 			reconciler, registry, _, sandbox := newControllerHarness(t)
 			now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
 			reconciler.Now = func() time.Time { return now }
-			assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
+			placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 			current := getControllerSandbox(t, reconciler, sandbox.Name)
 			current.Spec.FailurePolicy = testCase.policy
 			current.Spec.RecoveryTimeoutSeconds = 1
 			require.NoError(t, reconciler.Update(context.Background(), current))
 			current = getControllerSandbox(t, reconciler, sandbox.Name)
-			current.Status = readyControllerStatus(&assignment)
-			require.NoError(t, reconciler.Status().Update(context.Background(), current))
+			current = seedReadyControllerAssignment(t, reconciler, current, placementStatus)
 			var fastletPod corev1.Pod
 			require.NoError(t, reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "fastlet-a"}, &fastletPod))
 			require.NoError(t, reconciler.Delete(context.Background(), &fastletPod))
@@ -182,18 +222,18 @@ func TestPodLostPolicyManualAndAutoRecreate(t *testing.T) {
 			registry.candidates = nil
 			reconcileTwice(t, reconciler, sandbox.Name)
 			current = getControllerSandbox(t, reconciler, sandbox.Name)
-			require.NotNil(t, current.Status.Recovery)
-			require.True(t, current.Status.Recovery.Deadline.Time.Equal(now.Add(time.Second)))
+			require.NotNil(t, current.Status.Placement.Recovery)
+			require.True(t, current.Status.Placement.Recovery.Deadline.Time.Equal(now.Add(time.Second)))
 			now = now.Add(2 * time.Second)
 			reconcileTwice(t, reconciler, sandbox.Name)
 			current = getControllerSandbox(t, reconciler, sandbox.Name)
 			if testCase.auto {
-				require.Nil(t, current.Status.Assignment)
-				require.Equal(t, int64(2), current.Status.InstanceGeneration)
+				require.Empty(t, current.Status.Placement.FastletName)
+				require.Equal(t, int64(2), current.Status.Runtime.Generation)
 			} else {
-				require.NotNil(t, current.Status.Assignment)
-				require.Equal(t, apiv1alpha2.ObservedStateUnavailable, current.Status.RuntimeState)
-				require.True(t, current.Status.HasCondition(apiv1alpha2.SandboxConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost))
+				require.NotEmpty(t, current.Status.Placement.FastletName)
+				require.Equal(t, apiv1alpha2.RuntimeUnavailable, current.Status.Runtime.State)
+				require.True(t, current.Status.HasCondition(apiv1alpha2.SandboxConditionReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost))
 			}
 		})
 	}
@@ -201,35 +241,33 @@ func TestPodLostPolicyManualAndAutoRecreate(t *testing.T) {
 
 func TestRegistryMissDoesNotMeanFastletPodLost(t *testing.T) {
 	reconciler, registry, _, sandbox := newControllerHarness(t)
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
 	current.Spec.FailurePolicy = apiv1alpha2.FailurePolicyAutoRecreate
 	require.NoError(t, reconciler.Update(context.Background(), current))
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	current.Status = readyControllerStatus(&assignment)
-	require.NoError(t, reconciler.Status().Update(context.Background(), current))
+	current = seedReadyControllerAssignment(t, reconciler, current, placementStatus)
 	registry.fastlets = map[placement.FastletID]placement.FastletInfo{}
 
 	reconcileTwice(t, reconciler, sandbox.Name)
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	require.NotNil(t, current.Status.Assignment)
-	require.Equal(t, int64(1), current.Status.InstanceGeneration)
-	require.Equal(t, apiv1alpha2.ObservedStateUnavailable, current.Status.RuntimeState)
-	require.False(t, current.Status.HasCondition(apiv1alpha2.SandboxConditionRuntimeReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost))
+	require.NotEmpty(t, current.Status.Placement.FastletName)
+	require.Equal(t, int64(1), current.Status.Runtime.Generation)
+	require.Equal(t, apiv1alpha2.RuntimeUnavailable, current.Status.Runtime.State)
+	require.False(t, current.Status.HasCondition(apiv1alpha2.SandboxConditionReady, metav1.ConditionFalse, orchestration.ReasonFastletPodLost))
 }
 
 func TestReplacementPodWithSameNameCannotClaimOldAssignment(t *testing.T) {
 	reconciler, registry, _, sandbox := newControllerHarness(t)
 	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
 	reconciler.Now = func() time.Time { return now }
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
 	current.Spec.FailurePolicy = apiv1alpha2.FailurePolicyAutoRecreate
 	current.Spec.RecoveryTimeoutSeconds = 1
 	require.NoError(t, reconciler.Update(context.Background(), current))
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	current.Status = readyControllerStatus(&assignment)
-	require.NoError(t, reconciler.Status().Update(context.Background(), current))
+	current = seedReadyControllerAssignment(t, reconciler, current, placementStatus)
 	var oldPod corev1.Pod
 	require.NoError(t, reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "fastlet-a"}, &oldPod))
 	require.NoError(t, reconciler.Delete(context.Background(), &oldPod))
@@ -244,20 +282,19 @@ func TestReplacementPodWithSameNameCannotClaimOldAssignment(t *testing.T) {
 	now = now.Add(2 * time.Second)
 	reconcileTwice(t, reconciler, sandbox.Name)
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	require.Nil(t, current.Status.Assignment)
-	require.Equal(t, int64(2), current.Status.InstanceGeneration)
-	require.Equal(t, int64(1), current.Status.AssignmentAttempt)
+	require.Empty(t, current.Status.Placement.FastletName)
+	require.Equal(t, int64(2), current.Status.Runtime.Generation)
+	require.Equal(t, int64(1), current.Status.Placement.Attempt)
 }
 
 func TestDeletionFinalizerWaitsForV2RuntimeDeletion(t *testing.T) {
 	reconciler, _, fastlet, sandbox := newControllerHarness(t)
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
 	current.Finalizers = []string{FinalizerName}
 	require.NoError(t, reconciler.Update(context.Background(), current))
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	current.Status = readyControllerStatus(&assignment)
-	require.NoError(t, reconciler.Status().Update(context.Background(), current))
+	current = seedReadyControllerAssignment(t, reconciler, current, placementStatus)
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
 	fastlet.runtimes[string(current.UID)] = "running"
 	require.NoError(t, reconciler.Delete(context.Background(), current))
@@ -276,15 +313,14 @@ func TestDeletionFinalizerWaitsForV2RuntimeDeletion(t *testing.T) {
 
 func TestResetDeletesOldRuntimeThenAdvancesGeneration(t *testing.T) {
 	reconciler, _, fastlet, sandbox := newControllerHarness(t)
-	assignment := apiv1alpha2.SandboxAssignment{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1, InfraRevision: "infra-minimal-v1"}
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
 	resetAt := metav1.NewTime(time.Now().Add(time.Minute))
 	current := getControllerSandbox(t, reconciler, sandbox.Name)
 	current.Spec.ResetRevision = &resetAt
 	current.Finalizers = []string{FinalizerName}
 	require.NoError(t, reconciler.Update(context.Background(), current))
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	current.Status = readyControllerStatus(&assignment)
-	require.NoError(t, reconciler.Status().Update(context.Background(), current))
+	current = seedReadyControllerAssignment(t, reconciler, current, placementStatus)
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
 	fastlet.runtimes[string(current.UID)] = "running"
 
@@ -293,10 +329,90 @@ func TestResetDeletesOldRuntimeThenAdvancesGeneration(t *testing.T) {
 	_, err = reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
 	require.NoError(t, err)
 	current = getControllerSandbox(t, reconciler, sandbox.Name)
-	require.Nil(t, current.Status.Assignment)
-	require.Equal(t, int64(2), current.Status.InstanceGeneration)
-	require.NotNil(t, current.Status.AcceptedResetRevision)
-	require.Equal(t, resetAt.Unix(), current.Status.AcceptedResetRevision.Unix())
+	require.Empty(t, current.Status.Placement.FastletName)
+	require.Equal(t, int64(2), current.Status.Runtime.Generation)
+	require.NotNil(t, current.Status.Runtime.AcceptedResetRevision)
+	require.Equal(t, resetAt.Unix(), current.Status.Runtime.AcceptedResetRevision.Unix())
+}
+
+func TestExpiredSandboxRecoversWhenExpireTimeIsExtended(t *testing.T) {
+	reconciler, _, fastlet, sandbox := newControllerHarness(t)
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	reconciler.Now = func() time.Time { return now }
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+	current := getControllerSandbox(t, reconciler, sandbox.Name)
+	expiredAt := metav1.NewTime(now.Add(-time.Minute))
+	current.Spec.ExpireTime = &expiredAt
+	current.Finalizers = []string{FinalizerName}
+	require.NoError(t, reconciler.Update(context.Background(), current))
+	current = seedReadyControllerAssignment(t, reconciler, getControllerSandbox(t, reconciler, sandbox.Name), placementStatus)
+	fastlet.runtimes[string(current.UID)] = "running"
+
+	// First pass requests deletion; the second observes the runtime gone and
+	// commits the stopped state with the next instance generation.
+	reconcileTwice(t, reconciler, sandbox.Name)
+	current = getControllerSandbox(t, reconciler, sandbox.Name)
+	require.Empty(t, current.Status.Placement.FastletName)
+	require.Equal(t, apiv1alpha2.RuntimeStopped, current.Status.Runtime.State)
+	require.Equal(t, int64(2), current.Status.Runtime.Generation)
+
+	extended := metav1.NewTime(now.Add(time.Hour))
+	current.Spec.ExpireTime = &extended
+	require.NoError(t, reconciler.Update(context.Background(), current))
+	_, err := reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
+	require.NoError(t, err)
+	current = getControllerSandbox(t, reconciler, sandbox.Name)
+	require.Equal(t, apiv1alpha2.RuntimeReady, current.Status.Runtime.State)
+	require.Equal(t, int64(2), current.Status.Runtime.Generation)
+	require.NotEmpty(t, current.Status.Placement.FastletName)
+}
+
+func TestExpiredSandboxRecoversWithNewerResetRevision(t *testing.T) {
+	reconciler, _, fastlet, sandbox := newControllerHarness(t)
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	reconciler.Now = func() time.Time { return now }
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+	current := getControllerSandbox(t, reconciler, sandbox.Name)
+	expiredAt := metav1.NewTime(now.Add(-time.Minute))
+	current.Spec.ExpireTime = &expiredAt
+	current.Finalizers = []string{FinalizerName}
+	require.NoError(t, reconciler.Update(context.Background(), current))
+	current = seedReadyControllerAssignment(t, reconciler, getControllerSandbox(t, reconciler, sandbox.Name), placementStatus)
+	fastlet.runtimes[string(current.UID)] = "running"
+	reconcileTwice(t, reconciler, sandbox.Name)
+
+	current = getControllerSandbox(t, reconciler, sandbox.Name)
+	resetAt := metav1.NewTime(now.Add(time.Minute))
+	current.Spec.ResetRevision = &resetAt
+	require.NoError(t, reconciler.Update(context.Background(), current))
+	_, err := reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
+	require.NoError(t, err)
+	_, err = reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
+	require.NoError(t, err)
+	current = getControllerSandbox(t, reconciler, sandbox.Name)
+	require.NotNil(t, current.Status.Runtime.AcceptedResetRevision)
+	require.Equal(t, resetAt.Unix(), current.Status.Runtime.AcceptedResetRevision.Unix())
+	require.Equal(t, apiv1alpha2.RuntimeReady, current.Status.Runtime.State)
+	require.Equal(t, int64(2), current.Status.Runtime.Generation)
+}
+
+func TestReadyConditionReasonIsNeverUsedAsControllerState(t *testing.T) {
+	reconciler, _, fastlet, sandbox := newControllerHarness(t)
+	placementStatus := apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: "pod-a", Attempt: 1}
+	current := seedReadyControllerAssignment(t, reconciler, getControllerSandbox(t, reconciler, sandbox.Name), placementStatus)
+	fastlet.runtimes[string(current.UID)] = "running"
+	condition := metav1.Condition{
+		Type: apiv1alpha2.SandboxConditionReady, Status: metav1.ConditionFalse,
+		Reason: orchestration.ReasonExpired, Message: "stale external diagnostic", LastTransitionTime: metav1.Now(),
+	}
+	current.Status.Conditions = []metav1.Condition{condition}
+	require.NoError(t, reconciler.Status().Update(context.Background(), current))
+
+	_, err := reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
+	require.NoError(t, err)
+	current = getControllerSandbox(t, reconciler, sandbox.Name)
+	require.NotEmpty(t, current.Status.Placement.FastletName)
+	require.Equal(t, apiv1alpha2.RuntimeReady, current.Status.Runtime.State)
 }
 
 func newControllerHarness(t *testing.T) (*SandboxReconciler, *controllerRegistry, *controllerFastlet, *apiv1alpha2.Sandbox) {
@@ -338,11 +454,30 @@ func newControllerHarness(t *testing.T) (*SandboxReconciler, *controllerRegistry
 	return reconciler, registry, fastlet, sandbox
 }
 
-func readyControllerStatus(assignment *apiv1alpha2.SandboxAssignment) apiv1alpha2.SandboxStatus {
+func readyControllerStatus(placementStatus apiv1alpha2.PlacementStatus) apiv1alpha2.SandboxStatus {
 	return apiv1alpha2.SandboxStatus{
-		Assignment: assignment, AssignmentAttempt: assignment.Attempt, InstanceGeneration: 1,
-		RuntimeState: apiv1alpha2.ObservedStateReady, DataPlaneState: apiv1alpha2.ObservedStateReady,
+		Placement: placementStatus,
+		Runtime:   apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeReady, Generation: 1},
+		DataPlane: apiv1alpha2.DataPlaneStatus{State: apiv1alpha2.DataPlaneReady, RouteGeneration: 1},
 	}
+}
+
+func seedReadyControllerAssignment(t *testing.T, reconciler *SandboxReconciler, current *apiv1alpha2.Sandbox, placementStatus apiv1alpha2.PlacementStatus) *apiv1alpha2.Sandbox {
+	t.Helper()
+	var pool apiv1alpha2.SandboxPool
+	require.NoError(t, reconciler.Get(context.Background(), types.NamespacedName{Namespace: current.Namespace, Name: current.Spec.PoolRef}, &pool))
+	envelope := assignment.AssignmentEnvelope{
+		Version:     assignment.AssignmentEnvelopeVersion,
+		FastletName: placementStatus.FastletName, FastletPodUID: string(placementStatus.FastletPodUID), NodeName: "node-a",
+		Attempt: placementStatus.Attempt, InstanceGeneration: 1, RouteGeneration: 1, RuntimeInstanceID: "runtime-a",
+		RuntimeProfileHash: "container-runtime-profile-v1", ResourceProfileHash: pool.Spec.SandboxResources.Hash(), InfraRevision: "infra-minimal-v1",
+	}
+	require.NoError(t, assignment.SetAssignmentAnnotation(current, envelope))
+	require.NoError(t, reconciler.Update(context.Background(), current))
+	current = getControllerSandbox(t, reconciler, current.Name)
+	current.Status = readyControllerStatus(placementStatus)
+	require.NoError(t, reconciler.Status().Update(context.Background(), current))
+	return getControllerSandbox(t, reconciler, current.Name)
 }
 
 func reconcileTwice(t *testing.T, reconciler *SandboxReconciler, name string) {

@@ -46,12 +46,11 @@ func (f *fakeHeartbeatClient) Heartbeat(_ context.Context, _ string, request *fa
 func heartbeatFor(podUID, epoch string, sequence, revision uint64, full bool) *fastletapi.HeartbeatResponse {
 	return &fastletapi.HeartbeatResponse{
 		FastletStatus: fastletapi.FastletStatus{
-			FastletPodUID: podUID, RuntimeReady: true,
+			FastletPodUID: podUID, RuntimeReady: true, RuntimeProfileHash: "runtime-hash",
 			Admission: fastletapi.AdmissionStatus{Capacity: 5, Used: 1, Running: 1},
 		},
-		Sequence:    sequence,
-		Cache:       fastletapi.CacheSnapshot{Epoch: epoch, Revision: revision, Full: full, Complete: true, Images: []string{"alpine:latest"}},
-		Diagnostics: fastletapi.RuntimeDiagnostics{RuntimeProfileHash: "runtime-hash"},
+		Sequence: sequence,
+		Cache:    fastletapi.CacheSnapshot{Epoch: epoch, Revision: revision, Full: full, Complete: true, Images: []string{"alpine:latest"}},
 	}
 }
 

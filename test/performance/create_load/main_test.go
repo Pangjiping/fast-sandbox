@@ -22,7 +22,7 @@ import (
 
 type fakeFastPath struct {
 	mu         sync.Mutex
-	requests   []*fastpathv2.CreateRequest
+	requests   []*fastpathv2.CreateSandboxRequest
 	deleted    []string
 	deletedSet map[string]bool
 	failAt     map[string]bool
@@ -34,34 +34,37 @@ func (function roundTripperFunc) RoundTrip(request *http.Request) (*http.Respons
 	return function(request)
 }
 
-func (f *fakeFastPath) CreateSandbox(_ context.Context, request *fastpathv2.CreateRequest, _ ...grpc.CallOption) (*fastpathv2.SandboxInfo, error) {
+func (f *fakeFastPath) CreateSandbox(_ context.Context, request *fastpathv2.CreateSandboxRequest, _ ...grpc.CallOption) (*fastpathv2.CreateSandboxResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, request)
 	if f.failAt[request.RequestId] {
 		return nil, status.Error(codes.ResourceExhausted, "full")
 	}
-	return &fastpathv2.SandboxInfo{SandboxUid: "uid-" + request.RequestId, SandboxName: request.RequestId}, nil
+	return &fastpathv2.CreateSandboxResponse{Sandbox: &fastpathv2.SandboxInfo{Identity: &fastpathv2.SandboxIdentity{
+		Uid: "uid-" + request.RequestId, Name: request.RequestId,
+	}}}, nil
 }
 
 func (f *fakeFastPath) DeleteSandbox(_ context.Context, request *fastpathv2.DeleteRequest, _ ...grpc.CallOption) (*fastpathv2.DeleteResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.deleted = append(f.deleted, request.SandboxName)
+	name := request.GetSandbox().GetNamespacedName().GetName()
+	f.deleted = append(f.deleted, name)
 	if f.deletedSet == nil {
 		f.deletedSet = make(map[string]bool)
 	}
-	f.deletedSet[request.SandboxName] = true
-	return &fastpathv2.DeleteResponse{Success: true}, nil
+	f.deletedSet[name] = true
+	return &fastpathv2.DeleteResponse{}, nil
 }
 
-func (f *fakeFastPath) ListSandboxes(_ context.Context, request *fastpathv2.ListRequest, _ ...grpc.CallOption) (*fastpathv2.ListResponse, error) {
+func (f *fakeFastPath) ListSandboxes(_ context.Context, request *fastpathv2.ListSandboxesRequest, _ ...grpc.CallOption) (*fastpathv2.ListSandboxesResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	response := &fastpathv2.ListResponse{}
+	response := &fastpathv2.ListSandboxesResponse{}
 	for _, create := range f.requests {
 		if create.Namespace == request.Namespace && !f.failAt[create.RequestId] && !f.deletedSet[create.RequestId] {
-			response.Items = append(response.Items, &fastpathv2.SandboxInfo{SandboxName: create.RequestId})
+			response.Items = append(response.Items, &fastpathv2.SandboxSummary{Identity: &fastpathv2.SandboxIdentity{Name: create.RequestId}})
 		}
 	}
 	return response, nil

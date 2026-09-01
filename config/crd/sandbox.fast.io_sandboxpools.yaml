@@ -39,6 +39,47 @@ spec:
           spec:
             description: SandboxPoolSpec defines the desired state of SandboxPool.
             properties:
+              actionHandlers:
+                description: |-
+                  ActionHandlers are Pod-local HTTP receivers used by ordered per-Sandbox
+                  Action Bindings.
+                items:
+                  description: ActionHandler declares one Pod-local HTTP receiver
+                    served on loopback.
+                  properties:
+                    hooks:
+                      description: |-
+                        Hooks selects the lifecycle checkpoints delivered to this Handler. An
+                        empty list makes the Handler config-only: it receives SetBinding and
+                        RemoveBinding but no lifecycle Hook calls.
+                      items:
+                        description: |-
+                          LifecycleHook is a versioned Fastlet-local Sandbox lifecycle checkpoint.
+                          It is intentionally a string alias so future hooks do not require changing
+                          the CRD shape. ValidateActionHandlers rejects names unsupported by this
+                          Fastlet version instead of silently ignoring them.
+                        type: string
+                      maxItems: 16
+                      type: array
+                      x-kubernetes-list-type: set
+                    name:
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    targetHTTPPort:
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                  required:
+                  - name
+                  - targetHTTPPort
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               capacity:
                 description: PoolCapacity describes the sizing policy of the fastlet
                   pool.
@@ -289,6 +330,11 @@ spec:
             - runtime
             - sandboxResources
             type: object
+            x-kubernetes-validations:
+            - message: existing Action Handler names cannot be removed or renamed
+              rule: '!has(oldSelf.actionHandlers) || (has(self.actionHandlers) &&
+                oldSelf.actionHandlers.all(x, self.actionHandlers.exists(y, y.name
+                == x.name)))'
           status:
             description: SandboxPoolStatus defines the observed state of SandboxPool.
             properties:
@@ -354,30 +400,11 @@ spec:
               currentPods:
                 format: int32
                 type: integer
+              fastletRevision:
+                type: string
               idleFastlets:
                 format: int32
                 type: integer
-              infraComponents:
-                items:
-                  description: InfraComponentSummary is safe discovery data for a
-                    compiled Pool revision.
-                  properties:
-                    healthKind:
-                      type: string
-                    name:
-                      type: string
-                    port:
-                      format: int32
-                      type: integer
-                    protocol:
-                      type: string
-                  required:
-                  - healthKind
-                  - name
-                  - port
-                  - protocol
-                  type: object
-                type: array
               infraRevision:
                 type: string
               observedGeneration:
@@ -389,28 +416,8 @@ spec:
               readyPods:
                 format: int32
                 type: integer
-              registry:
-                description: |-
-                  RegistryApplicationStatus reports configuration rollout without exposing
-                  credentials.
-                properties:
-                  appliedFastlets:
-                    format: int32
-                    type: integer
-                  lastError:
-                    type: string
-                  targetGeneration:
-                    format: int64
-                    type: integer
-                  totalFastlets:
-                    format: int32
-                    type: integer
-                type: object
               runtimeRevision:
                 type: string
-              totalFastlets:
-                format: int32
-                type: integer
               warmImages:
                 items:
                   description: WarmImageStatus aggregates cache state for one configured

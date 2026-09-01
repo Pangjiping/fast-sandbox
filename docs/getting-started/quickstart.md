@@ -42,6 +42,17 @@ replacement instead of silently retaining a Fastlet from an earlier run.
 
 Quick Start retains the cluster and Pool for interactive use.
 
+To exercise Sandbox Actions as well, enable the demo Handler:
+
+```bash
+make quickstart RUNTIME=container INFRA=execd ACTIONS=demo
+```
+
+This builds and loads a separate `sandbox-action-fixture` E2E image, declares
+an `egress` Handler with both lifecycle Hooks, and prints commands that create,
+inspect, update, and delete a Binding. The fixture is not included in the
+Fastlet production image.
+
 ## Expose the endpoints
 
 Keep the following command running in terminal 1:
@@ -72,10 +83,9 @@ bin/fastctl get quickstart-execd-sandbox
 bin/fastctl diagnostics sandbox quickstart-execd-sandbox
 ```
 
-Create returns at `RuntimeReady`. The Controller projects CRD status and
-prepares the data plane asynchronously. The `fastctl opensandbox` adapter waits
-directly on the assigned Fastlet when it resolves `execd`, so it does not
-depend on status watch latency or require a separate `kubectl wait`.
+Create defaults to aggregate `Ready`, evaluated inside the assigned Fastlet
+call, so the returned Sandbox can immediately resolve `execd` without waiting
+for CRD status projection or a separate `kubectl wait`.
 
 ## Execute a command
 
@@ -195,7 +205,7 @@ Inspect the independent runtime and data-plane states:
 
 ```bash
 kubectl get sandbox quickstart-execd-sandbox \
-  -o jsonpath='{.status.runtimeState}{" "}{.status.dataPlaneState}{"\n"}'
+  -o jsonpath='{.status.runtime.state}{" "}{.status.dataPlane.state}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}'
 ```
 
 The `fastctl opensandbox` adapter waits for `execd` directly. A non-Ready

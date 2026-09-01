@@ -60,10 +60,12 @@ func (p *RoutePublisher) ReconcileRoutes(ctx context.Context, publications []dat
 
 func routeFromPublication(publication dataplane.RoutePublication) Route {
 	return Route{
-		Namespace: publication.Namespace, SandboxUID: publication.SandboxUID,
-		FastletPodUID: publication.FastletPodUID, AssignmentAttempt: publication.AssignmentAttempt,
-		RouteGeneration: publication.RouteGeneration, Access: publication.Access,
-		State: RouteReady, Components: publication.Components,
+		RouteKey: RouteKey{SandboxUID: publication.SandboxUID, RouteGeneration: publication.RouteGeneration},
+		RouteSpec: RouteSpec{
+			Namespace: publication.Namespace, FastletPodUID: publication.FastletPodUID,
+			AssignmentAttempt: publication.AssignmentAttempt, Access: publication.Access,
+			State: RouteReady, Components: publication.Components,
+		},
 	}
 }
 

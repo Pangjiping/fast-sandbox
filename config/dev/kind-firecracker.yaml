@@ -1,0 +1,40 @@
+# kind-firecracker.yaml — single-node Kind cluster with the host devices the
+# Firecracker runtime needs, passed through into the node container:
+# KVM (vmm) and /dev/net/tun (tap devices). vhost-vsock is intentionally NOT
+# mounted: the firecracker driver probes only /dev/kvm and /dev/net/tun, and
+# hosts without a vhost-vsock device fail kind create when docker tries to
+# create the mount source under /sys.
+#
+# Usage: kind create cluster --config config/dev/kind-firecracker.yaml
+# Then label the node (required by the SandboxTemplate builder and the
+# fastlet scheduling):
+#   kubectl label node <node> sandbox.fast.io/kvm=true
+#   kubectl label node <node> fast-sandbox.io/firecracker-node=true
+#
+# See docs/guides/firecracker-integration-environment.md.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: firecracker
+nodes:
+- role: control-plane
+  extraMounts:
+  # KVM device for the Firecracker microVM.
+  - hostPath: /dev/kvm
+    containerPath: /dev/kvm
+  # Required for KVM access inside the container.
+  - hostPath: /sys/devices/virtual/misc/kvm
+    containerPath: /sys/devices/virtual/misc/kvm
+  # TAP devices for the per-clone netns data plane.
+  - hostPath: /dev/net/tun
+    containerPath: /dev/net/tun
+  # Snapshot memory + rootfs staging; Docker's default 64MiB shm is too
+  # small for the 1:1 guest memory files.
+  - hostPath: /dev/shm
+    containerPath: /dev/shm
+  # Firecracker StateRoot backed by an XFS mount on the host (setup by
+  # scripts/integration-env.sh up): per-sandbox rootfs copies become CoW
+  # reflinks (~ms) instead of full copies (~2.5s on ext4). The host mount
+  # must exist before `kind create`; the path is also used without XFS when
+  # XFS_STATEROOT=0 (plain directory).
+  - hostPath: /var/lib/fast-sandbox
+    containerPath: /var/lib/fast-sandbox

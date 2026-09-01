@@ -41,9 +41,11 @@ func TestProxyForwardsArbitraryPortPreservesApplicationAuthorizationAndStripsRou
 	verifier, err := routeauth.NewVerifier(publicKey, time.Now)
 	require.NoError(t, err)
 	route := Route{
-		Namespace: "default", SandboxUID: "uid-a", FastletPodUID: "pod-a", AssignmentAttempt: 4, RouteGeneration: 7,
-		Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: upstreamURL.Hostname()},
-		State:  RouteReady,
+		RouteKey: RouteKey{SandboxUID: "uid-a", RouteGeneration: 7},
+		RouteSpec: RouteSpec{
+			Namespace: "default", FastletPodUID: "pod-a", AssignmentAttempt: 4,
+			Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: upstreamURL.Hostname()}, State: RouteReady,
+		},
 	}
 	store := NewStore()
 	_, err = store.Apply(route)
@@ -92,9 +94,11 @@ func TestProxyDoesNotTreatCallerAuthorizationAsRouteCredential(t *testing.T) {
 	verifier, err := routeauth.NewVerifier(publicKey, time.Now)
 	require.NoError(t, err)
 	route := Route{
-		Namespace: "default", SandboxUID: "uid-a", FastletPodUID: "pod-a", AssignmentAttempt: 4, RouteGeneration: 7,
-		Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: upstreamURL.Hostname()},
-		State:  RouteReady,
+		RouteKey: RouteKey{SandboxUID: "uid-a", RouteGeneration: 7},
+		RouteSpec: RouteSpec{
+			Namespace: "default", FastletPodUID: "pod-a", AssignmentAttempt: 4,
+			Access: dataplane.AccessDescriptor{Kind: dataplane.AccessKindDirectIP, Address: upstreamURL.Hostname()}, State: RouteReady,
+		},
 	}
 	store := NewStore()
 	_, err = store.Apply(route)

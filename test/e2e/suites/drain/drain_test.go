@@ -51,8 +51,8 @@ func TestPoolScaleDownUsesDurableDrain(t *testing.T) {
 			second := drainSandbox(namespace, "sandbox-b", pool.Name, "docker.io/library/alpine:latest")
 			requireNoError(t, k8sClient.Create(ctx, second), "create second Sandbox")
 			second = waitAssigned(ctx, t, fixture, second)
-			if first.Status.Assignment == nil || second.Status.Assignment == nil || first.Status.Assignment.FastletPodUID == second.Status.Assignment.FastletPodUID {
-				t.Fatalf("expected loaded Sandboxes on distinct Fastlets, got first=%+v second=%+v", first.Status.Assignment, second.Status.Assignment)
+			if first.Status.Placement.FastletName == "" || second.Status.Placement.FastletName == "" || first.Status.Placement.FastletPodUID == second.Status.Placement.FastletPodUID {
+				t.Fatalf("expected loaded Sandboxes on distinct Fastlets, got first=%+v second=%+v", first.Status.Placement, second.Status.Placement)
 			}
 
 			requireNoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -99,7 +99,7 @@ func TestPoolScaleDownUsesDurableDrain(t *testing.T) {
 			third := drainSandbox(namespace, "sandbox-c", pool.Name, "docker.io/library/alpine:latest")
 			requireNoError(t, k8sClient.Create(ctx, third), "create post-drain Sandbox")
 			third = waitAssigned(ctx, t, fixture, third)
-			if third.Status.Assignment.FastletPodUID == string(drainingPod.UID) {
+			if third.Status.Placement.FastletPodUID == drainingPod.UID {
 				t.Fatalf("new Sandbox was assigned to draining Pod %s/%s", drainingPod.Name, drainingPod.UID)
 			}
 			return ctx
@@ -142,8 +142,8 @@ func TestPoolPlannedUpgradeUsesReadySurgeAndDurableDrain(t *testing.T) {
 			sandbox := drainSandbox(namespace, "upgrade-sandbox", pool.Name, "docker.io/library/alpine:latest")
 			requireNoError(t, k8sClient.Create(ctx, sandbox), "create loaded Sandbox")
 			sandbox = waitAssigned(ctx, t, fixture, sandbox)
-			if sandbox.Status.Assignment.FastletPodUID != string(oldPod.UID) {
-				t.Fatalf("Sandbox assigned to %s, want initial Fastlet %s", sandbox.Status.Assignment.FastletPodUID, oldPod.UID)
+			if sandbox.Status.Placement.FastletPodUID != oldPod.UID {
+				t.Fatalf("Sandbox assigned to %s, want initial Fastlet %s", sandbox.Status.Placement.FastletPodUID, oldPod.UID)
 			}
 
 			requireNoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -232,7 +232,7 @@ func waitAssigned(ctx context.Context, t *testing.T, fixture *fixtures.FixtureCl
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	result, err := fixture.WaitForSandbox(waitCtx, client.ObjectKeyFromObject(sandbox), func(current *apiv1alpha2.Sandbox) bool {
-		return current.Status.Assignment != nil && current.Status.RuntimeState == apiv1alpha2.ObservedStateReady
+		return current.Status.Placement.FastletName != "" && current.Status.Runtime.State == apiv1alpha2.RuntimeReady
 	})
 	requireNoError(t, err, "wait for Sandbox assignment")
 	return result

@@ -1,0 +1,10 @@
+.git
+.idea
+.tools
+.DS_Store
+.remote-dev-run.env
+bin
+vendor
+sdk/python/.venv
+**/__pycache__
+**/.pytest_cache

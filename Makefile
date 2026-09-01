@@ -7,6 +7,8 @@ SANDBOX_PROXY_IMAGE ?= $(REGISTRY)/sandbox-proxy:dev
 CONTROLLER_IMAGE ?= $(REGISTRY)/controller:dev
 JANITOR_IMAGE ?= $(REGISTRY)/janitor:dev
 BOXLITE_RUNTIME_IMAGE ?= $(REGISTRY)/boxlite-runtime:dev
+SANDBOX_ACTION_FIXTURE_IMAGE ?= $(REGISTRY)/sandbox-action-fixture:dev
+FIRECRACKER_RUNTIME_AGENT_IMAGE ?= $(REGISTRY)/firecracker-runtime-agent:dev
 
 GO ?= go
 PYTHON ?= python3
@@ -18,14 +20,15 @@ SCOPE ?= unit
 SUITE ?= all
 RUNTIME ?= container
 INFRA ?= execd
+ACTIONS ?= disabled
 PROFILE ?= basic
 E2E_TEST_TIMEOUT ?= 30m
 
 BIN_DIR := $(CURDIR)/bin
 LINUX_BIN_DIR := $(CURDIR)/.build/linux-amd64
-ALL_BINARIES := controller fastlet sandbox-init sandbox-tunnel fastlet-proxy sandbox-proxy janitor fastctl boxlite-runtime
+ALL_BINARIES := controller fastlet sandbox-init sandbox-tunnel sandbox-action-fixture fastlet-proxy sandbox-proxy janitor fastctl boxlite-runtime firecracker-runtime-agent
 CORE_IMAGES := controller fastlet fastlet-proxy sandbox-proxy janitor
-ALL_IMAGES := $(CORE_IMAGES) boxlite-runtime
+ALL_IMAGES := $(CORE_IMAGES) boxlite-runtime sandbox-action-fixture firecracker-runtime-agent
 UNIT_PACKAGES := ./api/... ./cmd/... ./internal/... ./pkg/... ./test/e2e/env/... ./test/e2e/support/... ./test/performance/...
 
 ifeq ($(DEBUG),1)
@@ -78,7 +81,7 @@ help:
 	@echo "           [RUNTIME=container|gvisor|kata|boxlite]"
 	@echo "      Run E2E tests; each suite prepares the runtime profile it needs."
 	@echo ""
-	@echo "  make quickstart [RUNTIME=container|gvisor|kata-qemu|kata-clh|kata-fc|kata-dragonball] [INFRA=execd|minimal]"
+	@echo "  make quickstart [RUNTIME=...] [INFRA=execd|minimal] [ACTIONS=disabled|demo]"
 	@echo "      Prepare an interactive environment and print copy/paste examples."
 	@echo ""
 	@echo "  make quickstart-forward"
@@ -112,6 +115,7 @@ images:
 	for component in $$components; do \
 		case "$$component" in \
 			fastlet) binaries="fastlet sandbox-init sandbox-tunnel" ;; \
+			sandbox-action-fixture) binaries="sandbox-action-fixture" ;; \
 			boxlite-runtime) binaries="" ;; \
 			*) binaries="$$component" ;; \
 		esac; \
@@ -130,6 +134,9 @@ images:
 			boxlite-runtime) docker build $(DOCKER_BUILD_FLAGS) \
 				--build-arg GOPROXY="$(GOPROXY)" \
 				-t "$(BOXLITE_RUNTIME_IMAGE)" -f build/Dockerfile.boxlite-runtime . ;; \
+			sandbox-action-fixture) docker build $(DOCKER_BUILD_FLAGS) -t "$(SANDBOX_ACTION_FIXTURE_IMAGE)" -f build/Dockerfile.sandbox-action-fixture . ;; \
+			firecracker-runtime-agent) docker build $(DOCKER_BUILD_FLAGS) \
+				-t "$(FIRECRACKER_RUNTIME_AGENT_IMAGE)" -f build/Dockerfile.firecracker-runtime-agent . ;; \
 		esac || exit $$?; \
 	done
 
@@ -236,35 +243,42 @@ e2e:
 		$(GO) test $$flags $$packages -v -count=1 -timeout "$(E2E_TEST_TIMEOUT)"
 
 quickstart:
-	@case "$(RUNTIME):$(INFRA)" in \
-		container:execd) \
+	@case "$(RUNTIME):$(INFRA):$(ACTIONS)" in \
+		container:execd:disabled) \
 			profile=basic; pool_file=config/samples/pool-container-execd.yaml; \
 			pool=quickstart-execd-pool; sandbox=quickstart-execd-sandbox; data_plane=execd ;; \
-		container:minimal) \
+		container:execd:demo) \
+			profile=basic; pool_file=config/samples/pool-container-execd-actions.yaml; \
+			pool=quickstart-execd-actions-pool; sandbox=quickstart-execd-actions-sandbox; data_plane=execd ;; \
+		container:minimal:disabled) \
 			profile=basic; pool_file=config/samples/pool-container.yaml; \
 			pool=quickstart-pool; sandbox=quickstart-minimal-sandbox; data_plane= ;; \
-		gvisor:execd) \
+		container:minimal:demo) \
+			profile=basic; pool_file=config/samples/pool-container-actions.yaml; \
+			pool=quickstart-actions-pool; sandbox=quickstart-actions-sandbox; data_plane= ;; \
+		gvisor:execd:disabled) \
 			profile=gvisor; pool_file=config/samples/pool-gvisor.yaml; \
 			pool=gvisor-execd-pool; sandbox=quickstart-gvisor-execd-sandbox; data_plane=execd ;; \
-		kata-qemu:execd) \
+		kata-qemu:execd:disabled) \
 			profile=kata-qemu; pool_file=config/samples/pool-kata-qemu.yaml; \
 			pool=kata-qemu-execd-pool; sandbox=quickstart-kata-qemu-execd-sandbox; data_plane=execd ;; \
-		kata-clh:execd) \
+		kata-clh:execd:disabled) \
 			profile=kata-clh; pool_file=config/samples/pool-kata.yaml; \
 			pool=kata-clh-execd-pool; sandbox=quickstart-kata-clh-execd-sandbox; data_plane=execd ;; \
-		kata-fc:execd) \
+		kata-fc:execd:disabled) \
 			profile=kata-fc; pool_file=config/samples/pool-kata-fc.yaml; \
 			pool=kata-fc-execd-pool; sandbox=quickstart-kata-fc-execd-sandbox; data_plane=execd ;; \
-		kata-dragonball:execd) \
+		kata-dragonball:execd:disabled) \
 			profile=kata-dragonball; pool_file=config/samples/pool-kata-dragonball.yaml; \
 			pool=kata-dragonball-execd-pool; sandbox=quickstart-kata-dragonball-execd-sandbox; data_plane=execd ;; \
-		*) echo "unsupported Quick Start RUNTIME=$(RUNTIME) INFRA=$(INFRA)" >&2; exit 2 ;; \
+		*) echo "unsupported Quick Start RUNTIME=$(RUNTIME) INFRA=$(INFRA) ACTIONS=$(ACTIONS)" >&2; exit 2 ;; \
 	esac; \
 	resource_namespace=fast-sandbox; \
 	echo ""; \
 	echo "Fast Sandbox Quick Start"; \
 	echo "Runtime:  $(RUNTIME)"; \
 	echo "Infra:    $(INFRA)"; \
+	echo "Actions:  $(ACTIONS)"; \
 	echo "Profile:  $$profile"; \
 	echo ""; \
 	echo "The first run builds images and can take several minutes."; \
@@ -272,6 +286,10 @@ quickstart:
 	echo ""; \
 	echo "[quickstart 1/4] Preparing the reusable kind environment..."; \
 	$(MAKE) --no-print-directory env PROFILE=$$profile || exit $$?; \
+	if [ "$(ACTIONS)" = "demo" ]; then \
+		$(MAKE) --no-print-directory images COMPONENT=sandbox-action-fixture || exit $$?; \
+		kind load docker-image "$(SANDBOX_ACTION_FIXTURE_IMAGE)" --name fsb-e2e-basic || exit $$?; \
+	fi; \
 	echo "[quickstart 2/4] Applying SandboxPool $$pool..."; \
 	kubectl apply -f "$$pool_file" || exit $$?; \
 	image_id=$$(docker image inspect --format='{{.Id}}' "$(FASTLET_IMAGE)") || exit $$?; \
@@ -314,7 +332,7 @@ quickstart:
 	echo ""; \
 	bash test/e2e/hack/quickstart-print.sh \
 		"$$pool" "$$sandbox" "$$data_plane" "$$config_state" \
-		"$$fastpath_port" "$$proxy_port"
+		"$$fastpath_port" "$$proxy_port" "$(ACTIONS)"
 
 quickstart-forward:
 	@bash test/e2e/hack/quickstart-forward.sh

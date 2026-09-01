@@ -64,27 +64,27 @@ func (j *Janitor) cleanupDecision(ctx context.Context, resource ResourceIdentity
 	if !found || string(sandbox.UID) != resource.SandboxUID {
 		return CleanupDecision{Eligible: true, Reason: "SandboxIdentityMissing"}, nil
 	}
-	assignment := sandbox.Status.Assignment
-	if assignment == nil {
+	placement := sandbox.Status.Placement
+	if placement.FastletName == "" {
 		return CleanupDecision{Eligible: true, Reason: "SandboxUnassigned"}, nil
 	}
-	if assignment.FastletPodUID != resource.FastletPodUID {
+	if string(placement.FastletPodUID) != resource.FastletPodUID {
 		return CleanupDecision{Eligible: true, Reason: "AssignmentMoved"}, nil
 	}
 	if resource.InstanceGeneration <= 0 || resource.AssignmentAttempt <= 0 {
 		return CleanupDecision{Reason: "InvalidResourceFence"}, nil
 	}
-	currentGeneration := sandbox.Status.InstanceGeneration
+	currentGeneration := sandbox.Status.Runtime.Generation
 	if currentGeneration < apiv1alpha2.InitialInstanceGeneration {
 		currentGeneration = apiv1alpha2.InitialInstanceGeneration
 	}
-	if currentGeneration > resource.InstanceGeneration || assignment.Attempt > resource.AssignmentAttempt {
+	if currentGeneration > resource.InstanceGeneration || placement.Attempt > resource.AssignmentAttempt {
 		return CleanupDecision{Eligible: true, Reason: "ResourceFenceSuperseded"}, nil
 	}
-	if currentGeneration < resource.InstanceGeneration || assignment.Attempt < resource.AssignmentAttempt {
+	if currentGeneration < resource.InstanceGeneration || placement.Attempt < resource.AssignmentAttempt {
 		return CleanupDecision{Reason: "ResourceFenceAheadOfControlPlane"}, nil
 	}
-	if sandbox.Status.HasCondition("RuntimeReady", metav1.ConditionFalse, "FastletPodLost") {
+	if sandbox.Status.Runtime.State == apiv1alpha2.RuntimeUnavailable && sandbox.Status.Placement.Recovery != nil {
 		return CleanupDecision{Eligible: true, Reason: "SandboxMarkedLost"}, nil
 	}
 	return CleanupDecision{Reason: "AssignmentStillAuthoritative"}, nil

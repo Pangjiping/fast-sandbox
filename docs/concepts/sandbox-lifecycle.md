@@ -30,9 +30,9 @@ The Sandbox status separates:
 
 - runtime state;
 - data-plane state;
-- user-process state;
-- assignment and generation fields;
-- canonical `RuntimeReady` and `DataPlaneReady` Conditions.
+- Infra Component and Action Binding state;
+- placement/recovery and subsystem-owned generations;
+- one aggregate standard `Ready` Condition.
 
 A runtime may be ready while its required Infra Component is still starting. A data-plane failure does not rewrite runtime truth.
 
@@ -46,18 +46,20 @@ Fast-Path and direct CRD creation converge through the same Orchestrator and Fas
 
 Fast-Path writes the complete initial lifecycle intent in the first Sandbox
 CRD operation, including absolute expiry, metadata, failure policy, and
-recovery timeout. Create returns at `RuntimeReady`; component health and
-`DataPlaneReady` remain asynchronous.
+recovery timeout. Create defaults to aggregate `Ready`; explicit
+`RUNTIME_READY` returns early while components, Actions, and DataPlane converge.
 
 ## Delete
 
 Deletion uses a finalizer:
 
-1. stop publishing the route;
-2. delete the runtime through an ensure-absent backend operation;
-3. release network and Infra resources;
-4. retain cleanup state and retry on partial failure;
-5. remove the finalizer only when absence is proven.
+1. mark the local Sandbox Terminating, then attempt Action Binding
+   `RemoveBinding` in reverse order under one shared five-second deadline;
+2. stop publishing the route;
+3. delete the runtime through an ensure-absent backend operation;
+4. release network and Infra resources;
+5. retain platform cleanup state and retry on partial failure;
+6. remove the finalizer only when platform resource absence is proven.
 
 Missing task, container, snapshot, network, or Infra state is treated as success when the desired state is absence. This makes repeated deletion and deletion after a workload exits idempotent.
 

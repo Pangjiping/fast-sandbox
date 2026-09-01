@@ -51,13 +51,13 @@ func (f *FixtureClient) CreateSandbox(ctx context.Context, namespace string, san
 	return sandbox, nil
 }
 
-func (f *FixtureClient) WaitForSandboxRuntimeState(ctx context.Context, name types.NamespacedName, states ...apiv1alpha2.ObservedState) (*apiv1alpha2.Sandbox, error) {
-	allowed := make(map[apiv1alpha2.ObservedState]struct{}, len(states))
+func (f *FixtureClient) WaitForSandboxRuntimeState(ctx context.Context, name types.NamespacedName, states ...apiv1alpha2.RuntimeState) (*apiv1alpha2.Sandbox, error) {
+	allowed := make(map[apiv1alpha2.RuntimeState]struct{}, len(states))
 	for _, state := range states {
 		allowed[state] = struct{}{}
 	}
 	return f.WaitForSandbox(ctx, name, func(sandbox *apiv1alpha2.Sandbox) bool {
-		_, ok := allowed[sandbox.Status.RuntimeState]
+		_, ok := allowed[sandbox.Status.Runtime.State]
 		return ok
 	})
 }
@@ -100,7 +100,7 @@ func (f *FixtureClient) EnsureSandboxRemainsUnassigned(ctx context.Context, name
 			}
 			return err
 		}
-		if sandbox.Status.Assignment != nil {
+		if sandbox.Status.Placement.FastletName != "" {
 			return fmt.Errorf("sandbox %s/%s was assigned unexpectedly", name.Namespace, name.Name)
 		}
 

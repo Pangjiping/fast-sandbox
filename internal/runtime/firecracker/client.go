@@ -48,10 +48,10 @@ type SnapshotNetworkOverride struct {
 // must be the first configuration call: any machine/drive/network setup
 // before it is rejected by Firecracker.
 type SnapshotLoadRequest struct {
-	SnapshotPath      string                    `json:"snapshot_path"`
-	MemBackend        SnapshotMemBackend        `json:"mem_backend"`
-	ResumeVM          bool                      `json:"resume_vm"`
-	NetworkOverrides  []SnapshotNetworkOverride `json:"network_overrides,omitempty"`
+	SnapshotPath     string                    `json:"snapshot_path"`
+	MemBackend       SnapshotMemBackend        `json:"mem_backend"`
+	ResumeVM         bool                      `json:"resume_vm"`
+	NetworkOverrides []SnapshotNetworkOverride `json:"network_overrides,omitempty"`
 }
 
 // SnapshotCreateRequest mirrors PUT /snapshot/create (v1.16). It is used by
