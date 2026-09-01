@@ -129,8 +129,9 @@ Notes and known limits:
 - private-registry images: the builder Pod has no imagePullSecrets and the
   CRD has no credential field — pulls are anonymous. For private source or
   execd images, the platform operator must bind registry pull secrets to
-  the `sandbox-template-builder` ServiceAccount (cluster-level secret +
-  SA imagePullSecrets), which is a documented platform responsibility
+  the `sandbox-template-builder` ServiceAccount in the template's
+  namespace (per-tenant secret + SA imagePullSecrets), which is a
+  documented platform responsibility
 - supply chain: the kernel (S3), oci2rootfs and overlaybd (GitHub) are
   downloaded at builder-image build time at pinned revisions but without
   checksum verification; upgrades should pin and verify checksums

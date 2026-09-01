@@ -13,7 +13,7 @@ A bare-metal KVM host running the full fast-sandbox Firecracker chain with
 one command:
 
 ```
-SandboxTemplate (builder Job, in-cluster)
+SandboxTemplate (builder Pod, in-cluster)
   → golden snapshot published to MinIO
   → node runtime-agent (DaemonSet) pulls + caches
   → SandboxPool schedules fastlet Pods (×2, 5 slots each)
@@ -36,7 +36,7 @@ One-liners:
 |---|---|---|---|
 | MinIO | host Docker container | host | on the kind network (container IP = endpoint); publish + pull credentials |
 | controller | Deployment (1 replica) | control plane | CRDs + RBAC + route-keys; Fast-Path gRPC :9090 |
-| builder Job | Job (on-demand) | KVM-labeled node | /dev/kvm, /dev/net/tun, self-mknod loop devices, publish creds |
+| builder Pod | Job (on-demand) | KVM-labeled node | /dev/kvm, /dev/net/tun, self-mknod loop devices, publish creds |
 | runtime installer | DaemonSet (per-node) | firecracker-node | installs firecracker v1.16.1 + jailer + kernel → hostPath |
 | runtime-agent | DaemonSet (per-node) | firecracker-node | UDS socket + StateRoot shared with fastlets; MinIO pull creds |
 | fastlet Pod | pool-managed Pod ×2 | firecracker-node | profile hostPaths auto-injected; agent socket; registry plan |
@@ -64,7 +64,7 @@ SandboxTemplate controller) and `fast-sandbox.io/firecracker-node=true`
    mounts fail otherwise).
 10. **agent** — readiness = POST /v1/health with a real podUID (read routes
     are POST-only and validate caller identity).
-11. **template build** — builder Job → publish → manifest assertions
+11. **template build** — builder Pod → publish → manifest assertions
     (index/manifest/artifactDigest/sizeBytes/guestNetwork).
 12. **pool** — 2 fastlet pods (poolMin=2), warmImages Cached on both.
 
@@ -231,7 +231,7 @@ Baseline on the reference node (XFS StateRoot):
 - The artifact store must be S3-compatible with immutable,
   digest-addressed objects (`index/<sha256(image)>.json`). Publish and
   pull credentials should be separate (write vs read-only).
-- The store endpoint must be reachable from: builder Job, agent DaemonSet
+- The store endpoint must be reachable from: builder Pod, agent DaemonSet
   (both in-cluster) — a host-side MinIO needs the same routing story as the
   kind-network container-IP trick.
 

@@ -2,7 +2,7 @@
 # integration-env.sh — Kind single-host full-chain integration environment.
 #
 # Builds the fast-sandbox Firecracker on-demand loading chain on a bare-metal
-# KVM host: SandboxTemplate golden-image build (builder Job in-cluster) →
+# KVM host: SandboxTemplate golden-image build (builder Pod in-cluster) →
 # publish MinIO → node runtime-agent (DaemonSet) → fastlet sandbox restore →
 # execd /ping delivery verification.
 #
@@ -721,7 +721,8 @@ credentials_up() {
 	local host
 	host="${MINIO_ENDPOINT#http://}"
 	host="${host#https://}"
-	# Publish credentials: SecretKeyRef'd by the builder Job (fast-sandbox-system).
+	# Publish credentials: SecretKeyRef'd by the builder Pod (same namespace
+	# as the template).
 	kubectl -n "$NS" create secret generic sandbox-oss-credentials \
 		--from-literal=accessKeyId="$MINIO_AK" \
 		--from-literal=secretAccessKey="$MINIO_SK" \

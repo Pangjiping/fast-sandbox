@@ -34,13 +34,21 @@ rules:
   resources: ["configmaps", "secrets"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["get", "create"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
+  # update: ensureBuilderRBAC converges pre-existing same-named Role /
+  # RoleBinding back onto the enforced shape instead of trusting them.
+  verbs: ["get", "create", "update"]
+- apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch", "update"]
 - apiGroups: ["node.k8s.io"]
   resources: ["runtimeclasses"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["sandbox.fast.io"]
-  resources: ["sandboxes", "sandboxpools", "sandboxtemplates", "sandboxes/status", "sandboxpools/status", "sandboxtemplates/status", "sandboxtemplates/finalizers"]
+  resources: ["sandboxes", "sandboxpools", "sandboxtemplates", "sandboxes/status", "sandboxpools/status", "sandboxtemplates/status"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
@@ -109,33 +117,11 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fast-san
 subjects:
 - {kind: ServiceAccount, name: fast-sandbox-proxy, namespace: fast-sandbox-system}
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: sandbox-template-builder
-  namespace: fast-sandbox-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: sandbox-template-builder
-  namespace: fast-sandbox-system
-rules:
-# The builder Pod reports the build outcome by merge-patching its own
-# annotations; build Pods run only in this (platform) namespace.
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: sandbox-template-builder
-  namespace: fast-sandbox-system
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-template-builder}
-subjects:
-- {kind: ServiceAccount, name: sandbox-template-builder, namespace: fast-sandbox-system}
----
+# The SandboxTemplate build Pod runs in the template's (tenant) namespace,
+# owned by the template for cascading deletion. The controller provisions
+# the builder ServiceAccount + Role + RoleBinding (pods/patch only, for the
+# builder to self-report its outcome) per tenant namespace on demand; the
+# controller ClusterRole above grants the create/get permissions it needs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
