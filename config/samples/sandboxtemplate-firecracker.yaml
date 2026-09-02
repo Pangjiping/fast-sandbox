@@ -1,16 +1,18 @@
 # sandboxtemplate-firecracker.yaml — golden-image build for the Firecracker
 # on-demand loading chain.
 #
-# The controller runs a privileged builder Job on a node labeled
-# sandbox.fast.io/kvm=true; the builder bakes the golden snapshot set
-# (rootfs.ext4 / vmstate.snap / memory.snap + manifest) and publishes it to
-# the artifact store (MinIO). The runtime-agent then pulls it per node.
+# The controller runs a privileged builder Pod (owned by this template, in
+# the template's namespace) on a node labeled sandbox.fast.io/kvm=true; the
+# builder bakes the golden snapshot set (rootfs.ext4 / vmstate.snap /
+# memory.snap + manifest) and publishes it to the artifact store (MinIO).
+# The runtime-agent then pulls it per node.
 #
 # Prerequisites:
-#   - Secret <publishSecretRef.name> in namespace fast-sandbox-system with
+#   - Secret <publishSecretRef.name> in this template's namespace with
 #     keys accessKeyId / secretAccessKey / endpoint / region
 #     (see scripts/integration-env.sh for the generated values).
 #   - Node label: kubectl label node <node> sandbox.fast.io/kvm=true
+#   - The namespace must allow privileged Pods (the builder mounts /dev/kvm).
 #
 # Apply with:
 #   kubectl apply -f config/samples/sandboxtemplate-firecracker.yaml

@@ -11,6 +11,12 @@
 > （Actions 协议/CRD，已合入）。**egress 镜像固定为
 > `docker.io/opensandbox/egress:latest`（需求方提供，直接写死使用）**，
 > 本清单不包含镜像构建。
+>
+> **本期范围：仅 network policy 通道（actions 驱动）**——actions 生命周期
+> （SET_BINDING deny-first + `binding.input` 携带策略 / hooks /
+> REMOVE_BINDING）+ A1 host-process 交付模式。**credential 通道不在本期**
+> （credential vault 端点/凭据存储 + fastlet-proxy host upstream / UID
+> 传播 / egress route parsing 随 vault 一起延后），涉及处已标注。
 
 ---
 
@@ -19,10 +25,10 @@
 | # | 任务 | 产出物 | 依赖 |
 |---|------|--------|------|
 | 1 | 协议交叉验证 | 核对结论（文档/测试） | — |
-| 2 | A1：host-process 交付模式 | catalog + sandbox-init 生成逻辑改动 | — |
-| 3 | A2+A3：proxy host upstream + UID 头 | fastlet-proxy 改动 | — |
-| 4 | A4：egress route parsing | fastlet-proxy 改动 | 3 |
-| 5 | Pool 样例 + egress 容器部署形态 | `pool-firecracker-egress.yaml` + fastletTemplate 更新 | 2,4 |
+| 2 | A1：host-process 交付模式 | catalog + CRD + sandbox-init 生成逻辑改动 | — |
+| 3（延后） | A2+A3：proxy host upstream + UID 头 | fastlet-proxy 改动（credential 通道） | — |
+| 4（延后） | A4：egress route parsing | fastlet-proxy 改动（credential 通道） | 3 |
+| 5 | Pool 样例 + egress 容器部署形态 | `pool-firecracker-egress.yaml` + fastletTemplate 更新 | 2 |
 | 6 | 集成测试（verify-egress） | integration-env.sh 扩展 | 5 + egress 镜像 |
 | 7 | 回归与清理 | 全量测试绿 + 文档 | 全部 |
 
@@ -34,28 +40,30 @@
 `components/egress/pkg/actionhandler` 是两侧独立实现的同一协议
 （`sandbox.fast.io/actions/v1`）——必须先核对字节级一致性。
 
-- [ ] 拉取 egress 源码：`Pangjiping/OpenSandbox` @ `feat/egress-actions-handler`
+- [x] 拉取 egress 源码：`Pangjiping/OpenSandbox` @ `feat/egress-actions-handler`
   （pin `460b1cb`），路径 `components/egress/pkg/actionhandler/`
-- [ ] 逐项核对（产出核对表写入 `docs/guides/egress-protocol-verification.md`）：
-  - [ ] `apiVersion` 常量与校验（`sandbox.fast.io/actions/v1`）
-  - [ ] Operation 枚举：`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`
+- [x] 逐项核对（核对表已产出：`docs/guides/egress-protocol-verification.md`）：
+  - [x] `apiVersion` 常量与校验（`sandbox.fast.io/actions/v1`）
+  - [x] Operation 枚举：`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`
     （fast-sandbox `internal/protocol/action/types.go`）
-  - [ ] LifecycleHook 枚举：`sandbox.runtime-ready` /
+  - [x] LifecycleHook 枚举：`sandbox.runtime-ready` /
     `sandbox.data-plane-ready`
-  - [ ] 请求字段：`invocationId`、`sandbox{uid,name,namespace}`、
+  - [x] 请求字段：`invocationId`、`sandbox{uid,name,namespace}`、
     `revision{specGeneration,runtimeInstanceId,attachmentId,routeGeneration}`、
     `attachment.network{ip,gateway,privateCidr,hostVeth}`
-  - [ ] `binding.input` 语义（null vs 字符串"null"——两侧 pointer 处理）
-  - [ ] 错误语义：未知 handler / 无 pending 策略的 data-plane-ready（409）等
-  - [ ] `GET /_fastlet/v1/actions/status` 的 `HandlerStatus` 字段
+  - [x] `binding.input` 语义（null vs 字符串"null"——两侧 pointer 处理）
+    ——本期策略体经此字段传递，已核对两侧编码约定（egress
+    `ParsePolicy` 接受 `""`/`"null"`/`"{}"` → 默认 deny）
+  - [x] 错误语义：未知 handler / 无 pending 策略的 data-plane-ready（409）等
+  - [x] `GET /_fastlet/v1/actions/status` 的 `HandlerStatus` 字段
     （apiVersion/ready/instanceId/message）
-- [ ] 差异项全部记录（如字段命名/大小写/可选性差异——实现者不修改协议，
-  只记录，交回评审决策）
-- [ ] 快速构建验证：egress 侧 `go build ./components/egress/...` 通过
-  （不产出镜像，仅确认代码可编译——镜像由需求方提供）
+- [x] 差异项全部记录（核对表 §5：D1-D5——类型/omitempty/status message/
+  ready 语义/策略编码；实现者不修改协议，交回评审决策）
+- [x] 快速构建验证：egress 侧 `go build ./components/egress/...` 通过
+  （@ `460b1cb`，不产出镜像——镜像由需求方提供）
 
 **验收**：核对表完成；无未记录的协议差异；两侧独立实现可互操作
-（留待任务 6 实测）。
+（留待任务 6 实测——`verify-egress` 阶段 0/2 已含 status 端点字节断言）。
 
 ## 任务 2：A1 host-process 交付模式
 
@@ -77,7 +85,10 @@
 
 **验收**：单测绿；无 host-process 声明时行为与现状完全一致。
 
-## 任务 3：A2+A3 proxy host upstream + UID 头
+## 任务 3（延后）：A2+A3 proxy host upstream + UID 头
+
+> **本期不做**：credential 通道（fastlet-proxy host upstream、UID 头）
+> 随 credential vault 延后。任务保留以备排期。
 
 **位置**：`internal/dataplane/fastletproxy/proxy.go`
 
@@ -85,7 +96,8 @@
   **Pod-netns listener（127.0.0.1:18080）**（区别于现有 DirectIP/
   LocalForward 目标语义）
 - [ ] A3：proxy 注入 `X-Fast-Sandbox-Uid` 头（值为 sandbox 标识）；
-  **不参与 `stripRouteHeaders`**（route 剥离逻辑不删该头）
+  **不参与 `stripRouteHeaders`**（route 剥离逻辑不删该头）；
+  route credential 头**维持现有剥离**（proxy 已校验，egress 不依赖）
 - [ ] 单测（`proxy_test.go`）：
   - egress 目标转发到 127.0.0.1:18080（fake upstream 断言目标与头）
   - UID 头注入正确（sandboxId）；剥离逻辑不剥离 UID 头
@@ -93,7 +105,9 @@
 
 **验收**：单测绿；既有 proxy 测试全绿。
 
-## 任务 4：A4 egress route parsing
+## 任务 4（延后）：A4 egress route parsing
+
+> **本期不做**：同任务 3，随 credential 通道延后。
 
 **位置**：`internal/dataplane/fastletproxy/proxy.go`（`parseTarget`）
 
@@ -116,10 +130,14 @@
     hooks: [sandbox.runtime-ready, sandbox.data-plane-ready]}]`
   - egress 容器进 fastletTemplate（host-process，共享 Pod netns，
     镜像 **`docker.io/opensandbox/egress:latest`** 直接写死）
-  - egress 的 host-process 组件声明（infra 组件 + DeliveryMode）
+  - egress 的 host-process 组件声明（`infraComponents[].delivery:
+    host-process`，无 artifact，endpoint 18080 + tcpConnect 探活）
 - [ ] 确认 fastlet 对 actionHandlers 的投递在 firecracker runtime 下生效
   （#30 已实现，声明即用——验证 `recordActionHook` 的 data-plane-ready
   在 restore + 网络就绪后触发）
+- [ ] 确认策略经 `binding.input` 到达 egress：server 在 Sandbox
+  `spec.actionBindings[egress].input` 写入策略（opaque string 编码），
+  fastlet 的 SET_BINDING 原样携带（任务 1 核对 `binding.input` 语义）
 - [ ] 集成环境文档同步：`docs/guides/firecracker-integration-environment.md`
   补 egress 部署步骤
 
@@ -130,26 +148,29 @@
 
 **前置**：`docker.io/opensandbox/egress:latest`（需求方提供）；
 `kind load docker-image` 进集群（或在 fastlet pod 中直接可拉取）。
+策略通道为本期 **actions 通道**（binding.input），不依赖 proxy route。
 
-- [ ] `integration-env.sh` 新增 `verify-egress` 阶段（复用现有 up 环境）：
-  - **0. 协议一致性实测**：SET_BINDING 被 egress 正确解析（egress 日志/
-    状态断言）——任务 1 核对表的实测闭环
-  - **1. 生命周期**：Sandbox 创建 → SET_BINDING（deny-first）→
-    runtime-ready → 策略推送（proxy route + UID 头）→ data-plane-ready
-    → active → sandbox 出网恢复
-  - **2. fail-closed 窗口**：策略推送前 sandbox 无法出网（DNS
-    NXDOMAIN/转发 drop）；推送后恢复
-  - **3. per-subject 隔离**：同一 fastlet 两个 sandbox 不同策略
-    （allow A / deny B），DNS + 出网分别验证
-  - **4. firecracker 模式**：egress 流量 src=slot.IP（nft trace/计数）；
-    两个 clone sandbox 各自受控
-  - **5. 删除**：REMOVE_BINDING → 规则卸载、subject 释放；重复删除幂等
-  - **6. 重启恢复**：egress 重启 → fastlet 重放（Handler restart
-    replay）；ApplyReset 后重新 deny → server 重推 → active
-  - **7. 清理**：全部 sandbox 删除后 egress 无残留规则（nft list）
-- [ ] 日志/回收沿用既有规范（logs/、failure 落盘、down 无残留）
+- [x] `integration-env.sh` 新增 `verify-egress` 阶段（复用现有 up 环境）：
+  - [x] **0. 协议一致性实测**：egress 容器 ready + `actions/status` 端点
+    字节断言（apiVersion/ready/instanceId）——任务 1 核对表的实测闭环
+  - [x] **1. 生命周期**：Sandbox 创建（`--action egress=<deny 策略>`）→
+    SET_BINDING（deny-first + binding.input 策略）→ runtime-ready →
+    data-plane-ready（egress 日志 "policy active"）→ binding Ready
+  - [x] **2. 真实数据面断言**：guest 内 `wget 1.1.1.1` 在 deny 策略下被
+    阻断（fail-closed 窗口 + 规则真实生效）
+  - [x] **3. 策略更新（patch）**：`kubectl patch` actionBindings.input
+    allow 1.1.1.1 → fastlet 重投 SET_BINDING（日志计数增长）→ guest
+    出网恢复；patch 回 deny → 再次阻断
+  - [x] **4. per-subject 隔离**：同 fastlet 第二个 sandbox（allow）出网
+    成功、第一个（deny）仍阻断
+  - [x] **5. 重启恢复**：egress 容器 `kill 1` → 重启 → fastlet 重放
+    （SET_BINDING 计数增长）→ deny 策略重启后仍生效
+  - [x] **6. 删除**：fastctl delete → egress 日志 REMOVE_BINDING complete
+  - [x] **7. 清理**：egress pool 删除 + 无残留 subject 规则（nft 断言）
+- [x] 日志/回收沿用既有规范（logs/、failure 落盘、down 无残留）
 
-**验收**：`verify-egress` 全绿（8 项断言）。
+**验收**：`verify-egress` 在集成环境全绿（生命周期 + 数据面强制 + 策略
+更新 + 隔离）——脚本已实现，待需求方提供 egress 镜像后在集成环境实测。
 
 ## 任务 7：回归与清理
 
@@ -171,9 +192,9 @@
 | 产出 | 路径 |
 |------|------|
 | 协议核对表 | `docs/guides/egress-protocol-verification.md` |
-| A1 | `internal/catalog/runtime/catalog.go` + sandbox-init 生成改动 + 单测 |
-| A2+A3 | `internal/dataplane/fastletproxy/proxy.go` + 单测 |
-| A4 | `internal/dataplane/fastletproxy/proxy.go`（parseTarget）+ 单测 |
+| A1 | `internal/catalog/runtime/catalog.go` + CRD `delivery` + sandbox-init 生成改动 + 单测 |
+| A2+A3（延后） | `internal/dataplane/fastletproxy/proxy.go` + 单测（credential 通道） |
+| A4（延后） | `internal/dataplane/fastletproxy/proxy.go`（parseTarget）+ 单测（credential 通道） |
 | Pool 样例 | `config/samples/pool-firecracker-egress.yaml` |
 | 集成测试 | `scripts/integration-env.sh`（+verify-egress） |
 | 文档 | 集成环境指南 + 方案文档实测更新 |

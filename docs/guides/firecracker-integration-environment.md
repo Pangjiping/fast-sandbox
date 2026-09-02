@@ -256,6 +256,24 @@ verify # 步骤 9 的断言链（sandbox Running + execd /ping）
 | `scripts/integration-env.sh` | **新增**（up/down/status/verify） |
 | builder/MinIO 逻辑（chain-e2e.sh） | 逻辑抽取 |
 
+## Egress 集成部署（network policy 通道，actions 驱动）
+
+方案与任务清单见 `docs/design/egress-integration-plan.md` /
+`egress-integration-plan-tasks.md`。本期仅 actions 通道：策略经
+`SET_BINDING.binding.input` 传递，credential 通道（proxy route / UID /
+vault）延后。
+
+1. **镜像**：`docker.io/opensandbox/egress:latest`（需求方提供），
+   `kind load docker-image docker.io/opensandbox/egress:latest` 进集群；
+2. **Pool**：apply `config/samples/pool-firecracker-egress.yaml`
+   （= pool-firecracker + `actionHandlers[egress]` + host-process
+   infra 组件 + fastletTemplate 追加 egress 容器）；
+3. **策略**：server 在 Sandbox `spec.actionBindings[egress].input` 写入
+   策略（opaque string 编码，与 egress 侧核对 base64/JSON 约定）；
+4. **验证**：`integration-env.sh verify-egress`（生命周期 deny-first →
+   runtime-ready → data-plane-ready → active；per-subject 隔离；
+   firecracker src=slot.IP；REMOVE_BINDING 清理；egress 重启重放）。
+
 ## 端到端验收清单
 
 1. `SandboxTemplate` Succeeded + MinIO 产物布局正确（index/digest16/

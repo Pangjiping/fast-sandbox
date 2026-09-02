@@ -10,6 +10,8 @@ import (
 
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+
+	"k8s.io/klog/v2"
 )
 
 type PreparedMapping struct {
@@ -76,7 +78,15 @@ func (m *Manager) Prepare(ctx context.Context) error {
 	}
 	m.err = nil
 	prepared := PreparedPlan{Plan: m.plan.Plan}
+	guestComponents := false
 	for _, component := range m.plan.Plan.Components {
+		if component.Delivery == runtimecatalog.InfraDeliveryHostProcess {
+			klog.InfoS("Infra component uses host-process delivery; artifact delivery skipped",
+				"component", component.Name, "delivery", component.Delivery)
+			prepared.Components = append(prepared.Components, PreparedComponent{Plan: component})
+			continue
+		}
+		guestComponents = true
 		source, err := m.config.Resolver.Prepare(ctx, component.Artifact.Source, m.config.Store)
 		if err != nil {
 			m.err = fmt.Errorf("prepare component %s: %w", component.Name, err)
@@ -98,7 +108,7 @@ func (m *Manager) Prepare(ctx context.Context) error {
 		}
 		prepared.Components = append(prepared.Components, preparedComponent)
 	}
-	if len(prepared.Components) > 0 {
+	if guestComponents {
 		if m.config.SandboxInitPath == "" {
 			m.err = errors.New("sandbox-init path is required when Infra Components are configured")
 			return m.err
@@ -163,6 +173,9 @@ func (m *Manager) ArtifactReferences() []string {
 		references = append(references, plan.Tunnel.Digest)
 	}
 	for _, component := range plan.Components {
+		if component.Plan.Delivery == runtimecatalog.InfraDeliveryHostProcess {
+			continue
+		}
 		references = append(references, component.Plan.Artifact.Source.Digest)
 	}
 	return references
