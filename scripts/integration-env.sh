@@ -1311,6 +1311,461 @@ verify_delete_all() {
 	pass "delete cleaned leases + jails ($((CONCURRENCY + 2)) sandboxes)"
 }
 
+# --- verify-egress: egress Actions-channel integration -----------------------
+# Network policy is delivered over the Sandbox Actions channel only this
+# phase (SET_BINDING binding.input / LIFECYCLE_HOOK / REMOVE_BINDING); the
+# credential channel (proxy route / UID / vault) is deferred. Requires the
+# requirement-owned egress image loaded into Kind.
+# See docs/design/egress-integration-plan.md / egress-integration-plan-tasks.md.
+EGRESS_POOL="firecracker-egress-pool"
+EGRESS_IMAGE="docker.io/opensandbox/egress:latest"
+EGRESS_SBX="sandbox-egress"
+
+egress_image_ready() {
+	# docker images reports repositories without the docker.io registry
+	# prefix (docker pull opensandbox/egress:latest lands as
+	# opensandbox/egress:latest), so match either spelling.
+	local local_ref
+	local_ref="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '(^|/)opensandbox/egress:latest$' | head -n 1)" || {
+		fail "egress image opensandbox/egress:latest is not present in local docker; load it first (docker pull opensandbox/egress:latest)"
+		return 1
+	}
+	# Skip the (slow) re-load when the image is already inside the Kind
+	# nodes; kind load is otherwise repeated on every verify-egress run.
+	if kind_node_image_present "$EGRESS_IMAGE"; then
+		log "egress image already loaded into Kind (skipping kind load)"
+		return 0
+	fi
+	log "loading egress image into Kind (this can take minutes for large images)..."
+	timeout 600 kind load docker-image "$local_ref" --name "$KIND_CLUSTER"
+}
+
+kind_node_image_present() { # image
+	local node images image="$1" bare="${1#docker.io/}"
+	node="$(kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | head -n 1)"
+	[[ -n "$node" ]] || return 1
+	images="$(docker exec "$node" crictl images --output json 2>/dev/null)"
+	grep -q "\"$image\"" <<< "$images" || grep -q "\"$bare\"" <<< "$images"
+}
+
+egress_fastlet_pod() {
+	# Fallback used before the sandbox exists (pool readiness): pick any
+	# pod of this pool — every fastlet pod carries an egress sidecar.
+	kubectl -n "$NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$EGRESS_POOL" \
+		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+# egress_sandbox_pod resolves the fastlet pod a sandbox is placed on (the
+# pool runs multiple pods; e.g. the restart stage must kill the egress
+# sidecar the sandbox actually uses so the Fastlet replay happens there).
+egress_sandbox_pod() { # sandbox
+	kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.status.placement.fastletName}' 2>/dev/null
+}
+
+# egress_pool_pods lists every fastlet pod of the egress pool. The pool runs
+# poolMin=2 pods and a sandbox can land on either, so log/count assertions
+# must scan all of them instead of pinning one pod.
+egress_pool_pods() {
+	local out attempt
+	for attempt in 1 2 3; do
+		out="$(kubectl -n "$NS" get pods \
+			-l "app=sandbox-fastlet,fast-sandbox.io/pool=$EGRESS_POOL" \
+			-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
+		if [[ -n "$out" ]]; then
+			echo "$out"
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+egress_container_ready() {
+	local pod
+	for pod in $(egress_pool_pods); do
+		if kubectl -n "$NS" get pod "$pod" -o jsonpath='{range .status.containerStatuses[*]}{.name}{"="}{.ready}{" "}{end}' 2>/dev/null | grep -q 'egress=true'; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Protocol cross-verification (live): GET /_fastlet/v1/actions/status must
+# echo the shared apiVersion, ready=true, and a non-empty instanceId. The
+# egress Handler binds Pod loopback only (127.0.0.1:18080), so the probe
+# runs inside the egress container (the image ships curl + nftables).
+egress_status_ready() {
+	local pod out
+	pod="$(egress_fastlet_pod)"
+	[[ -n "$pod" ]] || return 1
+	out="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- \
+		curl -fsS -m 5 "http://127.0.0.1:18080/_fastlet/v1/actions/status" 2>/dev/null)"
+	[[ "$out" == *'"apiVersion":"sandbox.fast.io/actions/v1"'* && "$out" == *'"ready":true'* && "$out" == *'"instanceId":'* ]]
+}
+
+egress_log_has() { # pattern
+	local pod found="" lines
+	for pod in $(egress_pool_pods); do
+		lines="$(kubectl -n "$NS" logs "pod/$pod" -c egress --tail=300 2>/dev/null)"
+		log "egress log check $pod: lines=$(grep -c . <<< "$lines") match=$(grep -c "$1" <<< "$lines")"
+		if grep -q "$1" <<< "$lines"; then
+			found=1
+			break
+		fi
+	done
+	if [[ -z "$found" ]]; then
+		log "egress log pattern '$1' not found (pool pods: $(egress_pool_pods 2>/dev/null | tr '\n' ' '))"
+	fi
+	[[ -n "$found" ]]
+}
+
+# Count of SET_BINDING-applied lines across every pool pod's egress log.
+# Used to distinguish a policy-update SET_BINDING from the initial one.
+egress_set_binding_count() {
+	local total=0 pod n
+	for pod in $(egress_pool_pods); do
+		n="$(kubectl -n "$NS" logs "pod/$pod" -c egress --tail=2000 2>/dev/null | grep -c "SET_BINDING applied")"
+		total=$((total + n))
+	done
+	echo "$total"
+}
+
+# Update the Sandbox's egress ActionBinding input (policy update) via the
+# fastpath UpdateSandbox RPC: the Fastlet only reacts to RPCs, so a direct
+# kubectl patch of the Sandbox CR would never reach it. The RPC re-delivers
+# SET_BINDING with the new binding.input; an already-active subject applies
+# the policy in place (no Hook replay).
+egress_patch_policy() { # sandbox policy-json
+	# Output is kept: a silent update failure otherwise stalls the policy
+	# wait below for no reason.
+	fastctl update "$1" --action "egress=$2"
+}
+
+# egress_guest_reachable probes the egress data plane from the sandbox's
+# own slot netns (fastlet pod, ip netns exec): a DNS query to the slot
+# gateway is redirected to the egress DNS proxy, which evaluates the domain
+# policy (deny -> refused/hung, allow -> resolves). This bypasses the
+# execd /command SSE endpoint, which is broken on the firecracker snapshot
+# (the execd answers /ping but /command never streams).
+#
+# The sandbox netns is located via the egress dispatch rule
+# (ip saddr <slot.IP> iifname <veth> jump subj_<uid>) — the veth name is
+# the netns name prefix (fh<hash13> vs fsb<hash>).
+EGRESS_PROBE_URL="http://example.com/"
+EGRESS_DENY_POLICY='{"defaultAction":"deny"}'
+# allow example.com (domain, resolved IPs land in the dyn_v4 set) plus a
+# static IP (1.1.1.1, allow_v4) so IP-direct probing has a stable,
+# reliably reachable target.
+EGRESS_ALLOW_POLICY='{"egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"1.1.1.1"}],"defaultAction":"deny"}'
+
+egress_sandbox_netns() { # sandbox -> netns name
+	# Locate the netns whose eth0 peer (veth) still exists in the sandbox's
+	# own fastlet pod AND carries the dispatch slot IP. Historical leftover
+	# netns share the slot IP range and dispatch matches on saddr alone, so
+	# a plain IP match can pick an orphan netns whose peer veth is gone —
+	# its traffic never reaches the egress bridge (Connection refused).
+	local pod uid key line ip ns peer
+	pod="$(egress_sandbox_pod "$1")" || return 1
+	uid="$(kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$uid" ]] || return 1
+	key="subj_s_${uid//-/_}"
+	line="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- nft list ruleset 2>/dev/null | grep "jump $key" | grep "ip saddr" | head -n 1)" || return 1
+	ip="$(sed -n 's/.*ip saddr \([0-9.]*\).*/\1/p' <<< "$line")"
+	[[ -n "$ip" ]] || {
+		log "egress_sandbox_netns $1: dispatch rule parsed no saddr (line: $line)"
+		return 1
+	}
+	for ns in $(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns list 2>/dev/null | awk '{print $1}'); do
+		peer="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip link show eth0 2>/dev/null | grep -o '@if[0-9]*' | tr -d '@if')"
+		[[ -n "$peer" ]] || continue
+		peer_ok="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip link show 2>/dev/null | grep -c "^${peer}:")"
+		ip_ok="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip -o addr show 2>/dev/null | grep -c "$ip/")"
+		[[ "$peer_ok" -ge 1 && "$ip_ok" -ge 1 ]] || continue
+		# The live sandbox's netns has its VM tap UP (vmtap0); historical
+		# leftover netns reuse the slot IP but their VM is dead (DOWN) and
+		# their peer bridge is gone — probes there get Connection refused.
+		vmtap_up="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip link show vmtap0 2>/dev/null | grep -c "state UP")"
+		if [[ "$vmtap_up" -ge 1 ]]; then
+			echo "$ns"
+			return 0
+		fi
+	done
+	log "egress_sandbox_netns $1: no live netns in $pod carries slot IP $ip"
+	return 1
+}
+
+# egress_ip_reachable probes the per-subject nft rules with IP-direct
+# traffic (no DNS involved): a TCP connect to a raw IP is governed only by
+# the subj_ chain (dyn/allow sets accept, final drop otherwise). TCP-only
+# (nc) so HTTP-level behavior (CDN Host routing, 4xx pages) cannot skew
+# the result — a deny drops the SYN silently (nc -w times out).
+egress_ip_reachable() { # sandbox ip
+	local pod ns
+	pod="$(egress_sandbox_pod "$1")" || return 1
+	ns="$(egress_sandbox_netns "$1")" || return 1
+	kubectl -n "$NS" exec "pod/$pod" -c fastlet -- \
+		ip netns exec "$ns" timeout 5 nc -w 3 "$2" 80 </dev/null >/dev/null 2>&1
+}
+
+# egress_dyn_v4_has asserts the DNS-resolved IP landed in the subject's
+# dynamic nft set (dyn_v4), which is what makes the follow-up TCP accepted.
+egress_dyn_v4_has() { # sandbox ip
+	local pod uid set
+	pod="$(egress_sandbox_pod "$1")" || return 1
+	uid="$(kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$uid" ]] || return 1
+	set="subj_s_${uid//-/_}_dyn_v4"
+	kubectl -n "$NS" exec "pod/$pod" -c egress -- nft list set inet opensandbox-fleet "$set" 2>/dev/null | grep -q "$2"
+}
+
+# EGRESS_IP is a well-known, reliably reachable public address used for
+# IP-direct probing; deny-first drops it via the subj_ chain regardless
+# of DNS.
+EGRESS_IP="1.1.1.1"
+
+# egress_probe_ip extracts the first IPv4 A record from a DNS probe
+# (nslookup prints the server as 'Address: <ip>:53', A answers as plain
+# 'Address: <ip>').
+egress_probe_ip() { # sandbox -> ip
+	local pod ns out
+	pod="$(egress_sandbox_pod "$1")" || return 1
+	ns="$(egress_sandbox_netns "$1")" || return 1
+	gw="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip route 2>/dev/null | awk '/default/{print $3; exit}')"
+	[[ -n "$gw" ]] || return 1
+	out="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" timeout 5 nslookup example.com "$gw" 2>&1)"
+	awk '/^Address:/ { if ($2 ~ /^[0-9.]+$/) { print $2; exit } }' <<< "$out"
+}
+
+egress_guest_reachable() { # sandbox
+	local pod ns gw out
+	pod="$(egress_sandbox_pod "$1")" || return 1
+	ns="$(egress_sandbox_netns "$1")" || {
+		log "egress data-plane probe for $1: slot netns not found (dispatch rule missing?)"
+		return 1
+	}
+	gw="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip route 2>/dev/null | awk '/default/{print $3; exit}')"
+	[[ -n "$gw" ]] || return 1
+	out="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" timeout 5 nslookup example.com "$gw" 2>&1)"
+	log "egress DNS probe for $1 (netns $ns, gw $gw): $(tr '\n' ' ' <<< "$out")"
+	# A resolution matches on the answer's Name line; the nslookup Server
+	# section also prints 'Address: <server>' and would falsely match.
+	grep -q "Name:" <<< "$out"
+}
+
+egress_binding_state() { # sandbox
+	kubectl -n "$NS" get sandbox "$1" -o jsonpath="{.status.actionBindings[?(@.handler=='egress')].state}" 2>/dev/null
+}
+
+egress_binding_ready() { # sandbox
+	[[ "$(egress_binding_state "$1")" == "Ready" ]]
+}
+
+# egress_nft_subjects_clean asserts the per-subject chains are really gone
+# from the host data plane on every pool pod. The egress image implements
+# enforcement with nft (table opensandbox-fleet, per-subject chain
+# subj_<id>), so the CLI must be present; a missing CLI fails the stage
+# instead of skipping the assertion.
+egress_nft_subjects_clean() {
+	local pod rules any
+	any=""
+	for pod in $(egress_pool_pods); do
+		rules="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- nft list ruleset 2>/dev/null)"
+		[[ -n "$rules" ]] || { fail "nft CLI unavailable in the egress container; cannot verify rule unload"; return 1; }
+		any+="$rules"
+	done
+	! grep -q 'subj_' <<< "$any"
+}
+
+# Create the egress sandbox after removing any leftover of the same name.
+# A stale Sandbox keeps its placement pointing at a replaced Fastlet pod
+# (assignedPodLost), so the controller never reconciles its bindings —
+# policy updates via fastctl update would silently not reach the Fastlet.
+# Deletion uses kubectl directly: fastctl delete goes through fastpath,
+# which consults the (possibly dead) assigned Fastlet and can wedge.
+egress_run_sandbox() { # sandbox policy-json
+	local name="$1" attempt=0
+	if kubectl -n "$NS" get sandbox "$name" >/dev/null 2>&1; then
+		fastctl delete "$name" >/dev/null 2>&1 \
+			|| kubectl -n "$NS" delete sandbox "$name" --ignore-not-found >/dev/null 2>&1 \
+			|| true
+		while kubectl -n "$NS" get sandbox "$name" >/dev/null 2>&1; do
+			attempt=$((attempt + 1))
+			if [[ "$attempt" -ge 30 ]]; then
+				# Last resort: drop the cleanup finalizer so a dead
+				# assigned Fastlet cannot wedge the delete.
+				kubectl -n "$NS" patch sandbox "$name" --type=merge \
+					-p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+			fi
+			if [[ "$attempt" -ge 60 ]]; then
+				fail "leftover $name could not be removed"
+			fi
+			sleep 1
+		done
+	fi
+	fastctl run "$name" --image "$SBX_IMAGE" --pool "$EGRESS_POOL" --action "egress=$2"
+}
+
+verify_egress() {
+	local sbx_a="$EGRESS_SBX" sbx_b="$EGRESS_SBX-2" sbx_pod probe_ip binding_n
+
+	port_forward_up
+	resolve_daemon_up
+
+	run_stage "egress 0: egress image available + loaded into Kind" egress_image_ready
+
+	# A fresh single-fastlet pool guarantees BOTH sandboxes land on the SAME
+	# egress instance — the core scenario under test is multiple subjects
+	# with different policies on one egress control plane.
+	run_stage "egress 1: reset egress pool (single fastlet) + egress container ready" \
+		kubectl -n "$NS" delete sandboxpool "$EGRESS_POOL" --ignore-not-found
+	kubectl -n "$NS" apply -f config/samples/pool-firecracker-egress.yaml
+	wait_for "exactly one egress fastlet pod" 180 egress_single_pod
+	wait_for "egress container ready in the fastlet pod" 180 egress_container_ready
+	pass "egress (host-process) container running in a single fastlet pod"
+
+	trap 'port_forward_down; resolve_daemon_down' EXIT
+	run_stage "egress 2: actions/status protocol cross-verification" egress_status_ready
+	pass "GET /_fastlet/v1/actions/status: apiVersion + ready + instanceId (protocol agreement)"
+
+	run_stage "egress 3: create A (deny) and B (allow) on the same fastlet" \
+		egress_run_sandbox "$sbx_a" "$EGRESS_DENY_POLICY"
+	wait_for "egress binding Ready on A" 120 egress_binding_ready "$sbx_a"
+	wait_for "egress log: SET_BINDING applied" 15 egress_log_has "SET_BINDING applied"
+	run_stage "egress 3: create B" \
+		egress_run_sandbox "$sbx_b" "$EGRESS_ALLOW_POLICY"
+	wait_for "egress binding Ready on B" 120 egress_binding_ready "$sbx_b"
+	sbx_pod="$(egress_sandbox_pod "$sbx_a")"
+	[[ -n "$sbx_pod" && "$sbx_pod" == "$(egress_sandbox_pod "$sbx_b")" ]] || {
+		fail "A and B landed on different fastlet pods ($sbx_pod vs $(egress_sandbox_pod "$sbx_b")) — single-pool assumption broken"
+	}
+	pass "A and B co-located on fastlet $sbx_pod (one egress instance)"
+
+	# Default state: two subjects, different policies, on the same egress.
+	run_stage "egress 4: A deny (DNS + IP blocked)" test_egress_denied "$sbx_a"
+	run_stage "egress 4: A IP-direct blocked" test_egress_ip_denied "$sbx_a" "$EGRESS_IP"
+	pass "subject A: example.com NXDOMAIN and $EGRESS_IP dropped (deny)"
+	run_stage "egress 4: B allow (DNS resolves + IP accepted)" \
+		egress_guest_reachable "$sbx_b"
+	pass "subject B: example.com resolves (allow)"
+	probe_ip="$(egress_probe_ip "$sbx_b")"
+	[[ -n "$probe_ip" ]] || fail "could not resolve example.com for B"
+	wait_for "resolved IP $probe_ip in B's dyn_v4 set" 15 egress_dyn_v4_has "$sbx_b" "$probe_ip"
+	pass "B: DNS-resolved IP $probe_ip entered dyn_v4"
+	wait_for "B: IP-direct $EGRESS_IP accepted" 30 egress_ip_reachable "$sbx_b" "$EGRESS_IP"
+	pass "per-subject isolation on one egress: A denied while B allowed"
+
+	# Switch A deny -> allow; B must stay unaffected.
+	binding_n="$(egress_set_binding_count)"
+	run_stage "egress 5: A -> allow policy" egress_patch_policy "$sbx_a" "$EGRESS_ALLOW_POLICY"
+	wait_for "A binding Ready after policy switch" 120 egress_binding_ready "$sbx_a"
+	wait_for "A: SET_BINDING re-applied" 30 egress_count_gt "$binding_n"
+	wait_for "A: egress allowed after switch" 30 egress_guest_reachable "$sbx_a"
+	wait_for "A: IP-direct $EGRESS_IP accepted after switch" 30 egress_ip_reachable "$sbx_a" "$EGRESS_IP"
+	wait_for "B: still allowed while A switched" 30 egress_guest_reachable "$sbx_b"
+	pass "A allow applied; B unaffected on the same egress"
+
+	# Switch B allow -> deny; A must stay unaffected.
+	binding_n="$(egress_set_binding_count)"
+	run_stage "egress 6: B -> deny policy" egress_patch_policy "$sbx_b" "$EGRESS_DENY_POLICY"
+	wait_for "B binding Ready after deny switch" 120 egress_binding_ready "$sbx_b"
+	wait_for "B: SET_BINDING re-applied" 30 egress_count_gt "$binding_n"
+	run_stage "egress 6: B blocked after switch" test_egress_denied "$sbx_b"
+	run_stage "egress 6: B IP-direct blocked after switch" test_egress_ip_denied "$sbx_b" "$EGRESS_IP"
+	wait_for "A: still allowed while B switched to deny" 30 egress_guest_reachable "$sbx_a"
+	pass "B deny applied; A unaffected (per-subject policy isolation)"
+
+	# Restart the egress worker: the Fastlet replays BOTH subjects; each
+	# keeps its own policy.
+	binding_n="$(egress_set_binding_count)"
+	run_stage "egress 7: egress worker restart -> Fastlet replays A and B" \
+		kubectl -n "$NS" exec "pod/$sbx_pod" -c egress -- \
+		sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = "egress" ] && kill ${p#/proc/}; done'
+	wait_for "egress log: SET_BINDING replayed after restart" 30 egress_count_gt "$binding_n"
+	pass "Handler restart replay observed (new instanceId; A and B re-bound)"
+	wait_for "A: still allowed after replay" 30 egress_guest_reachable "$sbx_a"
+	run_stage "egress 7: B still denied after replay" test_egress_denied "$sbx_b"
+	pass "per-subject policies survive the egress restart"
+
+	# Delete A: its subject rules unload; B's must stay until B is deleted.
+	run_stage "egress 8: delete A; A rules unload while B's remain" \
+		fastctl delete "$sbx_a"
+	wait_for "A gone" 60 egress_sandbox_gone "$sbx_a"
+	wait_for "egress log: REMOVE_BINDING complete" 15 egress_log_has "REMOVE_BINDING complete"
+	wait_for "A subject chain unloaded" 30 egress_subject_absent "$sbx_a" "$sbx_pod"
+	wait_for "B subject chain still present" 15 egress_subject_present "$sbx_b" "$sbx_pod"
+	pass "deleting A unloaded A's subj_ chain only (B untouched)"
+
+	run_stage "egress 9: delete B; all subject rules unloaded" \
+		fastctl delete "$sbx_b"
+	wait_for "B gone" 60 egress_sandbox_gone "$sbx_b"
+	wait_for "no subject chains left in nft" 60 egress_nft_subjects_clean
+	pass "deleting B unloaded the remaining per-subject nft rules"
+
+	run_stage "egress 10: cleanup — egress pool removed" \
+		kubectl -n "$NS" delete sandboxpool "$EGRESS_POOL" --ignore-not-found
+
+	trap - EXIT
+	port_forward_down
+	resolve_daemon_down
+	stage_summary
+	highlight "== verify-egress complete: multi-subject policies on one egress green =="
+}
+# --- verify-egress helpers ---------------------------------------------------
+
+egress_sandboxes_gone() { # a b
+	! sandbox_exists "$1" && ! sandbox_exists "$2"
+}
+
+egress_sandbox_gone() { # sandbox
+	! sandbox_exists "$1"
+}
+
+egress_single_pod() {
+	[[ "$(kubectl -n "$NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$EGRESS_POOL" -o name 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ]]
+}
+
+# egress_subject_present / egress_subject_absent assert whether the sandbox's
+# per-subject nft chain exists on the (single) egress fastlet pod. Used for
+# the per-sandbox rule-unload checks during staged deletion.
+egress_subject_present() { # sandbox pod
+	local uid
+	uid="$(kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$uid" ]] || return 1
+	kubectl -n "$NS" exec "pod/$2" -c egress -- \
+		nft list chain inet opensandbox-fleet "subj_s_${uid//-/_}" 2>/dev/null | grep -q "chain subj_s_"
+}
+
+egress_subject_absent() { # sandbox pod
+	local uid
+	uid="$(kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$uid" ]] || return 0
+	! kubectl -n "$NS" exec "pod/$2" -c egress -- \
+		nft list chain inet opensandbox-fleet "subj_s_${uid//-/_}" 2>/dev/null | grep -q "chain subj_s_"
+}
+
+egress_count_gt() { # count
+	[[ "$(egress_set_binding_count)" -gt "$1" ]]
+}
+
+# test_egress_denied fails the stage if the guest unexpectedly reaches the
+# probe URL (policy leak), passes when egress is really blocked.
+test_egress_denied() { # sandbox
+	if egress_guest_reachable "$1"; then
+		fail "guest egress to $EGRESS_PROBE_URL was NOT blocked (policy leak)"
+	fi
+	pass "guest egress to $EGRESS_PROBE_URL blocked"
+}
+
+# test_egress_ip_denied asserts the per-subject nft chain drops IP-direct
+# traffic under a deny policy.
+test_egress_ip_denied() { # sandbox ip
+	if egress_ip_reachable "$1" "$2"; then
+		fail "IP-direct egress to $2 was NOT blocked (nft rule leak)"
+	fi
+	pass "IP-direct egress to $2 blocked"
+}
+
 # --- status --------------------------------------------------------------------------------------
 status() {
 	log "status: components"
@@ -1378,6 +1833,10 @@ usage: integration-env.sh [--cleanup|--auto-clean] {up|down|status|verify}
   status   component / template / pool / sandbox health
   verify   create 2 sandboxes, probe execd /ping, then a max-concurrency
            batch (CONCURRENCY=5 at pool capacity), delete all, assert cleanup
+  verify-egress
+           egress Actions-channel integration: pool apply, protocol
+           cross-verification, SET_BINDING -> hooks -> REMOVE_BINDING
+           lifecycle, restart replay, teardown (requires the egress image)
 
   --cleanup     down after an interrupted run (same recovery as down)
   --auto-clean  on up failure, run down automatically before dumping logs
@@ -1389,7 +1848,7 @@ for arg in "$@"; do
 	case "$arg" in
 		--cleanup) ACTION="down" ;;
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|verify) ACTION="$arg" ;;
+		up|down|status|verify|verify-egress) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -1442,6 +1901,11 @@ case "$ACTION" in
 	verify)
 		trap 'on_error verify' ERR
 		verify
+		trap - ERR
+		;;
+	verify-egress)
+		trap 'on_error verify_egress' ERR
+		verify_egress
 		trap - ERR
 		;;
 	status)
