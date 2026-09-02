@@ -118,7 +118,9 @@ spec:
                 items:
                   description: |-
                     InfraComponent injects one artifact-backed managed process with one public
-                    named endpoint.
+                    named endpoint. host-process components are declared for revision,
+                    Fastlet-side readiness probing, and routing purposes only: they carry no
+                    artifact and are deployed by fastletTemplate in the Pod network namespace.
                   properties:
                     artifact:
                       description: InfraArtifact defines immutable delivery for one
@@ -180,6 +182,14 @@ spec:
                       - mappings
                       - source
                       type: object
+                    delivery:
+                      description: |-
+                        InfraDeliveryMode selects an explicit delivery path for one Infra Component.
+                        An empty value selects the runtime-defaulted delivery mode. host-process is
+                        the only explicitly selectable mode today.
+                      enum:
+                      - host-process
+                      type: string
                     endpoint:
                       description: InfraEndpoint is the single public endpoint of
                         a component.
@@ -256,11 +266,13 @@ spec:
                       - healthCheck
                       type: object
                   required:
-                  - artifact
                   - endpoint
                   - name
                   - process
                   type: object
+                  x-kubernetes-validations:
+                  - message: artifact is required unless delivery is host-process
+                    rule: has(self.delivery) || has(self.artifact)
                 maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:

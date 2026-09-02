@@ -64,6 +64,47 @@ func TestManagerPreparesTunnelForBoxLite(t *testing.T) {
 	require.Len(t, manager.ArtifactReferences(), 3)
 }
 
+func TestManagerPreparesHostProcessComponentWithoutArtifactOrSupervisor(t *testing.T) {
+	manager, resolver := testHostProcessManager(t)
+	require.NoError(t, manager.Prepare(context.Background()))
+	plan, err := manager.Plan()
+	require.NoError(t, err)
+	require.Nil(t, plan.Supervisor)
+	require.Nil(t, plan.Tunnel)
+	require.Len(t, plan.Components, 1)
+	require.Equal(t, runtimecatalog.InfraDeliveryHostProcess, plan.Components[0].Plan.Delivery)
+	require.Empty(t, plan.Components[0].Mappings)
+	require.Zero(t, resolver.calls, "host-process components must not resolve artifacts")
+	require.Empty(t, manager.ArtifactReferences())
+}
+
+func testHostProcessManager(t *testing.T) (*Manager, *testResolver) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := NewArtifactStore(filepath.Join(root, "pod"), filepath.Join(root, "host"))
+	require.NoError(t, err)
+	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	component := apiv1alpha2.InfraComponent{
+		Name:     "egress",
+		Delivery: apiv1alpha2.InfraDeliveryHostProcess,
+		Process: apiv1alpha2.InfraProcess{
+			Command:     []string{"/bin/egress"},
+			HealthCheck: apiv1alpha2.InfraHealthCheck{TCPConnect: &apiv1alpha2.InfraTCPConnect{}, TimeoutSeconds: 5},
+		},
+		Endpoint: apiv1alpha2.InfraEndpoint{Protocol: "HTTP", Port: 18080},
+	}
+	plan, err := infracatalog.Compile([]apiv1alpha2.InfraComponent{component}, runtimeProfile)
+	require.NoError(t, err)
+	resolver := &testResolver{}
+	manager, err := NewManagerWithConfig(ManagerConfig{
+		Plan: plan, RuntimeProfile: runtimeProfile, Store: store, Resolver: resolver,
+		SandboxInitPath: filepath.Join(root, "sandbox-init"),
+	})
+	require.NoError(t, err)
+	return manager, resolver
+}
+
 type testResolver struct {
 	source    PreparedSource
 	calls     int
@@ -112,7 +153,7 @@ func testInfraPlan(t *testing.T, runtimeProfile runtimecatalog.RuntimeProfile) i
 	t.Helper()
 	component := apiv1alpha2.InfraComponent{
 		Name: "execd",
-		Artifact: apiv1alpha2.InfraArtifact{
+		Artifact: &apiv1alpha2.InfraArtifact{
 			Source: apiv1alpha2.InfraArtifactSource{Image: &apiv1alpha2.InfraArtifactImage{
 				Reference: "registry.example/execd@sha256:0000000000000000000000000000000000000000000000000000000000000000",
 			}},

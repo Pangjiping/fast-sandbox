@@ -9,6 +9,10 @@ type ServiceEndpoint struct {
 	Protocol  string                      `json:"protocol"`
 	Port      uint32                      `json:"port"`
 	Readiness infracatalog.ReadinessProbe `json:"readiness"`
+	// HostProcess marks a component running in the Fastlet Pod network
+	// namespace. Fastlet probes it on Pod loopback instead of the Sandbox
+	// access address and never expects a guest-side listener.
+	HostProcess bool `json:"hostProcess,omitempty"`
 }
 
 type ComponentDiagnostic struct {

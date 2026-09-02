@@ -12,6 +12,8 @@ import (
 
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+
+	"k8s.io/klog/v2"
 )
 
 type TargetDialer func(context.Context, uint32) (net.Conn, error)
@@ -50,7 +52,23 @@ func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, config *fast
 	instance.Diagnostics = nil
 	for _, service := range instance.Services {
 		started := time.Now()
-		serviceErr := m.initializeServiceWithDialer(ctx, dial, service)
+		var serviceErr error
+		if service.HostProcess {
+			// The process runs in the Fastlet Pod network namespace, so its
+			// listener is reached on Pod loopback instead of the Sandbox
+			// access address.
+			klog.V(2).InfoS("Probing host-process component on Pod loopback",
+				"component", service.Component, "port", service.Port, "probe", service.Readiness.Type)
+			serviceErr = m.initializeServiceWithDialer(ctx, func(ctx context.Context, port uint32) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+			}, service)
+			if serviceErr != nil {
+				klog.InfoS("Host-process component readiness probe failed on Pod loopback",
+					"error", serviceErr, "component", service.Component, "port", service.Port, "sandboxID", config.Identity.SandboxUID)
+			}
+		} else {
+			serviceErr = m.initializeServiceWithDialer(ctx, dial, service)
+		}
 		m.observeInfraReady(service.Component, started, serviceErr)
 		if serviceErr == nil {
 			instance.Diagnostics = append(instance.Diagnostics, ComponentDiagnostic{

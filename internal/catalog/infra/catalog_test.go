@@ -98,10 +98,51 @@ func TestRevisionIncludesImmutableArtifactAndProcessContract(t *testing.T) {
 	require.NotEqual(t, first.Revision, second.Revision)
 }
 
+func TestCompileHostProcessComponentSkipsArtifactAndPinsDelivery(t *testing.T) {
+	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeFirecracker)
+	require.NoError(t, err)
+	component := apiv1alpha2.InfraComponent{
+		Name:     "egress",
+		Delivery: apiv1alpha2.InfraDeliveryHostProcess,
+		Process: apiv1alpha2.InfraProcess{
+			Command:     []string{"/bin/egress"},
+			HealthCheck: apiv1alpha2.InfraHealthCheck{TCPConnect: &apiv1alpha2.InfraTCPConnect{}, TimeoutSeconds: 5},
+		},
+		Endpoint: apiv1alpha2.InfraEndpoint{Protocol: "HTTP", Port: 18080},
+	}
+	plan, err := Compile([]apiv1alpha2.InfraComponent{component}, runtimeProfile)
+	require.NoError(t, err)
+	require.Len(t, plan.Components, 1)
+	compiled := plan.Components[0]
+	require.Equal(t, "egress", compiled.Name)
+	require.Equal(t, runtimecatalog.InfraDeliveryHostProcess, compiled.Delivery)
+	require.Empty(t, compiled.Artifact.Source.Type)
+	require.Empty(t, compiled.Artifact.Mappings)
+	require.Equal(t, ProbeTCP, compiled.Process.Readiness.Type)
+	require.Equal(t, 5*time.Second, compiled.Process.Readiness.Timeout)
+	require.Equal(t, uint32(18080), compiled.Endpoint.Port)
+}
+
+func TestCompileRejectsHostProcessDeliveryWithoutRuntimeSupport(t *testing.T) {
+	runtimeProfile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeContainer)
+	require.NoError(t, err)
+	component := apiv1alpha2.InfraComponent{
+		Name:     "egress",
+		Delivery: apiv1alpha2.InfraDeliveryHostProcess,
+		Process: apiv1alpha2.InfraProcess{
+			Command:     []string{"/bin/egress"},
+			HealthCheck: apiv1alpha2.InfraHealthCheck{TCPConnect: &apiv1alpha2.InfraTCPConnect{}},
+		},
+		Endpoint: apiv1alpha2.InfraEndpoint{Protocol: "HTTP", Port: 18080},
+	}
+	_, err = Compile([]apiv1alpha2.InfraComponent{component}, runtimeProfile)
+	require.ErrorIs(t, err, ErrRuntimeUnsupported)
+}
+
 func componentForTest(name, port string) apiv1alpha2.InfraComponent {
 	return apiv1alpha2.InfraComponent{
 		Name: name,
-		Artifact: apiv1alpha2.InfraArtifact{
+		Artifact: &apiv1alpha2.InfraArtifact{
 			Source: apiv1alpha2.InfraArtifactSource{Image: &apiv1alpha2.InfraArtifactImage{
 				Reference: "registry.example/component@sha256:0000000000000000000000000000000000000000000000000000000000000000",
 			}},

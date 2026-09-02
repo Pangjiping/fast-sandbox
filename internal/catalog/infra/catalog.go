@@ -98,6 +98,14 @@ func Compile(components []apiv1alpha2.InfraComponent, runtimeProfile runtimecata
 	}
 	plan := Plan{Components: make([]Component, 0, len(components))}
 	for index := range components {
+		if components[index].Delivery == apiv1alpha2.InfraDeliveryHostProcess {
+			delivery := runtimecatalog.InfraDeliveryHostProcess
+			if !supportsDelivery(runtimeProfile.InfraDeliveryModes, delivery) {
+				return Plan{}, fmt.Errorf("%w: component %s requires host-process delivery unsupported by runtime %s", ErrRuntimeUnsupported, components[index].Name, runtimeProfile.Name)
+			}
+			plan.Components = append(plan.Components, compileComponent(components[index], Artifact{}, delivery))
+			continue
+		}
 		source := ArtifactSource{}
 		switch {
 		case components[index].Artifact.Source.Image != nil:
@@ -118,40 +126,13 @@ func Compile(components []apiv1alpha2.InfraComponent, runtimeProfile runtimecata
 		if !ok {
 			return Plan{}, fmt.Errorf("%w: component %s has no delivery mode for runtime %s", ErrRuntimeUnsupported, components[index].Name, runtimeProfile.Name)
 		}
-		restart := RestartPolicy(components[index].Process.RestartPolicy)
-		if restart == "" {
-			restart = RestartOnFailure
-		}
-		timeout := time.Duration(components[index].Process.HealthCheck.TimeoutSeconds) * time.Second
-		if timeout == 0 {
-			timeout = 10 * time.Second
-		}
-		probe := ReadinessProbe{Timeout: timeout}
-		if components[index].Process.HealthCheck.HTTPGet != nil {
-			probe.Type = ProbeHTTP
-			probe.Path = components[index].Process.HealthCheck.HTTPGet.Path
-		} else {
-			probe.Type = ProbeTCP
-		}
 		mappings := make([]ArtifactMapping, 0, len(components[index].Artifact.Mappings))
 		for _, mapping := range components[index].Artifact.Mappings {
 			mappings = append(mappings, ArtifactMapping{
 				SourcePath: mapping.SourcePath, TargetPath: mapping.TargetPath,
 			})
 		}
-		plan.Components = append(plan.Components, Component{
-			Name:     components[index].Name,
-			Artifact: Artifact{Source: source, Mappings: mappings},
-			Process: Process{
-				Command: append([]string(nil), components[index].Process.Command...),
-				Env:     cloneStrings(components[index].Process.Env), RestartPolicy: restart, Readiness: probe,
-			},
-			Endpoint: Endpoint{
-				Protocol: components[index].Endpoint.Protocol,
-				Port:     uint32(components[index].Endpoint.Port),
-			},
-			Delivery: delivery,
-		})
+		plan.Components = append(plan.Components, compileComponent(components[index], Artifact{Source: source, Mappings: mappings}, delivery))
 	}
 	revision, err := Revision(plan.Components)
 	if err != nil {
@@ -159,6 +140,48 @@ func Compile(components []apiv1alpha2.InfraComponent, runtimeProfile runtimecata
 	}
 	plan.Revision = revision
 	return plan, nil
+}
+
+// compileComponent normalizes the runtime-neutral Process and Endpoint contract
+// shared by every component regardless of delivery mode.
+func compileComponent(declaration apiv1alpha2.InfraComponent, artifact Artifact, delivery runtimecatalog.InfraDeliveryMode) Component {
+	restart := RestartPolicy(declaration.Process.RestartPolicy)
+	if restart == "" {
+		restart = RestartOnFailure
+	}
+	timeout := time.Duration(declaration.Process.HealthCheck.TimeoutSeconds) * time.Second
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	probe := ReadinessProbe{Timeout: timeout}
+	if declaration.Process.HealthCheck.HTTPGet != nil {
+		probe.Type = ProbeHTTP
+		probe.Path = declaration.Process.HealthCheck.HTTPGet.Path
+	} else {
+		probe.Type = ProbeTCP
+	}
+	return Component{
+		Name:     declaration.Name,
+		Artifact: artifact,
+		Process: Process{
+			Command: append([]string(nil), declaration.Process.Command...),
+			Env:     cloneStrings(declaration.Process.Env), RestartPolicy: restart, Readiness: probe,
+		},
+		Endpoint: Endpoint{
+			Protocol: declaration.Endpoint.Protocol,
+			Port:     uint32(declaration.Endpoint.Port),
+		},
+		Delivery: delivery,
+	}
+}
+
+func supportsDelivery(runtimeModes []runtimecatalog.InfraDeliveryMode, requested runtimecatalog.InfraDeliveryMode) bool {
+	for _, mode := range runtimeModes {
+		if mode == requested {
+			return true
+		}
+	}
+	return false
 }
 
 func Revision(components []Component) (string, error) {

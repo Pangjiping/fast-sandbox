@@ -10,7 +10,7 @@ const OpenSandboxExecdImage = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/o
 func OpenSandboxExecdComponent() apiv1alpha2.InfraComponent {
 	return apiv1alpha2.InfraComponent{
 		Name: "execd",
-		Artifact: apiv1alpha2.InfraArtifact{
+		Artifact: &apiv1alpha2.InfraArtifact{
 			Source: apiv1alpha2.InfraArtifactSource{Image: &apiv1alpha2.InfraArtifactImage{
 				Reference: OpenSandboxExecdImage,
 			}},

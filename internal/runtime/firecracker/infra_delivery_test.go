@@ -76,3 +76,22 @@ func TestDeliverGuestInfraRequiresRunner(t *testing.T) {
 	err := deliverGuestInfra(context.Background(), nil, "img", fastletinfra.PreparedInstance{Mounts: infraMounts(t)})
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
+
+func TestDeliverGuestResolverWritesNameserverIntoRootfs(t *testing.T) {
+	runner := &infraRunner{}
+	require.NoError(t, deliverGuestResolver(context.Background(), runner, "/var/lib/fast-sandbox/rootfs.img", resolverForGateway("172.30.0.1")))
+	joined := strings.Join(runner.commands, "\n")
+	require.Contains(t, joined, "mount -o loop /var/lib/fast-sandbox/rootfs.img")
+	require.Contains(t, joined, "printf '%s' 'nameserver 172.30.0.1")
+	require.Contains(t, joined, "etc/resolv.conf")
+	require.Equal(t, 1, strings.Count(joined, "umount "))
+}
+
+func TestDeliverGuestResolverRequiresRunner(t *testing.T) {
+	err := deliverGuestResolver(context.Background(), nil, "img", "nameserver 172.30.0.1\n")
+	require.ErrorIs(t, err, ErrInvalidConfig)
+}
+
+func TestUsesHostProcessDelivery(t *testing.T) {
+	require.False(t, (&Driver{}).usesHostProcessDelivery())
+}

@@ -75,7 +75,7 @@ func TestGenerationAndAssignmentValidation(t *testing.T) {
 func TestValidateInfraComponents(t *testing.T) {
 	valid := SandboxPoolSpec{InfraComponents: []InfraComponent{{
 		Name: "execd",
-		Artifact: InfraArtifact{
+		Artifact: &InfraArtifact{
 			Source: InfraArtifactSource{Image: &InfraArtifactImage{
 				Reference: "ghcr.io/opensandbox/execd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			}},
@@ -105,6 +105,42 @@ func TestValidateInfraComponents(t *testing.T) {
 	tokenEnv := *valid.DeepCopy()
 	tokenEnv.InfraComponents[0].Process.Env = map[string]string{"FAST_SANDBOX_TOKEN": "bad"}
 	require.ErrorIs(t, tokenEnv.ValidateInfraComponents(), ErrInfraComponentsInvalid)
+}
+
+func TestValidateHostProcessInfraComponent(t *testing.T) {
+	hostProcess := SandboxPoolSpec{InfraComponents: []InfraComponent{{
+		Name:     "egress",
+		Delivery: InfraDeliveryHostProcess,
+		Process: InfraProcess{
+			Command:     []string{"/bin/egress"},
+			HealthCheck: InfraHealthCheck{TCPConnect: &InfraTCPConnect{}, TimeoutSeconds: 10},
+		},
+		Endpoint: InfraEndpoint{Protocol: "HTTP", Port: 18080},
+	}}}
+	require.NoError(t, hostProcess.ValidateInfraComponents())
+
+	withArtifact := *hostProcess.DeepCopy()
+	withArtifact.InfraComponents[0].Artifact = &InfraArtifact{
+		Source: InfraArtifactSource{Image: &InfraArtifactImage{
+			Reference: "registry.example/egress@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		}},
+		Mappings: []InfraArtifactMapping{{SourcePath: "/egress", TargetPath: "/.fast/components/egress/egress"}},
+	}
+	require.ErrorIs(t, withArtifact.ValidateInfraComponents(), ErrInfraComponentsInvalid)
+
+	unsupportedDelivery := *hostProcess.DeepCopy()
+	unsupportedDelivery.InfraComponents[0].Delivery = "bind-mount"
+	require.ErrorIs(t, unsupportedDelivery.ValidateInfraComponents(), ErrInfraComponentsInvalid)
+
+	missingArtifact := SandboxPoolSpec{InfraComponents: []InfraComponent{{
+		Name: "execd",
+		Process: InfraProcess{
+			Command:     []string{"/bin/execd"},
+			HealthCheck: InfraHealthCheck{TCPConnect: &InfraTCPConnect{}, TimeoutSeconds: 10},
+		},
+		Endpoint: InfraEndpoint{Protocol: "HTTP", Port: 44772},
+	}}}
+	require.ErrorIs(t, missingArtifact.ValidateInfraComponents(), ErrInfraComponentsInvalid)
 }
 
 func TestSandboxResourceProfileHashIsCanonical(t *testing.T) {

@@ -1,0 +1,118 @@
+# pool-firecracker-egress.yaml — SandboxPool with the OpenSandbox egress
+# Handler attached through the Sandbox Actions channel.
+#
+# Network policy flows through the Actions protocol only (this phase):
+#   - the Pool declares egress as an actionHandlers entry (Pod-loopback
+#     targetHTTPPort 18080) and as a host-process infra component;
+#   - Fastlet delivers SET_BINDING (attachment + binding.input policy),
+#     sandbox.runtime-ready, sandbox.data-plane-ready, REMOVE_BINDING to
+#     the egress Handler on 127.0.0.1:18080;
+#   - the egress process itself runs as a container in fastletTemplate,
+#     sharing the Pod network namespace (host-process delivery: compiled
+#     into the Pool infra revision and probed on Pod loopback, but never
+#     delivered into or supervised by the guest).
+#
+# The credential channel (proxy host upstream / UID header / egress route
+# parsing / credential vault) is deferred to a later phase.
+#
+# egress image: docker.io/opensandbox/egress:latest is provided by the
+# requirement owner and pinned by tag; load it into Kind with:
+#   kind load docker-image docker.io/opensandbox/egress:latest
+#
+# Apply with:
+#   kubectl apply -f config/samples/pool-firecracker-egress.yaml
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxPool
+metadata:
+  name: firecracker-egress-pool
+  namespace: fast-sandbox-system
+spec:
+  fastletTemplate:
+    spec:
+      containers:
+      - name: fastlet
+        image: fast-sandbox/fastlet:dev
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
+          value: /run/fast-sandbox/firecracker/runtime.sock
+        volumeMounts:
+        - name: agent-socket
+          mountPath: /run/fast-sandbox/firecracker
+      - name: egress
+        image: docker.io/opensandbox/egress:latest
+        # IfNotPresent: the integration environment kind-loads the image
+        # into the nodes; Always would force a docker.io pull per restart.
+        imagePullPolicy: IfNotPresent
+        # Fleet profile is required: it serves the Sandbox Actions Handler
+        # endpoints (/_fastlet/v1/actions[/status]) that the Fastlet uses.
+        # Without it egress runs the sidecar profile (policy-file driven)
+        # and exposes no actions surface.
+        env:
+        - name: OPENSANDBOX_EGRESS_PROFILE
+          value: "fleet"
+        # dns+nft: DNS-based domain policy plus the per-subject nft rules
+        # (table opensandbox-fleet, subj_ chains). dns-only would neither
+        # block IP-direct traffic nor create the subj_ chains the
+        # integration test asserts on unload.
+        - name: OPENSANDBOX_EGRESS_MODE
+          value: "dns+nft"
+        # Egress installs nft/iptables rules (DNS redirect + per-subject
+        # sets) and marks sockets; NET_ADMIN covers nft/iptables/SO_MARK,
+        # NET_RAW covers the raw sockets used for DNS response spoofing.
+        # Without these it crashes on "netlink: Operation not permitted".
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+        # Platform validation requires non-zero CPU and memory limits on
+        # every sidecar container so the Pod cgroup stays bounded.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      volumes:
+      - name: agent-socket
+        hostPath:
+          path: /run/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      nodeSelector:
+        fast-sandbox.io/firecracker-node: "true"
+  capacity:
+    # poolMin=1: a single fastlet pod guarantees every egress sandbox lands
+    # on the SAME egress instance — the verify-egress scenario is multiple
+    # subjects with different policies on one control plane.
+    poolMin: 1
+    poolMax: 1
+    bufferMin: 0
+    bufferMax: 0
+  maxSandboxesPerPod: 5
+  runtime: firecracker
+  # host-process declaration: no artifact is delivered; Fastlet probes the
+  # Pod-loopback listener (127.0.0.1:18080) before data-plane-ready and
+  # never includes egress in the guest sandbox-init supervisor config.
+  infraComponents:
+  - name: egress
+    delivery: host-process
+    process:
+      command: ["/bin/egress"]
+      healthCheck:
+        tcpConnect: {}
+        timeoutSeconds: 10
+    endpoint:
+      protocol: HTTP
+      port: 18080
+  actionHandlers:
+  - name: egress
+    targetHTTPPort: 18080
+    hooks: [sandbox.runtime-ready, sandbox.data-plane-ready]
+  sandboxResources:
+    cpu: "1"
+    memory: 512Mi
+    pids: 128
+  warmImages:
+  - alpine:3.19
