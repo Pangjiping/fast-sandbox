@@ -46,7 +46,7 @@ func (f *fakeHeartbeatClient) Heartbeat(_ context.Context, _ string, request *fa
 func heartbeatFor(podUID, epoch string, sequence, revision uint64, full bool) *fastletapi.HeartbeatResponse {
 	return &fastletapi.HeartbeatResponse{
 		FastletStatus: fastletapi.FastletStatus{
-			FastletPodUID: podUID, RuntimeReady: true, RuntimeProfileHash: "runtime-hash",
+			FastletPodUID: podUID, RuntimeReady: true, InfraReady: true, RuntimeProfileHash: "runtime-hash",
 			Admission: fastletapi.AdmissionStatus{Capacity: 5, Used: 1, Running: 1},
 		},
 		Sequence: sequence,
@@ -139,6 +139,83 @@ func TestHeartbeatLoopUsesCacheCursorAndAppliesDelta(t *testing.T) {
 	stored, _ := registry.GetFastletByID("fastlet-a")
 	require.Equal(t, []string{"alpine:latest"}, stored.Images)
 	require.Equal(t, uint64(2), stored.HeartbeatSequence)
+}
+
+func TestReadyProbeRetriesUntilHeartbeatIsSchedulable(t *testing.T) {
+	registry := placement.NewInMemoryRegistry()
+	initial := placement.FastletInfo{
+		ID: "fastlet-a", PodName: "fastlet-a", PodUID: "pod-uid-a", PodIP: "10.0.0.1",
+		Namespace: "default", PoolName: "pool-a", PodReady: true,
+	}
+	registry.UpsertPod(initial)
+	attempt := 0
+	client := &fakeHeartbeatClient{response: func(fastletapi.HeartbeatRequest) *fastletapi.HeartbeatResponse {
+		attempt++
+		heartbeat := heartbeatFor("pod-uid-a", "boot-a", uint64(attempt), 1, true)
+		heartbeat.InfraReady = attempt > 1
+		return heartbeat
+	}}
+	loop := &Loop{
+		Registry: registry, FastletClient: client, RequestTimeout: time.Second,
+		ReadinessRetryInterval: time.Millisecond, MaxConcurrent: 1, probeSemaphore: make(chan struct{}, 1),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	loop.probeUntilSchedulable(ctx, initial)
+
+	client.mu.Lock()
+	require.Len(t, client.requests, 2)
+	client.mu.Unlock()
+	stored, exists := registry.GetFastletByID("fastlet-a")
+	require.True(t, exists)
+	require.True(t, stored.RuntimeReady)
+	require.True(t, stored.InfraReady)
+	require.Equal(t, 5, stored.Capacity())
+}
+
+func TestReadyProbeFallsBackToSteadyPollingAfterFastRetries(t *testing.T) {
+	registry := placement.NewInMemoryRegistry()
+	initial := placement.FastletInfo{
+		ID: "fastlet-a", PodName: "fastlet-a", PodUID: "pod-uid-a", PodIP: "10.0.0.1",
+		Namespace: "default", PoolName: "pool-a", PodReady: true,
+	}
+	registry.UpsertPod(initial)
+	sequence := uint64(0)
+	client := &fakeHeartbeatClient{response: func(fastletapi.HeartbeatRequest) *fastletapi.HeartbeatResponse {
+		sequence++
+		heartbeat := heartbeatFor("pod-uid-a", "boot-a", sequence, 1, true)
+		heartbeat.InfraReady = false
+		return heartbeat
+	}}
+	loop := &Loop{
+		Registry: registry, FastletClient: client, RequestTimeout: time.Second,
+		Interval: 5 * time.Millisecond, ReadinessRetryInterval: time.Millisecond,
+		MaxConcurrent: 1, probeSemaphore: make(chan struct{}, 1),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	loop.probeUntilSchedulable(ctx, initial)
+
+	client.mu.Lock()
+	require.Len(t, client.requests, 3)
+	client.mu.Unlock()
+	stored, exists := registry.GetFastletByID("fastlet-a")
+	require.True(t, exists)
+	require.False(t, stored.InfraReady)
+}
+
+func TestReadinessProbeIsDeduplicatedPerPodIdentity(t *testing.T) {
+	loop := &Loop{}
+	require.True(t, loop.beginReadinessProbe("fastlet-a", "pod-uid-a"))
+	require.False(t, loop.beginReadinessProbe("fastlet-a", "pod-uid-a"))
+	require.True(t, loop.beginReadinessProbe("fastlet-a", "replacement-uid"))
+
+	loop.endReadinessProbe("fastlet-a", "pod-uid-a")
+	require.False(t, loop.beginReadinessProbe("fastlet-a", "replacement-uid"))
+	loop.endReadinessProbe("fastlet-a", "replacement-uid")
+	require.True(t, loop.beginReadinessProbe("fastlet-a", "replacement-uid"))
 }
 
 func TestHeartbeatLoopBoundsConcurrency(t *testing.T) {
