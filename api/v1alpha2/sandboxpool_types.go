@@ -87,6 +87,21 @@ type InfraArtifact struct {
 	Mappings []InfraArtifactMapping `json:"mappings"`
 }
 
+// InfraDeliveryMode selects an explicit delivery path for one Infra Component.
+// An empty value selects the runtime-defaulted delivery mode. host-process is
+// the only explicitly selectable mode today.
+// +kubebuilder:validation:Enum=host-process
+type InfraDeliveryMode string
+
+const (
+	// InfraDeliveryHostProcess declares a component whose process runs in the
+	// Fastlet Pod network namespace (deployed by fastletTemplate) instead of
+	// inside the Sandbox. It is compiled into the Pool revision and probed by
+	// Fastlet on Pod loopback, but never delivered into or supervised by the
+	// guest.
+	InfraDeliveryHostProcess InfraDeliveryMode = "host-process"
+)
+
 // InfraHTTPGet is an HTTP readiness probe on the component endpoint.
 type InfraHTTPGet struct {
 	// +kubebuilder:validation:Pattern=`^/`
@@ -127,14 +142,22 @@ type InfraEndpoint struct {
 }
 
 // InfraComponent injects one artifact-backed managed process with one public
-// named endpoint.
+// named endpoint. host-process components are declared for revision,
+// Fastlet-side readiness probing, and routing purposes only: they carry no
+// artifact and are deployed by fastletTemplate in the Pod network namespace.
 type InfraComponent struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +kubebuilder:validation:MaxLength=63
-	Name     string        `json:"name"`
-	Artifact InfraArtifact `json:"artifact"`
-	Process  InfraProcess  `json:"process"`
-	Endpoint InfraEndpoint `json:"endpoint"`
+	Name string `json:"name"`
+
+	// +optional
+	Delivery InfraDeliveryMode `json:"delivery,omitempty"`
+
+	// Artifact is required unless delivery selects host-process.
+	// +optional
+	Artifact *InfraArtifact `json:"artifact,omitempty"`
+	Process  InfraProcess   `json:"process"`
+	Endpoint InfraEndpoint  `json:"endpoint"`
 }
 
 // LifecycleHook is a versioned Fastlet-local Sandbox lifecycle checkpoint.

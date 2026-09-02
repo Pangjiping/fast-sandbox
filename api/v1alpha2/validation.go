@@ -153,45 +153,38 @@ func (s *SandboxPoolSpec) ValidateInfraComponents() error {
 		}
 		names[component.Name] = struct{}{}
 
-		source := component.Artifact.Source
-		if (source.Image == nil) == (source.Archive == nil) {
-			return fmt.Errorf("%w: component %s must declare exactly one artifact source", ErrInfraComponentsInvalid, component.Name)
+		if component.Delivery != "" && component.Delivery != InfraDeliveryHostProcess {
+			return fmt.Errorf("%w: component %s delivery mode %q is unsupported", ErrInfraComponentsInvalid, component.Name, component.Delivery)
 		}
-		if source.Image != nil {
-			parts := strings.Split(source.Image.Reference, "@sha256:")
-			if len(parts) != 2 || parts[0] == "" || !sha256Pattern.MatchString(parts[1]) {
-				return fmt.Errorf("%w: component %s image reference must be digest-pinned", ErrInfraComponentsInvalid, component.Name)
+		if component.Delivery == InfraDeliveryHostProcess {
+			if component.Artifact != nil {
+				return fmt.Errorf("%w: host-process component %s cannot declare an artifact", ErrInfraComponentsInvalid, component.Name)
 			}
-		}
-		if source.Archive != nil {
-			parsed, err := url.Parse(source.Archive.URL)
-			if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-				return fmt.Errorf("%w: component %s archive URL must be absolute HTTPS", ErrInfraComponentsInvalid, component.Name)
+		} else {
+			if component.Artifact == nil {
+				return fmt.Errorf("%w: component %s requires an artifact unless delivery is host-process", ErrInfraComponentsInvalid, component.Name)
 			}
-			if !sha256Pattern.MatchString(source.Archive.SHA256) {
-				return fmt.Errorf("%w: component %s archive SHA-256 is invalid", ErrInfraComponentsInvalid, component.Name)
+			if err := validateComponentArtifact(component.Name, *component.Artifact); err != nil {
+				return err
 			}
-		}
-		if len(component.Artifact.Mappings) == 0 {
-			return fmt.Errorf("%w: component %s requires at least one artifact mapping", ErrInfraComponentsInvalid, component.Name)
-		}
-		targetRoot := "/.fast/components/" + component.Name
-		targets := make([]string, 0, len(component.Artifact.Mappings))
-		for mappingIndex := range component.Artifact.Mappings {
-			mapping := &component.Artifact.Mappings[mappingIndex]
-			if !cleanAbsolutePath(mapping.SourcePath) {
-				return fmt.Errorf("%w: component %s mapping sourcePath %q is not a clean absolute path", ErrInfraComponentsInvalid, component.Name, mapping.SourcePath)
-			}
-			if !cleanAbsolutePath(mapping.TargetPath) ||
-				(mapping.TargetPath != targetRoot && !strings.HasPrefix(mapping.TargetPath, targetRoot+"/")) {
-				return fmt.Errorf("%w: component %s mapping targetPath %q must be under %s", ErrInfraComponentsInvalid, component.Name, mapping.TargetPath, targetRoot)
-			}
-			for _, existing := range targets {
-				if pathsOverlap(existing, mapping.TargetPath) {
-					return fmt.Errorf("%w: component %s has overlapping target paths %q and %q", ErrInfraComponentsInvalid, component.Name, existing, mapping.TargetPath)
+			targetRoot := "/.fast/components/" + component.Name
+			targets := make([]string, 0, len(component.Artifact.Mappings))
+			for mappingIndex := range component.Artifact.Mappings {
+				mapping := &component.Artifact.Mappings[mappingIndex]
+				if !cleanAbsolutePath(mapping.SourcePath) {
+					return fmt.Errorf("%w: component %s mapping sourcePath %q is not a clean absolute path", ErrInfraComponentsInvalid, component.Name, mapping.SourcePath)
 				}
+				if !cleanAbsolutePath(mapping.TargetPath) ||
+					(mapping.TargetPath != targetRoot && !strings.HasPrefix(mapping.TargetPath, targetRoot+"/")) {
+					return fmt.Errorf("%w: component %s mapping targetPath %q must be under %s", ErrInfraComponentsInvalid, component.Name, mapping.TargetPath, targetRoot)
+				}
+				for _, existing := range targets {
+					if pathsOverlap(existing, mapping.TargetPath) {
+						return fmt.Errorf("%w: component %s has overlapping target paths %q and %q", ErrInfraComponentsInvalid, component.Name, existing, mapping.TargetPath)
+					}
+				}
+				targets = append(targets, mapping.TargetPath)
 			}
-			targets = append(targets, mapping.TargetPath)
 		}
 
 		if len(component.Process.Command) == 0 || strings.TrimSpace(component.Process.Command[0]) == "" {
@@ -233,6 +226,34 @@ func (s *SandboxPoolSpec) ValidateInfraComponents() error {
 
 func cleanAbsolutePath(value string) bool {
 	return strings.HasPrefix(value, "/") && value != "/" && path.Clean(value) == value
+}
+
+// validateComponentArtifact verifies the immutable artifact source and
+// mapping requirements shared by every non-host-process component.
+func validateComponentArtifact(componentName string, artifact InfraArtifact) error {
+	source := artifact.Source
+	if (source.Image == nil) == (source.Archive == nil) {
+		return fmt.Errorf("%w: component %s must declare exactly one artifact source", ErrInfraComponentsInvalid, componentName)
+	}
+	if source.Image != nil {
+		parts := strings.Split(source.Image.Reference, "@sha256:")
+		if len(parts) != 2 || parts[0] == "" || !sha256Pattern.MatchString(parts[1]) {
+			return fmt.Errorf("%w: component %s image reference must be digest-pinned", ErrInfraComponentsInvalid, componentName)
+		}
+	}
+	if source.Archive != nil {
+		parsed, err := url.Parse(source.Archive.URL)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+			return fmt.Errorf("%w: component %s archive URL must be absolute HTTPS", ErrInfraComponentsInvalid, componentName)
+		}
+		if !sha256Pattern.MatchString(source.Archive.SHA256) {
+			return fmt.Errorf("%w: component %s archive SHA-256 is invalid", ErrInfraComponentsInvalid, componentName)
+		}
+	}
+	if len(artifact.Mappings) == 0 {
+		return fmt.Errorf("%w: component %s requires at least one artifact mapping", ErrInfraComponentsInvalid, componentName)
+	}
+	return nil
 }
 
 func pathsOverlap(left, right string) bool {

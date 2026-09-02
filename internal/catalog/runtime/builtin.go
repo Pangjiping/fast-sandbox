@@ -99,7 +99,7 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 				// fastlet start.
 				Capabilities:       Capabilities{DefaultState: CapabilityConfigured, SupportsNetwork: true, SupportsCache: true, SupportsRecovery: true},
 				NetworkMode:        NetworkModeFirecracker,
-				InfraDeliveryModes: []InfraDeliveryMode{InfraDeliveryTemplateBake, InfraDeliveryPreinstalled, InfraDeliveryGuestCopy},
+				InfraDeliveryModes: []InfraDeliveryMode{InfraDeliveryTemplateBake, InfraDeliveryPreinstalled, InfraDeliveryGuestCopy, InfraDeliveryHostProcess},
 			},
 			ResidualProcessFirecracker,
 		),

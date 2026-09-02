@@ -44,6 +44,7 @@ const (
 	InfraDeliveryTemplateBake   InfraDeliveryMode = "template-bake"
 	InfraDeliveryGuestCopy      InfraDeliveryMode = "guest-copy"
 	InfraDeliveryArtifactVolume InfraDeliveryMode = "artifact-volume"
+	InfraDeliveryHostProcess    InfraDeliveryMode = "host-process"
 )
 
 type CapabilityState string

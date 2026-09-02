@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	dataplane "fast-sandbox/internal/dataplane/contract"
+
+	"k8s.io/klog/v2"
 )
 
 // ReconcileProxyRoutes is invoked after Fastlet Proxy reconnects. It rebuilds
@@ -87,6 +89,13 @@ func (m *SandboxManager) routePublication(metadata *SandboxMetadata) (RoutePubli
 	}
 	components := make(map[string]dataplane.ComponentRoute, len(metadata.InfraServices))
 	for _, endpoint := range metadata.InfraServices {
+		if endpoint.HostProcess {
+			// Host-process components are reached through the Pod-local
+			// egress route, never through a per-Sandbox component route.
+			klog.InfoS("Host-process component excluded from per-Sandbox component routes",
+				"component", endpoint.Component, "port", endpoint.Port, "sandboxID", metadata.Config.Identity.SandboxUID)
+			continue
+		}
 		components[endpoint.Component] = dataplane.ComponentRoute{
 			Protocol: endpoint.Protocol, Port: endpoint.Port,
 		}

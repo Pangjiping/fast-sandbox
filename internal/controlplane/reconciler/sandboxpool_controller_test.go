@@ -361,7 +361,7 @@ func TestEnsureBoundedPodContainersRejectsUnboundedUserSidecar(t *testing.T) {
 func testInlineComponent() apiv1alpha2.InfraComponent {
 	return apiv1alpha2.InfraComponent{
 		Name: "execd",
-		Artifact: apiv1alpha2.InfraArtifact{
+		Artifact: &apiv1alpha2.InfraArtifact{
 			Source: apiv1alpha2.InfraArtifactSource{Image: &apiv1alpha2.InfraArtifactImage{
 				Reference: "registry.example/execd@sha256:0000000000000000000000000000000000000000000000000000000000000000",
 			}},

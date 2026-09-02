@@ -15,7 +15,10 @@ import (
 	infracontract "fast-sandbox/internal/infra/contract"
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	"fast-sandbox/internal/sandbox/supervisor"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -88,18 +91,38 @@ func (m *Manager) PrepareInstance(ctx context.Context, config *fastletapi.Runtim
 	if len(plan.Components) == 0 {
 		return result, nil
 	}
-	if plan.Supervisor == nil {
-		return PreparedInstance{}, errors.New("sandbox-init is not prepared")
+	hasGuestComponents := false
+	for _, prepared := range plan.Components {
+		if prepared.Plan.Delivery != runtimecatalog.InfraDeliveryHostProcess {
+			hasGuestComponents = true
+			break
+		}
 	}
-	result.WrapperRequired = true
-	result.Mounts = append(result.Mounts, Mount{
-		Source: plan.Supervisor.HostPath, GuestSource: plan.Supervisor.PodPath,
-		Destination: SandboxInitContainerPath, Options: []string{"ro", "rbind", "nosuid", "nodev"},
-	})
+	if hasGuestComponents {
+		if plan.Supervisor == nil {
+			return PreparedInstance{}, errors.New("sandbox-init is not prepared")
+		}
+		result.WrapperRequired = true
+		result.Mounts = append(result.Mounts, Mount{
+			Source: plan.Supervisor.HostPath, GuestSource: plan.Supervisor.PodPath,
+			Destination: SandboxInitContainerPath, Options: []string{"ro", "rbind", "nosuid", "nodev"},
+		})
+	}
 
 	initConfig := supervisor.Config{Version: supervisor.ConfigVersion, SandboxUID: config.Identity.SandboxUID}
 	for _, prepared := range plan.Components {
 		component := prepared.Plan
+		if component.Delivery == runtimecatalog.InfraDeliveryHostProcess {
+			klog.InfoS("Infra host-process component registered for Pod-loopback readiness",
+				"component", component.Name, "port", component.Endpoint.Port,
+				"sandboxID", config.Identity.SandboxUID, "probe", component.Process.Readiness.Type)
+			result.Services = append(result.Services, ServiceEndpoint{
+				Component: component.Name, Protocol: component.Endpoint.Protocol,
+				Port: component.Endpoint.Port, Readiness: component.Process.Readiness, HostProcess: true,
+			})
+			result.Diagnostics = append(result.Diagnostics, ComponentDiagnostic{Component: component.Name, State: "Starting"})
+			continue
+		}
 		for _, mapping := range prepared.Mappings {
 			result.Mounts = append(result.Mounts, Mount{
 				Source: mapping.HostPath, GuestSource: mapping.PodPath,
@@ -142,10 +165,17 @@ func (m *Manager) PrepareInstance(ctx context.Context, config *fastletapi.Runtim
 	podPath, hostPath := m.instancePaths(config.Identity.SandboxUID, config.Identity.InstanceGeneration, config.Identity.AssignmentAttempt)
 	result.ConfigPodPath = podPath
 	result.ConfigHostPath = hostPath
-	result.Mounts = append(result.Mounts, Mount{
-		Source: hostPath, GuestSource: podPath, Destination: InstanceConfigPath,
-		Options: []string{"ro", "rbind", "nosuid", "nodev", "noexec"},
-	})
+	if hasGuestComponents {
+		// The guest supervisor (sandbox-init) is the only consumer of
+		// infra.json. A host-process-only plan has no guest components, so
+		// nothing must be delivered into the guest rootfs: the delivery
+		// drivers (firecracker GuestCopy, containerd bind mounts) see an
+		// empty Mounts set and skip the guest-side copy entirely.
+		result.Mounts = append(result.Mounts, Mount{
+			Source: hostPath, GuestSource: podPath, Destination: InstanceConfigPath,
+			Options: []string{"ro", "rbind", "nosuid", "nodev", "noexec"},
+		})
+	}
 	persisted.Prepared = result
 	if _, _, err := m.writeInstance(ctx, persisted); err != nil {
 		return PreparedInstance{}, err
