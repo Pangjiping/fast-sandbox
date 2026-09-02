@@ -1,0 +1,239 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1100" viewBox="0 0 1440 1100" role="img" aria-labelledby="title description">
+  <title id="title">Fast Sandbox architecture</title>
+  <desc id="description">Fast Sandbox control plane and data plane: imperative Fast-Path Create, leader-elected Reconcilers, declarative CRD state, the Fastlet Pod runtime boundary (Fastlet, RuntimeDriver, Fastlet Proxy, and the optional host-process Egress policy engine), and the Kubernetes foundation.</desc>
+
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#e7e7e4" stroke-width="1"/>
+    </pattern>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8" fill="none" stroke="#7c3aed" stroke-width="1.5"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8" fill="none" stroke="#a1a1aa" stroke-width="1.5"/>
+    </marker>
+    <style>
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+      .product {
+        fill: #18181b;
+        font-size: 24px;
+        font-weight: 600;
+      }
+      .breadcrumb {
+        fill: #71717a;
+        font-size: 17px;
+        font-weight: 400;
+      }
+      .section {
+        fill: #71717a;
+        font-size: 14px;
+        font-weight: 500;
+        letter-spacing: 0.04em;
+      }
+      .node-title {
+        fill: #18181b;
+        font-size: 20px;
+        font-weight: 500;
+      }
+      .node-note {
+        fill: #71717a;
+        font-size: 13px;
+        font-weight: 400;
+      }
+      .runtime {
+        fill: #52525b;
+        font-size: 12px;
+        font-weight: 400;
+      }
+      .sandbox-title {
+        fill: #18181b;
+        font-size: 15px;
+        font-weight: 500;
+      }
+      .sandbox-note {
+        fill: #71717a;
+        font-size: 11px;
+        font-weight: 400;
+      }
+      .lbl {
+        fill: #52525b;
+        font-size: 11px;
+        font-weight: 400;
+      }
+      .foundation-title {
+        fill: #172554;
+        font-size: 28px;
+        font-weight: 500;
+      }
+      .foundation-note {
+        fill: #475569;
+        font-size: 14px;
+        font-weight: 400;
+      }
+      .foundation-token {
+        fill: #1e3a8a;
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .foundation-sub {
+        fill: #1e3a8a;
+        font-size: 11px;
+        font-weight: 400;
+      }
+    </style>
+  </defs>
+
+  <rect width="1440" height="1100" fill="#fbfbfa"/>
+  <rect width="1440" height="1100" fill="url(#grid)" opacity="0.48"/>
+  <rect x="24" y="24" width="1392" height="1052" rx="10" fill="none" stroke="#d4d4d0"/>
+
+  <circle cx="62" cy="57" r="5" fill="#22c55e"/>
+  <text x="78" y="64" class="mono product">fast-sandbox</text>
+  <text x="260" y="64" class="mono breadcrumb">/ architecture</text>
+  <text x="1378" y="63" text-anchor="end" class="mono breadcrumb">kubernetes-native runtime plane</text>
+  <line x1="48" y1="88" x2="1392" y2="88" stroke="#d4d4d0"/>
+
+  <text x="64" y="122" class="mono section">01 / control plane</text>
+  <line x1="64" y1="139" x2="1376" y2="139" stroke="#d4d4d0" stroke-dasharray="3 6"/>
+
+  <rect x="64" y="170" width="280" height="96" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="86" y="212" class="mono node-title">fastctl / SDKs</text>
+  <text x="86" y="240" class="mono node-note">Go · Python · fastctl CLI</text>
+  <text x="86" y="262" class="mono node-note">Create · ResolveEndpoint</text>
+
+  <line x1="344" y1="218" x2="478" y2="218" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <text x="410" y="207" text-anchor="middle" class="mono lbl">imperative Create</text>
+
+  <rect x="480" y="150" width="320" height="140" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="502" y="186" class="mono node-title">Fast-Path servers</text>
+  <text x="502" y="212" class="mono runtime">multi-active × N · gRPC · no leader</text>
+  <text x="502" y="236" class="mono runtime">idempotent Create · request_id</text>
+  <text x="502" y="260" class="mono runtime">Top-K placement · local Registry</text>
+  <text x="502" y="282" class="mono runtime">route credential issuer</text>
+
+  <line x1="640" y1="290" x2="640" y2="328" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <text x="652" y="312" class="mono lbl">persist intent + assignment CAS</text>
+
+  <rect x="480" y="330" width="320" height="110" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="502" y="364" class="mono node-title">Kubernetes API</text>
+  <text x="502" y="390" class="mono runtime">source of truth · assignment</text>
+  <text x="502" y="414" class="mono runtime">[ Sandbox CRD ] · [ SandboxPool CRD ]</text>
+
+  <line x1="640" y1="440" x2="640" y2="518" stroke="#2563eb" stroke-width="1.5" marker-start="url(#arrow-blue)" marker-end="url(#arrow-blue)"/>
+  <text x="652" y="485" class="mono lbl">watch / status projection</text>
+
+  <rect x="480" y="520" width="320" height="150" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="502" y="556" class="mono node-title">Reconcilers · leader-elected</text>
+  <text x="502" y="582" class="mono runtime">Sandbox · SandboxPool controllers</text>
+  <text x="502" y="606" class="mono runtime">drain · recovery · status</text>
+  <text x="502" y="630" class="mono runtime">Fastlet heartbeat → Registry</text>
+  <text x="502" y="652" class="mono runtime">delete · reset · expiry</text>
+
+  <line x1="800" y1="220" x2="956" y2="225" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <text x="806" y="210" class="mono lbl">atomic Create · fenced identity</text>
+
+  <line x1="800" y1="575" x2="956" y2="260" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <text x="800" y="566" class="mono lbl">delete · drain · recover</text>
+
+  <text x="64" y="698" class="mono section">02 / data plane</text>
+  <line x1="64" y1="715" x2="1376" y2="715" stroke="#d4d4d0" stroke-dasharray="3 6"/>
+
+  <rect x="64" y="760" width="280" height="96" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="86" y="802" class="mono node-title">upstream SDKs</text>
+  <text x="86" y="830" class="mono node-note">native · OpenSandbox clients</text>
+  <text x="86" y="852" class="mono node-note">resolve route + credential</text>
+
+  <line x1="344" y1="808" x2="478" y2="808" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <text x="410" y="797" text-anchor="middle" class="mono lbl">component traffic</text>
+
+  <rect x="480" y="740" width="320" height="110" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="502" y="774" class="mono node-title">Sandbox Proxy · multi-active</text>
+  <text x="502" y="800" class="mono runtime">credential + fence validation</text>
+  <text x="502" y="824" class="mono runtime">transparent HTTP · SSE · WS</text>
+
+  <line x1="800" y1="795" x2="956" y2="485" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <text x="806" y="628" class="mono lbl">authenticated route</text>
+
+  <rect x="480" y="880" width="320" height="90" rx="7" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="502" y="914" class="mono node-title">OpenSandbox Ingress</text>
+  <text x="502" y="938" class="mono runtime">trusted platform integration</text>
+  <text x="502" y="960" class="mono runtime">direct route · no Proxy hop</text>
+
+  <line x1="800" y1="920" x2="956" y2="470" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <text x="806" y="700" class="mono lbl">direct trusted ingress</text>
+
+  <rect x="960" y="120" width="416" height="780" rx="10" fill="#f8fbff" fill-opacity="0.5" stroke="#93c5fd" stroke-dasharray="5 5"/>
+  <text x="980" y="148" class="mono section" fill="#2563eb">Fastlet Pod</text>
+  <text x="1352" y="148" text-anchor="end" class="mono runtime" fill="#64748b">pool-managed</text>
+
+  <rect x="984" y="170" width="368" height="110" rx="5" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="1006" y="206" class="mono sandbox-title">Fastlet</text>
+  <text x="1006" y="232" class="mono sandbox-note">atomic admission store</text>
+  <text x="1006" y="254" class="mono sandbox-note">network / IPAM · private CIDR</text>
+  <text x="1006" y="274" class="mono sandbox-note">Infra manager · image cache</text>
+
+  <line x1="1168" y1="280" x2="1168" y2="298" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <rect x="984" y="300" width="368" height="110" rx="5" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="1006" y="336" class="mono sandbox-title">RuntimeDriver</text>
+  <text x="1006" y="358" class="mono sandbox-note">containerd · gVisor · Kata</text>
+  <text x="1006" y="376" class="mono sandbox-note">Kata: QEMU · CLH · FC · Dragonball</text>
+  <text x="1006" y="394" class="mono sandbox-note">BoxLite sidecar</text>
+
+  <line x1="1168" y1="410" x2="1168" y2="558" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <text x="1176" y="500" class="mono lbl">isolated runtimes</text>
+
+  <rect x="984" y="430" width="368" height="100" rx="5" fill="#fbfbfa" stroke="#a1a1aa"/>
+  <text x="1006" y="466" class="mono sandbox-title">Fastlet Proxy · sidecar</text>
+  <text x="1006" y="490" class="mono sandbox-note">route publication · fence verify</text>
+  <text x="1006" y="512" class="mono sandbox-note">DirectIP · LocalForward</text>
+
+  <line x1="1168" y1="530" x2="1128" y2="558" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+
+  <line x1="1300" y1="280" x2="1300" y2="428" stroke="#a1a1aa" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow-gray)"/>
+  <text x="1300" y="355" text-anchor="middle" class="mono lbl">publish routes</text>
+
+  <rect x="984" y="560" width="368" height="120" rx="5" fill="#fbfbfa" stroke="#93c5fd"/>
+  <text x="1006" y="596" class="mono sandbox-title">Sandbox 1 … N</text>
+  <text x="1006" y="620" class="mono sandbox-note">user workload + Infra Component</text>
+  <text x="1006" y="642" class="mono sandbox-note">private network · NAT egress</text>
+  <text x="1006" y="664" class="mono sandbox-note">execd · envd · custom</text>
+
+  <!-- Egress: pool-declared host-process egress policy inside the Pod netns -->
+  <line x1="1168" y1="680" x2="1168" y2="697" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+  <text x="1176" y="692" class="mono lbl" font-size="10">guest egress · SNAT src=slot.IP</text>
+
+  <rect x="984" y="700" width="368" height="118" rx="5" fill="#fdf2f8" fill-opacity="0.45" stroke="#e879f9"/>
+  <text x="1006" y="734" class="mono sandbox-title" fill="#9d174d">Egress · host-process · optional</text>
+  <text x="1006" y="756" class="mono sandbox-note">pool-declared actionHandler · Pod netns · :18080</text>
+  <text x="1006" y="778" class="mono sandbox-note">SET_BINDING / hooks / REMOVE_BINDING</text>
+  <text x="1006" y="800" class="mono sandbox-note">deny-first · DNS proxy + nft per-subject</text>
+
+  <!-- Fastlet -> Egress: Actions lifecycle channel (Pod loopback) -->
+  <polyline points="1352,225 1356,225 1356,756 1352,756" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow-violet)"/>
+  <text x="1364" y="485" text-anchor="middle" class="mono lbl" fill="#7c3aed" transform="rotate(-90 1364 485)">Actions HTTP</text>
+
+  <!-- Egress -> internet: allowed outbound traffic -->
+  <line x1="1168" y1="818" x2="1168" y2="890" stroke="#a1a1aa" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow-gray)"/>
+  <text x="1176" y="858" class="mono lbl">policy pass → internet</text>
+
+  <rect x="64" y="990" width="1312" height="90" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="88" y="1016" class="mono section" fill="#3b82f6">03 / foundation</text>
+  <text x="88" y="1048" class="mono foundation-title">built on Kubernetes</text>
+  <text x="88" y="1072" class="mono foundation-note">portable control · durable state · native operations</text>
+
+  <rect x="600" y="1008" width="160" height="40" rx="5" fill="#f8fbff" stroke="#bfdbfe"/>
+  <text x="680" y="1033" text-anchor="middle" class="mono foundation-token">[ Sandbox CRD ]</text>
+  <rect x="772" y="1008" width="160" height="40" rx="5" fill="#f8fbff" stroke="#bfdbfe"/>
+  <text x="852" y="1033" text-anchor="middle" class="mono foundation-token">[ SandboxPool CRD ]</text>
+  <rect x="944" y="1008" width="150" height="40" rx="5" fill="#f8fbff" stroke="#bfdbfe"/>
+  <text x="1019" y="1033" text-anchor="middle" class="mono foundation-token">[ Fastlet Pods ]</text>
+  <rect x="1106" y="1008" width="230" height="40" rx="5" fill="#f8fbff" stroke="#bfdbfe"/>
+  <text x="1221" y="1033" text-anchor="middle" class="mono foundation-token">[ NodeJanitor DaemonSet ]</text>
+  <text x="1106" y="1066" class="mono foundation-sub">fenced orphan cleanup per node</text>
+</svg>
