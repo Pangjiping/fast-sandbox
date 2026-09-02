@@ -373,6 +373,12 @@ func TestEnsureSandboxInfraFailureReleasesResources(t *testing.T) {
 	require.ErrorIs(t, err, ErrInfraUnavailable)
 	require.Empty(t, fixture.launcher.started)
 	require.Equal(t, 0, fixture.manager.Snapshot().Bound)
+
+	// A failed Create must not leak the jail / per-sandbox state dirs it
+	// prepared before the Infra failure (regression: orphaned jail roots).
+	directory, err := sandboxDir(fixture.stateRoot, "sandbox-1")
+	require.NoError(t, err)
+	require.NoDirExists(t, directory)
 }
 
 // fakeResolver is a minimal ArtifactResolver used to construct an Infra

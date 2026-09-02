@@ -455,6 +455,22 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		releaseSlot()
 		return nil, err
 	}
+	// A failed Create must not leak the jail and per-sandbox state
+	// directories created above: every failure between here and the
+	// successful return removes them (the VMM is killed on each failure
+	// path before this defer runs, which removeJailRoot requires).
+	createdComplete := false
+	defer func() {
+		if createdComplete {
+			return
+		}
+		if jailRoot != "" {
+			d.removeJailRoot(identity.SandboxUID)
+		}
+		_ = removeSandboxDir(directory)
+		klog.InfoS("firecracker Create cleanup removed partial sandbox",
+			"sandboxId", identity.SandboxUID, "jailRoot", jailRoot)
+	}()
 	d.touchImage(spec.Image)
 	rootfsDur := time.Since(rootfsStarted)
 	rootfsMiB := float64(0)
@@ -479,6 +495,19 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			_ = d.infraMgr.RemoveInstance(config)
 			releaseSlot()
 			return nil, fmt.Errorf("%w: prepare Infra Components: %v", ErrInfraUnavailable, prepareErr)
+		}
+		// Egress-managed pools (host-process components) own the gateway DNS
+		// path: the guest resolver must point at the slot gateway so DNS
+		// queries hit the egress DNS proxy (gateway:53 REDIRECT). The golden
+		// snapshot bakes the builder-time resolver, so inject it now.
+		if d.usesHostProcessDelivery() {
+			resolverStart := time.Now()
+			if resolverErr := deliverGuestResolver(infraCtx, d.runner, instanceRootfs, resolverForGateway(slot.Gateway)); resolverErr != nil {
+				_ = d.infraMgr.RemoveInstance(config)
+				releaseSlot()
+				return nil, fmt.Errorf("%w: deliver guest resolver: %v", ErrInfraUnavailable, resolverErr)
+			}
+			klog.V(4).InfoS("firecracker guest resolver injected", "sandboxId", identity.SandboxUID, "gateway", slot.Gateway, "duration", time.Since(resolverStart).String())
 		}
 		infraServices = instance.Services
 		infraDiagnostics = instance.Diagnostics
@@ -596,6 +625,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		"configure", configureDur.String(),
 		"boot", bootDur.String(), "vmStatePolls", polls,
 	)
+	createdComplete = true
 	return existingMetadata(state), nil
 }
 
