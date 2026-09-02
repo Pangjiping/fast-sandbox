@@ -36,6 +36,8 @@ type Fastctl struct {
 	omitEndpointFlags bool
 }
 
+const noEligibleFastletMessage = "no eligible Fastlet for the Sandbox request"
+
 func NewFastctl(opts ...FastctlOption) *Fastctl {
 	rootDir, _ := findRootDir()
 	client := &Fastctl{
@@ -141,6 +143,39 @@ func (c *Fastctl) Run(ctx context.Context, name string, config FastctlConfig) ([
 	}
 
 	return c.run(ctx, "run", name, "-f", configPath)
+}
+
+// RunWhenCapacityAvailable retries only the FastPath's pre-admission
+// no-candidate response. The retry uses the same Sandbox name/request ID and
+// therefore remains idempotent. Any validation, persistence, or Fastlet-side
+// error is returned immediately so E2E tests cannot hide a real regression.
+func (c *Fastctl) RunWhenCapacityAvailable(ctx context.Context, name string, config FastctlConfig) ([]byte, error) {
+	return c.runWhenCapacityAvailable(ctx, name, config, 250*time.Millisecond)
+}
+
+func (c *Fastctl) runWhenCapacityAvailable(ctx context.Context, name string, config FastctlConfig, retryInterval time.Duration) ([]byte, error) {
+	if retryInterval <= 0 {
+		retryInterval = 250 * time.Millisecond
+	}
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("wait for FastPath capacity for Sandbox %s: %w; last run error: %v", name, err, lastErr)
+		}
+		output, err := c.Run(ctx, name, config)
+		if err == nil || !strings.Contains(err.Error(), noEligibleFastletMessage) {
+			return output, err
+		}
+		lastErr = err
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("wait for FastPath capacity for Sandbox %s: %w; last run error: %v", name, ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *Fastctl) GetJSON(ctx context.Context, name string) (*fastpathv2.GetSandboxResponse, error) {

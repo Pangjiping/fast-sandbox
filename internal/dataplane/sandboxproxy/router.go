@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -60,6 +61,36 @@ type fastletPodState struct {
 	IP        string
 }
 
+type routeAssignment struct {
+	FastletName       string
+	FastletPodUID     string
+	AssignmentAttempt int64
+	RouteGeneration   int64
+}
+
+func (a routeAssignment) complete() bool {
+	return a.FastletName != "" && a.FastletPodUID != "" && a.AssignmentAttempt > 0 && a.RouteGeneration > 0
+}
+
+// routeAssignmentFromSandbox accepts the durable assignment before its status
+// projection exists. Once status placement is populated, both representations
+// must agree. Status-only and conflicting projections fail closed.
+func routeAssignmentFromSandbox(sandbox *apiv1alpha2.Sandbox) (routeAssignment, error) {
+	envelope, err := assignment.EffectiveAssignment(sandbox)
+	if err != nil {
+		return routeAssignment{}, fmt.Errorf("resolve effective assignment: %w", err)
+	}
+	if envelope == nil {
+		return routeAssignment{}, nil
+	}
+	return routeAssignment{
+		FastletName:       envelope.FastletName,
+		FastletPodUID:     envelope.FastletPodUID,
+		AssignmentAttempt: envelope.Attempt,
+		RouteGeneration:   envelope.RouteGeneration,
+	}, nil
+}
+
 func NewIndex() *Index {
 	return &Index{}
 }
@@ -68,20 +99,17 @@ func (i *Index) UpsertSandbox(sandbox *apiv1alpha2.Sandbox) {
 	if sandbox == nil || sandbox.UID == "" {
 		return
 	}
-	routeGeneration := sandbox.Status.DataPlane.RouteGeneration
-	if routeGeneration <= 0 {
-		routeGeneration = 1
-	}
 	state := &sandboxRouteState{
-		Namespace:       sandbox.Namespace,
-		SandboxUID:      string(sandbox.UID),
-		DataPlaneReady:  sandbox.Status.DataPlane.State == apiv1alpha2.DataPlaneReady,
-		RouteGeneration: routeGeneration,
+		Namespace:      sandbox.Namespace,
+		SandboxUID:     string(sandbox.UID),
+		DataPlaneReady: sandbox.Status.DataPlane.State == apiv1alpha2.DataPlaneReady,
 	}
-	if placement := sandbox.Status.Placement; placement.FastletName != "" {
-		state.FastletName = placement.FastletName
-		state.FastletPodUID = string(placement.FastletPodUID)
-		state.AssignmentAttempt = placement.Attempt
+	resolved, err := routeAssignmentFromSandbox(sandbox)
+	if err == nil && resolved.complete() {
+		state.FastletName = resolved.FastletName
+		state.FastletPodUID = resolved.FastletPodUID
+		state.AssignmentAttempt = resolved.AssignmentAttempt
+		state.RouteGeneration = resolved.RouteGeneration
 	}
 	i.sandboxes.Store(state.SandboxUID, state)
 }
@@ -176,35 +204,32 @@ func (r *KubernetesResolver) ResolveFresh(ctx context.Context, sandboxUID string
 	if sandbox == nil {
 		return Route{}, ErrSandboxNotFound
 	}
-	if sandbox.Status.Placement.FastletName == "" {
+	resolved, err := routeAssignmentFromSandbox(sandbox)
+	if err != nil {
+		return Route{}, fmt.Errorf("%w: %w", ErrSandboxNotReady, err)
+	}
+	if !resolved.complete() {
 		return Route{}, ErrSandboxNotReady
 	}
 	var pod corev1.Pod
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Status.Placement.FastletName}, &pod); err != nil {
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: resolved.FastletName}, &pod); err != nil {
 		return Route{}, fmt.Errorf("%w: %v", ErrFastletUnavailable, err)
 	}
-	if pod.UID != sandbox.Status.Placement.FastletPodUID || pod.Status.PodIP == "" {
+	if string(pod.UID) != resolved.FastletPodUID || pod.Status.PodIP == "" {
 		return Route{}, ErrFastletUnavailable
 	}
 	if r.Index != nil {
 		r.Index.UpsertSandbox(sandbox)
 		r.Index.UpsertPod(&pod)
 	}
-	return routeFromObjects(sandbox, &pod)
+	return routeFromObjects(sandbox, &pod, resolved), nil
 }
 
-func routeFromObjects(sandbox *apiv1alpha2.Sandbox, pod *corev1.Pod) (Route, error) {
-	if sandbox.Status.Placement.FastletName == "" {
-		return Route{}, ErrSandboxNotReady
-	}
-	generation := sandbox.Status.DataPlane.RouteGeneration
-	if generation <= 0 {
-		generation = 1
-	}
+func routeFromObjects(sandbox *apiv1alpha2.Sandbox, pod *corev1.Pod, resolved routeAssignment) Route {
 	return Route{
 		Namespace: sandbox.Namespace, SandboxUID: string(sandbox.UID),
-		FastletName: sandbox.Status.Placement.FastletName, FastletPodUID: string(sandbox.Status.Placement.FastletPodUID),
-		FastletPodIP: pod.Status.PodIP, AssignmentAttempt: sandbox.Status.Placement.Attempt,
-		RouteGeneration: generation,
-	}, nil
+		FastletName: resolved.FastletName, FastletPodUID: resolved.FastletPodUID,
+		FastletPodIP: pod.Status.PodIP, AssignmentAttempt: resolved.AssignmentAttempt,
+		RouteGeneration: resolved.RouteGeneration,
+	}
 }
