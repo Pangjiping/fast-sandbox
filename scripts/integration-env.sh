@@ -1807,56 +1807,66 @@ EGRESS_ALLOW_POLICY='{"egress":[{"action":"allow","target":"example.com"},{"acti
 # are lost, the failure is the egress reply path — NOT egress blocking the
 # execd control connection. Single-shot (no hammering).
 egress_execd_run() { # sandbox-name command timeout-s -> command stdout; rc 0 on execution_complete
-	local sbx="$1" body="$2" timeout_s="$3" url out rc http body_out
-	# REAL delivery path: fastlet-proxy PORT route (same chain the SDK uses),
-	# resolved fresh per probe (DIRECT_FASTLET_PROXY -> local forward).
-	if ! execd_route_resolve "$sbx"; then
-		log "egress proxy probe for $sbx: route resolve failed"
-		return 1
-	fi
-	url="$(execd_base_url)/command"
-	out="$(curl -sS -m "$timeout_s" -N \
-		-H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" \
-		-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
-		--data-binary "$body" -w $'\nHTTP=%{http_code}' \
-		"$url" 2>/dev/null)"
-	rc=$?
-	http="$(sed -n 's/^HTTP=//p' <<<"$out" | tail -1)"
-	body_out="$(sed '$d' <<<"$out")"
-	log "egress proxy probe for $sbx (POST $url): rc=$rc http=${http:-000} cmd=$body"
-	printf '%s\n' "$body_out" | egress_print_raw "POST $url cmd=$body http=$http rc=$rc" || true
-	if [[ "$rc" -ne 0 || "$http" != "200" ]]; then
-		return 1
-	fi
+	local sbx="$1" body="$2" timeout_s="$3" url out rc http body_out attempt
+	attempt=0
+	while :; do
+		attempt=$((attempt + 1))
+		if ! execd_route_resolve "$sbx"; then
+			log "egress proxy probe for $sbx: route resolve failed (attempt $attempt)"
+			[[ "$attempt" -ge 8 ]] && return 1
+			sleep 3
+			continue
+		fi
+		url="$(execd_base_url)/command"
+		out="$(curl -sS -m "$timeout_s" -N \
+			-H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" \
+			-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+			--data-binary "$body" -w $'\nHTTP=%{http_code}' \
+			"$url" 2>/dev/null)"
+		rc=$?
+		http="$(sed -n 's/^HTTP=//p' <<<"$out" | tail -1)"
+		body_out="$(sed '$d' <<<"$out")"
+		log "egress proxy probe for $sbx (POST $url): rc=$rc http=${http:-000} cmd=$body"
+		printf '%s\n' "$body_out" | egress_print_raw "POST $url cmd=$body http=$http rc=$rc" || true
+		if [[ "$rc" -eq 0 && "$http" == "200" ]]; then
+			break
+		fi
+		# Transient route/hang window after subject activation; poll.
+		if [[ "$attempt" -ge 8 ]]; then
+			log "egress proxy probe for $sbx: still failing after $attempt attempts"
+			return 1
+		fi
+		sleep 3
+	done
 	jq -r 'select(.type == "stdout") | .text' <<<"$body_out" 2>/dev/null
 	grep -q "execution_complete" <<<"$body_out"
 }
 
-# egress_print_raw prints the raw execd SSE response line-by-line (one
-# frame per output line, blank frames preserved) inside a labeled fence so
-# nothing is flattened or truncated.
-egress_print_raw() { # label (reads lines on stdin)
-	local label="$1"
-	{
-		printf '  --- execd raw: %s ---\n' "$label"
-		cat
-		printf '  --- end %s ---\n' "$label"
-	} | tee -a "$WORK/run.log" >&2
-}
-
 egress_execd_ping() { # sandbox -> rc 0 when /ping answers 200 (through fastlet-proxy)
-	local sbx="$1" url http
-	if ! execd_route_resolve "$sbx"; then
-		log "egress proxy ping for $sbx: route resolve failed"
-		return 1
-	fi
-	url="$(execd_base_url)/ping"
-	http="$(curl -sS -m 8 -o /dev/null -w '%{http_code}' \
-		-H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" "$url" 2>/dev/null)"
-	log "execd control path for $sbx (GET $url): http=${http:-000}"
-	[[ "$http" == "200" ]]
+	local sbx="$1" url http attempt
+	attempt=0
+	while :; do
+		attempt=$((attempt + 1))
+		if ! execd_route_resolve "$sbx"; then
+			log "egress proxy ping for $sbx: route resolve failed (attempt $attempt)"
+			[[ "$attempt" -ge 8 ]] && return 1
+			sleep 3
+			continue
+		fi
+		url="$(execd_base_url)/ping"
+		http="$(curl -sS -m 8 -o /dev/null -w '%{http_code}' \
+			-H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" "$url" 2>/dev/null)"
+		log "execd control path for $sbx (GET $url): http=${http:-000}"
+		if [[ "$http" == "200" ]]; then
+			return 0
+		fi
+		if [[ "$attempt" -ge 8 ]]; then
+			log "egress proxy ping for $sbx: still failing after $attempt attempts"
+			return 1
+		fi
+		sleep 3
+	done
 }
-
 
 egress_execd_control() { # sandbox
 	egress_execd_ping "$1" && egress_execd_run "$1" '{"command":"echo execd-control-ok"}' 12 >/dev/null
