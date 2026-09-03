@@ -1210,6 +1210,7 @@ probe_execd() { # sandbox-name
 	local name="$1" out path cred uri host lport t0 timing t_abs
 	t_abs=$(( $(now_ms) / 1000000 ))
 	out="$(gen_endpoint_for "$name" 44772 2>/dev/null)" || {
+		log "probe_execd $name: route resolve failed"
 		if [[ "${DEBUG_PROBE:-0}" == 1 ]]; then
 			local errbody
 			errbody="$(curl -s --unix-socket "$GEN_SOCKET" \
@@ -1229,6 +1230,7 @@ probe_execd() { # sandbox-name
 	# matching local port-forward instead.
 	host="$(printf '%s' "$path" | sed 's|^[a-z]*://\([^/:]*\).*|\1|')"
 	if ! ensure_fastlet_forward "$host"; then
+		log "probe_execd $name: no local forward for host=$host"
 		PROBE_LOG+=("t=${t_abs}ms host=${host} NO-LOCAL-PORT")
 		return 1
 	fi
@@ -1238,17 +1240,16 @@ probe_execd() { # sandbox-name
 		-w '%{time_connect} %{time_starttransfer}' \
 		-H "X-Fast-Sandbox-Route-Credential: $cred" \
 		"http://127.0.0.1:$lport$uri/ping" 2>/dev/null)" || {
-		# DEBUG_PROBE=1: surface the failure window (code + body) instead of
-		# silently retrying.
+		# Surface the failure window (code) on EVERY failed probe so a
+		# run.log alone shows whether the local port refused (000), the
+		# reached proxy lacks the route (404) or rejects the credential
+		# (401/403).
 		local code
-		if [[ "${DEBUG_PROBE:-0}" == 1 ]]; then
-			code="$(curl -s -o /dev/null -w '%{http_code}' \
-				-H "X-Fast-Sandbox-Route-Credential: $cred" \
-				"http://127.0.0.1:$lport$uri/ping" 2>/dev/null)"
-		else
-			code="?"
-		fi
-		PROBE_LOG+=("t=${t_abs}ms resolve=${PROBE_RESOLVE_MS} host=${host} curl=HTTP${code}")
+		code="$(curl -s -o /dev/null -w '%{http_code}' -m 3 \
+			-H "X-Fast-Sandbox-Route-Credential: $cred" \
+			"http://127.0.0.1:$lport$uri/ping" 2>/dev/null)"
+		log "probe_execd $name: curl failed host=$host lport=$lport http=${code:-000}"
+		PROBE_LOG+=("t=${t_abs}ms resolve=${PROBE_RESOLVE_MS} host=${host} lport=$lport curl=HTTP${code:-000}")
 		return 1
 	}
 	PROBE_CURL_MS=$(( ($(now_ms) - t0) / 1000000 ))
