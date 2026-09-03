@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"fast-sandbox/internal/registryconfig"
@@ -75,18 +76,22 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		// A stable identity (the node name; hostname works for hostNetwork
+		// daemons) anchors the HRW keyspace AND names the per-node block
+		// cache: the StateRoot can be shared (multi-node kind mounts one
+		// host filesystem into every node container), but two DART arenas
+		// must never point at the same directory.
+		nodeID := getEnv("FAST_SANDBOX_DART_SELF_ID", hostnameOrEmpty())
 		peerPort := "9000"
 		config := agentdart.Config{
 			Binary:    getEnv("FAST_SANDBOX_DART_BIN", "dart"),
 			Listen:    listen,
 			Admin:     getEnv("FAST_SANDBOX_DART_ADMIN", "127.0.0.1:8147"),
-			CacheDir:  filepath.Join(stateRoot, "cache", "dart"),
-			CacheSize: getEnv("FAST_SANDBOX_DART_CACHE_SIZE", "20GiB"),
+			CacheDir:  filepath.Join(stateRoot, "cache", "dart-"+strings.ReplaceAll(nodeID, "/", "-")),
+			CacheSize: getEnv("FAST_SANDBOX_DART_CACHE_SIZE", "8GiB"),
 			Discover:  getEnv("FAST_SANDBOX_DART_DISCOVER", ""),
-			// A stable identity (the node name; hostname works for
-			// hostNetwork daemons) anchors the HRW keyspace.
-			SelfID: getEnv("FAST_SANDBOX_DART_SELF_ID", hostnameOrEmpty()),
-			Log:    os.Stderr,
+			SelfID:    nodeID,
+			Log:       os.Stderr,
 		}
 		if nodeIP := getEnv("FAST_SANDBOX_NODE_IP", ""); nodeIP != "" {
 			config.PeerAdvertise = net.JoinHostPort(nodeIP, peerPort)

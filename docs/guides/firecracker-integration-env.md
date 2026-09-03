@@ -267,7 +267,7 @@ Baseline on the reference node (XFS StateRoot):
 | `KIND_CLUSTER` / `KIND_NODE_IMAGE` / `KIND_RETAIN` | firecracker / - / 0 | kind knobs; mirror override, retain-for-debug |
 | `MINIO_PORT` / `MINIO_AK` / `MINIO_SK` / `MINIO_ENDPOINT` | 9000 / ... | store credentials; endpoint auto = container IP |
 | `SBX_IMAGE` / `EXECD` / `FC_VERSION` | alpine:3.19 / execd:1.1.0 / v1.16.1 | the chain keys |
-| `WARM_IMAGES` | 1 | 0 skips the pool warmImages preheat: the agent cache starts empty and the first sandbox create pulls the artifact set on demand through DART (stage-2 cold-start scenario; verify then measures the cold pull in the delivery path) |
+| `WARM_IMAGES` | 0 | on-demand is standard: no pool preheat, the first sandbox create on each node pulls the artifact set through DART (peer distribution across the two nodes), evidenced in verify 4. 1 restores the preheat for fast delivery baselines |
 | `CONCURRENCY` | 5 | per-fastlet slot capacity for the batch |
 | `EXECD_API_SBX` | sandbox-execd-api | sandbox name used by `verify-execd-api` |
 | `EXECD_API_KEEP_SANDBOX` | 0 | 1 keeps the sandbox + jail after the battery and prints the guest-console (firecracker.log) tail command for execd-side diagnosis |

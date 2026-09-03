@@ -50,6 +50,21 @@ spec:
           type: DirectoryOrCreate
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
+      # P2P is the standard topology: the pool keeps ONE fastlet per node
+      # (podAntiAffinity spreads the poolMin=2 fastlets across the two
+      # firecracker nodes), so the warmImages preheat on each node pulls
+      # through the node-local DART peer of the OTHER node — the second
+      # pull is the P2P event the stage-2 assertions measure. On a single
+      # node this is a no-op (only one eligible node exists).
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: sandbox-fastlet
+              topologyKey: kubernetes.io/hostname
   capacity:
     poolMin: 2
     poolMax: 2

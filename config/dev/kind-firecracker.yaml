@@ -1,13 +1,21 @@
-# kind-firecracker.yaml — single-node Kind cluster with the host devices the
-# Firecracker runtime needs, passed through into the node container:
-# KVM (vmm) and /dev/net/tun (tap devices). vhost-vsock is intentionally NOT
-# mounted: the firecracker driver probes only /dev/kvm and /dev/net/tun, and
-# hosts without a vhost-vsock device fail kind create when docker tries to
-# create the mount source under /sys.
+# kind-firecracker.yaml — two-node Kind cluster (P2P is the standard
+# topology) with the host devices the Firecracker runtime needs, passed
+# through into every node container: KVM (vmm) and /dev/net/tun (tap
+# devices). vhost-vsock is intentionally NOT mounted: the firecracker
+# driver probes only /dev/kvm and /dev/net/tun, and hosts without a
+# vhost-vsock device fail kind create when docker tries to create the mount
+# source under /sys.
+#
+# Two nodes are required for the P2P assertions: each node runs its own
+# runtime-agent + DART daemon, and the second node's warm pull must be
+# served by the first node's peer (origin fetched ~once for the cluster).
+# The StateRoot host mount is shared by both node containers (single XFS
+# loop image on the host); the DART block caches stay per-node because the
+# agent keys them by hostname (<state>/cache/dart-<hostname>).
 #
 # Usage: kind create cluster --config config/dev/kind-firecracker.yaml
-# Then label the node (required by the SandboxTemplate builder and the
-# fastlet scheduling):
+# Then label the nodes (required by the SandboxTemplate builder and the
+# fastlet scheduling; integration-env.sh up does this):
 #   kubectl label node <node> sandbox.fast.io/kvm=true
 #   kubectl label node <node> fast-sandbox.io/firecracker-node=true
 #
@@ -36,5 +44,17 @@ nodes:
   # reflinks (~ms) instead of full copies (~2.5s on ext4). The host mount
   # must exist before `kind create`; the path is also used without XFS when
   # XFS_STATEROOT=0 (plain directory).
+  - hostPath: /var/lib/fast-sandbox
+    containerPath: /var/lib/fast-sandbox
+- role: worker
+  extraMounts:
+  - hostPath: /dev/kvm
+    containerPath: /dev/kvm
+  - hostPath: /sys/devices/virtual/misc/kvm
+    containerPath: /sys/devices/virtual/misc/kvm
+  - hostPath: /dev/net/tun
+    containerPath: /dev/net/tun
+  - hostPath: /dev/shm
+    containerPath: /dev/shm
   - hostPath: /var/lib/fast-sandbox
     containerPath: /var/lib/fast-sandbox

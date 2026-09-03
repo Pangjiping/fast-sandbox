@@ -22,7 +22,7 @@
 # Environment overrides (all optional):
 #   WORK, KIND_CLUSTER, MINIO_PORT, MINIO_AK, MINIO_SK, MINIO_IMAGE,
 #   MINIO_ENDPOINT, IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE,
-#   WARM_IMAGES (=0: skip the pool preheat; the first sandbox pulls cold)
+#   WARM_IMAGES (=1: restore the preheat; default 0 = on-demand pulls)
 #
 # Every task logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -41,6 +41,10 @@ GEN_DIR="$REPO_ROOT/.integration-env-gen"
 
 KIND_CLUSTER="${KIND_CLUSTER:-firecracker}"
 KIND_CONFIG="$REPO_ROOT/config/dev/kind-firecracker.yaml"
+# P2P is the standard topology: the kind config carries TWO nodes (one
+# fastlet per node, the second warm pull is a peer hit). KIND_SINGLE=1
+# strips the worker for resource-constrained hosts (cache-only, no peer).
+KIND_SINGLE="${KIND_SINGLE:-0}"
 NS="fast-sandbox-system"
 
 MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
@@ -63,11 +67,11 @@ SBX_TEMPLATE="ai-office-sandbox"
 SBX_POOL="firecracker-pool"
 SBX_SANDBOX="sandbox-firecracker"
 
-# WARM_IMAGES=0 skips the pool warmImages preheat: the agent cache starts
-# empty and the FIRST sandbox create triggers the on-demand PinImage pull
-# through DART (the stage-2 cold-start scenario verify measures). Default 1
-# keeps the preheat and the fast delivery-baseline numbers.
-WARM_IMAGES="${WARM_IMAGES:-1}"
+# WARM_IMAGES=1 restores the pool warmImages preheat (optional). Default 0:
+# on-demand is the standard stage-2 flow — the agent cache starts empty and
+# the FIRST sandbox create on each node triggers the PinImage pull through
+# DART (peer distribution across the two nodes), which `verify` measures.
+WARM_IMAGES="${WARM_IMAGES:-0}"
 
 # Node labels. The KVM label key is hardcoded by the SandboxTemplate
 # reconciler (sandbox.fast.io/kvm); the firecracker label selects installer/
@@ -207,6 +211,17 @@ agent_leases_drained() {
 	kubectl exec -n "$NS" "$pod" -- sh -c \
 		"curl -fsS --unix-socket /run/fast-sandbox/firecracker/runtime.sock -H 'Content-Type: application/json' -d '{\"podUid\":\"$uid\",\"namespace\":\"$NS\"}' http://firecracker-agent/v1/list-leases" \
 		| grep -q '"leases":\[\]'
+}
+
+# dart_roster_ready reports whether the node-local DART daemon has joined the
+# cluster: its admin /admin/members must list all agent pods (each hostNetwork
+# pod IP == a node, so every member is a peer).
+dart_roster_ready() { # pod expected-members
+	local pod="$1" expected="$2"
+	local members
+	members="$(kubectl exec -n "$NS" "$pod" -- sh -c \
+		'curl -fsS --noproxy "*" http://127.0.0.1:8147/admin/members' 2>/dev/null || true)"
+	[[ "$(printf '%s' "$members" | grep -o '"id":' | wc -l | tr -d ' ')" == "$expected" ]]
 }
 
 jails_cleaned() {
@@ -421,7 +436,7 @@ sysctl_restore() {
 # Disable with XFS_STATEROOT=0; the plain directory then works as before.
 XFS_STATEROOT="${XFS_STATEROOT:-1}"
 XFS_LOOP_FILE="${XFS_LOOP_FILE:-$WORK/fast-sandbox.img}"
-XFS_SIZE="${XFS_SIZE:-16G}"
+XFS_SIZE="${XFS_SIZE:-24G}"
 XFS_MOUNT_POINT="${XFS_MOUNT_POINT:-/var/lib/fast-sandbox}"
 
 ensure_xfsprogs() {
@@ -640,9 +655,20 @@ EOF
 # slow/blocked pull fails loudly instead of inside kind create.
 # KIND_RETAIN=1 keeps the failed node container for diagnosis (kind --retain).
 kind_up() {
-	local create_args=()
+	local create_args=() kind_config="$KIND_CONFIG"
 	[[ "$KIND_RETAIN" == 1 ]] && create_args+=(--retain)
+	if [[ "$KIND_SINGLE" == "1" ]]; then
+		# KIND_SINGLE=1 strips the worker node (P2P becomes cache-only).
+		kind_config="$WORK/kind-firecracker-single.yaml"
+		sed '/^- role: worker/,$d' "$KIND_CONFIG" > "$kind_config"
+		log "single-node topology (KIND_SINGLE=1: no worker, no peer traffic)"
+	fi
 	if [[ -n "$(kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" || true)" ]]; then
+		local node_count
+		node_count="$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+		if [[ "$KIND_SINGLE" != "1" && "$node_count" -lt 2 ]]; then
+			log "WARNING: existing $node_count-node cluster cannot grow a worker; run 'integration-env.sh down' first for the two-node P2P topology"
+		fi
 		log "cluster $KIND_CLUSTER already exists; reusing (run down first for a clean rebuild)"
 	else
 		if [[ -n "${KIND_NODE_IMAGE:-}" ]]; then
@@ -650,22 +676,24 @@ kind_up() {
 			docker pull -q "$KIND_NODE_IMAGE" || die "kind node image pull failed (KIND_NODE_IMAGE=$KIND_NODE_IMAGE)"
 			log "creating cluster with node image $KIND_NODE_IMAGE"
 			kind create cluster --name "$KIND_CLUSTER" --image "$KIND_NODE_IMAGE" \
-				"${create_args[@]}" --config "$KIND_CONFIG" > "$LOGS_DIR/kind-create.log" 2>&1 \
+				"${create_args[@]}" --config "$kind_config" > "$LOGS_DIR/kind-create.log" 2>&1 \
 				|| fail "kind create failed (full log: $LOGS_DIR/kind-create.log)"
 		else
 			log "creating cluster (pulling kindest/node may take minutes; set KIND_NODE_IMAGE to a mirror if it fails)"
-			kind create cluster --name "$KIND_CLUSTER" --config "$KIND_CONFIG" \
+			kind create cluster --name "$KIND_CLUSTER" --config "$kind_config" \
 				"${create_args[@]}" > "$LOGS_DIR/kind-create.log" 2>&1 \
 				|| fail "kind create failed (full log: $LOGS_DIR/kind-create.log)"
 		fi
 		pass "kind cluster created"
 	fi
 	local node
-	node="$(kind_node)"
-	docker exec "$node" sh -c 'test -e /dev/kvm' || die "KVM not visible inside the kind node container"
-	kubectl label node "$node" "$KVM_NODE_LABEL=true" --overwrite >/dev/null
-	kubectl label node "$node" "$FC_NODE_LABEL=true" --overwrite >/dev/null
-	pass "kind cluster ready (kvm passthrough + labels)"
+	for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+		docker exec "$node" sh -c 'test -e /dev/kvm' || die "KVM not visible inside the kind node container $node"
+		kubectl label node "$node" "$KVM_NODE_LABEL=true" --overwrite >/dev/null
+		kubectl label node "$node" "$FC_NODE_LABEL=true" --overwrite >/dev/null
+		log "node $node: KVM + firecracker labels applied"
+	done
+	pass "kind cluster ready (kvm passthrough + labels on every node)"
 }
 
 # --- task 3: MinIO + credentials -------------------------------------------------------
@@ -808,7 +836,17 @@ agent_up() {
 				"curl -fsS --noproxy '*' --unix-socket /run/fast-sandbox/firecracker/runtime.sock -H 'Content-Type: application/json' -d '{\"podUid\":\"$uid\",\"namespace\":\"$NS\"}' http://firecracker-agent/v1/health | grep -q '\"dartUp\":true'"
 		log "dart: $node dart pid=$(kubectl exec -n "$NS" "$pod" -- sh -c 'pgrep -x dart')"
 	done
-	pass "runtime-agent healthy (UDS /v1/health) + DART daemon up on every node"
+	# P2P roster: every daemon must see every other agent pod as a peer
+	# before any warm pull, so the second node's pull can be served by the
+	# first node's dart instead of the origin.
+	local expected_members
+	expected_members="$(printf '%s' "$pods" | wc -w | tr -d ' ')"
+	for pod in $pods; do
+		node="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.spec.nodeName}')"
+		wait_for "dart roster full on $node ($expected_members members)" 90 \
+			dart_roster_ready "$pod" "$expected_members"
+	done
+	pass "runtime-agent healthy (UDS /v1/health) + DART daemons up, roster=$expected_members"
 }
 
 # --- task 7: SandboxTemplate build -----------------------------------------------------------
@@ -884,19 +922,67 @@ assert_publish_layout() {
 # --- task 8: SandboxPool -----------------------------------------------------------------------
 pool_up() {
 	if [[ "$WARM_IMAGES" == "1" ]]; then
+		# Optional preheat mode: warmImages pull the artifact set on every
+		# fastlet node during up (fast delivery baselines; the second node
+		# is still served by the first node's DART peer).
 		kubectl apply -f "$REPO_ROOT/config/samples/pool-firecracker.yaml" >/dev/null
 		wait_for "fastlet pod running" 150 fastlet_pod_ready
 		wait_for "pool warmImages Ready" 300 warm_images_ready
-		pass "fastlet Running + warmImages Ready (agent PinImage closed loop)"
+		p2p_evidence "warm preheat"
+		pass "fastlet Running + warmImages Ready (agent PinImage closed loop, P2P evidence captured)"
 	else
-		# Cold-start mode: apply the pool spec WITHOUT the warmImages entry
-		# (it is the last section of the manifest). No preheat: the first
-		# sandbox create pulls the artifact set on demand through DART.
+		# On-demand is the standard stage-2 flow: apply the pool spec
+		# WITHOUT the warmImages entry (it is the last section of the
+		# manifest). No preheat — the first sandbox create on each node
+		# pulls the artifact set through DART; the evidence lands in the
+		# verify stage (verify 5: P2P evidence).
 		local cold_spec="$WORK/pool-firecracker-cold.yaml"
 		sed '/^  warmImages:/,$d' "$REPO_ROOT/config/samples/pool-firecracker.yaml" > "$cold_spec"
 		kubectl apply -f "$cold_spec" >/dev/null
 		wait_for "fastlet pod running" 150 fastlet_pod_ready
-		pass "fastlet Running, NO warmImages (WARM_IMAGES=0: first sandbox pulls cold through DART)"
+		pass "fastlet Running, on-demand pull (default: first sandbox pulls through DART)"
+	fi
+}
+
+# p2p_evidence asserts the stage-2 outcome from the DART block counters: the
+# published artifact set (rootfs/vmstate/memory) is pulled once per 4MiB
+# block from the origin cluster-wide, and when more than one node served
+# traffic the second node must have been fed by the first node's peer
+# (block_source{peer} > 0). P2P is the standard data plane, so this runs as
+# part of the environment flow, not as a separate experiment.
+p2p_evidence() { # description
+	local description="$1"
+	local pods pod manifest_ref manifest_key build_dir expected_blocks=0
+	local origin_total=0 peer_total=0 cache_total=0 size value source active_nodes=0 node_total
+	manifest_ref="$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.manifestRef}')"
+	manifest_key="${manifest_ref#s3://$MINIO_BUCKET/}"
+	build_dir="$(dirname "$manifest_key")"
+	for object in rootfs.ext4 vmstate.snap memory.snap; do
+		size="$(mc stat --json "chain/$MINIO_BUCKET/$build_dir/$object" 2>/dev/null | jq -r .size)"
+		[[ "$size" =~ ^[0-9]+$ ]] || die "cannot stat published $object (publish incomplete?)"
+		expected_blocks=$((expected_blocks + (size + 4194303) / 4194304))
+	done
+	pods="$(kubectl -n "$NS" get pods -l component=firecracker-runtime-agent -o jsonpath='{.items[*].metadata.name}')"
+	for pod in $pods; do
+		node_total=0
+		while read -r source value; do
+			case "$source" in
+				origin) origin_total=$((origin_total + value)); node_total=$((node_total + value)) ;;
+				peer) peer_total=$((peer_total + value)); node_total=$((node_total + value)) ;;
+				cache) cache_total=$((cache_total + value)); node_total=$((node_total + value)) ;;
+			esac
+		done < <(dart_source_counters "$pod")
+		[[ "$node_total" -gt 0 ]] && active_nodes=$((active_nodes + 1))
+	done
+	log "p2p evidence ($description): expected origin=$expected_blocks blocks; cluster origin=$origin_total peer=$peer_total cache=$cache_total active-nodes=$active_nodes"
+	[[ "$origin_total" -ge "$expected_blocks" ]] || fail "cluster origin $origin_total < expected $expected_blocks blocks"
+	[[ "$origin_total" -le $((expected_blocks + 4)) ]] \
+		|| fail "origin amplified: $origin_total > $((expected_blocks + 4)): pulls were not deduplicated by DART"
+	if [[ "$active_nodes" -ge 2 ]]; then
+		[[ "$peer_total" -gt 0 ]] || fail "no peer traffic across $active_nodes nodes: the second node was not served by the peer"
+		pass "P2P evidence ($description): origin ~1 fetch per block (cluster=$origin_total/$expected_blocks), peer=$peer_total, nodes=$active_nodes"
+	else
+		pass "P2P evidence ($description): origin ~1 fetch per block (cluster=$origin_total/$expected_blocks) on $active_nodes node (no peer needed)"
 	fi
 }
 
@@ -1430,7 +1516,8 @@ verify() {
 	run_stage "verify 1: sandbox create + execd /ping (fastctl)" verify_sandbox "$SBX_SANDBOX"
 	run_stage "verify 2: clone sandbox (shared snapshot, per-clone netns)" verify_sandbox "$second"
 	run_stage "verify 3: max concurrency (2 fastlets, 10 slots)" verify_concurrent
-	run_stage "verify 4: delete all ($((CONCURRENCY + 2))) + cleanup" verify_delete_all
+	run_stage "verify 4: P2P evidence (origin ~1 fetch/block via DART)" p2p_evidence "verify delivery"
+	run_stage "verify 5: delete all ($((CONCURRENCY + 2))) + cleanup" verify_delete_all
 	trap - EXIT
 	resolve_daemon_down
 	port_forward_down
@@ -2642,7 +2729,8 @@ down() {
 		log "down: purging node runtime cache under $XFS_MOUNT_POINT/firecracker"
 		sudo_ rm -rf "$XFS_MOUNT_POINT/firecracker/images" \
 			"$XFS_MOUNT_POINT/firecracker/agent" \
-			"$XFS_MOUNT_POINT/firecracker/jails" 2>/dev/null || true
+			"$XFS_MOUNT_POINT/firecracker/jails" \
+			"$XFS_MOUNT_POINT/firecracker/cache" 2>/dev/null || true
 	fi
 	if docker network ls --format '{{.Name}}' | grep -qx 'kind'; then
 		log "note: docker network 'kind' remains (kind-wide, reused on next up)"
