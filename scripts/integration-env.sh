@@ -1339,6 +1339,7 @@ EXECD_API_KEEP_SANDBOX="${EXECD_API_KEEP_SANDBOX:-0}"
 EXECD_API_CASES=()
 EXECD_API_URI=""
 EXECD_API_CRED=""
+EXECD_API_HOST=""
 EXECD_API_LPORT=""
 
 # execd_route_resolve resolves the execd port route of a sandbox
@@ -1355,6 +1356,7 @@ execd_route_resolve() { # sandbox-name
 	host="$(printf '%s' "$path" | sed 's|^[a-z]*://\([^/:]*\).*|\1|')"
 	EXECD_API_URI="$uri"
 	EXECD_API_CRED="$cred"
+	EXECD_API_HOST="$host"
 	EXECD_API_LPORT="$(fastlet_local_port "$host")"
 	[[ -n "$EXECD_API_LPORT" ]]
 }
@@ -1408,6 +1410,13 @@ execd_command_case() { # name timeout-s expect body
 	http="$(awk '{print $1}' <<<"$meta")"; http="${http:-000}"
 	bytes="$(awk '{print $2}' <<<"$meta")"; bytes="${bytes:-0}"
 	elapsed="$(awk '{print $3}' <<<"$meta")"
+	# Keep the RAW execd response for every case in the run log (assertions
+	# alone would hide what execd actually answered).
+	{
+		printf 'execd-api case %-9s raw response (http=%s rc=%s):\n' "$name" "$http" "$rc"
+		sed 's/^/    execd> /' "$WORK/execd-api-$name.out" 2>/dev/null
+		sed 's/^/    execd> /' "$WORK/execd-api-$name.err" 2>/dev/null
+	} >> "$WORK/run.log" 2>/dev/null || true
 	if [[ "$expect" == "error400" ]]; then
 		if [[ "$http" == "400" ]]; then
 			record_api_row "$name" PASS "malformed JSON -> HTTP 400 in ${elapsed}s (request reaches execd)"
@@ -1418,8 +1427,8 @@ execd_command_case() { # name timeout-s expect body
 		fi
 		return 0
 	fi
-	has_complete="$(grep -c "execution_complete" "$WORK/execd-api-$name.out" 2>/dev/null)"
-	has_error="$(grep -c '"type":"error"' "$WORK/execd-api-$name.out" 2>/dev/null)"
+	has_complete="$(grep -c "execution_complete" "$WORK/execd-api-$name.out" 2>/dev/null || true)"
+	has_error="$(grep -c '"type":"error"' "$WORK/execd-api-$name.out" 2>/dev/null || true)"
 	if [[ "$has_complete" -gt 0 ]]; then
 		# execd streams execution_complete only for exit code 0.
 		if [[ "$expect" == "error-event" ]]; then
@@ -1764,18 +1773,15 @@ egress_patch_policy() { # sandbox policy-json
 	fastctl update "$1" --action "egress=$2"
 }
 
-# egress_guest_reachable probes the egress data plane from the sandbox's
-# own slot netns (fastlet pod, ip netns exec): a DNS query to the slot
-# gateway is redirected to the egress DNS proxy, which evaluates the domain
-# policy (deny -> refused/hung, allow -> resolves). This bypasses execd's
-# HTTP endpoints entirely (historical note: execd /command used to hang on
-# the firecracker snapshot — guest CRNG never seeded on the 4.14 quickstart
-# kernel; fixed by switching the golden snapshot to the 6.1 microvm kernel,
-# see verify-execd-api and OpenSandbox #1695).
-#
-# The sandbox netns is located via the egress dispatch rule
-# (ip saddr <slot.IP> iifname <veth> jump subj_<uid>) — the veth name is
-# the netns name prefix (fh<hash13> vs fsb<hash>).
+# Egress policy probes run INSIDE the sandbox guest through execd POST
+# /command (full end-to-end: user command -> guest kernel -> slot gateway ->
+# egress DNS proxy + per-subject nft enforcement) — no more emitting traffic
+# from the fastlet pod's slot netns. For egress pools the driver injects the
+# guest resolver (nameserver <slot gateway>), so DNS queries reach the
+# egress DNS proxy via the gateway redirect; execd /command itself only
+# became usable on the firecracker snapshot after the golden kernel switched
+# to the 6.1 microvm kernel (VMGenID reseeds the guest CRNG at every
+# restore — see verify-execd-api and OpenSandbox #1695).
 EGRESS_PROBE_URL="http://example.com/"
 EGRESS_DENY_POLICY='{"defaultAction":"deny"}'
 # allow example.com (domain, resolved IPs land in the dyn_v4 set) plus a
@@ -1783,53 +1789,90 @@ EGRESS_DENY_POLICY='{"defaultAction":"deny"}'
 # reliably reachable target.
 EGRESS_ALLOW_POLICY='{"egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"1.1.1.1"}],"defaultAction":"deny"}'
 
-egress_sandbox_netns() { # sandbox -> netns name
-	# Locate the netns whose eth0 peer (veth) still exists in the sandbox's
-	# own fastlet pod AND carries the dispatch slot IP. Historical leftover
-	# netns share the slot IP range and dispatch matches on saddr alone, so
-	# a plain IP match can pick an orphan netns whose peer veth is gone —
-	# its traffic never reaches the egress bridge (Connection refused).
-	local pod uid key line ip ns peer
-	pod="$(egress_sandbox_pod "$1")" || return 1
-	uid="$(kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
-	[[ -n "$uid" ]] || return 1
-	key="subj_s_${uid//-/_}"
-	line="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- nft list ruleset 2>/dev/null | grep "jump $key" | grep "ip saddr" | head -n 1)" || return 1
-	ip="$(sed -n 's/.*ip saddr \([0-9.]*\).*/\1/p' <<< "$line")"
-	[[ -n "$ip" ]] || {
-		log "egress_sandbox_netns $1: dispatch rule parsed no saddr (line: $line)"
-		return 1
-	}
-	for ns in $(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns list 2>/dev/null | awk '{print $1}'); do
-		peer="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip link show eth0 2>/dev/null | grep -o '@if[0-9]*' | tr -d '@if')"
-		[[ -n "$peer" ]] || continue
-		peer_ok="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip link show 2>/dev/null | grep -c "^${peer}:")"
-		ip_ok="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip -o addr show 2>/dev/null | grep -c "$ip/")"
-		[[ "$peer_ok" -ge 1 && "$ip_ok" -ge 1 ]] || continue
-		# The live sandbox's netns has its VM tap UP (vmtap0); historical
-		# leftover netns reuse the slot IP but their VM is dead (DOWN) and
-		# their peer bridge is gone — probes there get Connection refused.
-		vmtap_up="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip link show vmtap0 2>/dev/null | grep -c "state UP")"
-		if [[ "$vmtap_up" -ge 1 ]]; then
-			echo "$ns"
-			return 0
+# egress_execd_run executes one command INSIDE the sandbox guest via the
+# execd /command SSE endpoint (same DIRECT_FASTLET_PROXY route the
+# execd-api battery uses) and prints the command's stdout (decoded SSE
+# stdout events). Returns 0 iff the command exited 0 (execution_complete
+# SSE — execd's contract; non-zero exits surface as a structured error SSE,
+# see verify-execd-api).
+egress_execd_run() { # sandbox-name command timeout-s
+	local sbx="$1" body="$2" timeout_s="$3" pod uid ip outfile="$WORK/egress-execd.out" http attempt
+	pod="$(egress_sandbox_pod "$sbx")" || return 1
+	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$pod" && -n "$uid" ]] || return 1
+	# The command is delivered pod->guest DIRECTLY (egress container curls
+	# the guest execd at the sandbox's CURRENT slot IP read from the driver
+	# state meta.json): the fastlet-proxy per-sandbox PORT route of
+	# egress-pool sandboxes goes stale across pool churn (stale slot
+	# addressing -> 404 or dial hang), while the direct ingress DNAT to the
+	# slot IP is reliable. The command still executes IN the guest, so the
+	# egress policy is exercised end-to-end regardless of the delivery hop.
+	attempt=0
+	while :; do
+		attempt=$((attempt + 1))
+		rm -f "$outfile"
+		ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
+			"grep -m1 -oE '\"IP\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
+		if [[ -z "$ip" ]]; then
+			log "egress execd probe for $sbx: slot IP not found in driver state (attempt $attempt)"
+			if [[ "$attempt" -ge 8 ]]; then
+				return 1
+			fi
+			sleep 1
+			continue
 		fi
+		http="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
+			curl -sS -m "$timeout_s" -N \
+			-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+			--data-binary "$body" -o "$outfile" -w '%{http_code}' \
+			"http://$ip:44772/command" 2>/dev/null)" || {
+			log "egress execd probe for $sbx: curl failed (attempt $attempt, timeout ${timeout_s}s?) cmd=$body"
+			if [[ "$attempt" -ge 3 ]]; then
+				return 1
+			fi
+			sleep 1
+			continue
+		}
+		if [[ "$http" == "200" || "$attempt" -ge 3 ]]; then
+			break
+		fi
+		log "egress execd probe for $sbx: http=$http (attempt $attempt); retrying"
+		sleep 1
 	done
-	log "egress_sandbox_netns $1: no live netns in $pod carries slot IP $ip"
-	return 1
+	# Always surface the RAW execd SSE response — assertions alone hide what
+	# execd actually answered (useful for policy debugging).
+	log "egress execd response for $sbx (pod=$pod slotIP=$ip http=$http): cmd=$body"
+	sed 's/^/    execd> /' "$outfile" 2>/dev/null | tee -a "$WORK/run.log" || true
+	if [[ "$http" != "200" ]]; then
+		return 1
+	fi
+	jq -r 'select(.type == "stdout") | .text' "$outfile" 2>/dev/null
+	grep -q "execution_complete" "$outfile"
 }
 
-# egress_ip_reachable probes the per-subject nft rules with IP-direct
-# traffic (no DNS involved): a TCP connect to a raw IP is governed only by
-# the subj_ chain (dyn/allow sets accept, final drop otherwise). TCP-only
-# (nc) so HTTP-level behavior (CDN Host routing, 4xx pages) cannot skew
-# the result — a deny drops the SYN silently (nc -w times out).
+# egress_guest_reachable asserts the guest's DNS query for the probe domain
+# is answered by the egress DNS proxy through the injected guest resolver
+# (nameserver <slot gateway>): allow -> resolves (Name: + A record), deny ->
+# the proxy refuses and nslookup fails fast. TCP-level data-plane allow is
+# asserted separately against the static allow-listed IP (egress_ip_
+# reachable); resolved-domain IPs are asserted via dyn_v4 set membership.
+egress_guest_reachable() { # sandbox
+	local out rc=0
+	if out="$(egress_execd_run "$1" \
+		'{"command":"nslookup example.com 2>&1"}' 25)"; then
+		rc=0
+	else
+		rc=1
+	fi
+	log "egress in-guest probe for $1 (execd /command nslookup example.com): rc=$rc $(tr '\n' ' ' <<<"$out")"
+	[[ "$rc" -eq 0 ]] && grep -q "Name:" <<<"$out"
+}
+
+# egress_ip_reachable asserts IP-direct (DNS-free) TCP from the guest is
+# accepted: only the subj_ chain governs (dyn/allow sets accept, final drop
+# otherwise). A deny drops the SYN silently, so nc -w bounds the probe.
 egress_ip_reachable() { # sandbox ip
-	local pod ns
-	pod="$(egress_sandbox_pod "$1")" || return 1
-	ns="$(egress_sandbox_netns "$1")" || return 1
-	kubectl -n "$NS" exec "pod/$pod" -c fastlet -- \
-		ip netns exec "$ns" timeout 5 nc -w 3 "$2" 80 </dev/null >/dev/null 2>&1
+	egress_execd_run "$1" "{\"command\":\"nc -w 6 $2 80 </dev/null >/dev/null 2>&1\"}" 20 >/dev/null
 }
 
 # egress_dyn_v4_has asserts the DNS-resolved IP landed in the subject's
@@ -1848,33 +1891,15 @@ egress_dyn_v4_has() { # sandbox ip
 # of DNS.
 EGRESS_IP="1.1.1.1"
 
-# egress_probe_ip extracts the first IPv4 A record from a DNS probe
-# (nslookup prints the server as 'Address: <ip>:53', A answers as plain
-# 'Address: <ip>').
+# egress_probe_ip extracts the first IPv4 A record resolved FROM THE GUEST
+# (in-guest nslookup through the egress DNS proxy; the proxy's own Server
+# header line carries ':53' and is skipped by the bare-IP match).
 egress_probe_ip() { # sandbox -> ip
-	local pod ns out
-	pod="$(egress_sandbox_pod "$1")" || return 1
-	ns="$(egress_sandbox_netns "$1")" || return 1
-	gw="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip route 2>/dev/null | awk '/default/{print $3; exit}')"
-	[[ -n "$gw" ]] || return 1
-	out="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" timeout 5 nslookup example.com "$gw" 2>&1)"
-	awk '/^Address:/ { if ($2 ~ /^[0-9.]+$/) { print $2; exit } }' <<< "$out"
-}
-
-egress_guest_reachable() { # sandbox
-	local pod ns gw out
-	pod="$(egress_sandbox_pod "$1")" || return 1
-	ns="$(egress_sandbox_netns "$1")" || {
-		log "egress data-plane probe for $1: slot netns not found (dispatch rule missing?)"
+	local out
+	if ! out="$(egress_execd_run "$1" '{"command":"nslookup example.com 2>&1"}' 25)"; then
 		return 1
-	}
-	gw="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" ip route 2>/dev/null | awk '/default/{print $3; exit}')"
-	[[ -n "$gw" ]] || return 1
-	out="$(kubectl -n "$NS" exec "pod/$pod" -c fastlet -- ip netns exec "$ns" timeout 5 nslookup example.com "$gw" 2>&1)"
-	log "egress DNS probe for $1 (netns $ns, gw $gw): $(tr '\n' ' ' <<< "$out")"
-	# A resolution matches on the answer's Name line; the nslookup Server
-	# section also prints 'Address: <server>' and would falsely match.
-	grep -q "Name:" <<< "$out"
+	fi
+	awk '/^Address:/ { if ($2 ~ /^[0-9.]+$/) { print $2; exit } }' <<< "$out"
 }
 
 egress_binding_state() { # sandbox
@@ -1927,7 +1952,25 @@ egress_run_sandbox() { # sandbox policy-json
 			sleep 1
 		done
 	fi
-	fastctl run "$name" --image "$SBX_IMAGE" --pool "$EGRESS_POOL" --action "egress=$2"
+	# The pool was just (re)created: the controller may not have the new
+	# fastlet's capacity/heartbeat yet ("no eligible Fastlet"), so retry —
+	# mirrors fastctl_run_sandbox. Output is kept for diagnosis.
+	attempt=0
+	for attempt in $(seq 1 30); do
+		if out="$(fastctl run "$name" --image "$SBX_IMAGE" --pool "$EGRESS_POOL" --action "egress=$2" 2>&1)"; then
+			[[ -n "$out" ]] && printf '%s\n' "$out"
+			return 0
+		fi
+		if sandbox_exists "$name"; then
+			# A create that succeeded but errored on the wire: already exists.
+			printf '%s\n' "$out"
+			return 0
+		fi
+		printf '%s\n' "$out" >&2
+		log "egress_run_sandbox $name: attempt $attempt failed (pool recreated?); retrying"
+		sleep 2
+	done
+	fail "fastctl run $name failed after 30 attempts"
 }
 
 verify_egress() {
@@ -1968,10 +2011,10 @@ verify_egress() {
 	# Default state: two subjects, different policies, on the same egress.
 	run_stage "egress 4: A deny (DNS + IP blocked)" test_egress_denied "$sbx_a"
 	run_stage "egress 4: A IP-direct blocked" test_egress_ip_denied "$sbx_a" "$EGRESS_IP"
-	pass "subject A: example.com NXDOMAIN and $EGRESS_IP dropped (deny)"
+	pass "subject A: example.com blocked and $EGRESS_IP dropped (deny)"
 	run_stage "egress 4: B allow (DNS resolves + IP accepted)" \
 		egress_guest_reachable "$sbx_b"
-	pass "subject B: example.com resolves (allow)"
+	pass "subject B: guest reaches example.com through execd (allow)"
 	probe_ip="$(egress_probe_ip "$sbx_b")"
 	[[ -n "$probe_ip" ]] || fail "could not resolve example.com for B"
 	wait_for "resolved IP $probe_ip in B's dyn_v4 set" 15 egress_dyn_v4_has "$sbx_b" "$probe_ip"
