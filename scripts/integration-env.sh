@@ -1339,7 +1339,6 @@ EXECD_API_KEEP_SANDBOX="${EXECD_API_KEEP_SANDBOX:-0}"
 EXECD_API_CASES=()
 EXECD_API_URI=""
 EXECD_API_CRED=""
-EXECD_API_HOST=""
 EXECD_API_LPORT=""
 
 # execd_route_resolve resolves the execd port route of a sandbox
@@ -1356,7 +1355,6 @@ execd_route_resolve() { # sandbox-name
 	host="$(printf '%s' "$path" | sed 's|^[a-z]*://\([^/:]*\).*|\1|')"
 	EXECD_API_URI="$uri"
 	EXECD_API_CRED="$cred"
-	EXECD_API_HOST="$host"
 	EXECD_API_LPORT="$(fastlet_local_port "$host")"
 	[[ -n "$EXECD_API_LPORT" ]]
 }
@@ -1812,7 +1810,7 @@ egress_execd_run() { # sandbox-name command timeout-s
 		attempt=$((attempt + 1))
 		rm -f "$outfile"
 		ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
-			"grep -m1 -oE '\"IP\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
+			"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
 		if [[ -z "$ip" ]]; then
 			log "egress execd probe for $sbx: slot IP not found in driver state (attempt $attempt)"
 			if [[ "$attempt" -ge 8 ]]; then
