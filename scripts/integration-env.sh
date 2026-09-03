@@ -82,9 +82,9 @@ IMG_AGENT="${IMAGE_AGENT:-fast-sandbox/firecracker-runtime-agent:dev}"
 AUTO_CLEAN=0
 ACTION=""
 
-log() { printf '\033[1;34m[firecracker-integration]\033[0m %s\n' "$*" | tee -a "$WORK/run.log"; }
+log() { printf '\033[1;34m[firecracker-integration]\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
 die() { printf '\033[1;31m[firecracker-integration] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
-pass() { printf '\033[1;32m[firecracker-integration] PASS\033[0m %s\n' "$*" | tee -a "$WORK/run.log"; }
+pass() { printf '\033[1;32m[firecracker-integration] PASS\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
 fail() { printf '\033[1;31m[firecracker-integration] FAIL\033[0m %s\n' "$*" >&2; exit 1; }
 # highlight() marks a key milestone in the output (bold cyan, not logged).
 highlight() { printf '\033[1;36m%s\033[0m\n' "$*"; }
@@ -1826,7 +1826,7 @@ egress_execd_run() { # sandbox-name command timeout-s -> prints command stdout; 
 	http="$(sed -n 's/^HTTP=//p' <<<"$out" | tail -1)"
 	body_out="$(sed '$d' <<<"$out")"
 	log "egress execd probe for $sbx (url=http://$ip:44772/command): rc=$rc http=${http:-000} cmd=$body"
-	printf '%s\n' "$body_out" | egress_print_raw "url=http://$ip:44772/command cmd=$body http=$http rc=$rc" | tee -a "$WORK/run.log" || true
+	printf '%s\n' "$body_out" | egress_print_raw "url=http://$ip:44772/command cmd=$body http=$http rc=$rc" || true
 	if [[ "$rc" -ne 0 || "$http" != "200" ]]; then
 		return 1
 	fi
@@ -1837,13 +1837,13 @@ egress_execd_run() { # sandbox-name command timeout-s -> prints command stdout; 
 # egress_print_raw prints the raw execd SSE response line-by-line (one
 # frame per output line, blank frames preserved) inside a labeled fence so
 # nothing is flattened or truncated.
-egress_print_raw() { # label
-	local label="$1" line
-	printf '  --- execd raw: %s ---\n' "$label"
-	while IFS= read -r line; do
-		printf '    execd> %s\n' "$line"
-	done
-	printf '  --- end %s ---\n' "$label"
+egress_print_raw() { # label (reads lines on stdin)
+	local label="$1"
+	{
+		printf '  --- execd raw: %s ---\n' "$label"
+		cat
+		printf '  --- end %s ---\n' "$label"
+	} | tee -a "$WORK/run.log" >&2
 }
 
 egress_execd_ping() { # sandbox -> rc 0 when /ping answers 200
@@ -1891,7 +1891,7 @@ egress_execd_echo() { # sandbox -> rc 0 on execution_complete
 		http="$(sed -n 's/^HTTP=//p' <<<"$body" | tail -1)"
 		body="$(sed '$d' <<<"$body")"
 		log "execd control echo for $sbx (url=http://$ip:44772/command): rc=$rc http=${http:-000}"
-		printf '%s\n' "$body" | egress_print_raw "url=http://$ip:44772/command echo-control http=$http rc=$rc" | tee -a "$WORK/run.log" || true
+		printf '%s\n' "$body" | egress_print_raw "url=http://$ip:44772/command echo-control http=$http rc=$rc" || true
 		if [[ "$http" == "200" ]] && grep -q "execution_complete" <<<"$body"; then
 			return 0
 		fi
