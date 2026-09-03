@@ -1311,6 +1311,328 @@ verify_delete_all() {
 	pass "delete cleaned leases + jails ($((CONCURRENCY + 2)) sandboxes)"
 }
 
+# --- verify-execd-api: execd HTTP API usability in the Firecracker guest ----
+# Dedicated execd protocol battery for the golden snapshot (OpenSandbox issue
+# #1695): POST /command reportedly hangs in the Firecracker guest (connection
+# up, SSE never streams, curl times out with 0 bytes) while GET /ping on the
+# same listener answers instantly and a malformed body returns 400 — proving
+# the request reaches execd and the stall sits in the runCommand path
+# (stdlog descriptor/tail -> getShell -> launchManaged).
+#
+# The battery drives the execd HTTP API over the SAME DIRECT_FASTLET_PROXY
+# route the /ping probes use (no central sandbox-proxy), and adds a
+# no-proxy-at-all control that curls the guest execd (172.30.0.3:44772)
+# straight from the sandbox's slot netns inside the fastlet pod.
+#
+# Root-cause signal (not just red/green): cases that write NOTHING to stdout
+# (/bin/false, a missing binary) complete whenever the synchronous init
+# sequence does not stall, while output-producing cases (echo / pipe / sleep)
+# additionally exercise the stdout-file + tail pipeline. So:
+#   everything HANGs                    -> init-sequence stall (stdlog/getShell)
+#   only output-producing cases HANG    -> stdout file/tail pipeline suspect
+#   everything completes                -> execd API usable (not reproduced)
+EXECD_API_SBX="${EXECD_API_SBX:-sandbox-execd-api}"
+# EXECD_API_KEEP_SANDBOX=1 keeps the sandbox (and its jail) after the battery
+# so the guest serial console — execd logs included — can be read from
+# firecracker.log before the jail is removed.
+EXECD_API_KEEP_SANDBOX="${EXECD_API_KEEP_SANDBOX:-0}"
+EXECD_API_CASES=()
+EXECD_API_URI=""
+EXECD_API_CRED=""
+EXECD_API_LPORT=""
+
+# execd_route_resolve resolves the execd port route of a sandbox
+# (DIRECT_FASTLET_PROXY, the durable-assignment fastlet) and maps the fastlet
+# authority to the local port-forward — the same plumbing probe_execd uses.
+# Sets EXECD_API_URI / EXECD_API_CRED / EXECD_API_LPORT.
+execd_route_resolve() { # sandbox-name
+	local name="$1" out path cred uri host
+	out="$(gen_endpoint_for "$name" 44772 2>/dev/null)" || return 1
+	path="$(printf '%s' "$out" | cut -f1)"
+	cred="$(printf '%s' "$out" | cut -f2)"
+	[[ -n "$path" && -n "$cred" ]] || return 1
+	uri="$(printf '%s' "$path" | sed 's|^[a-z]*://[^/]*||')"
+	host="$(printf '%s' "$path" | sed 's|^[a-z]*://\([^/:]*\).*|\1|')"
+	EXECD_API_URI="$uri"
+	EXECD_API_CRED="$cred"
+	EXECD_API_LPORT="$(fastlet_local_port "$host")"
+	[[ -n "$EXECD_API_LPORT" ]]
+}
+
+# execd_base_url prints the base curl URL of the resolved execd route
+# (http://127.0.0.1:<local-forward><route-path>).
+execd_base_url() {
+	printf 'http://127.0.0.1:%s%s' "$EXECD_API_LPORT" "$EXECD_API_URI"
+}
+
+record_api_row() { # name verdict detail
+	EXECD_API_CASES+=("$1|$2|$3")
+	printf '  %-16s %-9s %s\n' "$1" "$2" "$3" | tee -a "$WORK/run.log"
+}
+
+# execd_ping_case: GET /ping control on the resolved route (must answer
+# instantly with 200; the issue's baseline).
+execd_ping_case() {
+	local meta rc=0 http elapsed
+	meta="$(curl -sS -m 5 -H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" \
+		-o /dev/null -w '%{http_code} %{time_total}' "$(execd_base_url)/ping" 2>/dev/null)" \
+		|| rc=$?
+	http="$(awk '{print $1}' <<<"$meta")"
+	elapsed="$(awk '{print $2}' <<<"$meta")"
+	if [[ "$http" == "200" ]]; then
+		record_api_row "ping" PASS "HTTP 200 in ${elapsed}s"
+	else
+		record_api_row "ping" FAIL "http=${http:-000} rc=$rc"
+	fi
+}
+
+# execd_command_case posts one JSON /command body over the resolved route and
+# classifies the outcome. Row verdicts:
+#   PASS       expected outcome arrived: execution_complete SSE (exit 0),
+#              OR the structured error SSE execd sends for non-zero exits
+#              (expect=error-event), OR the fast 400 (expect=error400)
+#   RESPONDED  HTTP 200 with SSE bytes but neither completion nor error event
+#   HANG       nothing received until the curl timeout (issue #1695 symptom)
+#   FAIL       outcome mismatched the expectation / other transport error
+execd_command_case() { # name timeout-s expect body
+	local name="$1" timeout_s="$2" expect="$3" body="$4"
+	local meta rc=0 http bytes elapsed snippet has_complete has_error
+	meta="$(curl -sS -N -m "$timeout_s" \
+		-H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" \
+		-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+		--data-binary "$body" \
+		-o "$WORK/execd-api-$name.out" \
+		-w '%{http_code} %{size_download} %{time_total}' \
+		"$(execd_base_url)/command" 2>"$WORK/execd-api-$name.err")" \
+		|| rc=$?
+	http="$(awk '{print $1}' <<<"$meta")"; http="${http:-000}"
+	bytes="$(awk '{print $2}' <<<"$meta")"; bytes="${bytes:-0}"
+	elapsed="$(awk '{print $3}' <<<"$meta")"
+	if [[ "$expect" == "error400" ]]; then
+		if [[ "$http" == "400" ]]; then
+			record_api_row "$name" PASS "malformed JSON -> HTTP 400 in ${elapsed}s (request reaches execd)"
+		elif [[ "$http" == "000" && "$rc" == "28" ]]; then
+			record_api_row "$name" HANG "malformed JSON ALSO hangs (${timeout_s}s, no response)"
+		else
+			record_api_row "$name" FAIL "expected HTTP 400, got $http (rc=$rc)"
+		fi
+		return 0
+	fi
+	has_complete="$(grep -c "execution_complete" "$WORK/execd-api-$name.out" 2>/dev/null)"
+	has_error="$(grep -c '"type":"error"' "$WORK/execd-api-$name.out" 2>/dev/null)"
+	if [[ "$has_complete" -gt 0 ]]; then
+		# execd streams execution_complete only for exit code 0.
+		if [[ "$expect" == "error-event" ]]; then
+			record_api_row "$name" FAIL "expected an error SSE for a non-zero exit, got execution_complete"
+		else
+			record_api_row "$name" PASS "execution_complete in ${elapsed}s (http=$http, $bytes bytes)"
+		fi
+	elif [[ "$has_error" -gt 0 ]]; then
+		# execd reports non-zero exits / launch failures via a structured
+		# SSE error event (no execution_complete) — correct protocol.
+		if [[ "$expect" == "error-event" ]]; then
+			record_api_row "$name" PASS "structured error SSE in ${elapsed}s (non-zero exit, http=$http, $bytes bytes)"
+		else
+			snippet="$(head -c 160 "$WORK/execd-api-$name.out" 2>/dev/null | tr '\n|' ' ;' | cut -c1-160)"
+			record_api_row "$name" FAIL "error SSE where completion was expected: $snippet"
+		fi
+	elif [[ "$http" == "200" && "$bytes" -gt 0 ]]; then
+		snippet="$(head -c 160 "$WORK/execd-api-$name.out" 2>/dev/null | tr '\n|' ' ;' | cut -c1-160)"
+		record_api_row "$name" RESPONDED "SSE bytes but no completion/error event: $snippet"
+	elif [[ "$rc" == "28" ]]; then
+		record_api_row "$name" HANG "curl timeout ${timeout_s}s, $bytes bytes (http=$http)"
+	else
+		snippet="$(head -c 160 "$WORK/execd-api-$name.err" 2>/dev/null | tr '\n|' ' ;' | cut -c1-160)"
+		record_api_row "$name" FAIL "http=$http rc=$rc bytes=$bytes err: $snippet"
+	fi
+}
+
+# execd_slot_netns finds a live per-sandbox slot netns inside the sandbox's
+# fastlet pod (the netns whose VM tap vmtap0 is UP). Prints "pod netns".
+execd_slot_netns() { # sandbox-name
+	local sbx="$1" pod lines ns
+	pod="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.status.placement.fastletName}' 2>/dev/null)"
+	[[ -n "$pod" ]] || return 1
+	lines="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- ip netns list 2>/dev/null)" || return 1
+	while read -r ns _; do
+		[[ -n "$ns" ]] || continue
+		if kubectl -n "$NS" exec -c fastlet "pod/$pod" -- ip netns exec "$ns" ip link show vmtap0 2>/dev/null | grep -q "state UP"; then
+			printf '%s %s\n' "$pod" "$ns"
+			return 0
+		fi
+	done <<<"$lines"
+	return 1
+}
+
+# execd_netns_control probes the guest execd straight from the slot netns
+# (guest 172.30.0.3:44772 — zero proxies) with the fastlet image's busybox
+# wget. The /ping control runs FIRST and gates the /command probe: when the
+# guest is not reachable from the netns at all (netns/ping also fails) the
+# rows are SKIP — that is a data-plane/path issue, not execd, and must not
+# pollute the API verdict. Skipped entirely when the applet is unavailable.
+execd_netns_control() { # sandbox-name
+	local sbx="$1" pod ns ping_out cmd_out rc=0
+	read -r pod ns < <(execd_slot_netns "$sbx") || {
+		record_api_row "netns" SKIP "no live slot netns found in the fastlet pod"
+		return 0
+	}
+	if ! kubectl -n "$NS" exec -c fastlet "pod/$pod" -- busybox wget --help 2>&1 | grep -q -- "--post-data"; then
+		record_api_row "netns" SKIP "busybox wget (--post-data) unavailable in the fastlet image"
+		return 0
+	fi
+	ping_out="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- ip netns exec "$ns" \
+		busybox wget -S -T 8 -qO - \
+		--header 'Content-Type: application/json' \
+		"http://172.30.0.3:44772/ping" 2>&1)" || rc=$?
+	if ! grep -q "HTTP/1.1 200\|HTTP/1.0 200" <<<"$ping_out"; then
+		record_api_row "netns" SKIP "guest not reachable from slot netns $ns (netns/ping fails: data-plane path, not execd)"
+		return 0
+	fi
+	record_api_row "netns/ping" PASS "guest execd answered 200 directly in netns $ns"
+	cmd_out="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- ip netns exec "$ns" \
+		busybox wget -S -T 8 -qO - \
+		--header 'Content-Type: application/json' \
+		--header 'Accept: text/event-stream' \
+		--post-data '{"command":"echo probe-ok"}' \
+		"http://172.30.0.3:44772/command" 2>&1)" || rc=$?
+	if grep -q "execution_complete" <<<"$cmd_out"; then
+		record_api_row "netns/command" PASS "guest execd completed directly in netns $ns"
+	elif grep -q '"type":"error"' <<<"$cmd_out"; then
+		record_api_row "netns/command" PASS "guest execd answered with a structured error SSE in netns $ns"
+	else
+		record_api_row "netns/command" HANG "no guest /command response in netns $ns (rc=$rc): $(head -c 120 <<<"$cmd_out")"
+	fi
+}
+
+# execd_api_dump_console captures execd's own log lines from the guest
+# serial console (firecracker.log) BEFORE the sandbox is deleted (cleanup
+# removes the jail). execd logs to /dev/console and the jailer stores the
+# firecracker stdout (the console) under
+# <StateRoot>/jails/firecracker/<uid[:32]>/root/firecracker.log, readable
+# from the fastlet pod. Best effort — a missing/unreadable log only warns.
+execd_api_dump_console() { # sandbox-name
+	local name="$1" pod uid32 logfile
+	pod="$(kubectl -n "$NS" get sandbox "$name" -o jsonpath='{.status.placement.fastletName}' 2>/dev/null)" || return 0
+	uid32="$(kubectl -n "$NS" get sandbox "$name" -o jsonpath='{.metadata.uid}' 2>/dev/null | cut -c1-32)"
+	[[ -n "$pod" && -n "$uid32" ]] || return 0
+	logfile="/var/lib/fast-sandbox/firecracker/jails/firecracker/$uid32/root/firecracker.log"
+	if ! kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c "test -s '$logfile'" >/dev/null 2>&1; then
+		log "execd-api: guest console $logfile not found on $pod (evidence capture skipped)"
+		return 0
+	fi
+	highlight "  key node: guest console evidence for '$name' (execd logs from firecracker.log)"
+	log "execd-api: execd-relevant console lines ($logfile):"
+	kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
+		"grep -aE 'Requested: (POST|GET)|crypto/rand|received command|StreamEvent|CommandExecError|starting OpenSandbox| error' '$logfile' | tail -60" \
+		| sed 's/^/    /' | tee -a "$WORK/run.log" || true
+	log "execd-api: raw console tail (last 25 lines):"
+	kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c "tail -25 '$logfile'" \
+		| sed 's/^/    /' | tee -a "$WORK/run.log" || true
+	pass "guest console evidence dumped before teardown"
+}
+
+verify_execd_api_sandbox() { # sandbox-name
+	local name="$1"
+	fastctl_run_sandbox "$name"
+	wait_until "execd /ping on $name" 120000 probe_execd "$name"
+	execd_route_resolve "$name" || fail "execd route resolve failed for $name"
+	log "execd-api: route $(execd_base_url) (DIRECT_FASTLET_PROXY, credential route)"
+	pass "sandbox $name running, execd /ping reachable end-to-end"
+}
+
+verify_execd_api_battery() {
+	local body_pipe
+	EXECD_API_CASES=()
+	execd_ping_case
+	execd_command_case "bad-json" 5 error400 '{not-json'
+	execd_command_case "echo" 8 completed '{"command":"echo probe-ok"}'
+	body_pipe="{\"command\":\"printf 'a b c\\n' | wc -w\"}"
+	execd_command_case "pipe" 8 completed "$body_pipe"
+	execd_command_case "sleep" 10 completed '{"command":"sleep 1 && echo done-after-sleep"}'
+	execd_command_case "false" 8 error-event '{"command":"/bin/false"}'
+	execd_command_case "missing" 8 error-event '{"command":"definitely-not-a-real-binary-xyz"}'
+	pass "route battery complete (see rows above)"
+}
+
+verify_execd_api_netns() { # sandbox-name
+	execd_netns_control "$1"
+	pass "slot-netns controls complete (no proxy; SKIP when the guest is unreachable from the netns)"
+}
+
+verify_execd_api_cleanup() { # sandbox-name
+	local name="$1" pod uid32
+	if [[ "$EXECD_API_KEEP_SANDBOX" == "1" ]]; then
+		# The battery hung (issue #1695). Keep the VM alive so the execd
+		# side can be inspected: execd logs to /dev/console, the jailer
+		# captures firecracker stdout (the serial console) in
+		# <StateRoot>/jails/firecracker/<sandbox-id[:32]>/root/firecracker.log.
+		# The battery's own hang attempts are ALREADY in that log — read it
+		# first (look for "received command", "StreamEvent.OnExecuteInit",
+		# "CommandExecError"); for a live replay, tail BEFORE re-running the
+		# battery (the next run's leftover removal recycles this sandbox).
+		pod="$(kubectl -n "$NS" get sandbox "$name" -o jsonpath='{.status.placement.fastletName}' 2>/dev/null)"
+		uid32="$(kubectl -n "$NS" get sandbox "$name" -o jsonpath='{.metadata.uid}' 2>/dev/null | cut -c1-32)"
+		log "diagnosis: sandbox $name KEPT (EXECD_API_KEEP_SANDBOX=1)"
+		log "diagnosis: this battery's execd log lines are in firecracker.log on pod $pod:"
+		log "  kubectl -n $NS exec -c fastlet pod/$pod -- sh -c 'grep -aE \"starting OpenSandbox|received command|StreamEvent|CommandExecError|error\" /var/lib/fast-sandbox/firecracker/jails/firecracker/$uid32/root/firecracker.log | tail -80'"
+		log "diagnosis: for a LIVE replay, run this tail in one terminal BEFORE the next battery:"
+		log "  kubectl -n $NS exec -c fastlet pod/$pod -- sh -c 'tail -f /var/lib/fast-sandbox/firecracker/jails/firecracker/*/root/firecracker.log'"
+		log "  then: EXECD_API_KEEP_SANDBOX=1 ./scripts/integration-env.sh verify-execd-api"
+		log "diagnosis: teardown afterwards with:  fastctl delete $name  (or re-run verify-execd-api)"
+		rm -f "$WORK"/execd-api-*.out "$WORK"/execd-api-*.err
+		return 0
+	fi
+	fastctl delete "$name" >/dev/null 2>&1 || true
+	wait_for "execd-api sandbox gone" 120 sandbox_gone "$name"
+	rm -f "$WORK"/execd-api-*.out "$WORK"/execd-api-*.err
+	pass "sandbox $name deleted; workspace clean"
+}
+
+verify_execd_api() {
+	local name="$EXECD_API_SBX" row verdict
+	local api_hang=0 api_pass=0 api_other=0 api_skip=0 api_total=0
+	port_forward_up
+	resolve_daemon_up
+	trap 'port_forward_down; resolve_daemon_down' EXIT
+	run_stage "execd-api 1: sandbox create + execd /ping (route plumbing)" \
+		verify_execd_api_sandbox "$name"
+	run_stage "execd-api 2: API battery over the fastlet-proxy route" \
+		verify_execd_api_battery
+	run_stage "execd-api 3: no-proxy controls (slot netns -> guest 172.30.0.3)" \
+		verify_execd_api_netns "$name"
+	for row in "${EXECD_API_CASES[@]}"; do
+		verdict="${row#*|}"
+		verdict="${verdict%%|*}"
+		case "$verdict" in
+			HANG) api_hang=$((api_hang + 1)) ;;
+			PASS) api_pass=$((api_pass + 1)) ;;
+			SKIP) api_skip=$((api_skip + 1)) ;;
+			*) api_other=$((api_other + 1)) ;;
+		esac
+		api_total=$((api_total + 1))
+	done
+	highlight "  key node: execd API verdict on '$name' (execd protocol, issue #1695)"
+	if [[ "$api_hang" -gt 0 ]]; then
+		printf '    REPRODUCED #1695: %d/%d API cases hang (0 bytes) while /ping stays up\n' \
+			"$api_hang" "$api_total" | tee -a "$WORK/run.log"
+		printf '    root-cause read: all command cases HANG -> synchronous init stall (stdlog\n    descriptor / getShell / launchManaged); only echo/pipe/sleep HANG -> stdout\n    file/tail pipeline\n' | tee -a "$WORK/run.log" >/dev/null
+	elif [[ "$api_other" -eq 0 ]]; then
+		printf '    NOT REPRODUCED: execd API fully usable (%d/%d PASS, %d SKIP control rows)\n' \
+			"$api_pass" "$api_total" "$api_skip" | tee -a "$WORK/run.log"
+	else
+		printf '    PARTIAL: %d PASS, %d HANG, %d other, %d SKIP of %d — inspect rows above\n' \
+			"$api_pass" "$api_hang" "$api_other" "$api_skip" "$api_total" | tee -a "$WORK/run.log"
+	fi
+	run_stage "execd-api 4: guest console evidence (firecracker.log, auto-captured)" \
+		execd_api_dump_console "$name"
+	run_stage "execd-api 5: sandbox delete + cleanup" verify_execd_api_cleanup "$name"
+	trap - EXIT
+	resolve_daemon_down
+	port_forward_down
+	stage_summary
+	highlight "== verify-execd-api complete: execd protocol battery + no-proxy controls =="
+}
+
 # --- verify-egress: egress Actions-channel integration -----------------------
 # Network policy is delivered over the Sandbox Actions channel only this
 # phase (SET_BINDING binding.input / LIFECYCLE_HOOK / REMOVE_BINDING); the
@@ -1445,9 +1767,11 @@ egress_patch_policy() { # sandbox policy-json
 # egress_guest_reachable probes the egress data plane from the sandbox's
 # own slot netns (fastlet pod, ip netns exec): a DNS query to the slot
 # gateway is redirected to the egress DNS proxy, which evaluates the domain
-# policy (deny -> refused/hung, allow -> resolves). This bypasses the
-# execd /command SSE endpoint, which is broken on the firecracker snapshot
-# (the execd answers /ping but /command never streams).
+# policy (deny -> refused/hung, allow -> resolves). This bypasses execd's
+# HTTP endpoints entirely (historical note: execd /command used to hang on
+# the firecracker snapshot — guest CRNG never seeded on the 4.14 quickstart
+# kernel; fixed by switching the golden snapshot to the 6.1 microvm kernel,
+# see verify-execd-api and OpenSandbox #1695).
 #
 # The sandbox netns is located via the egress dispatch rule
 # (ip saddr <slot.IP> iifname <veth> jump subj_<uid>) — the veth name is
@@ -1804,6 +2128,17 @@ down() {
 	rm -rf "$GEN_DIR"
 	sysctl_restore
 	stateroot_xfs_down
+	# Purge the runtime cache the environment owns. The pull layer treats a
+	# committed cache as FINAL (idempotent, never refreshed), so a rebuilt
+	# SandboxTemplate would otherwise keep being ignored on the next up when
+	# the StateRoot survives teardown (e.g. XFS_STATEROOT=0 plain directory).
+	# The XFS loop-image case is already covered by stateroot_xfs_down.
+	if [[ -d "$XFS_MOUNT_POINT/firecracker" ]]; then
+		log "down: purging node runtime cache under $XFS_MOUNT_POINT/firecracker"
+		sudo_ rm -rf "$XFS_MOUNT_POINT/firecracker/images" \
+			"$XFS_MOUNT_POINT/firecracker/agent" \
+			"$XFS_MOUNT_POINT/firecracker/jails" 2>/dev/null || true
+	fi
 	if docker network ls --format '{{.Name}}' | grep -qx 'kind'; then
 		log "note: docker network 'kind' remains (kind-wide, reused on next up)"
 	fi
@@ -1833,6 +2168,13 @@ usage: integration-env.sh [--cleanup|--auto-clean] {up|down|status|verify}
   status   component / template / pool / sandbox health
   verify   create 2 sandboxes, probe execd /ping, then a max-concurrency
            batch (CONCURRENCY=5 at pool capacity), delete all, assert cleanup
+  verify-execd-api
+           execd HTTP API usability battery in the Firecracker guest
+           (OpenSandbox #1695): /ping, POST /command SSE (echo/pipe/sleep/
+           false/missing command classes), malformed-JSON 400, plus
+           no-proxy slot-netns controls; verdict: hang reproduced or not;
+           auto-captures the guest console (execd logs from firecracker.log)
+           before teardown
   verify-egress
            egress Actions-channel integration: pool apply, protocol
            cross-verification, SET_BINDING -> hooks -> REMOVE_BINDING
@@ -1848,7 +2190,7 @@ for arg in "$@"; do
 	case "$arg" in
 		--cleanup) ACTION="down" ;;
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|verify|verify-egress) ACTION="$arg" ;;
+		up|down|status|verify|verify-execd-api|verify-egress) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -1901,6 +2243,11 @@ case "$ACTION" in
 	verify)
 		trap 'on_error verify' ERR
 		verify
+		trap - ERR
+		;;
+	verify-execd-api)
+		trap 'on_error verify-execd-api' ERR
+		verify_execd_api
 		trap - ERR
 		;;
 	verify-egress)

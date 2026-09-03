@@ -30,6 +30,23 @@ One-liners:
 ./scripts/integration-env.sh down      # host left clean
 ```
 
+`up` and the plain `verify` only prove execd `/ping` delivery. For execd
+**protocol** usability in the guest (OpenSandbox issue #1695: `POST
+/command` hangs on the snapshot while `/ping` works) run:
+
+```bash
+./scripts/integration-env.sh verify-execd-api   # execd API battery + verdict
+```
+
+It creates one sandbox, drives the execd HTTP API over the same
+DIRECT_FASTLET_PROXY route the `/ping` probes use (`/ping`, `POST /command`
+SSE across echo/pipe/sleep/false/missing command classes, malformed-JSON
+400), then curls the guest `172.30.0.3:44772` straight from the slot netns
+(no proxy at all) when the fastlet image ships busybox wget. Rows classify
+each case PASS / RESPONDED / HANG / FAIL and the stage prints an explicit
+verdict: `REPRODUCED #1695` (hang, with an init-stall vs stdout-tail
+root-cause read) or `NOT REPRODUCED` (API fully usable).
+
 ## 2. Deployment topology (deployment forms)
 
 | Component | Form | Node | Key mounts / wiring |
@@ -251,6 +268,8 @@ Baseline on the reference node (XFS StateRoot):
 | `MINIO_PORT` / `MINIO_AK` / `MINIO_SK` / `MINIO_ENDPOINT` | 9000 / ... | store credentials; endpoint auto = container IP |
 | `SBX_IMAGE` / `EXECD` / `FC_VERSION` | alpine:3.19 / execd:1.1.0 / v1.16.1 | the chain keys |
 | `CONCURRENCY` | 5 | per-fastlet slot capacity for the batch |
+| `EXECD_API_SBX` | sandbox-execd-api | sandbox name used by `verify-execd-api` |
+| `EXECD_API_KEEP_SANDBOX` | 0 | 1 keeps the sandbox + jail after the battery and prints the guest-console (firecracker.log) tail command for execd-side diagnosis |
 | `DEBUG_PROBE` | 0 | print every probe attempt (resolve/host/curl code) for the batch window |
 | `XFS_STATEROOT` / `XFS_SIZE` | 1 / 16G | reflink layer on/off, virtual size |
 | `SKIP_TOOL_INSTALL` / `SKIP_LEFTOVER_CLEAN` | 0 | manual tooling / refuse auto-rebuild |

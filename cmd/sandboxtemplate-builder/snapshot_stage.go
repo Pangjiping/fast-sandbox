@@ -103,7 +103,14 @@ func runSnapshotStage(args []string) error {
 	if err != nil {
 		return err
 	}
-	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 root=/dev/vda rw"
+	// random.trust_cpu=on seeds the guest CRNG from RDRAND at boot. The
+	// microVM has no other entropy source (no virtio-rng device, and
+	// Firecracker snapshots preserve the CPUID mask), so without it the CRNG
+	// stays uninitialized and any getrandom()/crypto/rand caller — e.g. execd
+	// generating a session id for POST /command — blocks forever. The golden
+	// snapshot carries the initialized CRNG, so every restored instance is
+	// fixed too.
+	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 random.trust_cpu=on root=/dev/vda rw"
 	bootArgs += " init=" + guestInitPath(spec)
 	bootArgs = bakedNetworkBootArgs(bootArgs)
 	if err := configureVM(vm, kernel, rootfs, bootArgs, spec); err != nil {
@@ -252,6 +259,17 @@ func configureVM(vm *vmm, kernel, rootfs, bootArgs string, spec apiv1alpha2.Sand
 		"cpu_template": "T2",
 	}); err != nil {
 		return err
+	}
+	// Entropy device (virtio-rng): the microVM has no other entropy source —
+	// the T2 CPU template masks RDRAND/RDSEED (snapshot determinism) and no
+	// host RNG device is passed through — so without it the guest CRNG never
+	// initializes and getrandom() callers (Go crypto/rand, uuid, openssl,
+	// python secrets, TLS) block forever; execd POST /command hangs on its
+	// session id while /ping and malformed-JSON 400 stay instant (OpenSandbox
+	// #1695). Seeding the CRNG at prep boot means the golden snapshot carries
+	// an initialized CRNG and every restored instance works.
+	if err := api(vm.socket, "PUT", "/entropy", map[string]any{}); err != nil {
+		return fmt.Errorf("attach entropy device: %w", err)
 	}
 	if err := api(vm.socket, "PUT", "/boot-source", map[string]any{
 		"kernel_image_path": kernel,
