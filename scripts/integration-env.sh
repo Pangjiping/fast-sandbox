@@ -1794,19 +1794,123 @@ EGRESS_DENY_POLICY='{"defaultAction":"deny"}'
 # reliably reachable target.
 EGRESS_ALLOW_POLICY='{"egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"1.1.1.1"}],"defaultAction":"deny"}'
 
-# --- egress policy assertions run from the SUBJECT's slot netns ----------
-# All egress policy assertions (DNS deny/allow and IP-direct) execute from
-# the subject's slot netns with the egress gateway as resolver/egress hop.
-# In-guest (execd /command) probes were the end-to-end preference, but the
-# egress DNS proxy intermittently does not deliver replies to
-# GUEST-originated (SNATed) flows for minutes — UDP DNS and TCP handshakes
-# alike — while netns-originated traffic of the SAME subject is answered
-# immediately (egress logs keep emitting outbound events during the window:
-# reply delivery, not policy). Netns-originated traffic carries the same
-# subject identity (slot IP) and never flakes, so it is the assertion plane
-# for egress policy semantics; execd /command usability is covered by
-# verify-execd-api (main pool) and the kernel fix for OpenSandbox #1695.
-# The slot netns name and gateway are read from the driver state meta.json.
+# --- egress policy assertions run IN-GUEST (end-to-end) -------------------
+# DNS deny/allow, dyn_v4 probe IP and IP-direct assertions execute commands
+# INSIDE the guest via execd /command (pod->guest direct at the current slot
+# IP), so they traverse the guest -> egress data plane end-to-end — the
+# delivery semantics users get. The subject netns helpers are kept ONLY as
+# the plane-liveness readiness gate (a netns query exercises the egress
+# plane without touching execd).
+# execd control-path checks under an active egress policy (issue #1704
+# discriminator): /ping + /command echo from the pod DIRECTLY into the guest
+# execd (slot IP DNAT). If these succeed while guest-originated DNS replies
+# are lost, the failure is the egress reply path — NOT egress blocking the
+# execd control connection. Single-shot (no hammering).
+egress_execd_run() { # sandbox-name command timeout-s -> prints command stdout; rc 0 on execution_complete
+	local sbx="$1" body="$2" timeout_s="$3" pod uid ip out rc http
+	pod="$(egress_sandbox_pod "$sbx")" || return 1
+	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$pod" && -n "$uid" ]] || return 1
+	ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
+		"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
+	[[ -n "$ip" ]] || return 1
+	# Response read on STDOUT (never -o into the container): raw SSE printed
+	# host-side, one source of truth for assertions and logs.
+	out="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
+		curl -sS -m "$timeout_s" -N \
+		-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+		--data-binary "$body" \
+		-w $'\nHTTP=%{http_code}' \
+		"http://$ip:44772/command" 2>/dev/null)"
+	rc=$?
+	http="$(sed -n 's/^HTTP=//p' <<<"$out" | tail -1)"
+	body_out="$(sed '$d' <<<"$out")"
+	log "egress execd probe for $sbx (url=http://$ip:44772/command): rc=$rc http=${http:-000} cmd=$body"
+	printf '%s\n' "$body_out" | egress_print_raw "url=http://$ip:44772/command cmd=$body http=$http rc=$rc" | tee -a "$WORK/run.log" || true
+	if [[ "$rc" -ne 0 || "$http" != "200" ]]; then
+		return 1
+	fi
+	jq -r 'select(.type == "stdout") | .text' <<<"$body_out" 2>/dev/null
+	grep -q "execution_complete" <<<"$body_out"
+}
+
+# egress_print_raw prints the raw execd SSE response line-by-line (one
+# frame per output line, blank frames preserved) inside a labeled fence so
+# nothing is flattened or truncated.
+egress_print_raw() { # label
+	local label="$1" line
+	printf '  --- execd raw: %s ---\n' "$label"
+	while IFS= read -r line; do
+		printf '    execd> %s\n' "$line"
+	done
+	printf '  --- end %s ---\n' "$label"
+}
+
+egress_execd_ping() { # sandbox -> rc 0 when /ping answers 200
+	local sbx="$1" pod uid ip http
+	pod="$(egress_sandbox_pod "$sbx")" || return 1
+	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$pod" && -n "$uid" ]] || return 1
+	ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
+		"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
+	[[ -n "$ip" ]] || return 1
+	http="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
+		curl -sS -m 8 -o /dev/null -w '%{http_code}' "http://$ip:44772/ping" 2>/dev/null)" || return 1
+	log "execd control path for $sbx (pod->guest $ip:44772/ping): http=$http"
+	[[ "$http" == "200" ]]
+}
+
+egress_execd_echo() { # sandbox -> rc 0 on execution_complete
+	local sbx="$1" pod uid ip body http rc attempt
+	pod="$(egress_sandbox_pod "$sbx")" || return 1
+	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$pod" && -n "$uid" ]] || return 1
+	attempt=0
+	while :; do
+		attempt=$((attempt + 1))
+		ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
+			"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
+		[[ -n "$ip" ]] || {
+			log "execd control echo for $sbx: slot IP not found (attempt $attempt)"
+			return 1
+		}
+		# Response is read on STDOUT and split host-side. Writing it to a
+		# file INSIDE the container (-o "<host path>") made curl abort right
+		# after the server's first write — execd logged "client
+		# disconnected" ~1ms after the init event while the command itself
+		# completed fine (and no raw execd output surfaced, matching the
+		# earlier complaint). stdout capture matches the manual probe that
+		# always worked.
+		body="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
+			curl -sS -m 12 -N \
+			-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+			--data-binary '{"command":"echo execd-control-ok"}' \
+			-w $'\nHTTP=%{http_code}' \
+			"http://$ip:44772/command" 2>/dev/null)"
+		rc=$?
+		http="$(sed -n 's/^HTTP=//p' <<<"$body" | tail -1)"
+		body="$(sed '$d' <<<"$body")"
+		log "execd control echo for $sbx (url=http://$ip:44772/command): rc=$rc http=${http:-000}"
+		printf '%s\n' "$body" | egress_print_raw "url=http://$ip:44772/command echo-control http=$http rc=$rc" | tee -a "$WORK/run.log" || true
+		if [[ "$http" == "200" ]] && grep -q "execution_complete" <<<"$body"; then
+			return 0
+		fi
+		# New pod->guest /command connections were reset for a minutes-long
+		# window after subject activation; poll until it ends.
+		if [[ "$attempt" -ge 60 ]]; then
+			log "execd control echo for $sbx: still failing after 60 attempts"
+			return 1
+		fi
+		sleep 4
+	done
+}
+
+egress_execd_control() { # sandbox
+	egress_execd_ping "$1" && egress_execd_echo "$1"
+}
+
+# egress_subject_netns() etc. — the slot netns name and gateway are read
+# from the driver state meta.json.
 egress_subject_netns() { # sandbox -> "netns gateway"
 	local sbx="$1" pod uid meta ns gw
 	pod="$(egress_sandbox_pod "$sbx")" || return 1
@@ -1831,30 +1935,44 @@ egress_subject_dns() { # sandbox dnsname -> rc (0 = resolved)
 	[[ "$rc" -eq 0 ]] && grep -q "Name:" <<<"$out"
 }
 
-egress_guest_reachable() { # sandbox
+egress_plane_ready() { # sandbox  (netns liveness; gate only, never assert policy through it)
 	egress_subject_dns "$1" "example.com"
 }
 
-# egress_probe_ip extracts the first IPv4 A record resolved from the subject
-# netns (the proxy's Server header line carries ':53' and is skipped by the
-# bare-IP match).
+# --- IN-GUEST (end-to-end) policy assertions via execd /command ----------
+# DNS deny/allow, dyn_v4 probe IP and IP-direct probes execute INSIDE the
+# guest through execd (pod->guest direct at the current slot IP), so they
+# traverse the guest -> egress data plane end-to-end. The netns helpers
+# above remain only as the plane-liveness readiness gate.
+
+egress_guest_reachable() { # sandbox  (IN-GUEST end-to-end)
+	local out rc=0
+	if out="$(egress_execd_run "$1" \
+		'{"command":"timeout 6 nslookup example.com 2>&1"}' 12)"; then
+		rc=0
+	else
+		rc=1
+	fi
+	log "egress in-guest probe for $1 (execd /command nslookup example.com): rc=$rc $(tr '\n' ' ' <<<"$out")"
+	[[ "$rc" -eq 0 ]] && grep -q "Name:" <<<"$out"
+}
+
+# egress_probe_ip extracts the first IPv4 A record resolved IN-GUEST (the
+# proxy's Server header line carries ':53' and is skipped by the bare-IP
+# match).
 egress_probe_ip() { # sandbox -> ip
-	local sbx="$1" ns gw out
-	read -r ns gw < <(egress_subject_netns "$sbx") || return 1
-	out="$(kubectl -n "$NS" exec -c fastlet "pod/$(egress_sandbox_pod "$sbx")" -- \
-		ip netns exec "$ns" timeout 6 nslookup example.com "$gw" 2>&1)"
+	local out
+	if ! out="$(egress_execd_run "$1" '{"command":"timeout 6 nslookup example.com 2>&1"}' 12)"; then
+		return 1
+	fi
 	awk '/^Address:/ { if ($2 ~ /^[0-9.]+$/) { print $2; exit } }' <<<"$out"
 }
 
-# egress_ip_reachable asserts IP-direct (DNS-free) TCP from the subject
-# netns is accepted: only the subj_ chain governs (dyn/allow sets accept,
-# final drop otherwise). A deny drops the SYN silently, so nc -w bounds the
-# probe.
+# egress_ip_reachable asserts IP-direct (DNS-free) TCP from the guest is
+# accepted: only the subj_ chain governs (dyn/allow sets accept, final drop
+# otherwise). A deny drops the SYN silently, so nc -w bounds the probe.
 egress_ip_reachable() { # sandbox ip
-	local sbx="$1" ip="$2" ns gw
-	read -r ns gw < <(egress_subject_netns "$sbx") || return 1
-	kubectl -n "$NS" exec -c fastlet "pod/$(egress_sandbox_pod "$sbx")" -- \
-		ip netns exec "$ns" timeout 5 nc -w 3 "$ip" 80 </dev/null >/dev/null 2>&1
+	egress_execd_run "$1" "{\"command\":\"nc -w 6 $2 80 </dev/null >/dev/null 2>&1\"}" 20 >/dev/null
 }
 
 # egress_dyn_v4_has asserts the DNS-resolved IP landed in the subject's
@@ -1944,6 +2062,17 @@ egress_run_sandbox() { # sandbox policy-json
 	fail "fastctl run $name failed after 30 attempts"
 }
 
+# egress_restart_worker kills the egress worker process so the Fastlet
+# detects the instance change and replays SET_BINDING. Killing the egress
+# main process takes the container (and the exec session) down with it, so
+# the kubectl exec exit code is not meaningful — the replay assertions
+# follow separately.
+egress_restart_worker() { # pod
+	kubectl -n "$NS" exec "pod/$1" -c egress -- \
+		sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = "egress" ] && kill ${p#/proc/}; done' \
+		>/dev/null 2>&1 || true
+}
+
 verify_egress() {
 	local sbx_a="$EGRESS_SBX" sbx_b="$EGRESS_SBX-2" sbx_pod probe_ip binding_n
 
@@ -1986,9 +2115,19 @@ verify_egress() {
 	# answer DNS for a stretch right after pool/subject activation). Wait
 	# until B(allow) genuinely resolves from the subject netns with a long
 	# deadline; everything below (A deny included) runs only after this gate.
-	wait_for "egress DNS plane serving: B resolves (allow, subject netns)" \
-		300 egress_guest_reachable "$sbx_b"
-	pass "egress readiness gate: DNS answered by the egress proxy"
+	wait_for "egress DNS plane serving (netns liveness): B resolves" \
+		300 egress_plane_ready "$sbx_b"
+	pass "egress readiness gate: DNS plane serving (netns liveness)"
+
+	# Control (AFTER the plane gate: pod->guest connections are reset while
+	# the plane is still settling, so in-guest checks must not run before
+	# it): is execd itself reachable in the guest while an egress policy is
+	# ACTIVE? /ping + /command echo from the pod directly into the guest
+	# discriminate "egress blocks the execd control path" from "egress
+	# replies to guest-originated traffic are lost" (issue #1704).
+	run_stage "egress 3c: execd control path intact under egress policy (ping + echo)" \
+		egress_execd_control "$sbx_b"
+	pass "execd reachable in the guest under an active egress policy"
 
 	# Default state: two subjects, different policies, on the same egress.
 	run_stage "egress 4: A deny (DNS + IP blocked)" test_egress_denied "$sbx_a"
@@ -2027,8 +2166,7 @@ verify_egress() {
 	# keeps its own policy.
 	binding_n="$(egress_set_binding_count)"
 	run_stage "egress 7: egress worker restart -> Fastlet replays A and B" \
-		kubectl -n "$NS" exec "pod/$sbx_pod" -c egress -- \
-		sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = "egress" ] && kill ${p#/proc/}; done'
+		egress_restart_worker "$sbx_pod"
 	wait_for "egress log: SET_BINDING replayed after restart" 30 egress_count_gt "$binding_n"
 	pass "Handler restart replay observed (new instanceId; A and B re-bound)"
 	wait_for "A: still allowed after replay" 90 egress_guest_reachable "$sbx_a"
