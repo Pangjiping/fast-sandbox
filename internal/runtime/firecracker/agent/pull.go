@@ -10,20 +10,35 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 // Client pulls published Firecracker artifacts for an image reference into
-// the node-local cache. Stage 1 carries only the pure pull layer: the UDS
-// server, device leasing, and driver wiring arrive with the runtime-agent
-// work.
+// the node-local cache. The pull chain is stage-1 pure (UDS server, device
+// leasing, and driver wiring arrive with the runtime-agent work); stage 2
+// adds the DART P2P data plane for the artifact bytes.
 type Client struct {
 	s3 *s3Client
+	// dart is the DART P2P gateway configuration; nil keeps the pull on the
+	// direct header-signed S3 path (local mode / stage-1 behavior).
+	dart *dartGateway
+}
+
+// dartGateway routes artifact GETs through a node-local DART instance
+// (stage-2 P2P). The agent signs presigned origin URLs; DART fetches,
+// caches and P2P-distributes the blocks, and the agent still verifies the
+// whole-object digest against the manifest.
+type dartGateway struct {
+	base string // e.g. http://127.0.0.1:8145 (prefix route /dart/<upstream-url>)
+	ttl  time.Duration
+	http *http.Client
 }
 
 // NewClient builds a pull client for a store root (s3://bucket/prefix) with
@@ -38,7 +53,21 @@ func NewClient(storeRoot string, credential registryconfig.Credential, options .
 	if err != nil {
 		return nil, err
 	}
-	return &Client{s3: s3}, nil
+	client := &Client{s3: s3}
+	if config.dartBase != "" {
+		client.dart = &dartGateway{
+			base: strings.TrimRight(config.dartBase, "/"),
+			ttl:  config.presignTTL,
+			http: config.httpClient,
+		}
+		if client.dart.ttl <= 0 {
+			client.dart.ttl = time.Hour
+		}
+		if client.dart.http == nil {
+			client.dart.http = &http.Client{Timeout: defaultS3RequestTimeout}
+		}
+	}
+	return client, nil
 }
 
 // Option configures the pull client.
@@ -48,6 +77,8 @@ type optionsConfig struct {
 	region     string
 	endpoint   string
 	httpClient *http.Client
+	dartBase   string
+	presignTTL time.Duration
 }
 
 // WithRegion overrides the SigV4 signing region (default us-east-1).
@@ -65,6 +96,22 @@ func WithEndpoint(endpoint string) Option {
 // timeout), e.g. to tune timeouts or the transport.
 func WithHTTPClient(client *http.Client) Option {
 	return func(config *optionsConfig) { config.httpClient = client }
+}
+
+// WithDART routes artifact downloads through the node-local DART P2P gateway
+// at base (e.g. http://127.0.0.1:8145). Metadata (image index and manifest)
+// stays on the direct header-signed path: their 404 semantics must survive
+// exactly, and DART collapses origin errors into 502. Empty base = direct
+// mode (the stage-1 behavior).
+func WithDART(base string) Option {
+	return func(config *optionsConfig) { config.dartBase = base }
+}
+
+// WithPresignTTL bounds the lifetime of the presigned URLs handed to DART.
+// The default is one hour; the TTL only needs to cover one artifact fetch
+// (DART reuses the URL for cache misses back to the origin).
+func WithPresignTTL(ttl time.Duration) Option {
+	return func(config *optionsConfig) { config.presignTTL = ttl }
 }
 
 // PullImage resolves the addressing chain for image and materializes the
@@ -136,11 +183,73 @@ func (c *Client) PullImage(ctx context.Context, stateRoot, image string) error {
 	// manifest, so their store keys derive from the manifest reference.
 	buildDir := path.Dir(manifestKey)
 	for _, file := range files {
-		if err := stageFile(ctx, c.s3, dir, path.Join(buildDir, file.publish), file); err != nil {
+		if err := stageFile(ctx, c, dir, path.Join(buildDir, file.publish), file); err != nil {
 			return err
 		}
 	}
 	return commitManifest(dir, payload)
+}
+
+// getArtifact streams one native artifact object. In DART mode the download
+// goes through the P2P gateway as presign -> GET <dart>/dart/<url>; a DART
+// transport failure or a gateway error (502 origin error / 400 prefix
+// drift) falls back to the direct header-signed S3 path, so a broken or
+// missing DART degrades to stage-1 behavior without failing the pull.
+// Without a DART gateway the call is the plain direct GET.
+func (c *Client) getArtifact(ctx context.Context, storeKey string) (io.ReadCloser, error) {
+	if c.dart == nil {
+		return c.s3.get(ctx, storeKey)
+	}
+	body, err := c.getArtifactViaDART(ctx, storeKey)
+	if err == nil {
+		return body, nil
+	}
+	if errors.Is(err, ErrObjectNotFound) {
+		return nil, err
+	}
+	var status *httpError
+	if errors.As(err, &status) && status.StatusCode >= 200 && status.StatusCode < 500 && status.StatusCode != http.StatusBadRequest {
+		// A definitive client-class answer from the origin through DART
+		// (excluding 400, which is a DART routing/prefix problem): do not
+		// fall back, the origin would answer the same.
+		return nil, err
+	}
+	// Transport error, gateway error (502/503) or prefix drift (400): the
+	// DART instance cannot serve this object; fall back to the direct
+	// header-signed path (which carries its own retry loop).
+	return c.s3.get(ctx, storeKey)
+}
+
+// getArtifactViaDART performs one presigned GET through the DART prefix
+// route. DART surfaces origin failures as 502 "origin error" and routing
+// problems as 400, so a non-200 answer here is an httpError for the caller
+// to classify.
+func (c *Client) getArtifactViaDART(ctx context.Context, storeKey string) (io.ReadCloser, error) {
+	presigned, err := c.s3.presignGET(storeKey, c.dart.ttl)
+	if err != nil {
+		return nil, err
+	}
+	target := c.dart.base + "/dart/" + presigned
+	if _, err := url.Parse(target); err != nil {
+		return nil, fmt.Errorf("build DART request URL: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.dart.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		if response.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %s", ErrObjectNotFound, storeKey)
+		}
+		return nil, &httpError{StatusCode: response.StatusCode, Body: string(body)}
+	}
+	return response.Body, nil
 }
 
 // maxManifestBytes caps the downloaded manifest document. Manifests are

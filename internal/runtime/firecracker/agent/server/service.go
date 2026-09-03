@@ -36,6 +36,9 @@ type Service struct {
 	state     *agentstate.State
 	stateRoot string
 	now       func() time.Time
+	// dartUp reports the node-local DART daemon state; nil when DART is not
+	// configured (stage-1 local mode).
+	dartUp func() bool
 }
 
 // NewService assembles the stage-1 backend.
@@ -53,6 +56,14 @@ type ServiceOption func(*Service)
 // WithServiceClock overrides the clock.
 func WithServiceClock(now func() time.Time) ServiceOption {
 	return func(service *Service) { service.now = now }
+}
+
+// WithDARTProbe wires the node-local DART daemon state into Health: dartUp
+// reports whether the DART admin plane answered its last probe. The agent's
+// own health stays independent of DART (a broken gateway keeps pulls on the
+// direct S3 fallback path).
+func WithDARTProbe(dartUp func() bool) ServiceOption {
+	return func(service *Service) { service.dartUp = dartUp }
 }
 
 // PinImage pulls the image (if not already cached) and records one pin.
@@ -134,13 +145,17 @@ func (s *Service) Compatibility(_ context.Context) (string, error) {
 // Health reports the agent state and the cache footprint.
 func (s *Service) Health(_ context.Context) (agentprotocol.HealthResponse, error) {
 	snapshot := s.state.Snapshot()
-	return agentprotocol.HealthResponse{
+	response := agentprotocol.HealthResponse{
 		OK:         true,
 		CacheBytes: cacheBytes(s.stateRoot),
 		LeaseCount: snapshot.LeaseCount,
 		PinCount:   snapshot.PinCount,
 		ImageCount: snapshot.ImageCount,
-	}, nil
+	}
+	if s.dartUp != nil {
+		response.DartUp = s.dartUp()
+	}
+	return response, nil
 }
 
 // manifestDigestFor re-reads the committed manifest digest of an image.

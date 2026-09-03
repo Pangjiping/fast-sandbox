@@ -56,6 +56,22 @@ spec:
           value: /var/lib/fast-sandbox/firecracker
         - name: FAST_SANDBOX_REGISTRY_CONFIG_PATH
           value: /etc/fast-sandbox/agent/registry.json
+        # DART P2P gateway (stage 2): non-empty enables the node-local DART
+        # child process and routes artifact pulls through its prefix API.
+        # The image carries the pinned dart binary; see
+        # build/Dockerfile.firecracker-runtime-agent.
+        - name: FAST_SANDBOX_DART_ADDR
+          value: http://127.0.0.1:8145
+        # Peer discovery via the headless Service (config/dev/dart-service.yaml);
+        # the agent falls back to direct S3 when DART is unreachable.
+        - name: FAST_SANDBOX_DART_DISCOVER
+          value: dns:dart.fast-sandbox-system.svc:9000
+        # hostNetwork pods share the node network: podIP == node IP and the
+        # hostname is the node's, so HRW self-id stays stable across restarts.
+        - name: FAST_SANDBOX_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         securityContext:
           privileged: true
         readinessProbe:

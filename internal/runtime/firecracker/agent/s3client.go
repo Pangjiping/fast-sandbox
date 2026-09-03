@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -222,6 +223,83 @@ func (c *s3Client) objectURL(key string) (string, error) {
 // emptyPayloadHash is the SHA-256 of an empty payload, the fixed
 // X-Amz-Content-Sha256 of a bodyless GET.
 var emptyPayloadHash = sha256Hex(nil)
+
+// unsignedPayload is the presigned-URL payload hash. A presigned GET cannot
+// promise the caller will set a content hash header, so the signature covers
+// the constant "UNSIGNED-PAYLOAD" instead (S3/MinIO convention for query
+// signing; the request still carries no body).
+const unsignedPayload = "UNSIGNED-PAYLOAD"
+
+// presignGET returns a SigV4 query-signed GET URL for a store object, valid
+// for ttl. The signature is derived from the same canonical request as the
+// header signing in sign (identical path, host, region scope and signing
+// key); only the carrier differs — the X-Amz-* parameters travel in the
+// query string and the only signed header is host. Presigned URLs are handed
+// to DART so the P2P layer can fetch from the origin without ever seeing the
+// access key pair.
+func (c *s3Client) presignGET(storeKey string, ttl time.Duration) (string, error) {
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	key := storeKey
+	if c.prefix != "" {
+		key = c.prefix + "/" + storeKey
+	}
+	urlString, err := c.objectURL(key)
+	if err != nil {
+		return "", err
+	}
+	target, err := url.Parse(urlString)
+	if err != nil {
+		return "", fmt.Errorf("build object URL: %w", err)
+	}
+	now := time.Now().UTC()
+	amzDate := now.Format("20060102T150405Z")
+	date := now.Format("20060102")
+	scope := date + "/" + c.region + "/s3/aws4_request"
+
+	// The five X-Amz-* parameters sort alphabetically in this order.
+	parameters := [][2]string{
+		{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"},
+		{"X-Amz-Credential", c.accessKey + "/" + scope},
+		{"X-Amz-Date", amzDate},
+		{"X-Amz-Expires", strconv.FormatInt(int64(ttl/time.Second), 10)},
+		{"X-Amz-SignedHeaders", "host"},
+	}
+	canonicalQuery := canonicalQueryString(parameters)
+	canonicalHeaders := "host:" + target.Host + "\n"
+	canonicalRequest := strings.Join([]string{
+		http.MethodGet,
+		target.EscapedPath(),
+		canonicalQuery,
+		canonicalHeaders,
+		"host",
+		unsignedPayload,
+	}, "\n")
+	stringToSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + sha256Hex([]byte(canonicalRequest))
+	signingKey := deriveSigningKey(c.secretKey, date, c.region)
+	signature := hmacHex(signingKey, stringToSign)
+	target.RawQuery = canonicalQuery + "&X-Amz-Signature=" + signature
+	return target.String(), nil
+}
+
+// canonicalQueryString renders an already-sorted parameter list as the SigV4
+// canonical query string: every name and value is RFC 3986 encoded (spaces as
+// %20, never '+') and pairs join with '&'.
+func canonicalQueryString(parameters [][2]string) string {
+	parts := make([]string, 0, len(parameters))
+	for _, pair := range parameters {
+		parts = append(parts, awsQueryEscape(pair[0])+"="+awsQueryEscape(pair[1]))
+	}
+	return strings.Join(parts, "&")
+}
+
+// awsQueryEscape encodes a SigV4 query component. url.QueryEscape uses '+' for
+// spaces, which SigV4 canonicalization forbids; the '+'-to-%20 replacement
+// yields the RFC 3986 form both sides of the signature agree on.
+func awsQueryEscape(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
 
 // sign applies AWS Signature Version 4 to the request (service s3,
 // path-style). The payload hash is the empty-string digest: GETs carry no

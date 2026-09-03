@@ -1,0 +1,30 @@
+# dart-service.yaml — headless Service backing DART peer discovery.
+#
+# The node-local DART daemons discover each other via DNS seeding
+# (dns:dart.<namespace>.svc:9000): each instance resolves the Service to the
+# agent pod IPs (hostNetwork pods: podIP == node IP), contacts one seed, and
+# learns the rest of the roster over the peer connections. clusterIP: None
+# makes the DNS answer the ready pod IPs instead of a stable virtual IP —
+# discovery needs addresses, not load balancing.
+#
+# Apply with the agent DaemonSet:
+#   kubectl apply -f config/dev/dart-service.yaml
+#   kubectl apply -f config/dev/agent-daemonset.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dart
+  namespace: fast-sandbox-system
+  labels:
+    app: fast-sandbox
+    component: firecracker-runtime-agent
+spec:
+  clusterIP: None
+  selector:
+    app: fast-sandbox
+    component: firecracker-runtime-agent
+  ports:
+  - name: peer
+    port: 9000
+    targetPort: 9000
+    protocol: TCP
