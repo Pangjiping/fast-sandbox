@@ -21,7 +21,8 @@
 #
 # Environment overrides (all optional):
 #   WORK, KIND_CLUSTER, MINIO_PORT, MINIO_AK, MINIO_SK, MINIO_IMAGE,
-#   MINIO_ENDPOINT, IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE
+#   MINIO_ENDPOINT, IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE,
+#   WARM_IMAGES (=0: skip the pool preheat; the first sandbox pulls cold)
 #
 # Every task logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -61,6 +62,12 @@ ROOTFS_SIZE="${ROOTFS_SIZE:-2Gi}"
 SBX_TEMPLATE="ai-office-sandbox"
 SBX_POOL="firecracker-pool"
 SBX_SANDBOX="sandbox-firecracker"
+
+# WARM_IMAGES=0 skips the pool warmImages preheat: the agent cache starts
+# empty and the FIRST sandbox create triggers the on-demand PinImage pull
+# through DART (the stage-2 cold-start scenario verify measures). Default 1
+# keeps the preheat and the fast delivery-baseline numbers.
+WARM_IMAGES="${WARM_IMAGES:-1}"
 
 # Node labels. The KVM label key is hardcoded by the SandboxTemplate
 # reconciler (sandbox.fast.io/kvm); the firecracker label selects installer/
@@ -876,10 +883,21 @@ assert_publish_layout() {
 
 # --- task 8: SandboxPool -----------------------------------------------------------------------
 pool_up() {
-	kubectl apply -f "$REPO_ROOT/config/samples/pool-firecracker.yaml" >/dev/null
-	wait_for "fastlet pod running" 150 fastlet_pod_ready
-	wait_for "pool warmImages Ready" 300 warm_images_ready
-	pass "fastlet Running + warmImages Ready (agent PinImage closed loop)"
+	if [[ "$WARM_IMAGES" == "1" ]]; then
+		kubectl apply -f "$REPO_ROOT/config/samples/pool-firecracker.yaml" >/dev/null
+		wait_for "fastlet pod running" 150 fastlet_pod_ready
+		wait_for "pool warmImages Ready" 300 warm_images_ready
+		pass "fastlet Running + warmImages Ready (agent PinImage closed loop)"
+	else
+		# Cold-start mode: apply the pool spec WITHOUT the warmImages entry
+		# (it is the last section of the manifest). No preheat: the first
+		# sandbox create pulls the artifact set on demand through DART.
+		local cold_spec="$WORK/pool-firecracker-cold.yaml"
+		sed '/^  warmImages:/,$d' "$REPO_ROOT/config/samples/pool-firecracker.yaml" > "$cold_spec"
+		kubectl apply -f "$cold_spec" >/dev/null
+		wait_for "fastlet pod running" 150 fastlet_pod_ready
+		pass "fastlet Running, NO warmImages (WARM_IMAGES=0: first sandbox pulls cold through DART)"
+	fi
 }
 
 # --- task 9: sandbox + delivery ------------------------------------------------------------------
@@ -2700,7 +2718,7 @@ case "$ACTION" in
 			go version
 			docker --version
 			echo "minio=$MINIO_IMAGE minioPort=$MINIO_PORT bucket=$MINIO_BUCKET"
-			echo "fcVersion=$FC_VERSION sbxImage=$SBX_IMAGE execd=$EXECD"
+			echo "fcVersion=$FC_VERSION sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES"
 			echo "images: controller=$IMG_CONTROLLER agent=$IMG_AGENT builder=$IMG_BUILDER"
 		} > "$LOGS_DIR/environment.txt" 2>&1 || true
 		if [[ -n "$(kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" || true)" ]] \
