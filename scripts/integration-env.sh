@@ -1222,7 +1222,10 @@ probe_execd() { # sandbox-name
 	}
 	path="$(printf '%s' "$out" | cut -f1)"
 	cred="$(printf '%s' "$out" | cut -f2)"
-	[[ -n "$path" && -n "$cred" ]] || return 1
+	if [[ -z "$path" || -z "$cred" ]]; then
+		log "probe_execd $name: resolve returned empty route (out='$(printf '%s' "$out" | head -c 120)')"
+		return 1
+	fi
 	PROBE_RESOLVE_MS="$(printf '%s' "$out" | cut -f3)"
 	# strip scheme://authority -> /v1/sandboxes/{uid}/ports/{port}
 	uri="$(printf '%s' "$path" | sed 's|^[a-z]*://[^/]*||')"
