@@ -496,19 +496,11 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			releaseSlot()
 			return nil, fmt.Errorf("%w: prepare Infra Components: %v", ErrInfraUnavailable, prepareErr)
 		}
-		// Egress-managed pools (host-process components) own the gateway DNS
-		// path: the guest resolver must point at the slot gateway so DNS
-		// queries hit the egress DNS proxy (gateway:53 REDIRECT). The golden
-		// snapshot bakes the builder-time resolver, so inject it now.
-		if d.usesHostProcessDelivery() {
-			resolverStart := time.Now()
-			if resolverErr := deliverGuestResolver(infraCtx, d.runner, instanceRootfs, resolverForGateway(slot.Gateway)); resolverErr != nil {
-				_ = d.infraMgr.RemoveInstance(config)
-				releaseSlot()
-				return nil, fmt.Errorf("%w: deliver guest resolver: %v", ErrInfraUnavailable, resolverErr)
-			}
-			klog.V(4).InfoS("firecracker guest resolver injected", "sandboxId", identity.SandboxUID, "gateway", slot.Gateway, "duration", time.Since(resolverStart).String())
-		}
+		// Infra delivery is the only per-instance rootfs mutation left:
+		// the guest DNS resolver is no longer injected here — the template
+		// bakes /etc/resolv.conf next to the guest network constants it
+		// targets (see cmd/sandboxtemplate-builder convert.go), so egress
+		// pools inherit the gateway resolver without pre-boot image writes.
 		infraServices = instance.Services
 		infraDiagnostics = instance.Diagnostics
 		infraPrepared = true

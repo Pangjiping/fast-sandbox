@@ -184,6 +184,15 @@ func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint str
 			return err
 		}
 	}
+	// Guest DNS resolver: the guest network (address/gateway) is baked by
+	// this template, and egress-managed pools redirect gateway:53 to the
+	// egress DNS proxy — so the resolver is baked alongside the gateway it
+	// points at (deterministic; no per-instance rootfs mutation at Create
+	// time, which previously corrupted the image on the loop-mount write).
+	if err := os.WriteFile(filepath.Join(mountPoint, "etc", "resolv.conf"),
+		[]byte("nameserver "+bakedGuestGateway+"\n"), 0o644); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -2,6 +2,7 @@ package env
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -31,6 +32,7 @@ func (r *configCaptureRunner) Run(ctx context.Context, dir, name string, args ..
 type sequenceRunner struct {
 	commands []recordedCommand
 	outputs  [][]byte
+	errs     []error
 }
 
 func (r *sequenceRunner) Run(_ context.Context, dir, name string, args ...string) ([]byte, error) {
@@ -39,12 +41,17 @@ func (r *sequenceRunner) Run(_ context.Context, dir, name string, args ...string
 		name: name,
 		args: append([]string(nil), args...),
 	})
-	if len(r.outputs) == 0 {
-		return []byte(`{"sandbox":{"identity":{"uid":"sb-id","name":"sb-cli"},"applied_generation":2,"runtime":{"state":4},"data_plane":{"state":4},"ready":true},"generation":2}`), nil
+	output := []byte(`{"sandbox":{"identity":{"uid":"sb-id","name":"sb-cli"},"applied_generation":2,"runtime":{"state":4},"data_plane":{"state":4},"ready":true},"generation":2}`)
+	if len(r.outputs) > 0 {
+		output = r.outputs[0]
+		r.outputs = r.outputs[1:]
 	}
-	output := r.outputs[0]
-	r.outputs = r.outputs[1:]
-	return output, nil
+	var err error
+	if len(r.errs) > 0 {
+		err = r.errs[0]
+		r.errs = r.errs[1:]
+	}
+	return output, err
 }
 
 func TestFastctlRunWritesConfigAndInvokesCLI(t *testing.T) {
@@ -92,6 +99,60 @@ func TestFastctlRunWritesConfigAndInvokesCLI(t *testing.T) {
 		if !strings.Contains(runner.configContent, want) {
 			t.Fatalf("config missing %q:\n%s", want, runner.configContent)
 		}
+	}
+}
+
+func TestFastctlRunWhenCapacityAvailableRetriesOnlyNoCandidate(t *testing.T) {
+	runner := &sequenceRunner{
+		outputs: [][]byte{
+			[]byte("rpc error: code = ResourceExhausted desc = no eligible Fastlet for the Sandbox request"),
+			[]byte("created successfully"),
+		},
+		errs: []error{errors.New("exit status 1"), nil},
+	}
+	client := NewFastctl(
+		WithFastctlRunner(runner),
+		WithFastctlBinary("/repo/bin/fastctl"),
+		WithFastctlRootDir("/repo"),
+		WithFastctlConfigDir(t.TempDir()),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	output, err := client.runWhenCapacityAvailable(ctx, "sb-cli", FastctlConfig{
+		Image: "docker.io/library/alpine:latest", PoolRef: "pool-a",
+	}, time.Millisecond)
+	if err != nil {
+		t.Fatalf("RunWhenCapacityAvailable returned error: %v", err)
+	}
+	if string(output) != "created successfully" {
+		t.Fatalf("output = %q, want successful retry output", output)
+	}
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %d, want two attempts", len(runner.commands))
+	}
+}
+
+func TestFastctlRunWhenCapacityAvailableDoesNotRetryOtherFailures(t *testing.T) {
+	runner := &sequenceRunner{
+		outputs: [][]byte{[]byte("rpc error: code = InvalidArgument desc = invalid Pool")},
+		errs:    []error{errors.New("exit status 1")},
+	}
+	client := NewFastctl(
+		WithFastctlRunner(runner),
+		WithFastctlBinary("/repo/bin/fastctl"),
+		WithFastctlRootDir("/repo"),
+		WithFastctlConfigDir(t.TempDir()),
+	)
+
+	_, err := client.runWhenCapacityAvailable(context.Background(), "sb-cli", FastctlConfig{
+		Image: "docker.io/library/alpine:latest", PoolRef: "pool-a",
+	}, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "InvalidArgument") {
+		t.Fatalf("error = %v, want original non-capacity failure", err)
+	}
+	if len(runner.commands) != 1 {
+		t.Fatalf("commands = %d, want one attempt", len(runner.commands))
 	}
 }
 

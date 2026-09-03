@@ -6,10 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
-	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 
@@ -48,72 +46,6 @@ func ensureLoopDevices() error {
 			fmt.Sprintf("%d", device.major), fmt.Sprintf("%d", device.minor)).Run()
 	}
 	return nil
-}
-
-// deliverGuestResolver writes the per-instance DNS resolver into the guest
-// rootfs before boot. The golden snapshot bakes the builder-time
-// /etc/resolv.conf, which does not route through the slot gateway; egress-
-// managed pools (host-process components) redirect gateway:53 to the egress
-// DNS proxy, so the guest resolver must point at the slot gateway.
-func deliverGuestResolver(ctx context.Context, runner fastletnetwork.CommandRunner, rootfsImage, resolver string) error {
-	if runner == nil {
-		return fmt.Errorf("%w: command runner is required for DNS delivery", ErrInvalidConfig)
-	}
-	mountpoint, err := os.MkdirTemp("", "fc-resolv")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(mountpoint)
-	if err := ensureLoopDevices(); err != nil {
-		return err
-	}
-	if _, err := runner.Run(ctx, "mount", "-o", "loop", rootfsImage, mountpoint); err != nil {
-		return fmt.Errorf("mount guest rootfs for DNS delivery: %w", err)
-	}
-	mounted := true
-	defer func() {
-		if mounted {
-			_, _ = runner.Run(context.Background(), "umount", mountpoint)
-		}
-	}()
-	target := filepath.Join(mountpoint, "etc", "resolv.conf")
-	escaped := strings.ReplaceAll(resolver, "'", "'\\''")
-	// rm -f first: a base-image /etc/resolv.conf symlink would otherwise
-	// redirect the write outside the mounted rootfs.
-	if _, err := runner.Run(ctx, "sh", "-c",
-		"mkdir -p "+filepath.Dir(target)+" && rm -f "+target+" && printf '%s' '"+escaped+"' > "+target); err != nil {
-		return fmt.Errorf("write guest resolver to %s: %w", target, err)
-	}
-	if _, err := runner.Run(ctx, "umount", mountpoint); err != nil {
-		return err
-	}
-	mounted = false
-	return nil
-}
-
-// resolverForGateway renders a resolv.conf body that sends guest DNS queries
-// to the slot gateway, where the egress DNS proxy listens via REDIRECT.
-func resolverForGateway(gateway string) string {
-	return "nameserver " + gateway + "\n"
-}
-
-// usesHostProcessDelivery reports whether the prepared Infra plan contains a
-// host-process component (a Pod-netns service such as egress). Such pools
-// own the gateway DNS path and need the guest resolver injected.
-func (d *Driver) usesHostProcessDelivery() bool {
-	if d.infraMgr == nil {
-		return false
-	}
-	plan, err := d.infraMgr.Plan()
-	if err != nil {
-		return false
-	}
-	for _, component := range plan.Components {
-		if component.Plan.Delivery == runtimecatalog.InfraDeliveryHostProcess {
-			return true
-		}
-	}
-	return false
 }
 
 // deliverGuestInfra performs the GuestCopy Infra delivery by loop-mounting the

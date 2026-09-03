@@ -85,10 +85,13 @@ func TestQuickStartOpenSandboxExecd(t *testing.T) {
 				e2eenv.WithoutFastctlEndpointFlags(),
 			)
 			const sandboxName = "quickstart-execd-sandbox"
-			if output, err := ctl.Run(ctx, sandboxName, e2eenv.FastctlConfig{
+			createCtx, cancelCreate := context.WithTimeout(ctx, 60*time.Second)
+			output, err := ctl.RunWhenCapacityAvailable(createCtx, sandboxName, e2eenv.FastctlConfig{
 				Image: "docker.io/library/alpine:latest", PoolRef: pool.Name,
 				Command: []string{"/bin/sleep"}, Args: []string{"3600"},
-			}); err != nil {
+			})
+			cancelCreate()
+			if err != nil {
 				t.Fatalf("fastctl run failed: %v\n%s", err, output)
 			}
 			defer ctl.Delete(context.Background(), sandboxName)
@@ -104,7 +107,7 @@ func TestQuickStartOpenSandboxExecd(t *testing.T) {
 				t.Fatalf("unexpected diagnostics output: %s", output)
 			}
 
-			output, err := ctl.Command(ctx, "opensandbox", "exec", sandboxName, "--", "sh", "-lc", "printf 'hello from execd\\n' > /tmp/execd.txt && cat /tmp/execd.txt")
+			output, err = ctl.Command(ctx, "opensandbox", "exec", sandboxName, "--", "sh", "-lc", "printf 'hello from execd\\n' > /tmp/execd.txt && cat /tmp/execd.txt")
 			if err != nil {
 				t.Fatalf("fastctl opensandbox exec failed: %v\n%s", err, output)
 			}
@@ -194,11 +197,6 @@ func TestUpdateReset(t *testing.T) {
 				t.Fatalf("wait for ready fastlet pods: %v", err)
 			}
 
-			// Wait for fastlet capacity to sync to controller registry
-			// Fastlet control loop runs every 2s, give it time to register capacity
-			t.Log("Waiting for fastlet capacity to sync...")
-			time.Sleep(8 * time.Second)
-
 			// Start port-forward to controller
 			ctrlNS := testSuite.ControllerNamespace()
 			endpoint, pf, err := e2eenv.StartControllerPortForward(ctx, ctrlNS)
@@ -215,12 +213,15 @@ func TestUpdateReset(t *testing.T) {
 			)
 
 			t.Log("Creating sandbox through fastctl run...")
-			if output, err := ctl.Run(ctx, "sb-update-test", e2eenv.FastctlConfig{
+			createCtx, cancelCreate := context.WithTimeout(ctx, 60*time.Second)
+			output, err := ctl.RunWhenCapacityAvailable(createCtx, "sb-update-test", e2eenv.FastctlConfig{
 				Image:   "docker.io/library/alpine:latest",
 				PoolRef: pool.Name,
 				Command: []string{"/bin/sleep"},
 				Args:    []string{"3600"},
-			}); err != nil {
+			})
+			cancelCreate()
+			if err != nil {
 				t.Fatalf("fastctl run failed: %v\noutput: %s", err, output)
 			}
 
@@ -243,7 +244,7 @@ func TestUpdateReset(t *testing.T) {
 
 			// Test 2: fastctl update --metadata
 			t.Log("Testing fastctl update --metadata...")
-			output, err := ctl.UpdateMetadata(ctx, "sb-update-test", "test=e2e", "env=cli")
+			output, err = ctl.UpdateMetadata(ctx, "sb-update-test", "test=e2e", "env=cli")
 			if err != nil || !strings.Contains(string(output), "update committed") {
 				t.Fatalf("fastctl update metadata failed: %v\noutput: %s", err, output)
 			}
@@ -302,11 +303,6 @@ func TestCLIRun(t *testing.T) {
 				t.Fatalf("wait for ready fastlet pods: %v", err)
 			}
 
-			// Wait for fastlet capacity to sync to controller registry
-			// Fastlet control loop runs every 2s, give it time to register capacity
-			t.Log("Waiting for fastlet capacity to sync...")
-			time.Sleep(8 * time.Second)
-
 			// Start port-forward to controller
 			ctrlNS := testSuite.ControllerNamespace()
 			endpoint, pf, err := e2eenv.StartControllerPortForward(ctx, ctrlNS)
@@ -323,12 +319,14 @@ func TestCLIRun(t *testing.T) {
 			)
 
 			t.Log("Testing fastctl run command...")
-			output, err := ctl.Run(ctx, "sb-run-test", e2eenv.FastctlConfig{
+			createCtx, cancelCreate := context.WithTimeout(ctx, 60*time.Second)
+			output, err := ctl.RunWhenCapacityAvailable(createCtx, "sb-run-test", e2eenv.FastctlConfig{
 				Image:   "docker.io/library/alpine:latest",
 				PoolRef: pool.Name,
 				Command: []string{"/bin/sh"},
 				Args:    []string{"-c", "echo 'Hello from fastctl' && sleep 30"},
 			})
+			cancelCreate()
 			if err != nil {
 				t.Fatalf("fastctl run failed: %v\noutput: %s", err, output)
 			}

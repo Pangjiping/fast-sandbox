@@ -52,12 +52,9 @@ func TestKataQemuSandbox(t *testing.T) {
 				t.Fatalf("wait for ready fastlet pods: %v", err)
 			}
 			waitForKataRuntimeReady(ctx, t, fixture, namespace, pool.Name)
-			waitForFastletRegistrySync(t)
 
 			ctl := newFastctlForNamespace(ctx, t, cliBinaryPath, namespace)
-			if output, err := ctl.Run(ctx, "sb-kata-qemu", secureRuntimeFastctlConfig(pool.Name, "kata-qemu-ok")); err != nil {
-				t.Fatalf("fastctl run kata-qemu sandbox: %v\noutput: %s", err, output)
-			}
+			runKataSandboxWhenCapacityAvailable(ctx, t, ctl, "sb-kata-qemu", secureRuntimeFastctlConfig(pool.Name, "kata-qemu-ok"))
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 120*time.Second)
 			defer cancelRunWait()
@@ -101,12 +98,9 @@ func TestKataDragonballSandbox(t *testing.T) {
 				t.Fatalf("wait for ready kata-dragonball Fastlet: %v", err)
 			}
 			waitForKataRuntimeReady(ctx, t, fixture, namespace, pool.Name)
-			waitForFastletRegistrySync(t)
 
 			ctl := newFastctlForNamespace(ctx, t, cliBinaryPath, namespace)
-			if output, err := ctl.Run(ctx, "sb-kata-dragonball", secureRuntimeFastctlConfig(pool.Name, "kata-dragonball-ok")); err != nil {
-				t.Fatalf("fastctl run kata-dragonball sandbox: %v\noutput: %s", err, output)
-			}
+			runKataSandboxWhenCapacityAvailable(ctx, t, ctl, "sb-kata-dragonball", secureRuntimeFastctlConfig(pool.Name, "kata-dragonball-ok"))
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 120*time.Second)
 			defer cancelRunWait()
@@ -151,12 +145,9 @@ func TestKataFcSandbox(t *testing.T) {
 				t.Fatalf("wait for ready kata-fc Fastlet: %v", err)
 			}
 			waitForKataRuntimeReady(ctx, t, fixture, namespace, pool.Name)
-			waitForFastletRegistrySync(t)
 
 			ctl := newFastctlForNamespace(ctx, t, cliBinaryPath, namespace)
-			if output, err := ctl.Run(ctx, "sb-kata-fc", secureRuntimeFastctlConfig(pool.Name, "kata-fc-ok")); err != nil {
-				t.Fatalf("fastctl run kata-fc sandbox: %v\noutput: %s", err, output)
-			}
+			runKataSandboxWhenCapacityAvailable(ctx, t, ctl, "sb-kata-fc", secureRuntimeFastctlConfig(pool.Name, "kata-fc-ok"))
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 180*time.Second)
 			defer cancelRunWait()
@@ -176,9 +167,7 @@ func TestKataFcSandbox(t *testing.T) {
 
 			// A second create/delete on the same one-slot Fastlet proves that the
 			// first deletion released capacity without accumulating an orphan VMM.
-			if output, err := ctl.Run(ctx, "sb-kata-fc-reuse", secureRuntimeFastctlConfig(pool.Name, "kata-fc-reuse-ok")); err != nil {
-				t.Fatalf("fastctl run replacement kata-fc sandbox: %v\noutput: %s", err, output)
-			}
+			runKataSandboxWhenCapacityAvailable(ctx, t, ctl, "sb-kata-fc-reuse", secureRuntimeFastctlConfig(pool.Name, "kata-fc-reuse-ok"))
 			reuseCtx, cancelReuseWait := context.WithTimeout(ctx, 180*time.Second)
 			defer cancelReuseWait()
 			if _, err := ctl.WaitRunning(reuseCtx, "sb-kata-fc-reuse"); err != nil {
@@ -206,9 +195,7 @@ func verifyKataFCLostFastletCleanup(
 ) {
 	t.Helper()
 	const sandboxName = "sb-kata-fc-lost-fastlet"
-	if output, err := ctl.Run(ctx, sandboxName, secureRuntimeFastctlConfig(poolName, "kata-fc-lost-fastlet-ok")); err != nil {
-		t.Fatalf("create Firecracker Sandbox for lost-Fastlet cleanup: %v\noutput: %s", err, output)
-	}
+	runKataSandboxWhenCapacityAvailable(ctx, t, ctl, sandboxName, secureRuntimeFastctlConfig(poolName, "kata-fc-lost-fastlet-ok"))
 	waitCtx, cancelWait := context.WithTimeout(ctx, 180*time.Second)
 	defer cancelWait()
 	sandbox, err := fixture.WaitForSandbox(waitCtx, types.NamespacedName{Name: sandboxName, Namespace: namespace}, func(item *apiv1alpha2.Sandbox) bool {
@@ -324,12 +311,9 @@ func TestKataClhSandbox(t *testing.T) {
 				t.Fatalf("wait for ready fastlet pods: %v", err)
 			}
 			waitForKataRuntimeReady(ctx, t, fixture, namespace, pool.Name)
-			waitForFastletRegistrySync(t)
 
 			ctl := newFastctlForNamespace(ctx, t, cliBinaryPath, namespace)
-			if output, err := ctl.Run(ctx, "sb-kata-clh", secureRuntimeFastctlConfig(pool.Name, "kata-clh-ok")); err != nil {
-				t.Fatalf("fastctl run kata-clh sandbox: %v\noutput: %s", err, output)
-			}
+			runKataSandboxWhenCapacityAvailable(ctx, t, ctl, "sb-kata-clh", secureRuntimeFastctlConfig(pool.Name, "kata-clh-ok"))
 
 			runCtx, cancelRunWait := context.WithTimeout(ctx, 90*time.Second)
 			defer cancelRunWait()
@@ -481,8 +465,13 @@ func assertKataOCISpecResources(t *testing.T, runtimeName apiv1alpha2.RuntimeNam
 	}
 }
 
-func waitForFastletRegistrySync(t *testing.T) {
+func runKataSandboxWhenCapacityAvailable(ctx context.Context, t *testing.T, ctl *e2eenv.Fastctl, name string, config e2eenv.FastctlConfig) []byte {
 	t.Helper()
-	t.Log("waiting for fastlet capacity to sync to controller registry")
-	time.Sleep(8 * time.Second)
+	createCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	output, err := ctl.RunWhenCapacityAvailable(createCtx, name, config)
+	if err != nil {
+		t.Fatalf("fastctl run %s when FastPath capacity is available: %v\noutput: %s", name, err, output)
+	}
+	return output
 }
