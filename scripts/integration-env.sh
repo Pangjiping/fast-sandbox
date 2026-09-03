@@ -20,7 +20,8 @@
 #
 # Environment overrides (all optional):
 #   WORK, KIND_CLUSTER, MINIO_PORT, MINIO_AK, MINIO_SK, MINIO_IMAGE,
-#   MINIO_ENDPOINT, IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE
+#   MINIO_ENDPOINT, IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE,
+#   CHAIN_E2E (=1 runs task 0, the host-level component chain E2E, first)
 #
 # Every task logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -60,6 +61,16 @@ ROOTFS_SIZE="${ROOTFS_SIZE:-2Gi}"
 SBX_TEMPLATE="ai-office-sandbox"
 SBX_POOL="firecracker-pool"
 SBX_SANDBOX="sandbox-firecracker"
+
+# Task 0 (optional): run the host-level component chain E2E
+# (scripts/firecracker-chain-e2e.sh) before the cluster tasks. It validates
+# the bare chain builder -> MinIO -> runtime-agent -> driver restore with no
+# Kubernetes (publish layout, SigV4 over the wire, credential mapping,
+# PinImage idempotency, lease lifecycle). Off by default because it rebuilds
+# the builder image and re-downloads the firecracker set (~10 min); when
+# enabled it also gates the cluster run on a green component chain.
+CHAIN_E2E="${CHAIN_E2E:-0}"
+CHAIN_E2E_CONTAINER="chain-e2e-minio"
 
 # Node labels. The KVM label key is hardcoded by the SandboxTemplate
 # reconciler (sandbox.fast.io/kvm); the firecracker label selects installer/
@@ -226,7 +237,7 @@ failure_dump() { # task
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== integration-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(MINIO|KIND|FC_|SBX|IMG_|EXECD|WORK)=' || true
+		env | grep -E '^(MINIO|KIND|FC_|SBX|IMG_|EXECD|WORK|CHAIN_E2E)=' || true
 		echo "--- kind nodes ---"
 		kind get nodes --name "$KIND_CLUSTER" 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -2487,6 +2498,9 @@ down() {
 	docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true
 	[[ -z "$(docker ps -a --filter "name=$MINIO_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "MinIO container still present"
+	if chain_e2e_leftover; then
+		chain_e2e_cleanup
+	fi
 	rm -f "$WORK/agent-registry.json" "$WORK/registry.json"
 	rm -rf "$GEN_DIR"
 	sysctl_restore
@@ -2508,6 +2522,46 @@ down() {
 	pass "host cleanup complete"
 }
 
+# --- task 0: host-level component chain E2E (firecracker-chain-e2e.sh) --------
+chain_e2e_workdir() { printf '%s' "$WORK/chain-e2e"; }
+
+chain_e2e_leftover() {
+	# Resources of a crashed firecracker-chain-e2e.sh run that would break
+	# either the next chain run (stale fsb netns/VMs) or this environment's
+	# MinIO (host :9000 taken): the chain MinIO container, fsb* netns, and
+	# the fsb0 bridge / 172.30/24 MASQUERADE rule it owns.
+	docker ps -a --format '{{.Names}}' | grep -qx "$CHAIN_E2E_CONTAINER" \
+		|| ls /var/run/netns/fsb* >/dev/null 2>&1
+}
+
+chain_e2e_cleanup() {
+	local chain_work
+	chain_work="$(chain_e2e_workdir)"
+	mkdir -p "$chain_work"
+	log "cleaning leftover host-level chain E2E resources (firecracker-chain-e2e.sh --cleanup)"
+	( cd "$REPO_ROOT" && WORK="$chain_work" bash scripts/firecracker-chain-e2e.sh --cleanup ) || true
+}
+
+chain_e2e_host() {
+	local chain_work
+	chain_work="$(chain_e2e_workdir)"
+	mkdir -p "$chain_work"
+	# The chain script self-cleans every resource it creates on exit (MinIO
+	# container, fsb netns/bridge/MASQUERADE, agent, jails), so the cluster
+	# tasks below start from a clean host. Its workspace is kept so the
+	# downloaded firecracker set is reused on the next CHAIN_E2E=1 run.
+	# Image/execd/rootfs/FC knobs are forwarded so the host-level run
+	# validates the same inputs as the cluster-level chain.
+	log "host-level chain E2E workspace: $chain_work"
+	if ! ( cd "$REPO_ROOT" && WORK="$chain_work" \
+		CHAIN_SOURCE_IMAGE="$SBX_IMAGE" CHAIN_EXECD="$EXECD" \
+		CHAIN_ROOTFS_SIZE="$ROOTFS_SIZE" FC_VERSION="$FC_VERSION" \
+		bash scripts/firecracker-chain-e2e.sh ); then
+		die "host-level chain E2E failed (component logs: $chain_work/builder.log, $chain_work/agent.log, $chain_work/driver-e2e.log)"
+	fi
+	log "host-level component chain E2E green (artifacts under $chain_work)"
+}
+
 # --- main ------------------------------------------------------------------------------------------
 # env_summary prints the reachable facts of the environment for hand-off.
 env_summary() {
@@ -2526,8 +2580,10 @@ usage() {
 	cat <<'EOF'
 usage: integration-env.sh [--cleanup|--auto-clean] {up|down|status|verify}
 
-  up       build the whole environment (tasks 1-9) and report status
+  up       build the whole environment: optional task 0 (host-level
+           component chain E2E, CHAIN_E2E=1) + tasks 1-9, report status
   down     teardown: kind cluster + MinIO container + credentials + sysctl
+           (+ leftover host-level chain E2E resources if present)
   status   component / template / pool / sandbox health
   verify   create 2 sandboxes, probe execd /ping, then a max-concurrency
            batch (CONCURRENCY=5 at pool capacity), delete all, assert cleanup
@@ -2573,10 +2629,12 @@ case "$ACTION" in
 			docker --version
 			echo "minio=$MINIO_IMAGE minioPort=$MINIO_PORT bucket=$MINIO_BUCKET"
 			echo "fcVersion=$FC_VERSION sbxImage=$SBX_IMAGE execd=$EXECD"
+			echo "chainE2e=$CHAIN_E2E (host-level component chain before the cluster tasks)"
 			echo "images: controller=$IMG_CONTROLLER agent=$IMG_AGENT builder=$IMG_BUILDER"
 		} > "$LOGS_DIR/environment.txt" 2>&1 || true
 		if [[ -n "$(kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" || true)" ]] \
-			|| docker ps -a --format '{{.Names}}' | grep -qx "$MINIO_CONTAINER"; then
+			|| docker ps -a --format '{{.Names}}' | grep -qx "$MINIO_CONTAINER" \
+			|| chain_e2e_leftover; then
 			if [[ "$SKIP_LEFTOVER_CLEAN" == 1 ]]; then
 				log "leftover resources detected; aborting (SKIP_LEFTOVER_CLEAN=1). Run 'integration-env.sh down' first"
 				exit 1
@@ -2585,6 +2643,11 @@ case "$ACTION" in
 			down
 		fi
 		trap 'on_error up' ERR
+		if [[ "$CHAIN_E2E" == "1" ]]; then
+			run_stage "task 0: host-level component chain E2E (firecracker-chain-e2e.sh)" chain_e2e_host
+		else
+			log "task 0 skipped: host-level component chain E2E (CHAIN_E2E=1 runs it before the cluster tasks)"
+		fi
 		run_stage "task 1: preflight + tooling" preflight
 		run_stage "task 1: sysctl (fs.inotify)" sysctl_set
 		run_stage "task 1: build images (7)" build_images

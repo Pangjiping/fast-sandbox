@@ -24,11 +24,19 @@ SandboxTemplate (builder Pod, in-cluster)
 One-liners:
 
 ```bash
-./scripts/integration-env.sh up        # full environment (tasks 1-8)
+./scripts/integration-env.sh up                    # full environment (tasks 1-8)
+CHAIN_E2E=1 ./scripts/integration-env.sh up        # task 0 (host-level component chain E2E) + full environment
 ./scripts/integration-env.sh verify    # 2 + 5 sandboxes, proxy-chain probe, teardown asserts
 ./scripts/integration-env.sh status    # component / template / pool health
 ./scripts/integration-env.sh down      # host left clean
 ```
+
+`up` runs the optional **task 0** first when `CHAIN_E2E=1`: the host-level
+component chain E2E (`scripts/firecracker-chain-e2e.sh`, builder → MinIO →
+runtime-agent → driver restore with **no Kubernetes**) gates the cluster run
+on a green component chain. Off by default: it rebuilds the builder image
+and re-downloads the firecracker set (~10 min). It self-cleans on exit and
+its leftover resources are also detected and purged by `down`.
 
 `up` and the plain `verify` only prove execd `/ping` delivery. For execd
 **protocol** usability in the guest (OpenSandbox issue #1695: `POST
@@ -66,6 +74,14 @@ SandboxTemplate controller) and `fast-sandbox.io/firecracker-node=true`
 
 ## 3. What `up` actually does (stage order matters)
 
+0. **task 0 — host-level component chain E2E** (only with `CHAIN_E2E=1`):
+   `firecracker-chain-e2e.sh` validates the bare chain (builder publish →
+   real MinIO SigV4 pull → PinImage idempotency → driver restore → lease
+   lifecycle) before any cluster resource exists. Its exit leaves the host
+   clean (own MinIO container, fsb bridge/netns/MASQUERADE, agent, jails all
+   removed); its `chain-e2e-minio` container / fsb leftovers are also part
+   of `up`'s leftover detection and `down`'s cleanup. Workspace and
+   re-downloadable artifacts stay under `$WORK/chain-e2e` for reuse.
 1. **preflight + tooling** — installs kind/kubectl/jq/xfsprogs when missing.
 2. **sysctl** — `fs.inotify.max_user_instances=8192`.
 3. **images** — `make images` for 7 images + host `fastctl`/`gen-endpoint`.
@@ -267,6 +283,7 @@ Baseline on the reference node (XFS StateRoot):
 | `KIND_CLUSTER` / `KIND_NODE_IMAGE` / `KIND_RETAIN` | firecracker / - / 0 | kind knobs; mirror override, retain-for-debug |
 | `MINIO_PORT` / `MINIO_AK` / `MINIO_SK` / `MINIO_ENDPOINT` | 9000 / ... | store credentials; endpoint auto = container IP |
 | `SBX_IMAGE` / `EXECD` / `FC_VERSION` | alpine:3.19 / execd:1.1.0 / v1.16.1 | the chain keys |
+| `CHAIN_E2E` | 0 | 1 runs task 0: the host-level component chain E2E (`firecracker-chain-e2e.sh`) before the cluster tasks (~10 min; forwards `SBX_IMAGE`/`EXECD`/`ROOTFS_SIZE`/`FC_VERSION`) |
 | `CONCURRENCY` | 5 | per-fastlet slot capacity for the batch |
 | `EXECD_API_SBX` | sandbox-execd-api | sandbox name used by `verify-execd-api` |
 | `EXECD_API_KEEP_SANDBOX` | 0 | 1 keeps the sandbox + jail after the battery and prints the guest-console (firecracker.log) tail command for execd-side diagnosis |

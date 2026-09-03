@@ -223,11 +223,16 @@ curl http://<slot.IP>:44772/ping                     # execd /ping OK
 新增 `scripts/integration-env.sh`（对齐 chain-e2e.sh 风格）：
 
 ```text
-up     # 环境准备 + Kind + MinIO + controller + 节点资产 + agent + 模板 + pool
-down   # 清理（kind delete + MinIO 容器）
+up     # [task 0 可选] host-level 组件链 E2E（CHAIN_E2E=1，chain-e2e.sh）+ 环境准备 + Kind + MinIO + controller + 节点资产 + agent + 模板 + pool
+down   # 清理（kind delete + MinIO 容器 + 残留的 chain-e2e 资源）
 status # 各组件健康 + 模板状态 + warmImages 状态
 verify # 步骤 9 的断言链（sandbox Running + execd /ping）
 ```
+
+任务 0（`CHAIN_E2E=1` 可选）复用 `firecracker-chain-e2e.sh` 裸组件级全链路
+验证（builder publish → 真实 MinIO SigV4 拉取 → PinImage 幂等 → driver
+restore → lease 生命周期），作为集群级运行的组件前置门禁；退出自清理，
+残留由 `up` 的 leftover 检测与 `down` 兜底。
 
 ## 关键实现细节
 
