@@ -76,12 +76,17 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		// A stable identity (the node name; hostname works for hostNetwork
-		// daemons) anchors the HRW keyspace AND names the per-node block
-		// cache: the StateRoot can be shared (multi-node kind mounts one
-		// host filesystem into every node container), but two DART arenas
-		// must never point at the same directory.
-		nodeID := getEnv("FAST_SANDBOX_DART_SELF_ID", hostnameOrEmpty())
+		// A stable identity anchors the HRW keyspace AND names the per-node
+		// block cache: the StateRoot can be shared (multi-node kind mounts
+		// one host filesystem into every node container), but two DART
+		// arenas must never point at the same directory. The node's
+		// hostname is read from /etc/hostname (mounted from the node by the
+		// DaemonSet) because a regular pod's own hostname is its pod name,
+		// which changes on restart.
+		nodeID := getEnv("FAST_SANDBOX_DART_SELF_ID", "")
+		if nodeID == "" {
+			nodeID = nodeHostID()
+		}
 		peerPort := "9000"
 		config := agentdart.Config{
 			Binary:    getEnv("FAST_SANDBOX_DART_BIN", "dart"),
@@ -146,6 +151,19 @@ func dartListenAddress(dartAddr string) (string, error) {
 		return "", fmt.Errorf("invalid FAST_SANDBOX_DART_ADDR %q: expected http://host:port", dartAddr)
 	}
 	return parsed.Host, nil
+}
+
+// nodeHostID derives the stable node identity: the node hostname file
+// (FAST_SANDBOX_HOSTNAME_FILE, mounted from the node by the DaemonSet),
+// falling back to the process hostname.
+func nodeHostID() string {
+	path := getEnv("FAST_SANDBOX_HOSTNAME_FILE", "/etc/hostname")
+	if payload, err := os.ReadFile(path); err == nil {
+		if name := strings.TrimSpace(string(payload)); name != "" {
+			return name
+		}
+	}
+	return hostnameOrEmpty()
 }
 
 func hostnameOrEmpty() string {

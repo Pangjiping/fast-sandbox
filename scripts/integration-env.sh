@@ -693,6 +693,14 @@ kind_up() {
 		kubectl label node "$node" "$FC_NODE_LABEL=true" --overwrite >/dev/null
 		log "node $node: KVM + firecracker labels applied"
 	done
+	if [[ "$KIND_SINGLE" != "1" ]]; then
+		# Multi-node kind keeps the control-plane tainted (NoSchedule),
+		# which would strand half the topology: every firecracker workload
+		# (agent DaemonSet, fastlet pool, builder) must be schedulable on
+		# BOTH nodes for the P2P assertions to see two peers.
+		kubectl taint nodes --all node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
+		log "control-plane taint removed (both nodes schedulable for the P2P topology)"
+	fi
 	pass "kind cluster ready (kvm passthrough + labels on every node)"
 }
 
