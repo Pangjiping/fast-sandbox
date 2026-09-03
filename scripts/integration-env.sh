@@ -1029,12 +1029,14 @@ allocate_next_local_port() { # -> FASTLET_ALLOCATED_PORT
 # kill -0 and treated as failure — a surviving STALE listener must never be
 # mistaken for this forward (it would proxy to a pod that lacks the routes).
 start_fastlet_forward() { # pod-name pod-ip local-port -> stdout "port pid"
-	local name="$1" ip="$2" port="$3" pid attempt
-	kubectl -n "$NS" port-forward "pod/$name" "$port:5780" >/dev/null 2>&1 &
+	local name="$1" ip="$2" port="$3" pid attempt errf
+	errf="$WORK/pf-start-${port}.err"
+	kubectl -n "$NS" port-forward "pod/$name" "$port:5780" >/dev/null 2>"$errf" &
 	pid=$!
 	for attempt in $(seq 1 25); do
 		if kill -0 "$pid" 2>/dev/null; then
 			if tcp_listening "$port"; then
+				rm -f "$errf"
 				printf '%s %s' "$port" "$pid"
 				return 0
 			fi
@@ -1043,7 +1045,11 @@ start_fastlet_forward() { # pod-name pod-ip local-port -> stdout "port pid"
 		fi
 		sleep 0.2
 	done
-	log "start_fastlet_forward: forward for pod $name ($ip) on 127.0.0.1:$port failed (kubectl exited or never answered)"
+	{
+		printf '[firecracker-integration] start_fastlet_forward: FAILED pod=%s ip=%s port=%s (kubectl exited or never answered)\n' "$name" "$ip" "$port"
+		sed 's/^/    pf> /' "$errf" 2>/dev/null || true
+		rm -f "$errf"
+	} | tee -a "$WORK/run.log" >&2
 	kill "$pid" >/dev/null 2>&1 || true
 	pkill -f "kubectl -n $NS port-forward .* $port:5780" 2>/dev/null || true
 	return 1
