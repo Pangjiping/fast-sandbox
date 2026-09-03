@@ -881,46 +881,186 @@ GEN_DAEMON_PID=""
 GEN_SOCKET="$WORK/gen-endpoint.sock"
 FASTLET_IPS=()
 FASTLET_PORTS=()
+FASTLET_PIDS=()
+# FASTLET_NEXT_PORT hands out local forward ports; reset on every sweep and
+# bumped by start_fastlet_forward so mid-verify additions never collide with
+# ports that are still mapped to another pod.
+FASTLET_NEXT_PORT=18081
 
 port_forward_up() {
 	local pid
 	[[ -x "$FASTCTL" ]] || die "fastctl not built ($FASTCTL); run up first"
 	# A stale forward from an interrupted run holds the local ports and makes
 	# the new kubectl port-forward exit immediately ("address already in
-	# use"); sweep only forwards for OUR ports before starting.
+	# use"); sweep only forwards for OUR ports before starting. TERM first,
+	# then KILL the stragglers: a forward whose process survives the TERM
+	# keeps its local listener alive and makes the recreated forward fail
+	# its bind while the STALE listener keeps answering probes on that port.
 	pkill -f "kubectl -n $NS port-forward .* 19090:9090" 2>/dev/null || true
-	pkill -f "kubectl -n $NS port-forward .* 18[0-9][0-9]:5780" 2>/dev/null || true
-	sleep 0.3
+	pkill -f "kubectl -n $NS port-forward .*:5780" 2>/dev/null || true
+	sleep 0.5
+	pkill -9 -f "kubectl -n $NS port-forward .*:5780" 2>/dev/null || true
+	sleep 0.2
 	kubectl -n "$NS" port-forward deploy/fast-sandbox-controller 19090:9090 >/dev/null 2>&1 &
 	pid=$!
 	PF_PIDS+=("$pid")
 	# Direct-to-fastlet-proxy probing: one local port per fastlet pod, with
-	# the pod IP -> port mapping for the DIRECT_FASTLET_PROXY endpoints.
-	local port=18081 line name ip
+	# the pod IP -> port mapping for the DIRECT_FASTLET_PROXY endpoints. The
+	# map is REBUILT from the current pod list on every sweep: entries from
+	# a replaced pod incarnation would otherwise keep resolving onto a dead
+	# forward (curl http=000) or onto a port a later sweep re-pointed at a
+	# DIFFERENT live pod, whose fastlet-proxy answers 404 for the uid.
+	FASTLET_IPS=()
+	FASTLET_PORTS=()
+	FASTLET_PIDS=()
+	FASTLET_NEXT_PORT=18081
+	local name ip port
 	while read -r name ip; do
 		[[ -n "$name" && -n "$ip" ]] || continue
-		kubectl -n "$NS" port-forward "pod/$name" "$port:5780" >/dev/null 2>&1 &
-		pid=$!
-		PF_PIDS+=("$pid")
-		FASTLET_IPS+=("$ip")
-		FASTLET_PORTS+=("$port")
-		port=$((port + 1))
-	done < <(kubectl -n "$NS" get pods -l app=sandbox-fastlet \
-		-o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.podIP}{"\n"}{end}' 2>/dev/null)
+		port="$(start_fastlet_forward "$name" "$ip")" || {
+			log "port-forward for fastlet pod $name ($ip) could not be established"
+		}
+	done < <(fastlet_pod_ip_list)
 	wait_for "fastpath reachable via port-forward" 30 fastpath_reachable
 }
 
-# fastlet_local_port maps a fastlet pod IP (the DIRECT endpoint authority)
-# to the local port-forward.
-fastlet_local_port() { # pod-ip
+# fastlet_pod_ip_list prints the current "podName podIP" pairs of every
+# live fastlet pod (all pools share the app=sandbox-fastlet label). Pods
+# that are terminating (deletionTimestamp set) or not Running are excluded:
+# a replacing pool pod appears while the old one is still draining, and a
+# forward to the old pod would keep answering on the local port with a
+# proxy store that never holds the NEW sandbox routes (issue #37 404s).
+fastlet_pod_ip_list() {
+	kubectl -n "$NS" get pods -l app=sandbox-fastlet -o json 2>/dev/null \
+		| jq -r '.items[]
+			| select(.metadata.deletionTimestamp == null)
+			| select(.status.phase == "Running")
+			| [.metadata.name, .status.podIP] | @tsv' 2>/dev/null
+}
+
+# fastlet_pod_name_for_ip resolves a pod IP (the DIRECT endpoint authority)
+# back to the live pod name so a forward can be (re)established for it.
+fastlet_pod_name_for_ip() { # ip
+	local ip="$1"
+	fastlet_pod_ip_list | awk -v ip="$ip" '$2 == ip { print $1; exit }'
+}
+
+# tcp_listening reports whether something answers on 127.0.0.1:$1. Without nc
+# (probe tool missing) it assumes the forward is alive so healthy forwards
+# are never churned.
+tcp_listening() { # port
+	if command -v nc >/dev/null 2>&1; then
+		nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1
+	else
+		return 0
+	fi
+}
+
+# next_free_local_port returns the next local port that is not occupied by a
+# live listener (ours or a foreign one).
+next_free_local_port() {
+	local port="${FASTLET_NEXT_PORT:-18081}"
+	if command -v nc >/dev/null 2>&1; then
+		while nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1; do
+			port=$((port + 1))
+		done
+	fi
+	FASTLET_NEXT_PORT=$((port + 1))
+	printf '%s' "$port"
+}
+
+# fastlet_mapped_port looks up the local forward port recorded for a pod IP
+# together with the kubectl pid that serves it.
+fastlet_mapped_port() { # ip -> "port pid"; rc 1 when not mapped
 	local ip="$1" i
 	for i in "${!FASTLET_IPS[@]}"; do
 		if [[ "${FASTLET_IPS[$i]}" == "$ip" ]]; then
-			printf '%s' "${FASTLET_PORTS[$i]}"
+			printf '%s %s' "${FASTLET_PORTS[$i]}" "${FASTLET_PIDS[$i]}"
 			return 0
 		fi
 	done
 	return 1
+}
+
+# fastlet_unmap_ip drops the mapping of a pod IP and kills the forward that
+# served it so the port can be reused by the replacement pod.
+fastlet_unmap_ip() { # ip
+	local ip="$1" i port
+	for i in "${!FASTLET_IPS[@]}"; do
+		[[ "${FASTLET_IPS[$i]}" != "$ip" ]] && continue
+		port="${FASTLET_PORTS[$i]}"
+		pkill -f "kubectl -n $NS port-forward .* $port:5780" 2>/dev/null || true
+		unset 'FASTLET_IPS[i]' 'FASTLET_PORTS[i]' 'FASTLET_PIDS[i]'
+	done
+}
+
+# start_fastlet_forward opens one local forward to the pod's fastlet-proxy
+# (pod IP :5780 -> 127.0.0.1:<local port>), records the IP -> port pair and
+# prints the port once it answers. A kubectl that exits right away (bind
+# collision with a straggler listener, dead pod) is detected via kill -0 and
+# treated as failure — a surviving STALE listener must never be mistaken
+# for this forward (it would proxy to a pod that lacks the new routes).
+start_fastlet_forward() { # pod-name pod-ip
+	local name="$1" ip="$2" port pid attempt
+	port="$(next_free_local_port)"
+	kubectl -n "$NS" port-forward "pod/$name" "$port:5780" >/dev/null 2>&1 &
+	pid=$!
+	PF_PIDS+=("$pid")
+	FASTLET_IPS+=("$ip")
+	FASTLET_PORTS+=("$port")
+	FASTLET_PIDS+=("$pid")
+	for attempt in $(seq 1 25); do
+		if kill -0 "$pid" 2>/dev/null; then
+			if tcp_listening "$port"; then
+				printf '%s' "$port"
+				return 0
+			fi
+		else
+			break
+		fi
+		sleep 0.2
+	done
+	log "start_fastlet_forward: forward for pod $name ($ip) on 127.0.0.1:$port failed (kubectl exited or never answered)"
+	pkill -f "kubectl -n $NS port-forward .* $port:5780" 2>/dev/null || true
+	kill "$pid" >/dev/null 2>&1 || true
+	fastlet_unmap_ip "$ip"
+	return 1
+}
+
+# fastlet_local_port maps a fastlet pod IP (the DIRECT endpoint authority)
+# to a LIVE local port-forward, re-establishing the forward when needed:
+#   - the pod appeared after the last sweep (pool pod recreated mid-verify):
+#     open its forward on demand;
+#   - the recorded forward died with its pod (nothing listens on the port):
+#     drop the stale mapping and forward to the replacement pod;
+#   - the port answers but the mapped kubectl is gone (a straggler forward
+#     from an earlier run holds the port): kill the straggler and rebuild,
+#     otherwise probes would land on a fastlet that lacks the new routes.
+# Without this, a resolved route can point at a port with no listener
+# (curl http=000) or at a port owned by a different pod's fastlet-proxy
+# (404 for the uid) — the fastlet-proxy PORT-route flake of issue #37.
+fastlet_local_port() { # pod-ip
+	local ip="$1" port_pid port pid name
+	if port_pid="$(fastlet_mapped_port "$ip")"; then
+		port="${port_pid%% *}"
+		pid="${port_pid#* }"
+		if kill -0 "$pid" 2>/dev/null; then
+			if tcp_listening "$port"; then
+				printf '%s' "$port"
+				return 0
+			fi
+		else
+			log "fastlet_local_port: forward pid for $ip died; $(tcp_listening "$port" && echo "killing straggler on 127.0.0.1:$port" || echo "127.0.0.1:$port not listening")"
+		fi
+		log "fastlet_local_port: re-establishing forward for $ip"
+		fastlet_unmap_ip "$ip"
+	fi
+	name="$(fastlet_pod_name_for_ip "$ip")"
+	if [[ -z "$name" ]]; then
+		log "fastlet_local_port: no live fastlet pod has IP $ip (stale assignment?)"
+		return 1
+	fi
+	start_fastlet_forward "$name" "$ip"
 }
 
 # resolve_daemon_up starts the resident route resolver: the FastPath gRPC
