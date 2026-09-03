@@ -1946,6 +1946,19 @@ EGRESS_ALLOW_POLICY='{"egress":[{"action":"allow","target":"example.com"},{"acti
 # execd (slot IP DNAT). If these succeed while guest-originated DNS replies
 # are lost, the failure is the egress reply path — NOT egress blocking the
 # execd control connection. Single-shot (no hammering).
+# egress_print_raw prints the raw execd SSE response line-by-line (one
+# frame per output line, blank frames preserved) inside a labeled fence so
+# nothing is flattened or truncated. Emits on stderr (console + run.log);
+# stdout is reserved for the decoded probe data.
+egress_print_raw() { # label (reads lines on stdin)
+	local label="$1"
+	{
+		printf '  --- execd raw: %s ---\n' "$label"
+		cat
+		printf '  --- end %s ---\n' "$label"
+	} | tee -a "$WORK/run.log" >&2
+}
+
 egress_execd_run() { # sandbox-name command timeout-s -> command stdout; rc 0 on execution_complete
 	local sbx="$1" body="$2" timeout_s="$3" url out rc http body_out attempt
 	attempt=0
