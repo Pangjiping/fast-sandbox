@@ -1806,27 +1806,25 @@ EGRESS_ALLOW_POLICY='{"egress":[{"action":"allow","target":"example.com"},{"acti
 # execd (slot IP DNAT). If these succeed while guest-originated DNS replies
 # are lost, the failure is the egress reply path — NOT egress blocking the
 # execd control connection. Single-shot (no hammering).
-egress_execd_run() { # sandbox-name command timeout-s -> prints command stdout; rc 0 on execution_complete
-	local sbx="$1" body="$2" timeout_s="$3" pod uid ip out rc http
-	pod="$(egress_sandbox_pod "$sbx")" || return 1
-	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
-	[[ -n "$pod" && -n "$uid" ]] || return 1
-	ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
-		"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
-	[[ -n "$ip" ]] || return 1
-	# Response read on STDOUT (never -o into the container): raw SSE printed
-	# host-side, one source of truth for assertions and logs.
-	out="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
-		curl -sS -m "$timeout_s" -N \
+egress_execd_run() { # sandbox-name command timeout-s -> command stdout; rc 0 on execution_complete
+	local sbx="$1" body="$2" timeout_s="$3" url out rc http body_out
+	# REAL delivery path: fastlet-proxy PORT route (same chain the SDK uses),
+	# resolved fresh per probe (DIRECT_FASTLET_PROXY -> local forward).
+	if ! execd_route_resolve "$sbx"; then
+		log "egress proxy probe for $sbx: route resolve failed"
+		return 1
+	fi
+	url="$(execd_base_url)/command"
+	out="$(curl -sS -m "$timeout_s" -N \
+		-H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" \
 		-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
-		--data-binary "$body" \
-		-w $'\nHTTP=%{http_code}' \
-		"http://$ip:44772/command" 2>/dev/null)"
+		--data-binary "$body" -w $'\nHTTP=%{http_code}' \
+		"$url" 2>/dev/null)"
 	rc=$?
 	http="$(sed -n 's/^HTTP=//p' <<<"$out" | tail -1)"
 	body_out="$(sed '$d' <<<"$out")"
-	log "egress execd probe for $sbx (url=http://$ip:44772/command): rc=$rc http=${http:-000} cmd=$body"
-	printf '%s\n' "$body_out" | egress_print_raw "url=http://$ip:44772/command cmd=$body http=$http rc=$rc" || true
+	log "egress proxy probe for $sbx (POST $url): rc=$rc http=${http:-000} cmd=$body"
+	printf '%s\n' "$body_out" | egress_print_raw "POST $url cmd=$body http=$http rc=$rc" || true
 	if [[ "$rc" -ne 0 || "$http" != "200" ]]; then
 		return 1
 	fi
@@ -1846,67 +1844,22 @@ egress_print_raw() { # label (reads lines on stdin)
 	} | tee -a "$WORK/run.log" >&2
 }
 
-egress_execd_ping() { # sandbox -> rc 0 when /ping answers 200
-	local sbx="$1" pod uid ip http
-	pod="$(egress_sandbox_pod "$sbx")" || return 1
-	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
-	[[ -n "$pod" && -n "$uid" ]] || return 1
-	ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
-		"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
-	[[ -n "$ip" ]] || return 1
-	http="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
-		curl -sS -m 8 -o /dev/null -w '%{http_code}' "http://$ip:44772/ping" 2>/dev/null)" || return 1
-	log "execd control path for $sbx (pod->guest $ip:44772/ping): http=$http"
+egress_execd_ping() { # sandbox -> rc 0 when /ping answers 200 (through fastlet-proxy)
+	local sbx="$1" url http
+	if ! execd_route_resolve "$sbx"; then
+		log "egress proxy ping for $sbx: route resolve failed"
+		return 1
+	fi
+	url="$(execd_base_url)/ping"
+	http="$(curl -sS -m 8 -o /dev/null -w '%{http_code}' \
+		-H "X-Fast-Sandbox-Route-Credential: $EXECD_API_CRED" "$url" 2>/dev/null)"
+	log "execd control path for $sbx (GET $url): http=${http:-000}"
 	[[ "$http" == "200" ]]
 }
 
-egress_execd_echo() { # sandbox -> rc 0 on execution_complete
-	local sbx="$1" pod uid ip body http rc attempt
-	pod="$(egress_sandbox_pod "$sbx")" || return 1
-	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
-	[[ -n "$pod" && -n "$uid" ]] || return 1
-	attempt=0
-	while :; do
-		attempt=$((attempt + 1))
-		ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
-			"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
-		[[ -n "$ip" ]] || {
-			log "execd control echo for $sbx: slot IP not found (attempt $attempt)"
-			return 1
-		}
-		# Response is read on STDOUT and split host-side. Writing it to a
-		# file INSIDE the container (-o "<host path>") made curl abort right
-		# after the server's first write — execd logged "client
-		# disconnected" ~1ms after the init event while the command itself
-		# completed fine (and no raw execd output surfaced, matching the
-		# earlier complaint). stdout capture matches the manual probe that
-		# always worked.
-		body="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
-			curl -sS -m 12 -N \
-			-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
-			--data-binary '{"command":"echo execd-control-ok"}' \
-			-w $'\nHTTP=%{http_code}' \
-			"http://$ip:44772/command" 2>/dev/null)"
-		rc=$?
-		http="$(sed -n 's/^HTTP=//p' <<<"$body" | tail -1)"
-		body="$(sed '$d' <<<"$body")"
-		log "execd control echo for $sbx (url=http://$ip:44772/command): rc=$rc http=${http:-000}"
-		printf '%s\n' "$body" | egress_print_raw "url=http://$ip:44772/command echo-control http=$http rc=$rc" || true
-		if [[ "$http" == "200" ]] && grep -q "execution_complete" <<<"$body"; then
-			return 0
-		fi
-		# New pod->guest /command connections were reset for a minutes-long
-		# window after subject activation; poll until it ends.
-		if [[ "$attempt" -ge 60 ]]; then
-			log "execd control echo for $sbx: still failing after 60 attempts"
-			return 1
-		fi
-		sleep 4
-	done
-}
 
 egress_execd_control() { # sandbox
-	egress_execd_ping "$1" && egress_execd_echo "$1"
+	egress_execd_ping "$1" && egress_execd_run "$1" '{"command":"echo execd-control-ok"}' 12 >/dev/null
 }
 
 # egress_subject_netns() etc. — the slot netns name and gateway are read
@@ -2092,6 +2045,12 @@ verify_egress() {
 	wait_for "egress pool warm image cached (fastlet can accept sandboxes)" \
 		300 egress_warm_ready
 	pass "egress (host-process) container running in a single fastlet pod; pool warm"
+
+	# The initial forward sweep ran before this pool existed; the execd
+	# probes deliver through the fastlet-proxy PORT route, so sweep again
+	# now that the egress fastlet pod is up and warm.
+	log "egress: re-sweeping port-forwards to cover the egress pool fastlet"
+	port_forward_up
 
 	trap 'port_forward_down; resolve_daemon_down' EXIT
 	run_stage "egress 2: actions/status protocol cross-verification" egress_status_ready
