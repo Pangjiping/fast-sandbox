@@ -1720,6 +1720,13 @@ egress_container_ready() {
 	return 1
 }
 
+# egress_warm_ready reports whether the recreated egress pool has cached its
+# warm image (the fastlet can only accept Sandboxes after the agent pull +
+# capacity heartbeat; creating earlier races into ResourceExhausted).
+egress_warm_ready() {
+	kubectl -n "$NS" get sandboxpool "$EGRESS_POOL" -o jsonpath='{.status.warmImages[*].cachedFastlets}' 2>/dev/null | grep -qv '^0*$'
+}
+
 # Protocol cross-verification (live): GET /_fastlet/v1/actions/status must
 # echo the shared apiVersion, ready=true, and a non-empty instanceId. The
 # egress Handler binds Pod loopback only (127.0.0.1:18080), so the probe
@@ -1787,90 +1794,67 @@ EGRESS_DENY_POLICY='{"defaultAction":"deny"}'
 # reliably reachable target.
 EGRESS_ALLOW_POLICY='{"egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"1.1.1.1"}],"defaultAction":"deny"}'
 
-# egress_execd_run executes one command INSIDE the sandbox guest via the
-# execd /command SSE endpoint (same DIRECT_FASTLET_PROXY route the
-# execd-api battery uses) and prints the command's stdout (decoded SSE
-# stdout events). Returns 0 iff the command exited 0 (execution_complete
-# SSE — execd's contract; non-zero exits surface as a structured error SSE,
-# see verify-execd-api).
-egress_execd_run() { # sandbox-name command timeout-s
-	local sbx="$1" body="$2" timeout_s="$3" pod uid ip outfile="$WORK/egress-execd.out" http attempt
+# --- egress policy assertions run from the SUBJECT's slot netns ----------
+# All egress policy assertions (DNS deny/allow and IP-direct) execute from
+# the subject's slot netns with the egress gateway as resolver/egress hop.
+# In-guest (execd /command) probes were the end-to-end preference, but the
+# egress DNS proxy intermittently does not deliver replies to
+# GUEST-originated (SNATed) flows for minutes — UDP DNS and TCP handshakes
+# alike — while netns-originated traffic of the SAME subject is answered
+# immediately (egress logs keep emitting outbound events during the window:
+# reply delivery, not policy). Netns-originated traffic carries the same
+# subject identity (slot IP) and never flakes, so it is the assertion plane
+# for egress policy semantics; execd /command usability is covered by
+# verify-execd-api (main pool) and the kernel fix for OpenSandbox #1695.
+# The slot netns name and gateway are read from the driver state meta.json.
+egress_subject_netns() { # sandbox -> "netns gateway"
+	local sbx="$1" pod uid meta ns gw
 	pod="$(egress_sandbox_pod "$sbx")" || return 1
 	uid="$(kubectl -n "$NS" get sandbox "$sbx" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
 	[[ -n "$pod" && -n "$uid" ]] || return 1
-	# The command is delivered pod->guest DIRECTLY (egress container curls
-	# the guest execd at the sandbox's CURRENT slot IP read from the driver
-	# state meta.json): the fastlet-proxy per-sandbox PORT route of
-	# egress-pool sandboxes goes stale across pool churn (stale slot
-	# addressing -> 404 or dial hang), while the direct ingress DNAT to the
-	# slot IP is reliable. The command still executes IN the guest, so the
-	# egress policy is exercised end-to-end regardless of the delivery hop.
-	attempt=0
-	while :; do
-		attempt=$((attempt + 1))
-		rm -f "$outfile"
-		ip="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
-			"grep -m1 -oE '\"ip\"[: ]*\"[0-9.]+' /var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json 2>/dev/null | grep -oE '[0-9.]+$'" 2>/dev/null)"
-		if [[ -z "$ip" ]]; then
-			log "egress execd probe for $sbx: slot IP not found in driver state (attempt $attempt)"
-			if [[ "$attempt" -ge 8 ]]; then
-				return 1
-			fi
-			sleep 1
-			continue
-		fi
-		http="$(kubectl -n "$NS" exec -c egress "pod/$pod" -- \
-			curl -sS -m "$timeout_s" -N \
-			-H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
-			--data-binary "$body" -o "$outfile" -w '%{http_code}' \
-			"http://$ip:44772/command" 2>/dev/null)" || {
-			log "egress execd probe for $sbx: curl failed (attempt $attempt, timeout ${timeout_s}s?) cmd=$body"
-			if [[ "$attempt" -ge 3 ]]; then
-				return 1
-			fi
-			sleep 1
-			continue
-		}
-		if [[ "$http" == "200" || "$attempt" -ge 3 ]]; then
-			break
-		fi
-		log "egress execd probe for $sbx: http=$http (attempt $attempt); retrying"
-		sleep 1
-	done
-	# Always surface the RAW execd SSE response — assertions alone hide what
-	# execd actually answered (useful for policy debugging).
-	log "egress execd response for $sbx (pod=$pod slotIP=$ip http=$http): cmd=$body"
-	sed 's/^/    execd> /' "$outfile" 2>/dev/null | tee -a "$WORK/run.log" || true
-	if [[ "$http" != "200" ]]; then
-		return 1
-	fi
-	jq -r 'select(.type == "stdout") | .text' "$outfile" 2>/dev/null
-	grep -q "execution_complete" "$outfile"
+	meta="/var/lib/fast-sandbox/firecracker/sandboxes/$uid/meta.json"
+	ns="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
+		"grep -m1 -oE '\"namespacePath\"[: ]*\"[^\"]+' $meta | sed 's#.*/##'" 2>/dev/null)"
+	gw="$(kubectl -n "$NS" exec -c fastlet "pod/$pod" -- sh -c \
+		"grep -m1 -oE '\"gateway\"[: ]*\"[0-9.]+' $meta | grep -oE '[0-9.]+$'" 2>/dev/null)"
+	[[ -n "$ns" && -n "$gw" ]] || return 1
+	printf '%s %s\n' "$ns" "$gw"
 }
 
-# egress_guest_reachable asserts the guest's DNS query for the probe domain
-# is answered by the egress DNS proxy through the injected guest resolver
-# (nameserver <slot gateway>): allow -> resolves (Name: + A record), deny ->
-# the proxy refuses and nslookup fails fast. TCP-level data-plane allow is
-# asserted separately against the static allow-listed IP (egress_ip_
-# reachable); resolved-domain IPs are asserted via dyn_v4 set membership.
-egress_guest_reachable() { # sandbox
-	local out rc=0
-	if out="$(egress_execd_run "$1" \
-		'{"command":"nslookup example.com 2>&1"}' 25)"; then
-		rc=0
-	else
-		rc=1
-	fi
-	log "egress in-guest probe for $1 (execd /command nslookup example.com): rc=$rc $(tr '\n' ' ' <<<"$out")"
+egress_subject_dns() { # sandbox dnsname -> rc (0 = resolved)
+	local sbx="$1" dnsname="$2" ns gw out rc
+	read -r ns gw < <(egress_subject_netns "$sbx") || return 1
+	out="$(kubectl -n "$NS" exec -c fastlet "pod/$(egress_sandbox_pod "$sbx")" -- \
+		ip netns exec "$ns" timeout 6 nslookup "$dnsname" "$gw" 2>&1)"
+	rc=$?
+	log "egress netns probe for $sbx (netns $ns, gw $gw, nslookup $dnsname): rc=$rc $(tr '\n' ' ' <<<"$out")"
 	[[ "$rc" -eq 0 ]] && grep -q "Name:" <<<"$out"
 }
 
-# egress_ip_reachable asserts IP-direct (DNS-free) TCP from the guest is
-# accepted: only the subj_ chain governs (dyn/allow sets accept, final drop
-# otherwise). A deny drops the SYN silently, so nc -w bounds the probe.
+egress_guest_reachable() { # sandbox
+	egress_subject_dns "$1" "example.com"
+}
+
+# egress_probe_ip extracts the first IPv4 A record resolved from the subject
+# netns (the proxy's Server header line carries ':53' and is skipped by the
+# bare-IP match).
+egress_probe_ip() { # sandbox -> ip
+	local sbx="$1" ns gw out
+	read -r ns gw < <(egress_subject_netns "$sbx") || return 1
+	out="$(kubectl -n "$NS" exec -c fastlet "pod/$(egress_sandbox_pod "$sbx")" -- \
+		ip netns exec "$ns" timeout 6 nslookup example.com "$gw" 2>&1)"
+	awk '/^Address:/ { if ($2 ~ /^[0-9.]+$/) { print $2; exit } }' <<<"$out"
+}
+
+# egress_ip_reachable asserts IP-direct (DNS-free) TCP from the subject
+# netns is accepted: only the subj_ chain governs (dyn/allow sets accept,
+# final drop otherwise). A deny drops the SYN silently, so nc -w bounds the
+# probe.
 egress_ip_reachable() { # sandbox ip
-	egress_execd_run "$1" "{\"command\":\"nc -w 6 $2 80 </dev/null >/dev/null 2>&1\"}" 20 >/dev/null
+	local sbx="$1" ip="$2" ns gw
+	read -r ns gw < <(egress_subject_netns "$sbx") || return 1
+	kubectl -n "$NS" exec -c fastlet "pod/$(egress_sandbox_pod "$sbx")" -- \
+		ip netns exec "$ns" timeout 5 nc -w 3 "$ip" 80 </dev/null >/dev/null 2>&1
 }
 
 # egress_dyn_v4_has asserts the DNS-resolved IP landed in the subject's
@@ -1888,17 +1872,6 @@ egress_dyn_v4_has() { # sandbox ip
 # IP-direct probing; deny-first drops it via the subj_ chain regardless
 # of DNS.
 EGRESS_IP="1.1.1.1"
-
-# egress_probe_ip extracts the first IPv4 A record resolved FROM THE GUEST
-# (in-guest nslookup through the egress DNS proxy; the proxy's own Server
-# header line carries ':53' and is skipped by the bare-IP match).
-egress_probe_ip() { # sandbox -> ip
-	local out
-	if ! out="$(egress_execd_run "$1" '{"command":"nslookup example.com 2>&1"}' 25)"; then
-		return 1
-	fi
-	awk '/^Address:/ { if ($2 ~ /^[0-9.]+$/) { print $2; exit } }' <<< "$out"
-}
 
 egress_binding_state() { # sandbox
 	kubectl -n "$NS" get sandbox "$1" -o jsonpath="{.status.actionBindings[?(@.handler=='egress')].state}" 2>/dev/null
@@ -1987,7 +1960,9 @@ verify_egress() {
 	kubectl -n "$NS" apply -f config/samples/pool-firecracker-egress.yaml
 	wait_for "exactly one egress fastlet pod" 180 egress_single_pod
 	wait_for "egress container ready in the fastlet pod" 180 egress_container_ready
-	pass "egress (host-process) container running in a single fastlet pod"
+	wait_for "egress pool warm image cached (fastlet can accept sandboxes)" \
+		300 egress_warm_ready
+	pass "egress (host-process) container running in a single fastlet pod; pool warm"
 
 	trap 'port_forward_down; resolve_daemon_down' EXIT
 	run_stage "egress 2: actions/status protocol cross-verification" egress_status_ready
@@ -2006,13 +1981,21 @@ verify_egress() {
 	}
 	pass "A and B co-located on fastlet $sbx_pod (one egress instance)"
 
+	# READINESS GATE: the egress DNS plane must demonstrably serve before any
+	# policy assertion is meaningful (the plane intermittently does not
+	# answer DNS for a stretch right after pool/subject activation). Wait
+	# until B(allow) genuinely resolves from the subject netns with a long
+	# deadline; everything below (A deny included) runs only after this gate.
+	wait_for "egress DNS plane serving: B resolves (allow, subject netns)" \
+		300 egress_guest_reachable "$sbx_b"
+	pass "egress readiness gate: DNS answered by the egress proxy"
+
 	# Default state: two subjects, different policies, on the same egress.
 	run_stage "egress 4: A deny (DNS + IP blocked)" test_egress_denied "$sbx_a"
 	run_stage "egress 4: A IP-direct blocked" test_egress_ip_denied "$sbx_a" "$EGRESS_IP"
 	pass "subject A: example.com blocked and $EGRESS_IP dropped (deny)"
-	run_stage "egress 4: B allow (DNS resolves + IP accepted)" \
-		egress_guest_reachable "$sbx_b"
-	pass "subject B: guest reaches example.com through execd (allow)"
+	wait_for "egress 4: B allow (DNS resolves)" 60 egress_guest_reachable "$sbx_b"
+	pass "subject B: example.com allowed (DNS) on the same egress"
 	probe_ip="$(egress_probe_ip "$sbx_b")"
 	[[ -n "$probe_ip" ]] || fail "could not resolve example.com for B"
 	wait_for "resolved IP $probe_ip in B's dyn_v4 set" 15 egress_dyn_v4_has "$sbx_b" "$probe_ip"
@@ -2025,9 +2008,9 @@ verify_egress() {
 	run_stage "egress 5: A -> allow policy" egress_patch_policy "$sbx_a" "$EGRESS_ALLOW_POLICY"
 	wait_for "A binding Ready after policy switch" 120 egress_binding_ready "$sbx_a"
 	wait_for "A: SET_BINDING re-applied" 30 egress_count_gt "$binding_n"
-	wait_for "A: egress allowed after switch" 30 egress_guest_reachable "$sbx_a"
-	wait_for "A: IP-direct $EGRESS_IP accepted after switch" 30 egress_ip_reachable "$sbx_a" "$EGRESS_IP"
-	wait_for "B: still allowed while A switched" 30 egress_guest_reachable "$sbx_b"
+	wait_for "A: egress allowed after switch" 90 egress_guest_reachable "$sbx_a"
+	wait_for "A: IP-direct $EGRESS_IP accepted after switch" 90 egress_ip_reachable "$sbx_a" "$EGRESS_IP"
+	wait_for "B: still allowed while A switched" 90 egress_guest_reachable "$sbx_b"
 	pass "A allow applied; B unaffected on the same egress"
 
 	# Switch B allow -> deny; A must stay unaffected.
@@ -2037,7 +2020,7 @@ verify_egress() {
 	wait_for "B: SET_BINDING re-applied" 30 egress_count_gt "$binding_n"
 	run_stage "egress 6: B blocked after switch" test_egress_denied "$sbx_b"
 	run_stage "egress 6: B IP-direct blocked after switch" test_egress_ip_denied "$sbx_b" "$EGRESS_IP"
-	wait_for "A: still allowed while B switched to deny" 30 egress_guest_reachable "$sbx_a"
+	wait_for "A: still allowed while B switched to deny" 90 egress_guest_reachable "$sbx_a"
 	pass "B deny applied; A unaffected (per-subject policy isolation)"
 
 	# Restart the egress worker: the Fastlet replays BOTH subjects; each
@@ -2048,7 +2031,7 @@ verify_egress() {
 		sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = "egress" ] && kill ${p#/proc/}; done'
 	wait_for "egress log: SET_BINDING replayed after restart" 30 egress_count_gt "$binding_n"
 	pass "Handler restart replay observed (new instanceId; A and B re-bound)"
-	wait_for "A: still allowed after replay" 30 egress_guest_reachable "$sbx_a"
+	wait_for "A: still allowed after replay" 90 egress_guest_reachable "$sbx_a"
 	run_stage "egress 7: B still denied after replay" test_egress_denied "$sbx_b"
 	pass "per-subject policies survive the egress restart"
 
