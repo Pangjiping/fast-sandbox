@@ -753,7 +753,13 @@ func newE2EEnvironment(t *testing.T, capacity int, infraEnabled bool) *e2eEnviro
 	} else {
 		require.NoError(t, os.MkdirAll(stateRoot, 0o750))
 	}
-	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off net.ifnames=0 biosdevname=0"
+	// random.trust_cpu=on: the microVM has no entropy source (no virtio-rng,
+	// RDRAND masked for snapshot determinism), so without it the guest CRNG
+	// never initializes and getrandom() callers (Go crypto/rand, uuid, etc.)
+	// block forever — execd POST /command hangs on its session id while /ping
+	// and malformed-JSON 400 stay instant (OpenSandbox #1695). Keep in sync
+	// with the builder's prep boot args in cmd/sandboxtemplate-builder.
+	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off net.ifnames=0 biosdevname=0 random.trust_cpu=on"
 	// The golden snapshot set is the runtime asset: a preparation VM boots
 	// the kernel once, pauses, and dumps vmstate + memory; subsequent
 	// Sandboxes restore from it (no kernel at runtime). A complete set is
