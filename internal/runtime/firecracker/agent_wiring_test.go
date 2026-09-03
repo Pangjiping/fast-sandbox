@@ -188,3 +188,30 @@ func TestSetAgentSocketEmptySwitchesToLocalMode(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, client)
 }
+
+func TestEnsureSandboxColdCreatePullsMissingImage(t *testing.T) {
+	fixture := newDriverFixture(t)
+	agent := &fakeAgentClient{}
+	fixture.installAgent(agent)
+
+	// The image is NOT cached and the agent cannot materialize it (fake):
+	// the create must ask the agent for the pull (on-demand loading) and
+	// then fail with ErrImageNotReady — not reject without ever trying.
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	require.ErrorIs(t, err, ErrImageNotReady)
+	pins, _, _ := agent.snapshot()
+	require.Equal(t, []string{fixture.sandboxSpec.Spec.Image}, pins)
+	require.Equal(t, "warm-pull-pod-1-"+imageKey(fixture.sandboxSpec.Spec.Image), agent.pinReqs[0])
+}
+
+func TestEnsureSandboxCachedImageNeverPins(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	agent := &fakeAgentClient{}
+	fixture.installAgent(agent)
+
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	require.NoError(t, err)
+	pins, _, _ := agent.snapshot()
+	require.Empty(t, pins, "a cached image must not pin on create (warm pull pins once, delete unpins once)")
+}
