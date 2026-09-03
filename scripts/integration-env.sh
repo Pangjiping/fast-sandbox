@@ -1037,7 +1037,11 @@ start_fastlet_forward() { # pod-name pod-ip local-port -> stdout "port pid"
 		if kill -0 "$pid" 2>/dev/null; then
 			if tcp_listening "$port"; then
 				rm -f "$errf"
-				printf '%s %s' "$port" "$pid"
+				# Trailing newline is REQUIRED: read returns non-zero on EOF
+				# when the last line lacks one, which made every caller's
+				# "read -r port pid < <(start_fastlet_forward ...)" fail even
+				# though the forward had started successfully.
+				printf '%s %s\n' "$port" "$pid"
 				return 0
 			fi
 		else
