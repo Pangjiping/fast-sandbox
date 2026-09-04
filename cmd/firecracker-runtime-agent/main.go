@@ -1,10 +1,5 @@
 package main
 
-// firecracker-runtime-agent serves the node-level UDS management API of
-// the Firecracker on-demand loading design (implementation plan §8): the
-// pull chain (agent.Client) plus the durable lease/journal state, exposed
-// to fastlet drivers as JSON over a Unix socket.
-
 import (
 	"context"
 	"errors"

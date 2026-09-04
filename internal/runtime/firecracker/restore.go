@@ -110,7 +110,7 @@ func validateRestoreMachineConfig(spec fastletapi.SandboxSpec, config runtimecat
 	if _, err := machineVCPUs(machine.VCPU); err != nil {
 		return err
 	}
-	snapshotMiB, err := machineMemMiB(machine.Memory)
+	snapshotMiB, err := parseMemMiB(machine.Memory)
 	if err != nil {
 		return err
 	}
@@ -137,11 +137,6 @@ func machineVCPUs(value string) (int, error) {
 		return 0, fmt.Errorf("%w: manifest vcpu %q yields no vCPU", ErrInvalidConfig, value)
 	}
 	return vcpus, nil
-}
-
-// machineMemMiB parses the manifest memory quantity into MiB.
-func machineMemMiB(value string) (int, error) {
-	return parseMemMiB(value)
 }
 
 // parseMemMiB parses a resource quantity into whole MiB.

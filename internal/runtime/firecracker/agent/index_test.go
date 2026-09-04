@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -65,16 +64,6 @@ func TestIndexKeyMatchesCacheKey(t *testing.T) {
 	// addressing chain works without control-plane coordination.
 	require.Equal(t, indexKey(testImage), "index/"+imageKey(testImage)+".json")
 	require.Len(t, imageKey(testImage), 64)
-}
-
-// s3NotFoundServer returns 404 for every path.
-func s3NotFoundServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.NotFound(w, nil)
-	}))
-	t.Cleanup(server.Close)
-	return server
 }
 
 // clientForEndpoint builds a client without the fake store (used for

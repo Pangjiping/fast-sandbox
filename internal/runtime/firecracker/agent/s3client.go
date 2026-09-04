@@ -230,17 +230,18 @@ var emptyPayloadHash = sha256Hex(nil)
 // signing; the request still carries no body).
 const unsignedPayload = "UNSIGNED-PAYLOAD"
 
-// presignGET returns a SigV4 query-signed GET URL for a store object, valid
-// for ttl. The signature is derived from the same canonical request as the
-// header signing in sign (identical path, host, region scope and signing
-// key); only the carrier differs — the X-Amz-* parameters travel in the
-// query string and the only signed header is host. Presigned URLs are handed
-// to DART so the P2P layer can fetch from the origin without ever seeing the
-// access key pair.
-func (c *s3Client) presignGET(storeKey string, ttl time.Duration) (string, error) {
-	if ttl <= 0 {
-		ttl = time.Hour
-	}
+// presignGETTTL bounds a presigned URL. The TTL only needs to cover one
+// artifact fetch: DART reuses the URL for cache misses back to the origin.
+const presignGETTTL = time.Hour
+
+// presignGET returns a SigV4 query-signed GET URL for a store object. The
+// signature is derived from the same canonical request as the header signing
+// in sign (identical path, host, region scope and signing key); only the
+// carrier differs — the X-Amz-* parameters travel in the query string and
+// the only signed header is host. Presigned URLs are handed to DART so the
+// P2P layer can fetch from the origin without ever seeing the access key
+// pair.
+func (c *s3Client) presignGET(storeKey string) (string, error) {
 	key := storeKey
 	if c.prefix != "" {
 		key = c.prefix + "/" + storeKey
@@ -263,7 +264,7 @@ func (c *s3Client) presignGET(storeKey string, ttl time.Duration) (string, error
 		{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"},
 		{"X-Amz-Credential", c.accessKey + "/" + scope},
 		{"X-Amz-Date", amzDate},
-		{"X-Amz-Expires", strconv.FormatInt(int64(ttl/time.Second), 10)},
+		{"X-Amz-Expires", strconv.FormatInt(int64(presignGETTTL/time.Second), 10)},
 		{"X-Amz-SignedHeaders", "host"},
 	}
 	canonicalQuery := canonicalQueryString(parameters)

@@ -71,15 +71,6 @@ func (s *fakeAgentServer) recorded() []string {
 	return append([]string(nil), s.requests...)
 }
 
-// wireAgent connects the fake server to the driver fields.
-func (f *driverFixture) wireAgent(t *testing.T, server *fakeAgentServer) {
-	t.Helper()
-	f.driver.newAgentClient = func(string) (AgentClient, error) {
-		return NewAgentClient(server.socket, "tenant-a", "pod-1")
-	}
-	f.driver.agentSocket = server.socket
-}
-
 func TestAgentClientPinImageRequestAndResponse(t *testing.T) {
 	server := newFakeAgentServer(t)
 	server.responses[agentprotocol.RoutePinImage] = func(writer http.ResponseWriter, _ []byte) {

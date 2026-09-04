@@ -38,7 +38,7 @@ type ErrorCode string
 
 const (
 	ErrorInvalidRequest ErrorCode = "InvalidRequest" // 400
-	ErrorUnauthorized   ErrorCode = "Unauthorized"   // 403 (identity header missing)
+	ErrorUnauthorized   ErrorCode = "Unauthorized"   // 403 (identity missing or empty)
 	ErrorConflict       ErrorCode = "Conflict"       // 409 (idempotency key or ownership mismatch)
 	ErrorNotFound       ErrorCode = "NotFound"       // 404 (image not published)
 	ErrorInternal       ErrorCode = "Internal"       // 500

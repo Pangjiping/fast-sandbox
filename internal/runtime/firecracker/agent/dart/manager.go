@@ -82,7 +82,6 @@ type Manager struct {
 	logMu  sync.Mutex // serializes manager logs and child output
 
 	mu         sync.Mutex
-	cmd        *exec.Cmd
 	startCount int
 	healthy    atomic.Bool
 	backoff    time.Duration
@@ -133,8 +132,7 @@ func (m *Manager) Args() []string {
 }
 
 // StartCount reports how many times the child has been started (including
-// crash restarts). It is diagnostic: a climbing count means the child is
-// crash-looping, visible next to the agent's DartUp health.
+// crash restarts); tests assert the crash-restart discipline on it.
 func (m *Manager) StartCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -208,7 +206,6 @@ func (m *Manager) start(ctx context.Context) (*exec.Cmd, <-chan error, error) {
 		return nil, nil, err
 	}
 	m.mu.Lock()
-	m.cmd = command
 	m.startCount++
 	m.mu.Unlock()
 	m.healthy.Store(false) // not probed yet
@@ -269,9 +266,7 @@ func (m *Manager) backoffDelay(ctx context.Context) bool {
 		m.backoff = restartBackoffMax
 	}
 	m.mu.Unlock()
-	if delay > 0 {
-		m.logf("dart: restarting in %s\n", delay)
-	}
+	m.logf("dart: restarting in %s\n", delay)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {

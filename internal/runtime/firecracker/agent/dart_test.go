@@ -82,15 +82,6 @@ func (d *fakeDART) hitCount() int {
 	return len(d.hits)
 }
 
-func (d *fakeDART) latestUpstream() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if len(d.hits) == 0 {
-		return ""
-	}
-	return d.hits[len(d.hits)-1]
-}
-
 // --- B: presigned URL construction and SigV4 query signature ---------------
 
 func TestPresignGETParametersAndSignature(t *testing.T) {
@@ -105,7 +96,7 @@ func TestPresignGETParametersAndSignature(t *testing.T) {
 		accessKey: "test-access-key", secretKey: "test-secret-key",
 		http: &http.Client{Timeout: time.Second},
 	}
-	presigned, err := client.presignGET("index/abc.json", time.Minute)
+	presigned, err := client.presignGET("index/abc.json")
 	require.NoError(t, err)
 
 	parsed, err := url.Parse(presigned)
@@ -129,7 +120,7 @@ func TestPresignGETParametersAndSignature(t *testing.T) {
 	require.True(t, strings.HasPrefix(query.Get("X-Amz-Credential"), "test-access-key/"))
 	require.Contains(t, query.Get("X-Amz-Credential"), "/us-east-1/s3/aws4_request")
 	require.Equal(t, "host", query.Get("X-Amz-SignedHeaders"))
-	require.Equal(t, "60", query.Get("X-Amz-Expires"))
+	require.Equal(t, "3600", query.Get("X-Amz-Expires"))
 	require.NotEmpty(t, query.Get("X-Amz-Date"))
 	require.Len(t, query.Get("X-Amz-Signature"), 64)
 }
@@ -152,7 +143,7 @@ func TestPresignGETSignatureValidatesServerSide(t *testing.T) {
 		accessKey: accessKey, secretKey: secret,
 		http: &http.Client{Timeout: time.Second},
 	}
-	presigned, err := client.presignGET("digest16/rootfs.ext4", time.Hour)
+	presigned, err := client.presignGET("digest16/rootfs.ext4")
 	require.NoError(t, err)
 	response, err := http.Get(presigned)
 	require.NoError(t, err)
@@ -211,7 +202,7 @@ func TestPullImageArtifactsViaDART(t *testing.T) {
 	store, client, _, artifacts := publishFixture(t)
 	gateway := newFakeDART(t)
 	dartClient := &Client{s3: client, dart: &dartGateway{
-		base: gateway.url(), ttl: time.Hour, http: &http.Client{Timeout: time.Minute},
+		base: gateway.url(), http: &http.Client{Timeout: time.Minute},
 	}}
 	root := t.TempDir()
 
@@ -259,7 +250,7 @@ func TestPullImageDARTUnreachableFallsBackToDirect(t *testing.T) {
 	gateway.server.Close() // simulate a dead DART process
 
 	dartClient := &Client{s3: client, dart: &dartGateway{
-		base: dartBase, ttl: time.Hour, http: &http.Client{Timeout: time.Second},
+		base: dartBase, http: &http.Client{Timeout: time.Second},
 	}}
 	require.NoError(t, dartClient.PullImage(context.Background(), t.TempDir(), testImage))
 
@@ -277,7 +268,7 @@ func TestPullImageDARTGatewayErrorFallsBackToDirect(t *testing.T) {
 	gateway.mu.Unlock()
 
 	dartClient := &Client{s3: client, dart: &dartGateway{
-		base: gateway.url(), ttl: time.Hour, http: &http.Client{Timeout: time.Second},
+		base: gateway.url(), http: &http.Client{Timeout: time.Second},
 	}}
 	require.NoError(t, dartClient.PullImage(context.Background(), t.TempDir(), testImage))
 
@@ -295,7 +286,7 @@ func TestPullImageDARTKeepsImageNotReadySemantics(t *testing.T) {
 	gateway := newFakeDART(t)
 
 	dartClient := &Client{s3: client, dart: &dartGateway{
-		base: gateway.url(), ttl: time.Hour, http: &http.Client{Timeout: time.Second},
+		base: gateway.url(), http: &http.Client{Timeout: time.Second},
 	}}
 	err := dartClient.PullImage(context.Background(), t.TempDir(), testImage)
 	require.ErrorIs(t, err, runtimecontract.ErrImageNotReady)

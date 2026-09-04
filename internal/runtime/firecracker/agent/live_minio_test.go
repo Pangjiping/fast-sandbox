@@ -67,7 +67,7 @@ func TestLivePresignedGETAgainstMinIO(t *testing.T) {
 	endpoint, accessKey, secretKey, bucket, key, wantSHA := liveMinioEnv(t)
 	client := liveS3Client(endpoint, accessKey, secretKey, bucket)
 
-	presigned, err := client.presignGET(key, time.Hour)
+	presigned, err := client.presignGET(key)
 	require.NoError(t, err)
 	response, err := http.Get(presigned)
 	require.NoError(t, err)
@@ -92,7 +92,7 @@ func TestLivePullThroughDART(t *testing.T) {
 		t.Skip("FS_LIVE_DART_ADDR not set; the DART-leg of the live check is opt-in")
 	}
 	client := &Client{s3: liveS3Client(endpoint, accessKey, secretKey, bucket), dart: &dartGateway{
-		base: dartBase, ttl: time.Hour, http: &http.Client{Timeout: 10 * time.Minute},
+		base: dartBase, http: &http.Client{Timeout: 10 * time.Minute},
 	}}
 
 	for read := 1; read <= 2; read++ {
@@ -158,7 +158,7 @@ func TestLivePeerHitThroughTwoDARTNodes(t *testing.T) {
 	origin := func() int { return dartCounter(t, adminA, "origin") + dartCounter(t, adminB, "origin") }
 	readVia := func(name, base string) {
 		client := &Client{s3: liveS3Client(endpoint, accessKey, secretKey, bucket), dart: &dartGateway{
-			base: base, ttl: time.Hour, http: &http.Client{Timeout: 10 * time.Minute},
+			base: base, http: &http.Client{Timeout: 10 * time.Minute},
 		}}
 		body, err := client.getArtifact(context.Background(), key)
 		require.NoError(t, err)

@@ -432,6 +432,16 @@ func runE2EOnce(t *testing.T, useInfra bool) {
 // network_overrides expects), so the reuse check must reject it.
 const e2ePrepVersion = 2
 
+// bootVM starts the microVM and waits until the machine state is Running.
+// It serves the golden-snapshot prep path only (cold boot: InstanceStart);
+// the production driver is restore-only and resumes via resumeVM.
+func bootVM(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
+	if err := client.Start(ctx); err != nil {
+		return 0, fmt.Errorf("start Firecracker instance: %w", err)
+	}
+	return waitVMRunning(ctx, client, timeoutSeconds)
+}
+
 // prepareE2EGoldenSnapshot produces (or reuses) the golden snapshot set of
 // the E2E image (方式 B self-bootstrap, golden-restore plan §5): a
 // preparation VM cold-boots the kernel once with a NIC and a static guest

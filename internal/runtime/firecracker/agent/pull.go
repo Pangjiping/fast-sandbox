@@ -14,30 +14,27 @@ import (
 	"os"
 	"path"
 	"strings"
-	"time"
 
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 // Client pulls published Firecracker artifacts for an image reference into
-// the node-local cache. The pull chain is stage-1 pure (UDS server, device
-// leasing, and driver wiring arrive with the runtime-agent work); stage 2
-// adds the DART P2P data plane for the artifact bytes.
+// the node-local cache. When a DART P2P gateway is configured (WithDART)
+// artifact bytes route through it with a direct header-signed S3 fallback.
 type Client struct {
 	s3 *s3Client
 	// dart is the DART P2P gateway configuration; nil keeps the pull on the
-	// direct header-signed S3 path (local mode / stage-1 behavior).
+	// direct header-signed S3 path.
 	dart *dartGateway
 }
 
-// dartGateway routes artifact GETs through a node-local DART instance
-// (stage-2 P2P). The agent signs presigned origin URLs; DART fetches,
-// caches and P2P-distributes the blocks, and the agent still verifies the
-// whole-object digest against the manifest.
+// dartGateway routes artifact GETs through a node-local DART instance. The
+// agent signs presigned origin URLs; DART fetches, caches and P2P-distributes
+// the blocks, and the agent still verifies the whole-object digest against
+// the manifest.
 type dartGateway struct {
 	base string // e.g. http://127.0.0.1:8145 (prefix route /dart/<upstream-url>)
-	ttl  time.Duration
 	http *http.Client
 }
 
@@ -55,16 +52,13 @@ func NewClient(storeRoot string, credential registryconfig.Credential, options .
 	}
 	client := &Client{s3: s3}
 	if config.dartBase != "" {
+		httpClient := config.httpClient
+		if httpClient == nil {
+			httpClient = &http.Client{Timeout: defaultS3RequestTimeout}
+		}
 		client.dart = &dartGateway{
 			base: strings.TrimRight(config.dartBase, "/"),
-			ttl:  config.presignTTL,
-			http: config.httpClient,
-		}
-		if client.dart.ttl <= 0 {
-			client.dart.ttl = time.Hour
-		}
-		if client.dart.http == nil {
-			client.dart.http = &http.Client{Timeout: defaultS3RequestTimeout}
+			http: httpClient,
 		}
 	}
 	return client, nil
@@ -78,7 +72,6 @@ type optionsConfig struct {
 	endpoint   string
 	httpClient *http.Client
 	dartBase   string
-	presignTTL time.Duration
 }
 
 // WithRegion overrides the SigV4 signing region (default us-east-1).
@@ -102,16 +95,9 @@ func WithHTTPClient(client *http.Client) Option {
 // at base (e.g. http://127.0.0.1:8145). Metadata (image index and manifest)
 // stays on the direct header-signed path: their 404 semantics must survive
 // exactly, and DART collapses origin errors into 502. Empty base = direct
-// mode (the stage-1 behavior).
+// mode.
 func WithDART(base string) Option {
 	return func(config *optionsConfig) { config.dartBase = base }
-}
-
-// WithPresignTTL bounds the lifetime of the presigned URLs handed to DART.
-// The default is one hour; the TTL only needs to cover one artifact fetch
-// (DART reuses the URL for cache misses back to the origin).
-func WithPresignTTL(ttl time.Duration) Option {
-	return func(config *optionsConfig) { config.presignTTL = ttl }
 }
 
 // PullImage resolves the addressing chain for image and materializes the
@@ -225,7 +211,7 @@ func (c *Client) getArtifact(ctx context.Context, storeKey string) (io.ReadClose
 // problems as 400, so a non-200 answer here is an httpError for the caller
 // to classify.
 func (c *Client) getArtifactViaDART(ctx context.Context, storeKey string) (io.ReadCloser, error) {
-	presigned, err := c.s3.presignGET(storeKey, c.dart.ttl)
+	presigned, err := c.s3.presignGET(storeKey)
 	if err != nil {
 		return nil, err
 	}

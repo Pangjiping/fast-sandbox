@@ -83,12 +83,8 @@ func CachedManifestDigest(stateRoot, image string) (string, bool, error) {
 
 // cacheComplete reports whether the image directory holds a committed pull:
 // the local manifest plus a native file set whose digests match. It is the
-// idempotency check: a complete cache is never touched again.
-//
-// Deliberate trade-off: a committed cache is never refreshed for the same
-// image reference, even when the publisher rebuilds it. Picking up a new
-// build requires clearing the cache directory or using a new tag. Warm-image
-// preheating relies on this "pull once per reference" behavior.
+// idempotency check: a complete cache is never touched again (the trade-off
+// is documented on Client.PullImage).
 func cacheComplete(dir string) (bool, error) {
 	payload, err := os.ReadFile(filepath.Join(dir, manifestName))
 	if err != nil {
