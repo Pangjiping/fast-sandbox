@@ -49,6 +49,23 @@ func (fakeNetworkDriver) Validate(_ context.Context, slot *fastletnetwork.Slot) 
 }
 func (fakeNetworkDriver) Destroy(context.Context, *fastletnetwork.Slot) error { return nil }
 
+// flakyDestroyDriver fails the first slot destroys so DeleteSandbox must
+// surface the release failure and converge on a later retry.
+type flakyDestroyDriver struct {
+	fakeNetworkDriver
+	failuresRemaining int
+	destroyCalls      int
+}
+
+func (f *flakyDestroyDriver) Destroy(ctx context.Context, slot *fastletnetwork.Slot) error {
+	f.destroyCalls++
+	if f.failuresRemaining > 0 {
+		f.failuresRemaining--
+		return errors.New("netns delete failed: EBUSY")
+	}
+	return nil
+}
+
 // memoryStateStore keeps slots in memory for the manager fixture.
 type memoryStateStore struct {
 	mu    sync.Mutex
@@ -89,6 +106,10 @@ func cloneSlotForTest(slot *fastletnetwork.Slot) *fastletnetwork.Slot {
 }
 
 func newNetworkManagerForTest(t *testing.T) *fastletnetwork.Manager {
+	return newNetworkManagerWithDriverForTest(t, fakeNetworkDriver{})
+}
+
+func newNetworkManagerWithDriverForTest(t *testing.T, driver fastletnetwork.Driver) *fastletnetwork.Manager {
 	t.Helper()
 	root := t.TempDir()
 	manager, err := fastletnetwork.NewManager(fastletnetwork.Config{
@@ -96,7 +117,7 @@ func newNetworkManagerForTest(t *testing.T) *fastletnetwork.Manager {
 		StateRoot: root, NetNSRoot: filepath.Join(root, "netns"), HostNetNSRoot: filepath.Join(root, "host-netns"),
 		IDGenerator: func() (string, error) { return "slot-1", nil },
 		Now:         func() time.Time { return time.Unix(1720000000, 0) },
-	}, fakeNetworkDriver{}, newMemoryStateStore())
+	}, driver, newMemoryStateStore())
 	require.NoError(t, err)
 	require.NoError(t, manager.Initialize(context.Background()))
 	return manager
@@ -621,6 +642,40 @@ func TestDeleteSandboxIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	_, err = os.Stat(directory)
 	require.True(t, os.IsNotExist(err))
+}
+
+func TestDeleteSandboxRetriesFailedSlotRelease(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
+
+	flaky := &flakyDestroyDriver{failuresRemaining: 1}
+	manager := newNetworkManagerWithDriverForTest(t, flaky)
+	fixture.driver.SetNetworkManager(manager)
+
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	require.NoError(t, err)
+	require.Equal(t, 1, manager.Snapshot().Bound)
+
+	directory, err := sandboxDir(fixture.stateRoot, "sandbox-1")
+	require.NoError(t, err)
+
+	// The slot destroy fails (netns EBUSY): the delete must NOT report
+	// success, and the durable state directory must stay so a delete-failed
+	// retry can re-release the slot once the dying VMM drains.
+	err = fixture.driver.DeleteSandbox(context.Background(), "sandbox-1")
+	require.ErrorContains(t, err, "release network slot")
+	require.DirExists(t, directory)
+	require.Equal(t, 1, flaky.destroyCalls)
+	require.Equal(t, 1, manager.Snapshot().Destroying)
+	require.Zero(t, manager.Snapshot().Bound)
+
+	// The retry reaches the Destroying leftover and converges.
+	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), "sandbox-1"))
+	require.NoDirExists(t, directory)
+	require.Equal(t, 2, flaky.destroyCalls)
+	require.Zero(t, manager.Snapshot().Destroying)
+	require.Zero(t, manager.Snapshot().Bound)
 }
 
 func TestListManagedSandboxesFiltersNamespace(t *testing.T) {
