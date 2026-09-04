@@ -699,10 +699,15 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 		return err
 	}
 	d.killAndForget(sandboxID, state.PID)
-	stateIdentity := state.Config.Identity
-	if manager != nil && stateIdentity.SandboxUID != "" {
-		if _, exists := manager.Lookup(sandboxID); exists {
-			_ = manager.Release(ctx, d.networkOwner(&state.Config))
+	if manager != nil && state.Config.Identity.SandboxUID != "" {
+		// Release is reached unconditionally: a slot stuck in Destroying by an
+		// earlier failed release must be retried here, and Release matches
+		// Destroying leftovers itself (the old Lookup-only-Bound guard made
+		// such slots unreachable until a Fastlet restart).
+		if err := manager.Release(ctx, d.networkOwner(&state.Config)); err != nil {
+			klog.ErrorS(err, "DeleteSandbox: network slot release failed; sandbox state retained for delete retry",
+				"sandboxId", sandboxID, "stateDirectory", directory)
+			return fmt.Errorf("release network slot of sandbox %s: %w", sandboxID, err)
 		}
 	}
 	d.mu.RLock()
