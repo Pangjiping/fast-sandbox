@@ -1,12 +1,5 @@
 package state
 
-// The journal is an append-only JSON line log ordering every mutating RPC:
-// an intent line is fsynced before the side effect runs, a result line
-// after it commits. Recovery replays completed pairs in file order and
-// drops intents without results (crashes mid-execution). The only
-// legitimate malformed content is a trailing partial line from a crash
-// mid-append, which is truncated; mid-file corruption fails recovery.
-
 import (
 	"bytes"
 	"encoding/json"

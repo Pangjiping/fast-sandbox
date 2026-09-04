@@ -46,9 +46,6 @@ var (
 	// request id was already committed by a different pod, or the op
 	// collides with state owned by another pod.
 	ErrConflict = errors.New("conflict")
-	// ErrLeaseNotFound reports that a release or lookup targeted a lease
-	// the agent does not know.
-	ErrLeaseNotFound = errors.New("lease not found")
 )
 
 // Options configures the state for tests.
@@ -80,7 +77,6 @@ type imageRefs struct {
 type completed struct {
 	op        Op
 	podUID    string
-	namespace string
 	pinDigest string
 	lease     *agentprotocol.Lease
 }
@@ -308,7 +304,7 @@ func (s *State) ReleaseDevices(id agentprotocol.Identity, leaseID string) error 
 	return err
 }
 
-// GetLease returns a lease by id (for ListLeases and ownership checks).
+// GetLease returns a lease by id.
 func (s *State) GetLease(leaseID string) (agentprotocol.Lease, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -370,7 +366,7 @@ func (s *State) run(id agentprotocol.Identity, op Op, args any, do func() (any, 
 		}
 	}()
 	apply(result)
-	entry := completed{op: op, podUID: id.PodUID, namespace: id.Namespace}
+	entry := completed{op: op, podUID: id.PodUID}
 	entry.setResult(result)
 	s.completed[id.RequestID] = entry
 	resultPayload := mustJSON(result)
@@ -413,7 +409,7 @@ func (s *State) rememberCompleted(id agentprotocol.Identity, op Op, lease *agent
 		}
 		return nil
 	}
-	s.completed[id.RequestID] = completed{op: op, podUID: id.PodUID, namespace: id.Namespace, lease: lease}
+	s.completed[id.RequestID] = completed{op: op, podUID: id.PodUID, lease: lease}
 	return nil
 }
 
@@ -452,7 +448,7 @@ func (s *State) recover() error {
 // replayApply rebuilds the effect of one committed journal entry pair.
 func (s *State) replayApply(intent, result journalEntry) error {
 	op := Op(intent.Op)
-	completed := completed{op: op, podUID: intent.PodUID, namespace: intent.Namespace}
+	completed := completed{op: op, podUID: intent.PodUID}
 	switch op {
 	case OpPinImage:
 		var args pinImageArgs

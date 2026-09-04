@@ -233,18 +233,11 @@ func pathEscape(value string) string {
 	// guard rather than a lookup.
 	var escaped bytes.Buffer
 	for _, character := range value {
-		if isSafePathCharacter(character) {
+		if isSafeIDCharacter(character) {
 			escaped.WriteRune(character)
 			continue
 		}
 		fmt.Fprintf(&escaped, "%%%02X", character)
 	}
 	return escaped.String()
-}
-
-func isSafePathCharacter(character rune) bool {
-	return (character >= 'a' && character <= 'z') ||
-		(character >= 'A' && character <= 'Z') ||
-		(character >= '0' && character <= '9') ||
-		character == '-' || character == '_' || character == '.'
 }

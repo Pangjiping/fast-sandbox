@@ -37,7 +37,7 @@ const (
 	maxRequestBytes = 4 << 20
 )
 
-// Server is the UDS HTTP service. A nil Backend reports Unavailable.
+// Server is the UDS HTTP service. A nil Backend answers 500 ErrorInternal.
 type Server struct {
 	Backend    Backend
 	socketPath string
@@ -321,8 +321,6 @@ func writeError(writer http.ResponseWriter, err error) {
 		classified = typed
 	} else if errors.Is(err, agentstate.ErrConflict) {
 		classified = &Error{Code: agentprotocol.ErrorConflict, Message: err.Error(), Cause: err}
-	} else if errors.Is(err, agentstate.ErrLeaseNotFound) {
-		classified = &Error{Code: agentprotocol.ErrorNotFound, Message: err.Error(), Cause: err}
 	} else if errors.Is(err, runtimecontract.ErrImageNotReady) {
 		classified = &Error{Code: agentprotocol.ErrorNotFound, Message: err.Error(), Cause: err}
 	}

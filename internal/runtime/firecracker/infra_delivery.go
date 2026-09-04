@@ -6,12 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
-
-	"k8s.io/klog/v2"
 )
 
 // ensureLoopDevices creates the loop device nodes the rootfs loop mount
@@ -70,15 +67,9 @@ func deliverGuestInfra(ctx context.Context, runner fastletnetwork.CommandRunner,
 		return err
 	}
 
-	// Per-step timing isolates the GuestCopy cost: mounting a multi-GiB
-	// sparse ext4 image read-write can initialize metadata/journal regions
-	// (allocating blocks over the holes), which is where the delivery
-	// latency tends to hide.
-	mountStarted := time.Now()
 	if _, err := runner.Run(ctx, "mount", "-o", "loop", rootfsImage, mountpoint); err != nil {
 		return fmt.Errorf("mount guest rootfs for Infra delivery: %w", err)
 	}
-	klog.V(4).InfoS("infra delivery: rootfs mounted", "rootfs", rootfsImage, "mountMs", time.Since(mountStarted).Milliseconds())
 	mounted := true
 	defer func() {
 		if mounted {
@@ -86,7 +77,6 @@ func deliverGuestInfra(ctx context.Context, runner fastletnetwork.CommandRunner,
 		}
 	}()
 
-	copyStarted := time.Now()
 	for _, mount := range instance.Mounts {
 		if mount.Source == "" || mount.Destination == "" {
 			continue
@@ -107,12 +97,9 @@ func deliverGuestInfra(ctx context.Context, runner fastletnetwork.CommandRunner,
 			return fmt.Errorf("copy Infra artifact to %s: %w", mount.Destination, err)
 		}
 	}
-	klog.V(4).InfoS("infra delivery: artifacts copied", "files", len(instance.Mounts), "copyMs", time.Since(copyStarted).Milliseconds())
-	umountStarted := time.Now()
 	if _, err := runner.Run(ctx, "umount", mountpoint); err != nil {
 		return err
 	}
-	klog.V(4).InfoS("infra delivery: rootfs unmounted", "umountMs", time.Since(umountStarted).Milliseconds())
 	mounted = false
 	return nil
 }

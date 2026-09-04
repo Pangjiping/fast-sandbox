@@ -534,7 +534,6 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		infraDiagnostics = instance.Diagnostics
 		infraPrepared = true
 		infraDur = time.Since(infraStarted)
-		klog.V(4).InfoS("firecracker Infra Components delivered", "sandboxId", identity.SandboxUID, "services", len(instance.Services), "duration", infraDur.String())
 	}
 
 	// Restore-only startup: the golden snapshot carries the guest network
@@ -565,7 +564,6 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 
 	launchCtx, launchSpan := observability.Start(ctx, "fastlet.firecracker.launch")
 	launchStarted := time.Now()
-	spawnStarted := time.Now()
 	process, err := d.launchVM(launchCtx, launchConfig{
 		BinaryPath: d.config.BinaryPath,
 		SandboxID:  identity.SandboxUID,
@@ -573,7 +571,6 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		WorkingDir: directory,
 		LogPath:    filepath.Join(logDir, processLogName),
 	}, slot)
-	spawnDur := time.Since(spawnStarted)
 	if err == nil {
 		state.PID = process.PID()
 		d.rememberProcess(identity.SandboxUID, process)
@@ -583,9 +580,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			observability.End(launchSpan, saveErr)
 			return nil, saveErr
 		}
-		socketStarted := time.Now()
 		err = d.waitSocket(launchCtx, state.APIAddress, firecrackerSocketWaitTimeout)
-		socketWaitDur := time.Since(socketStarted)
 		if err != nil {
 			detail := readProcessLog(logDir)
 			d.killAndForget(identity.SandboxUID, process.PID())
@@ -593,7 +588,6 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			observability.End(launchSpan, err)
 			return nil, fmt.Errorf("%w: firecracker API socket did not appear: %v%s", ErrRuntimeNotInitialized, err, detail)
 		}
-		klog.V(4).InfoS("firecracker API socket ready", "sandboxId", identity.SandboxUID, "spawn", spawnDur.String(), "socketWait", socketWaitDur.String())
 	}
 	observability.End(launchSpan, err)
 	if err != nil {
@@ -948,15 +942,6 @@ func readProcessLog(stateDir string) string {
 		tail = tail[len(tail)-4096:]
 	}
 	return "\nfirecracker process log:\n" + string(tail)
-}
-
-// bootVM starts the microVM and waits until the machine state is Running.
-// It is used by the snapshot preparation path (cold boot: InstanceStart).
-func bootVM(ctx context.Context, client *Client, timeoutSeconds int32) (int, error) {
-	if err := client.Start(ctx); err != nil {
-		return 0, fmt.Errorf("start Firecracker instance: %w", err)
-	}
-	return waitVMRunning(ctx, client, timeoutSeconds)
 }
 
 // resumeVM resumes a microVM restored from a snapshot and waits until it is
