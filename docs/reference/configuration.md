@@ -72,7 +72,7 @@ at `/etc/fast-sandbox/registry/registry.json`. See
 - `FAST_SANDBOX_NETWORK_HOST_NETNS_ROOT`;
 - `FAST_SANDBOX_NETWORK_MTU`.
 
-Pool templates cannot override these variables or other platform-owned containers, mounts, runtime handlers, and security settings.
+Pool templates cannot override these variables or other platform-owned containers, mounts, runtime handlers, and security settings. Fastlet Pods never mount the service-account token (`automountServiceAccountToken: false` is forced), so they have no Kubernetes API access; control-plane components reach Fastlet over the Pod network.
 
 ## Proxy configuration
 
