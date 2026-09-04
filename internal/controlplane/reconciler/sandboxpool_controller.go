@@ -644,6 +644,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 	podSpec.HostNetwork = false
 	podSpec.HostPID = false
 	podSpec.RuntimeClassName = nil
+	podSpec.AutomountServiceAccountToken = boolPtr(false)
 	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("fastletTemplate.spec.containers must contain the fastlet container")
 	}

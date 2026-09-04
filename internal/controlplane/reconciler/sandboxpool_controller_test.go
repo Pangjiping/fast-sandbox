@@ -211,6 +211,7 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 		FastletProxyImage: "fastlet-proxy:test", RouteVerifyPublicKey: "test-public-key",
 	}
 	runtimeClass := "must-not-leak"
+	automount := true
 	pool := &apiv1alpha2.SandboxPool{
 		TypeMeta:   metav1.TypeMeta{APIVersion: apiv1alpha2.GroupVersion.String(), Kind: "SandboxPool"},
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: types.UID("pool-uid")},
@@ -223,7 +224,8 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 				CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 256,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-				RuntimeClassName: &runtimeClass,
+				RuntimeClassName:             &runtimeClass,
+				AutomountServiceAccountToken: &automount,
 				Containers: []corev1.Container{{
 					Name: "fastlet", Image: "fastlet:test",
 					Env: []corev1.EnvVar{
@@ -242,6 +244,8 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	pod, err := reconciler.constructPodWithRuntimePlan(pool, runtimePlan)
 	require.NoError(t, err)
 	require.Nil(t, pod.Spec.RuntimeClassName)
+	require.NotNil(t, pod.Spec.AutomountServiceAccountToken)
+	require.False(t, *pod.Spec.AutomountServiceAccountToken)
 	require.Equal(t, "container", envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_RUNTIME"))
 	require.Equal(t, profile.ProfileHash, envValue(pod.Spec.Containers[0].Env, "FAST_SANDBOX_RUNTIME_PROFILE_HASH"))
 	require.Equal(t, profile.ProfileHash, pod.Annotations["fast-sandbox.io/runtime-profile-hash"])
