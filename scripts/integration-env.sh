@@ -245,7 +245,8 @@ on_error() { # task
 }
 
 failure_dump() { # task
-	local task="$1" dump="$LOGS_DIR/failure-$task-$(date +%s).txt"
+	local task="$1"
+	local dump="$LOGS_DIR/failure-$task-$(date +%s).txt"
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== integration-env failure: $task ($(date -u +%FT%TZ)) ==="
