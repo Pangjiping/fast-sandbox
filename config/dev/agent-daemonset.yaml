@@ -32,7 +32,13 @@ spec:
     spec:
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
-      hostNetwork: true
+      # The agent runs on the cluster network (NOT hostNetwork): its dart
+      # child needs the cluster DNS (CoreDNS search domains) to resolve the
+      # headless Service peers. It talks to fastlets over the shared UDS
+      # hostPath and to MinIO over the cluster network, so no host network
+      # capability is required. The node hostname file is mounted read-only
+      # for the stable HRW self-id (hostNetwork used to provide it via the
+      # node UTS namespace; a regular pod's hostname is its pod name).
       containers:
       - name: agent
         image: fast-sandbox/firecracker-runtime-agent:dev
@@ -56,6 +62,23 @@ spec:
           value: /var/lib/fast-sandbox/firecracker
         - name: FAST_SANDBOX_REGISTRY_CONFIG_PATH
           value: /etc/fast-sandbox/agent/registry.json
+        # DART P2P gateway (stage 2): non-empty enables the node-local DART
+        # child process and routes artifact pulls through its prefix API.
+        # The image carries the pinned dart binary; see
+        # build/Dockerfile.firecracker-runtime-agent.
+        - name: FAST_SANDBOX_DART_ADDR
+          value: http://127.0.0.1:8145
+        # Peer discovery via the headless Service (config/dev/dart-service.yaml);
+        # the FQDN resolves on the cluster network. The agent falls back to
+        # direct S3 when DART is unreachable.
+        - name: FAST_SANDBOX_DART_DISCOVER
+          value: dns:dart.fast-sandbox-system.svc.cluster.local:9000
+        # Regular pods get their own cluster IP; the dart peer-listen binds
+        # it and the headless Service hands it out to peers.
+        - name: FAST_SANDBOX_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         securityContext:
           privileged: true
         readinessProbe:
@@ -72,6 +95,9 @@ spec:
         - name: agent-registry
           mountPath: /etc/fast-sandbox/agent
           readOnly: true
+        - name: node-hostname
+          mountPath: /etc/hostname
+          readOnly: true
       volumes:
       - name: agent-socket
         hostPath:
@@ -84,3 +110,9 @@ spec:
       - name: agent-registry
         secret:
           secretName: fast-sandbox-agent-registry
+      # The stable node identity for the HRW keyspace (hostNetwork used to
+      # provide it through the node UTS namespace).
+      - name: node-hostname
+        hostPath:
+          path: /etc/hostname
+          type: File

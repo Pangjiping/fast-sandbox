@@ -126,4 +126,9 @@ type HealthResponse struct {
 	LeaseCount int   `json:"leaseCount"`
 	PinCount   int   `json:"pinCount"`
 	ImageCount int   `json:"imageCount"`
+	// DartUp reports whether the node-local DART P2P daemon answered its
+	// last admin-plane probe. It is informational: the agent's own health
+	// never depends on DART (a broken gateway keeps artifact pulls on the
+	// direct S3 fallback path).
+	DartUp bool `json:"dartUp"`
 }

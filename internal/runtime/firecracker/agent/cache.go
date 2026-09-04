@@ -118,8 +118,9 @@ func cacheComplete(dir string) (bool, error) {
 // digest: an existing matching file is skipped (resume semantics), a
 // mismatching file is deleted and re-pulled, and the download lands in a
 // temporary file that is renamed into place only after the whole content
-// verifies.
-func stageFile(ctx context.Context, s3 *s3Client, dir, storeKey string, file nativeFile) error {
+// verifies. The object is fetched through the client, which routes artifact
+// bytes over DART when configured (falling back to direct S3).
+func stageFile(ctx context.Context, c *Client, dir, storeKey string, file nativeFile) error {
 	target := filepath.Join(dir, file.cache)
 	match, err := fileMatches(target, file)
 	if err == nil && match {
@@ -136,7 +137,7 @@ func stageFile(ctx context.Context, s3 *s3Client, dir, storeKey string, file nat
 		return err
 	}
 
-	body, err := s3.get(ctx, storeKey)
+	body, err := c.getArtifact(ctx, storeKey)
 	if err != nil {
 		return err
 	}

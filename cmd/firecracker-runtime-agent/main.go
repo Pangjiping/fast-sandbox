@@ -9,13 +9,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"fast-sandbox/internal/registryconfig"
 	agentpull "fast-sandbox/internal/runtime/firecracker/agent"
+	agentdart "fast-sandbox/internal/runtime/firecracker/agent/dart"
 	agentserver "fast-sandbox/internal/runtime/firecracker/agent/server"
 	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
 
@@ -31,6 +35,15 @@ const (
 )
 
 func main() {
+	if err := run(); err != nil {
+		klog.ErrorS(err, "firecracker-runtime-agent failed")
+		os.Exit(1)
+	}
+}
+
+// run assembles the agent. It returns an error when the agent cannot serve;
+// deferred cleanup (lease state close, DART child stop) runs on the way out.
+func run() error {
 	socketPath := getEnv("FAST_SANDBOX_RUNTIME_AGENT_SOCKET", defaultSocketPath)
 	storeRoot := getEnv("FAST_SANDBOX_ARTIFACT_STORE", "")
 	stateRoot := getEnv("FAST_SANDBOX_STATE_ROOT", defaultStateRoot)
@@ -41,40 +54,124 @@ func main() {
 	endpoint := getEnv("FAST_SANDBOX_ARTIFACT_ENDPOINT", "")
 
 	if storeRoot == "" {
-		klog.ErrorS(errors.New("missing store root"), "FAST_SANDBOX_ARTIFACT_STORE is required (s3://bucket/prefix)")
-		os.Exit(1)
+		return errors.New("FAST_SANDBOX_ARTIFACT_STORE is required (s3://bucket/prefix)")
 	}
 
 	registryProvider := registryconfig.NewFileProvider(registryPath)
 	credential, err := resolveCredential(registryProvider, storeRoot, endpoint)
 	if err != nil {
-		klog.ErrorS(err, "Failed to resolve the artifact store credential")
-		os.Exit(1)
+		return fmt.Errorf("resolve the artifact store credential: %w", err)
 	}
-	pull, err := agentpull.NewClient(storeRoot, credential)
+
+	// DART P2P gateway (stage 2). FAST_SANDBOX_DART_ADDR empty = local
+	// mode: artifact pulls stay on the direct header-signed S3 path.
+	// Non-empty = the node-local DART daemon is orchestrated as a child
+	// process and artifact bytes route through its prefix API as presigned
+	// URLs (with direct-S3 fallback when DART is unreachable).
+	dartAddr := getEnv("FAST_SANDBOX_DART_ADDR", "")
+	var pullOptions []agentpull.Option
+	var dartManager *agentdart.Manager
+	if dartAddr != "" {
+		listen, err := dartListenAddress(dartAddr)
+		if err != nil {
+			return err
+		}
+		// A stable identity anchors the HRW keyspace AND names the per-node
+		// block cache: the StateRoot can be shared (multi-node kind mounts
+		// one host filesystem into every node container), but two DART
+		// arenas must never point at the same directory. The node's
+		// hostname is read from /etc/hostname (mounted from the node by the
+		// DaemonSet) because a regular pod's own hostname is its pod name,
+		// which changes on restart.
+		nodeID := getEnv("FAST_SANDBOX_DART_SELF_ID", "")
+		if nodeID == "" {
+			nodeID = nodeHostID()
+		}
+		peerPort := "9000"
+		config := agentdart.Config{
+			Binary:    getEnv("FAST_SANDBOX_DART_BIN", "dart"),
+			Listen:    listen,
+			Admin:     getEnv("FAST_SANDBOX_DART_ADMIN", "127.0.0.1:8147"),
+			CacheDir:  filepath.Join(stateRoot, "cache", "dart-"+strings.ReplaceAll(nodeID, "/", "-")),
+			CacheSize: getEnv("FAST_SANDBOX_DART_CACHE_SIZE", "8GiB"),
+			Discover:  getEnv("FAST_SANDBOX_DART_DISCOVER", ""),
+			SelfID:    nodeID,
+			Log:       os.Stderr,
+		}
+		if nodeIP := getEnv("FAST_SANDBOX_NODE_IP", ""); nodeIP != "" {
+			config.PeerAdvertise = net.JoinHostPort(nodeIP, peerPort)
+		}
+		dartManager = agentdart.New(config)
+		pullOptions = append(pullOptions, agentpull.WithDART(dartAddr))
+		klog.InfoS("DART P2P gateway enabled", "addr", dartAddr,
+			"discover", config.Discover, "cacheDir", config.CacheDir, "peerAdvertise", config.PeerAdvertise)
+	}
+
+	pull, err := agentpull.NewClient(storeRoot, credential, pullOptions...)
 	if err != nil {
-		klog.ErrorS(err, "Failed to build the artifact pull client")
-		os.Exit(1)
+		return fmt.Errorf("build the artifact pull client: %w", err)
 	}
 	state, err := agentstate.New(stateRoot)
 	if err != nil {
-		klog.ErrorS(err, "Failed to open the lease state", "stateRoot", stateRoot)
-		os.Exit(1)
+		return fmt.Errorf("open the lease state: %w", err)
 	}
 	defer func() { _ = state.Close() }()
 
-	service := agentserver.NewService(pull, state, stateRoot)
+	serviceOptions := []agentserver.ServiceOption{}
+	if dartManager != nil {
+		serviceOptions = append(serviceOptions, agentserver.WithDARTProbe(dartManager.Healthy))
+	}
+	service := agentserver.NewService(pull, state, stateRoot, serviceOptions...)
 	server := agentserver.New(service, socketPath)
 	klog.InfoS("firecracker-runtime-agent starting",
-		"socket", socketPath, "store", storeRoot, "stateRoot", stateRoot, "registry", registryPath)
+		"socket", socketPath, "store", storeRoot, "stateRoot", stateRoot,
+		"registry", registryPath, "dart", dartAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	if dartManager != nil {
+		go func() {
+			if err := dartManager.Run(ctx); err != nil {
+				klog.ErrorS(err, "DART supervisor stopped with an error")
+			}
+		}()
+	}
 	if err := server.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		klog.ErrorS(err, "firecracker-runtime-agent stopped")
-		os.Exit(1)
+		return err
 	}
 	klog.InfoS("firecracker-runtime-agent stopped")
+	return nil
+}
+
+// dartListenAddress derives the DART client-plane listen address from the
+// FAST_SANDBOX_DART_ADDR base (http://127.0.0.1:8145 -> 127.0.0.1:8145).
+func dartListenAddress(dartAddr string) (string, error) {
+	parsed, err := url.Parse(dartAddr)
+	if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("invalid FAST_SANDBOX_DART_ADDR %q: expected http://host:port", dartAddr)
+	}
+	return parsed.Host, nil
+}
+
+// nodeHostID derives the stable node identity: the node hostname file
+// (FAST_SANDBOX_HOSTNAME_FILE, mounted from the node by the DaemonSet),
+// falling back to the process hostname.
+func nodeHostID() string {
+	path := getEnv("FAST_SANDBOX_HOSTNAME_FILE", "/etc/hostname")
+	if payload, err := os.ReadFile(path); err == nil {
+		if name := strings.TrimSpace(string(payload)); name != "" {
+			return name
+		}
+	}
+	return hostnameOrEmpty()
+}
+
+func hostnameOrEmpty() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return hostname
 }
 
 // resolveCredential matches the store endpoint host against the compiled

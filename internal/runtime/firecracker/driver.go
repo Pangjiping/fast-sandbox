@@ -376,6 +376,35 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		return nil, fmt.Errorf("%w: firecracker requires the Fastlet network manager", ErrNetworkUnavailable)
 	}
 
+	// On-demand image loading: a create whose image is not yet cached asks
+	// the node runtime-agent to pull it (PinImage proxy, artifact bytes via
+	// the DART data plane) instead of failing admission with
+	// ErrImageNotReady. A cached image never touches the agent (sandbox
+	// creates do not pin: only the pod-level warm pull pins once, and every
+	// DeleteSandbox unpins once). Local mode (no agent socket) and
+	// unreachable-agent fallbacks keep the pre-warmed behavior unchanged:
+	// a still-missing image reports ErrImageNotReady exactly as before.
+	if _, err := resolveRootfsImage(stateRoot, spec.Image); err != nil {
+		if !errors.Is(err, ErrImageNotReady) {
+			return nil, err
+		}
+		client, clientErr := d.agentClientOrNil()
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		if client != nil {
+			if _, err := client.PinImage(ctx, d.warmPullRequestID(spec.Image), spec.Image); err != nil {
+				if !errors.Is(err, errAgentUnreachable) {
+					return nil, err
+				}
+				// The agent is absent mid-flight: fall through, the local
+				// check below reports the missing image as before.
+			} else if _, err := resolveRootfsImage(stateRoot, spec.Image); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	directory, err := ensureSandboxDir(stateRoot, identity.SandboxUID)
 	if err != nil {
 		return nil, err
