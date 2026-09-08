@@ -62,12 +62,14 @@ streamingvolume 标准 commit 产物：
 
 ```
 快照阶段不变 →
-  进程内起 streamingvolume service（root=emptyDir，PurgeStale）
+  子进程拉起 strmvold（root=workdir/strmvol，unix socket，随 Pod 销毁）
   mem:    Attach 裸卷(memSize) → dd memory.snap → Commit+Push <t>-mem:<tag>
   rootfs: Attach 裸卷(rootfsSize) → dd rootfs.ext4 → Commit+Push <t>-rootfs:<tag>
   S3:     vmstate.snap → manifest.json（最后上传，保持提交点语义）
   → Pod annotations 自报 → controller 更新 status
 ```
+
+builder 经 gRPC（`api/strmvold`，与 strmvolctl 同一契约）驱动子进程 daemon，而非进程内嵌入 `pkg/service`——后者会引入无权限的私有模块（dadi-snapshotter、overlaybd-convert）。
 
 `overlaybd-import-raw` 转换步骤与 S3 大文件上传删除（LSMT 封装由 commit 完成）。
 

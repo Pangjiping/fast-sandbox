@@ -39,10 +39,12 @@ import (
 )
 
 const (
-	specEnv               = "SANDBOX_TEMPLATE_SPEC"
-	workDirEnv            = "SANDBOX_TEMPLATE_WORKDIR"
-	manifestRefAnnotation = "sandbox.fast.io/manifest-ref"
-	digestAnnotation      = "sandbox.fast.io/artifact-digest"
+	specEnv                     = "SANDBOX_TEMPLATE_SPEC"
+	workDirEnv                  = "SANDBOX_TEMPLATE_WORKDIR"
+	manifestRefAnnotation       = "sandbox.fast.io/manifest-ref"
+	digestAnnotation            = "sandbox.fast.io/artifact-digest"
+	rootfsImageRefAnnotation    = "sandbox.fast.io/rootfs-image-ref"
+	memoryImageRefAnnotation    = "sandbox.fast.io/memory-image-ref"
 )
 
 // Tool paths inside the builder image.
@@ -114,31 +116,45 @@ func run(ctx context.Context) error {
 	}
 	bootMs := time.Since(bootStarted).Milliseconds()
 
-	// Stage 4: package — OverlayBD encoding (overlaybd format only).
+	// Stage 4: package — OverlayBD encoding (overlaybd format only). With an
+	// output registry the OCI image path replaces the legacy import-raw
+	// packaging: rootfs and memory are published as single-layer OverlayBD
+	// OCI images and never touch S3 as large objects.
 	var layers []string
+	var imageRefs ociImageRefs
 	importRootfsMs, importMemoryMs := int64(0), int64(0)
+	ociPublishMs := int64(0)
 	if spec.Output.Format == apiv1alpha2.ArtifactFormatOverlayBD {
-		layers, importRootfsMs, importMemoryMs, err = stagePackage(workdir, rootfs, memory)
-		if err != nil {
-			return err
+		if spec.Output.Registry != "" {
+			ociStarted := time.Now()
+			imageRefs, err = stagePublishOCIImages(ctx, spec, workdir, rootfs, memory)
+			if err != nil {
+				return err
+			}
+			ociPublishMs = time.Since(ociStarted).Milliseconds()
+		} else {
+			layers, importRootfsMs, importMemoryMs, err = stagePackage(workdir, rootfs, memory)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	// Stage 5: manifest + checksums.
 	manifestStarted := time.Now()
-	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, layers, workdir)
+	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, layers, imageRefs, workdir)
 	if err != nil {
 		return err
 	}
 	manifestMs := time.Since(manifestStarted).Milliseconds()
 
-	// Stage 6: publish to the object store; the manifest is uploaded last so
-	// consumers never observe a half-published artifact set.
+	// Stage 6: publish the S3-side artifacts; the manifest is uploaded last
+	// so consumers never observe a half-published artifact set.
 	publishMs := int64(0)
 	manifestRef := ""
 	if spec.Output.Publish != "" {
 		publishStarted := time.Now()
-		manifestRef, err = publish(ctx, spec, workdir, manifestBytes)
+		manifestRef, err = publish(ctx, spec, workdir, manifestBytes, imageRefs)
 		if err != nil {
 			return err
 		}
@@ -161,11 +177,12 @@ func run(ctx context.Context) error {
 		"bootMs", bootMs,
 		"importRootfsMs", importRootfsMs,
 		"importMemoryMs", importMemoryMs,
+		"ociPublishMs", ociPublishMs,
 		"manifestMs", manifestMs,
 		"publishMs", publishMs,
 		"totalMs", time.Since(started).Milliseconds())
 
-	return patchPodAnnotations(ctx, manifestRef, sha256Of(manifestBytes))
+	return patchPodAnnotations(ctx, manifestRef, sha256Of(manifestBytes), imageRefs)
 }
 
 // loadSpecAndWorkdir reads the serialized SandboxTemplateSpec (the controller
