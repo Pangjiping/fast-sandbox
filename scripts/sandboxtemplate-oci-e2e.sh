@@ -17,12 +17,13 @@
 #      fixture (holes must read as zeros — the mkfs-residue guard)
 #
 # Requirements (internal build host):
-#   - Linux x86_64, kernel >= 5.19 with ublk (/dev/ublk-control present)
+#   - Linux x86_64 with EITHER ublk (kernel >= 5.19, /dev/ublk-control) OR
+#     tcmu (target_core_user module + configfs; auto-selected when ublk is
+#     absent — export SANDBOX_TEMPLATE_BLOCKDRIVER to pin manually)
 #   - docker (registry:2 container)
 #   - the streamingvolume runtime installed on the HOST and running:
-#     strmvold (systemd unit from the t-storage-strmvold rpm), the overlaybd
-#     api server (127.0.0.1:9862, part of the internal overlaybd runtime),
-#     /opt/overlaybd toolchain, and strmvolctl on PATH
+#     strmvold (systemd unit from the t-storage-strmvold rpm), and for the
+#     ublk path the overlaybd api server (127.0.0.1:9862); strmvolctl on PATH
 #   - go toolchain (builds the builder binary)
 #
 # Usage:
@@ -50,21 +51,38 @@ done
 
 [[ "$(uname -s)" == "Linux" ]] || die "requires Linux (ublk/strmvold stack)"
 [[ "$(uname -m)" == "x86_64" ]] || die "requires x86_64"
-[[ -e /dev/ublk-control ]] || die "/dev/ublk-control missing (kernel >= 5.19 with ublk required)"
 command -v docker >/dev/null || die "missing required command: docker"
 command -v go >/dev/null || die "missing required command: go"
 command -v strmvolctl >/dev/null || die "missing strmvolctl on PATH (t-storage-strmvold rpm)"
 command -v jq >/dev/null || die "missing required command: jq"
 command -v sha256sum >/dev/null || die "missing required command: sha256sum"
 
-# The builder's own strmvold session (for oci-publish) and the host daemon
-# (for the roundtrip) both need the overlaybd api server.
-if ! curl -fsS -m 3 "http://127.0.0.1:9862/" >/dev/null 2>&1 && ! curl -fsS -m 3 -X POST "http://127.0.0.1:9862/" >/dev/null 2>&1; then
-    # Any response (even 404/405) proves a listener; a connection refused
-    # means the api server is down.
-    if ! (echo > /dev/tcp/127.0.0.1/9862) 2>/dev/null; then
-        die "overlaybd api server not reachable on 127.0.0.1:9862 — start the overlaybd runtime first"
+# --- block driver selection ---------------------------------------------------
+BLOCK_DRIVER="${SANDBOX_TEMPLATE_BLOCKDRIVER:-}"
+if [[ -z "$BLOCK_DRIVER" ]]; then
+    if [[ -e /dev/ublk-control ]]; then
+        BLOCK_DRIVER=ublk
+    else
+        BLOCK_DRIVER=tcmu
     fi
+fi
+[[ "$BLOCK_DRIVER" == "ublk" || "$BLOCK_DRIVER" == "tcmu" ]] || die "SANDBOX_TEMPLATE_BLOCKDRIVER must be ublk or tcmu"
+if [[ "$BLOCK_DRIVER" == "ublk" && ! -e /dev/ublk-control ]]; then
+    die "blockDriver=ublk requires /dev/ublk-control (kernel >= 5.19); use tcmu or upgrade"
+fi
+if [[ "$BLOCK_DRIVER" == "tcmu" ]]; then
+    modprobe target_core_user 2>/dev/null || true
+    if ! lsmod 2>/dev/null | grep -q target_core_user; then
+        die "blockDriver=tcmu requires the target_core_user kernel module (kernel too old or module missing)"
+    fi
+    mountpoint -q /sys/kernel/config || mount -t configfs configfs /sys/kernel/config 2>/dev/null || true
+fi
+log "block driver: $BLOCK_DRIVER"
+
+# The ublk path additionally needs the overlaybd api server (the builder's
+# strmvold session posts create-device requests there).
+if [[ "$BLOCK_DRIVER" == "ublk" ]] && ! (echo > /dev/tcp/127.0.0.1/9862) 2>/dev/null; then
+    die "overlaybd api server not reachable on 127.0.0.1:9862 — start the overlaybd runtime first"
 fi
 
 log "workspace: $WORK"
@@ -102,6 +120,7 @@ log "building sandboxtemplate-builder"
 
 log "running oci-publish against ${REGISTRY}"
 if ! SANDBOX_TEMPLATE_REGISTRY_PLAINHTTP=1 \
+    SANDBOX_TEMPLATE_BLOCKDRIVER="$BLOCK_DRIVER" \
     "$WORK/sandboxtemplate-builder" oci-publish \
         --rootfs "$ROOTFS_FIXTURE" \
         --memory "$MEMORY_FIXTURE" \

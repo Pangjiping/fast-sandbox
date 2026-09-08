@@ -60,6 +60,12 @@ const (
 	// with a local registry:2 container).
 	registryPlainHTTPEnv = "SANDBOX_TEMPLATE_REGISTRY_PLAINHTTP"
 
+	// blockDriverEnv selects the streamingvolume block driver: "ublk"
+	// (default, kernel >= 5.19, needs the overlaybd api server) or "tcmu"
+	// (kernel >= 4.x, needs target_core_user + configfs and the
+	// overlaybd-tcmu handler — the fallback for older kernels).
+	blockDriverEnv = "SANDBOX_TEMPLATE_BLOCKDRIVER"
+
 	// strmvoldStartupTimeout bounds how long we wait for the daemon socket.
 	strmvoldStartupTimeout = 30 * time.Second
 )
@@ -84,13 +90,21 @@ func startStrmvold(ctx context.Context, workdir string) (*strmvoldSession, error
 	socket := filepath.Join(root, "strmvold.sock")
 	_ = os.Remove(socket)
 
+	blockDriver := os.Getenv(blockDriverEnv)
+	if blockDriver == "" {
+		blockDriver = "ublk"
+	}
+	if blockDriver != "ublk" && blockDriver != "tcmu" {
+		return nil, fmt.Errorf("invalid %s=%q: must be ublk or tcmu", blockDriverEnv, blockDriver)
+	}
+
 	configPath := filepath.Join(root, "config.json")
 	bootConfig := map[string]any{
 		"root":    root,
 		"address": "unix://" + socket,
 		"log":     map[string]any{"level": "info", "mode": "stdout"},
 		"storageDriver": map[string]any{
-			"overlaybd": map[string]any{"blockDriver": "ublk", "autoCompactLayers": 150},
+			"overlaybd": map[string]any{"blockDriver": blockDriver, "autoCompactLayers": 150},
 		},
 	}
 	configBytes, err := json.Marshal(bootConfig)

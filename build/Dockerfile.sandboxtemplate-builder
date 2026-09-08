@@ -48,8 +48,10 @@ RUN cd /src/overlaybd \
         -DBUILD_STREAM_CONVERTOR=0 \
         -DORIGIN_EXT2FS=1 \
     # overlaybd-commit is required by the strmvold commit path (OCI image
-    # publishing); overlaybd-import-raw serves the legacy S3 packaging path.
-    && cmake --build build --target overlaybd-import-raw overlaybd-commit --parallel "$(nproc)"
+    # publishing); overlaybd-tcmu is the block-device handler for the tcmu
+    # fallback (kernels without ublk, < 5.19); overlaybd-import-raw serves
+    # the legacy S3 packaging path.
+    && cmake --build build --target overlaybd-import-raw overlaybd-commit overlaybd-tcmu --parallel "$(nproc)"
 
 # --- sandboxtemplate-builder binary ----------------------------------------
 FROM golang:1.25 AS builder-build
@@ -122,8 +124,11 @@ RUN set -eux; \
 
 COPY --from=oci2rootfs-build /src/oci2rootfs/target/release/oci2rootfs /usr/local/bin/oci2rootfs
 COPY --from=overlaybd-build /src/overlaybd/build/output/overlaybd-import-raw /usr/local/bin/overlaybd-import-raw
-# strmvold resolves overlaybd-commit at /opt/overlaybd/bin/overlaybd-commit.
+# strmvold resolves overlaybd-commit at /opt/overlaybd/bin/overlaybd-commit,
+# and the tcmu driver launches the handler from the same dir.
 COPY --from=overlaybd-build /src/overlaybd/build/output/overlaybd-commit /opt/overlaybd/bin/overlaybd-commit
+COPY --from=overlaybd-build /src/overlaybd/build/output/overlaybd-tcmu /opt/overlaybd/bin/overlaybd-tcmu
+RUN ln -sf /opt/overlaybd/bin/overlaybd-tcmu /opt/overlaybd/bin/overlaybd
 COPY --from=builder-build /out/sandboxtemplate-builder /usr/local/bin/sandboxtemplate-builder
 
 # streamingvolume runtime (strmvold, overlaybd api server, ublk helpers) from

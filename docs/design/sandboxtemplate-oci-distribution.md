@@ -133,7 +133,7 @@ builder 经 Pod annotations `sandbox.fast.io/rootfs-image-ref` / `sandbox.fast.i
 
 | 组件 | 影响 |
 |------|------|
-| controller | 新增 status 字段回读与校验；build Pod 模板增加 ublk/loop hostPath（`/dev/ublk-control`，内核<5.19 回退 loop）与 registry SecretKeyRef |
+| controller | 新增 status 字段回读与校验；build Pod 模板增加 /dev hostPath（ublk 设备节点在宿主 devtmpfs 创建；内核<5.19 走 tcmu 无需 ublk）与 registry SecretKeyRef |
 | builder 镜像 | 补齐 OverlayBD 完整工具链（overlaybd-create/commit 等）；go.mod 引入 streamingvolume（内部代理） |
 | runtime-agent | pull 链增加 format 分支与 registry 通道（进程内嵌 streamingvolume service）；S3 大文件下载分支仅 native 使用 |
 | driver / restore | 无 |
@@ -156,7 +156,7 @@ builder 经 Pod annotations `sandbox.fast.io/rootfs-image-ref` / `sandbox.fast.i
 | 风险 | 缓解 |
 |------|------|
 | registry 大 blob 上限/推送慢 | LSMT zstd 压缩；streamingvolume 并发推层+断点重试；上线前确认 blob 上限 |
-| 宿主机无 ublk（内核<5.19） | loop 模式回退；节点/builder 安装前置检查 |
+| 宿主机无 ublk（内核<5.19） | blockDriver 回退 tcmu（内核 ≥4.x，需 target_core_user 模块 + configfs + overlaybd-tcmu handler，公开 overlaybd 源码可编）；builder 经 `SANDBOX_TEMPLATE_BLOCKDRIVER` 切换 |
 | streamingvolume 版本行为变化 | 锁模块版本；集成测试覆盖 Attach/Commit/Push |
 | 双存储运维 | S3 侧收缩为小文件；GC 各自独立，registry 侧按 tag 生命周期配置 |
 | 拷出模式 memory 仍全量读 | 灰度期可回退旧链路；Mode 2 落地后消除 |
