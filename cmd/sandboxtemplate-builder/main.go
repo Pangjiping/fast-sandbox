@@ -73,6 +73,15 @@ func main() {
 		}
 		return
 	}
+	// oci-publish: standalone OverlayBD OCI image packaging (see
+	// oci_publish_cmd.go); exercised by scripts/sandboxtemplate-oci-e2e.sh.
+	if len(os.Args) > 1 && os.Args[1] == "oci-publish" {
+		if err := runOCIPublish(os.Args[2:]); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "oci-publish failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	klog.InitFlags(nil)
 	// Parse flags so klog's -v/-logtostderr work on the command line.
 	flag.Parse()
@@ -124,10 +133,10 @@ func run(ctx context.Context) error {
 	var imageRefs ociImageRefs
 	importRootfsMs, importMemoryMs := int64(0), int64(0)
 	ociPublishMs := int64(0)
-	if spec.Output.Format == apiv1alpha2.ArtifactFormatOverlayBD {
-		if spec.Output.Registry != "" {
-			ociStarted := time.Now()
-			imageRefs, err = stagePublishOCIImages(ctx, spec, workdir, rootfs, memory)
+		if spec.Output.Format == apiv1alpha2.ArtifactFormatOverlayBD {
+			if spec.Output.Registry != "" {
+				ociStarted := time.Now()
+				imageRefs, err = stagePublishOCIImages(ctx, spec, workdir, rootfs, memory, ociImageTag(buildShortID(workdir)))
 			if err != nil {
 				return err
 			}

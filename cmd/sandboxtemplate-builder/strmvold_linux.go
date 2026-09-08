@@ -177,8 +177,12 @@ func waitForSocket(ctx context.Context, socket string, timeout time.Duration) er
 // stagePublishOCIImages packs rootfs and memory as OverlayBD OCI images and
 // returns their digest-pinned references. It replaces the legacy
 // overlaybd-import-raw packaging for overlaybd builds that declare an
-// output registry.
-func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir, rootfs, memory string) (refs ociImageRefs, err error) {
+// output registry. The tag names both derived image refs; callers pick it
+// from the build identity (pipeline) or an explicit flag (oci-publish).
+func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir, rootfs, memory, tag string) (refs ociImageRefs, err error) {
+	if tag == "" {
+		tag = buildShortID(workdir)
+	}
 	rootfsGiB, err := sizeGiB(spec.Output.RootfsSize)
 	if err != nil {
 		return refs, fmt.Errorf("rootfs size: %w", err)
@@ -196,7 +200,6 @@ func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplate
 
 	auth := os.Getenv(registryAuthEnv)
 	registry := &rpc.RegistryConfig{PlainHTTP: os.Getenv(registryPlainHTTPEnv) == "1"}
-	tag := ociImageTag(buildShortID(workdir))
 	rootfsRef, memRef := ociDerivedRefs(spec.Output.Registry, tag)
 
 	for _, artifact := range []struct {
@@ -218,22 +221,6 @@ func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplate
 		logOCIPublish(artifact.name, digestRef, time.Since(started).Milliseconds())
 	}
 	return refs, nil
-}
-
-// buildShortID derives a short, per-workspace identifier for image tags.
-// It reuses the snapshot phase marker when present and falls back to the
-// workspace basename.
-func buildShortID(workdir string) string {
-	if payload, err := os.ReadFile(filepath.Join(workdir, "snapshot-phases.json")); err == nil && len(payload) > 0 {
-		if sum := sha256Of(payload); len(sum) >= 12 {
-			return sum[:12]
-		}
-	}
-	base := filepath.Base(workdir)
-	if len(base) > 12 {
-		return base[:12]
-	}
-	return base
 }
 
 // publishBlockImage runs the per-artifact pipeline: attach an empty raw

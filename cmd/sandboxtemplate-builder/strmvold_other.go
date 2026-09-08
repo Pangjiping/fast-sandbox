@@ -13,6 +13,6 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
-func stagePublishOCIImages(_ context.Context, _ apiv1alpha2.SandboxTemplateSpec, _, _, _ string) (ociImageRefs, error) {
+func stagePublishOCIImages(_ context.Context, _ apiv1alpha2.SandboxTemplateSpec, _, _, _, _ string) (ociImageRefs, error) {
 	return ociImageRefs{}, errors.New("OCI image publishing requires the Linux builder image (ublk/overlaybd stack)")
 }

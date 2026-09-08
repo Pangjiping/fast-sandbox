@@ -40,6 +40,22 @@ func ociImageTag(shortID string) string {
 	return shortID
 }
 
+// buildShortID derives a short, per-workspace identifier for image tags.
+// It reuses the snapshot phase marker when present and falls back to the
+// workspace basename.
+func buildShortID(workdir string) string {
+	if payload, err := os.ReadFile(filepath.Join(workdir, "snapshot-phases.json")); err == nil && len(payload) > 0 {
+		if sum := sha256Of(payload); len(sum) >= 12 {
+			return sum[:12]
+		}
+	}
+	base := filepath.Base(workdir)
+	if len(base) > 12 {
+		return base[:12]
+	}
+	return base
+}
+
 // ociDerivedRefs returns the tag refs for the rootfs and memory images of
 // one build: <registry>-rootfs:<tag> and <registry>-mem:<tag>.
 func ociDerivedRefs(registry, tag string) (rootfsRef, memRef string) {
