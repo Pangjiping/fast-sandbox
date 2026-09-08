@@ -4,8 +4,7 @@
 >
 > 日期：2026-09-08
 >
-> 范围：仅改变 `spec.output.format=overlaybd` 构建的**分发通道**；`native` 构建
-> 完全不受影响。快照生成语义、节点缓存布局、restore 路径均不变。
+> 范围：仅改变 `spec.output.format=overlaybd` 构建的**分发通道**；`native` 构建完全不受影响。快照生成语义、节点缓存布局、restore 路径均不变。
 
 - [Summary](#summary)
 - [核心问题](#核心问题)
@@ -20,19 +19,15 @@
 
 ## Summary
 
-`format=overlaybd` 的构建产物中，`rootfs.ext4` 与 `memory.snap` 两个大文件
-改为以**单层 OverlayBD LSMT 的 OCI 镜像**发布（经 streamingvolume），小文件
-`vmstate.snap` / `manifest.json` 留在 S3。`format=native` 维持现有全量 S3
-布局不变，节点按 `manifest.json` 的 `format` 字段选择拉取通道。
+`format=overlaybd` 的构建产物中，`rootfs.ext4` 与 `memory.snap` 两个大文件改为以**单层 OverlayBD LSMT 的 OCI 镜像**发布（经 streamingvolume），小文件 `vmstate.snap` / `manifest.json` 留在 S3。`format=native` 维持现有全量 S3 布局不变，节点按 `manifest.json` 的 `format` 字段选择拉取通道。
 
 ## 核心问题
 
 当前全部产物走自建 S3 分发链（index 指针 → manifest → digest 校验下载）：
 
-1. memory（≥2Gi）/rootfs 实数据冷拉慢：无压缩、无 P2P、无按需取段
-2. 自建链路维护成本：index、SHA256SUMS、aws-cli、S3 大文件下载分支
-3. 现有 `overlaybd-import-raw` 转换产物没有对齐 OverlayBD 生态（OCI 层标注、
-   streamingvolume 消费端），后续内存按需加载无从演进
+1. memory（≥2Gi）/ rootfs 实数据冷拉慢：无压缩、无 P2P、无按需取段；
+2. 自建链路维护成本：index、SHA256SUMS、aws-cli、S3 大文件下载分支；
+3. 现有 `overlaybd-import-raw` 转换产物没有对齐 OverlayBD 生态（OCI 层标注、streamingvolume 消费端），后续内存按需加载无从演进。
 
 ## 方案
 
@@ -44,6 +39,8 @@
 | memory.snap | ≥2Gi，随机读（COW） | **OCI 镜像** `<t>-mem`（单层 LSMT） | S3（现状） |
 | vmstate.snap | MB 级，只读一次性读 | S3（现状） | S3（现状） |
 | manifest.json | KB 级 | S3（现状，schema 扩展） | S3（现状） |
+
+vmstate 不进 OCI 的原因：小、只读、restore 时一次性读入，S3 直拉已是最优；且它是逐 build 产物（vCPU 数、root drive 容量、NIC MAC、pause 时刻状态都随构建变化），无去重收益。
 
 ### 镜像格式
 
@@ -58,19 +55,17 @@ streamingvolume 标准 commit 产物：
 
 两条硬约束：
 
-- **裸块字节级一致**：写入方式为 Attach 空裸卷后 `dd`，不是挂 fs 拷文件
-  （重建 ext4 会导致 inode/UUID 漂移，破坏快照恢复契约）
-- **一镜像一设备**：rootfs 与 memory 是两个独立块设备对象，不能合并成镜像或
-  层；vmstate 非块设备，不进 OCI
+- **裸块字节级一致**：写入方式为 Attach 空裸卷后 `dd`，不是挂 fs 拷文件。重建 ext4 会导致 inode/UUID 漂移，破坏快照恢复契约。
+- **一镜像一设备**：rootfs 与 memory 是两个独立块设备对象（root drive 与 memfile），不能合并成镜像或层；vmstate 非块设备，不进 OCI。
 
 ### builder 流程（仅 format=overlaybd 的发布阶段替换）
 
 ```
 快照阶段不变 →
   进程内起 streamingvolume service（root=emptyDir，PurgeStale）
-  mem:   Attach 裸卷(memSize) → dd memory.snap → Commit+Push <t>-mem:<tag>
+  mem:    Attach 裸卷(memSize) → dd memory.snap → Commit+Push <t>-mem:<tag>
   rootfs: Attach 裸卷(rootfsSize) → dd rootfs.ext4 → Commit+Push <t>-rootfs:<tag>
-  S3:    vmstate.snap → manifest.json（最后上传，保持提交点语义）
+  S3:     vmstate.snap → manifest.json（最后上传，保持提交点语义）
   → Pod annotations 自报 → controller 更新 status
 ```
 
@@ -80,10 +75,10 @@ streamingvolume 标准 commit 产物：
 
 ```
 manifest.json（S3，现有 index/digest 校验）
-├─ format=native    → 现有 S3 全量下载（不变）
-└─ format=overlaybd → Fetch+Attach(-mem, ro)  → cp 设备 → <cache>/memory.snap
-                      Fetch+Attach(-rootfs, ro) → cp 设备 → <cache>/rootfs.img
-                      vmstate.snap/manifest.json 走 S3（现有逻辑）
+├─ format=native     → 现有 S3 全量下载（不变）
+└─ format=overlaybd  → Fetch+Attach(-mem, ro)    → cp 设备 → <cache>/memory.snap
+                       Fetch+Attach(-rootfs, ro) → cp 设备 → <cache>/rootfs.img
+                       vmstate.snap / manifest.json 走 S3（现有逻辑）
 ```
 
 缓存布局与后续 reflink / jailer hardlink / snapshot load **零改动**。
@@ -95,19 +90,18 @@ manifest.json（S3，现有 index/digest 校验）
 ```go
 type SandboxTemplateOutput struct {
     // 现有字段不变
-    RootfsSize      string
-    Format          string  // "overlaybd" 走新通道，"native" 走原通道
-    Publish         string  // S3 基址（s3://bucket/prefix）
+    RootfsSize       string
+    Format           string // "overlaybd" 走新通道，"native" 走原通道
+    Publish          string // S3 基址（s3://bucket/prefix）
     PublishSecretRef string
 
     // 新增（format=overlaybd 时必填）
-    Registry         string // 镜像仓库基址，如 registry.example.com/fs-templates/<name>
+    Registry          string // 镜像仓库基址，如 registry.example.com/fs-templates/<name>
     RegistrySecretRef string // docker config JSON（streamingvolume secret.type=dockerAuth）
 }
 ```
 
-镜像 ref 派生规则：`<Registry>-rootfs:<tag>` / `<Registry>-mem:<tag>`，
-`<tag>` 默认取 build generation（或 manifest digest 短缀）。
+镜像 ref 派生规则：`<Registry>-rootfs:<tag>` / `<Registry>-mem:<tag>`，`<tag>` 默认取 build generation（或 manifest digest 短缀）。
 
 ### SandboxTemplateStatus（新增字段）
 
@@ -116,8 +110,7 @@ RootfsImageRef string // digest-pin：...-rootfs:<tag>@sha256:...
 MemoryImageRef string // digest-pin：...-mem:<tag>@sha256:...
 ```
 
-builder 经 Pod annotations `sandbox.fast.io/rootfs-image-ref` /
-`sandbox.fast.io/memory-image-ref` 自报。
+builder 经 Pod annotations `sandbox.fast.io/rootfs-image-ref` / `sandbox.fast.io/memory-image-ref` 自报。
 
 ### manifest.json（schema 扩展）
 
@@ -148,18 +141,13 @@ builder 经 Pod annotations `sandbox.fast.io/rootfs-image-ref` /
 
 ## 原子性与回滚
 
-- 上传顺序固定：两镜像 → vmstate → manifest.json（最后）→ annotations → status；
-  status 更新即提交点，任何失败停留在旧一代
-- 镜像 digest 由 registry 内容寻址保证；跨产物一致性由 `artifactDigest`
-  （manifest.json digest）承担，节点拉齐后校验
-- digest-pin 引用，tag 被覆盖不影响已发布代
+- 上传顺序固定：两镜像 → vmstate → manifest.json（最后）→ annotations → status；status 更新即提交点，任何失败停留在旧一代。
+- 镜像 digest 由 registry 内容寻址保证；跨产物一致性由 `artifactDigest`（manifest.json digest）承担，节点拉齐后校验。
+- digest-pin 引用，tag 被覆盖不影响已发布代。
 
 ## 演进：内存按需加载
 
-本方案是 Mode 2 的直接前置：Phase 1（本方案）Attach 后 cp 出文件；
-Mode 2 将「cp 出来」替换为「Attach 可写卷直连 memfile」，缺页经 overlaybd
-按需取段、写落本地 upper，发布格式不变。前置验证（另行立项）：Firecracker
-mem_file_path 指向块设备、jailer 内设备节点暴露、缺页 prefetch。
+本方案是 Mode 2 的直接前置：Phase 1（本方案）Attach 后 cp 出文件；Mode 2 将「cp 出来」替换为「Attach 可写卷直连 memfile」，缺页经 overlaybd 按需取段、写落本地 upper，发布格式不变。前置验证（另行立项）：Firecracker `mem_file_path` 指向块设备、jailer 内设备节点暴露、缺页 prefetch。
 
 ## 风险
 
@@ -173,9 +161,8 @@ mem_file_path 指向块设备、jailer 内设备节点暴露、缺页 prefetch�
 
 ## 迁移
 
-1. **双写**：overlaybd 构建同时发布旧 S3 全量布局与新布局；节点 feature gate
-   灰度切新链路（native 始终旧链路）
-2. **切换**：全量后停止 S3 大文件发布；S3 GC 清理存量
-3. **收敛**：删 builder 旧发布代码与 agent 大文件下载分支（native 路径保留）
+1. **双写**：overlaybd 构建同时发布旧 S3 全量布局与新布局；节点 feature gate 灰度切新链路（native 始终旧链路）。
+2. **切换**：全量后停止 S3 大文件发布；S3 GC 清理存量。
+3. **收敛**：删 builder 旧发布代码与 agent 大文件下载分支（native 路径保留）。
 
 任一阶段可回滚到上一阶段。
