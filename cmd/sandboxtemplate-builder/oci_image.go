@@ -12,6 +12,7 @@ package main
 // writer) so they build and test on every platform.
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -85,6 +86,49 @@ func ociManifestDigest(serviceRoot, targetRef string) (string, error) {
 		return "", fmt.Errorf("committed manifest digest for %s has unexpected form %q", targetRef, digest)
 	}
 	return digest, nil
+}
+
+// ociLocalArtifacts describes where a committed (not necessarily pushed)
+// image lives in the strmvold session root — the kept-around build output
+// for push-less runs.
+type ociLocalArtifacts struct {
+	ManifestPath string // manifests/artifacts/<digest>/manifest.json
+	LayerDigest  string // the single LSMT layer's digest
+	BlobPath     string // blobs/<layer-digest>
+}
+
+// ociResolveLocalArtifacts maps a committed targetRef to its on-disk
+// manifest and layer blob under the strmvold session root. Layout per
+// streamingvolume's saveManifest/blobPath: manifests/artifacts/<ref> is a
+// symlink to ./<manifest-digest>, the manifest JSON lives beside it as
+// manifest.json, and layer blobs sit in blobs/<digest>.
+func ociResolveLocalArtifacts(serviceRoot, targetRef string) (ociLocalArtifacts, error) {
+	digest, err := ociManifestDigest(serviceRoot, targetRef)
+	if err != nil {
+		return ociLocalArtifacts{}, err
+	}
+	manifestPath := filepath.Join(serviceRoot, "manifests", "artifacts", strings.TrimPrefix(digest, "./"), "manifest.json")
+	payload, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return ociLocalArtifacts{}, fmt.Errorf("read committed manifest %s: %w", manifestPath, err)
+	}
+	var manifest struct {
+		Layers []struct {
+			Digest string `json:"digest"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		return ociLocalArtifacts{}, fmt.Errorf("parse committed manifest %s: %w", manifestPath, err)
+	}
+	if len(manifest.Layers) != 1 {
+		return ociLocalArtifacts{}, fmt.Errorf("committed manifest %s has %d layers, want 1", manifestPath, len(manifest.Layers))
+	}
+	layerDigest := manifest.Layers[0].Digest
+	return ociLocalArtifacts{
+		ManifestPath: manifestPath,
+		LayerDigest:  layerDigest,
+		BlobPath:     filepath.Join(serviceRoot, "blobs", layerDigest),
+	}, nil
 }
 
 // deviceWriteChunk is the unit size for zero-filling holes and copying data

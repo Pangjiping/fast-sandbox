@@ -136,7 +136,7 @@ func run(ctx context.Context) error {
 		if spec.Output.Format == apiv1alpha2.ArtifactFormatOverlayBD {
 			if spec.Output.Registry != "" {
 				ociStarted := time.Now()
-				imageRefs, err = stagePublishOCIImages(ctx, spec, workdir, rootfs, memory, ociImageTag(buildShortID(workdir)))
+				imageRefs, err = stagePublishOCIImages(ctx, spec, workdir, rootfs, memory, ociImageTag(buildShortID(workdir)), false)
 			if err != nil {
 				return err
 			}

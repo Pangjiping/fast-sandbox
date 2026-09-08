@@ -15,6 +15,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
@@ -32,6 +34,7 @@ func runOCIPublish(args []string) error {
 		rootfsGiB  = flags.Int("rootfs-size-gib", 0, "rootfs volume size in GiB (default: ceil of the file size)")
 		memoryGiB  = flags.Int("memory-size-gib", 0, "memory volume size in GiB (default: ceil of the file size)")
 		workdir    = flags.String("workdir", "", "build workspace for the strmvold session (default: temp dir)")
+		noPush     = flags.Bool("no-push", false, "commit only: keep manifest + layer blob under the strmvold session root, do not upload")
 	)
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -45,13 +48,16 @@ func runOCIPublish(args []string) error {
 		}
 	}
 
+	keepWorkdir := *noPush
 	if *workdir == "" {
 		dir, err := os.MkdirTemp("", "oci-publish-*")
 		if err != nil {
 			return err
 		}
-		defer os.RemoveAll(dir)
 		*workdir = dir
+		if !keepWorkdir {
+			defer os.RemoveAll(dir)
+		}
 	}
 	if err := os.MkdirAll(*workdir, 0o750); err != nil {
 		return err
@@ -64,12 +70,24 @@ func runOCIPublish(args []string) error {
 		Memory: fmt.Sprintf("%dGi", ceilGiBFlag(*memoryGiB, *memoryPath)),
 	}}
 
-	refs, err := stagePublishOCIImages(context.Background(), spec, *workdir, *rootfsPath, *memoryPath, *tag)
+	refs, err := stagePublishOCIImages(context.Background(), spec, *workdir, *rootfsPath, *memoryPath, *tag, *noPush)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("rootfs-ref: %s\n", refs.Rootfs)
 	fmt.Printf("memory-ref: %s\n", refs.Memory)
+	serviceRoot := filepath.Join(*workdir, "strmvol")
+	for _, entry := range []struct{ name, target string }{
+		{"rootfs", strings.Split(refs.Rootfs, "@")[0]},
+		{"memory", strings.Split(refs.Memory, "@")[0]},
+	} {
+		artifacts, err := ociResolveLocalArtifacts(serviceRoot, entry.target)
+		if err != nil {
+			return fmt.Errorf("resolve %s local artifacts: %w", entry.name, err)
+		}
+		fmt.Printf("%s-manifest: %s\n", entry.name, artifacts.ManifestPath)
+		fmt.Printf("%s-blob: %s\n", entry.name, artifacts.BlobPath)
+	}
 	return nil
 }
 

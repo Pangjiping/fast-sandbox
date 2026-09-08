@@ -193,7 +193,9 @@ func waitForSocket(ctx context.Context, socket string, timeout time.Duration) er
 // overlaybd-import-raw packaging for overlaybd builds that declare an
 // output registry. The tag names both derived image refs; callers pick it
 // from the build identity (pipeline) or an explicit flag (oci-publish).
-func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir, rootfs, memory, tag string) (refs ociImageRefs, err error) {
+// skipPush keeps the committed artifacts in the session root (manifest +
+// layer blob) without uploading — the local-only mode of oci-publish.
+func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir, rootfs, memory, tag string, skipPush bool) (refs ociImageRefs, err error) {
 	if tag == "" {
 		tag = buildShortID(workdir)
 	}
@@ -227,7 +229,7 @@ func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplate
 		{"rootfs", rootfs, rootfsRef, rootfsGiB, &refs.Rootfs},
 	} {
 		started := time.Now()
-		digestRef, publishErr := publishBlockImage(ctx, session, artifact.name, artifact.source, artifact.target, artifact.sizeGiB, auth, registry)
+		digestRef, publishErr := publishBlockImage(ctx, session, artifact.name, artifact.source, artifact.target, artifact.sizeGiB, auth, registry, skipPush)
 		if publishErr != nil {
 			return refs, fmt.Errorf("publish %s image: %w", artifact.name, publishErr)
 		}
@@ -239,8 +241,9 @@ func stagePublishOCIImages(ctx context.Context, spec apiv1alpha2.SandboxTemplate
 
 // publishBlockImage runs the per-artifact pipeline: attach an empty raw
 // volume, write the image byte-exactly onto the device, commit the upper
-// layer into an OCI manifest, push it, and return the digest-pinned ref.
-func publishBlockImage(ctx context.Context, session *strmvoldSession, name, sourcePath, targetRef string, sizeGiB int, auth string, registry *rpc.RegistryConfig) (string, error) {
+// layer into an OCI manifest, push it (unless skipPush), and return the
+// digest-pinned ref.
+func publishBlockImage(ctx context.Context, session *strmvoldSession, name, sourcePath, targetRef string, sizeGiB int, auth string, registry *rpc.RegistryConfig, skipPush bool) (string, error) {
 	if sizeGiB <= 0 {
 		return "", fmt.Errorf("invalid %s volume size %dG", name, sizeGiB)
 	}
@@ -316,20 +319,22 @@ func publishBlockImage(ctx context.Context, session *strmvoldSession, name, sour
 		return "", err
 	}
 
-	pushParams := map[string]string{labels.VolumeID: volumeID}
-	if auth != "" {
-		pushParams[labels.SecretType] = labels.DockerAuth
-		pushParams[labels.SecretData] = auth
-	}
-	if pushResp, pushErr := session.client.Push(ctx, &rpc.PushImageRequest{
-		Id:        volumeID + "-push",
-		TargetRef: targetRef,
-		Registry:  registry,
-		Params:    pushParams,
-	}); pushErr != nil {
-		return "", fmt.Errorf("push %s image: %w", name, pushErr)
-	} else if pushResp.GetStatus() != 0 {
-		return "", fmt.Errorf("push %s image: %s", name, pushResp.GetMessage())
+	if !skipPush {
+		pushParams := map[string]string{labels.VolumeID: volumeID}
+		if auth != "" {
+			pushParams[labels.SecretType] = labels.DockerAuth
+			pushParams[labels.SecretData] = auth
+		}
+		if pushResp, pushErr := session.client.Push(ctx, &rpc.PushImageRequest{
+			Id:        volumeID + "-push",
+			TargetRef: targetRef,
+			Registry:  registry,
+			Params:    pushParams,
+		}); pushErr != nil {
+			return "", fmt.Errorf("push %s image: %w", name, pushErr)
+		} else if pushResp.GetStatus() != 0 {
+			return "", fmt.Errorf("push %s image: %s", name, pushResp.GetMessage())
+		}
 	}
 
 	return ociDigestPin(targetRef, digest), nil
