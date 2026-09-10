@@ -14,6 +14,7 @@
 #   ./scripts/integration-env.sh up            # full environment + chain
 #   ./scripts/integration-env.sh status        # component/template/pool health
 #   ./scripts/integration-env.sh verify        # sandbox create + execd /ping
+#   ./scripts/integration-env.sh verify-snapshot # live sandbox snapshot E2E
 #   ./scripts/integration-env.sh verify-p2p    # DART data-plane evidence (stage 2)
 #   ./scripts/integration-env.sh down          # teardown, host left clean
 #   ./scripts/integration-env.sh --cleanup     # down after an interrupted run
@@ -392,13 +393,18 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 5 {
-		fmt.Fprintln(os.Stderr, "usage: gen-registry <host> <username> <password> <endpoint>")
+	if len(os.Args) != 5 && len(os.Args) != 7 {
+		fmt.Fprintln(os.Stderr, "usage: gen-registry <host> <username> <password> <endpoint> [write-username write-password]")
 		os.Exit(1)
 	}
-	compiled, err := registryconfig.NewCompiled([]registryconfig.Credential{{
+	credential := registryconfig.Credential{
 		Host: os.Args[1], Username: os.Args[2], Password: os.Args[3], Endpoint: os.Args[4],
-	}})
+	}
+	if len(os.Args) == 7 {
+		// Optional publish (write) pair: empty keeps the store read-only.
+		credential.WriteUsername, credential.WritePassword = os.Args[5], os.Args[6]
+	}
+	compiled, err := registryconfig.NewCompiled([]registryconfig.Credential{credential})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -1410,8 +1416,8 @@ sandbox_ready() { # sandbox-name
 		and (dp == 4 or dp == "DATA_PLANE_STATE_READY")' >/dev/null 2>&1
 }
 
-fastctl_run_sandbox() { # sandbox-name
-	local name="$1" attempt=0
+fastctl_run_sandbox() { # sandbox-name [image]
+	local name="$1" image="${2:-$SBX_IMAGE}" attempt=0
 	# Cold-start guarantee: a leftover sandbox from an interrupted run is
 	# already warm and would invalidate the delivery-baseline measurement
 	# (a 9ms run RPC with a 33ms restore is the tell-tale). Delete first;
@@ -1437,7 +1443,7 @@ fastctl_run_sandbox() { # sandbox-name
 	# yet). Retry; a succeeded create that errored on the wire surfaces as
 	# AlreadyExists on the next attempt, which is also success.
 	for attempt in $(seq 1 30); do
-		if fastctl run "$name" --image "$SBX_IMAGE" --pool "$SBX_POOL" >/dev/null 2>&1 \
+		if fastctl run "$name" --image "$image" --pool "$SBX_POOL" >/dev/null 2>&1 \
 			|| sandbox_exists "$name"; then
 			return 0
 		fi
@@ -2778,6 +2784,510 @@ test_egress_ip_denied() { # sandbox ip
 	pass "IP-direct egress to $2 blocked"
 }
 
+
+# --- verify-snapshot: live Sandbox snapshot E2E ---------------------------------
+#
+# Drives the full snapshot chain against the environment this script built:
+#
+#   fastpath CreateSandboxSnapshot (gRPC via the generated snapshotctl helper)
+#   -> SandboxSnapshot CR -> controller -> fastlet /snapshots/create ->
+#   firecracker driver (pause -> dump -> resume) -> runtime-agent
+#   /v1/publish-image -> MinIO artifact set -> restore a NEW sandbox from
+#   image=<templateName> -> execd /ping.
+#
+# Evidence collected into logs/snapshot-e2e-<ts>/ on success AND failure:
+# key timings (fastpath RPC, CR phase transitions, VM pauseWindow and agent
+# publish from the fastlet driver logs, the business-visible /ping
+# unavailability gap from a background probe, restore latencies), component
+# logs (controller/fastlet/agent/firecracker), CR manifests, and the
+# artifact-set validation report (index + digest + per-object sizes).
+#
+# Env overrides: SNAPSHOT_TEMPLATE (published index key), SNAPSHOT_NAME (CR
+# name), SNAPSHOT_TARGET / SNAPSHOT_RESTORE (sandbox names),
+# SNAPSHOT_TIMEOUT_S, SNAPSHOT_PING_INTERVAL_MS,
+# SNAPSHOT_SKIP_IMAGE_REBUILD=1 (skip rolling controller/fastlet/agent images
+# when the deployed ones already carry the snapshot chain).
+SNAPSHOT_TEMPLATE="${SNAPSHOT_TEMPLATE:-e2e-live-snapshot}"
+SNAPSHOT_NAME="${SNAPSHOT_NAME:-e2e-live-snapshot}"
+SNAPSHOT_TARGET="${SNAPSHOT_TARGET:-sandbox-snap-src}"
+SNAPSHOT_RESTORE="${SNAPSHOT_RESTORE:-sandbox-snap-restore}"
+SNAPSHOT_TIMEOUT_S="${SNAPSHOT_TIMEOUT_S:-600}"
+SNAPSHOT_PING_INTERVAL_MS="${SNAPSHOT_PING_INTERVAL_MS:-500}"
+SNAPSHOT_SKIP_IMAGE_REBUILD="${SNAPSHOT_SKIP_IMAGE_REBUILD:-0}"
+SNAPSHOTCTL_BIN="$WORK/bin/snapshotctl"
+SNAP_E2E_DIR=""
+SNAP_TIMINGS=""
+SNAP_PHASES_LOG=""
+SNAP_PING_LOG=""
+SNAP_PING_PID=""
+SNAP_ON_ERROR=0
+
+# duration_to_ms converts a Go duration string (1.5s, 2m3s, 850ms) to ms.
+duration_to_ms() { # value
+	awk -v d="$1" 'BEGIN {
+		total = 0
+		rest = d
+		while (match(rest, /[0-9.]+(ns|us|ms|m|s)/)) {
+			v = substr(rest, RSTART, RLENGTH)
+			n = v + 0
+			if (v ~ /ns$/) total += n / 1000000
+			else if (v ~ /us$/) total += n / 1000
+			else if (v ~ /ms$/) total += n
+			else if (v ~ /m[0-9.]*s*$/) { }  # handled below
+			if (v ~ /m$/ && v !~ /ms$/) total += n * 60000
+			if (v ~ /m[0-9]/ && v ~ /s$/) { split(v, p, /[ms]/); total += p[1] * 60000 + p[2] * 1000 }
+			else if (v ~ /s$/) total += n * 1000
+			rest = substr(rest, RSTART + RLENGTH)
+		}
+		printf "%d", total
+	}'
+}
+
+# --- snapshotctl: the gRPC helper (same per-run generation pattern as the
+# other gen-* helpers; created only by verify-snapshot).
+write_snapshotctl_source() {
+	mkdir -p "$GEN_DIR" "$WORK/bin"
+	cat > "$GEN_DIR/snapshotctl.go" <<'SNAPCTL_EOF'
+// Command snapshotctl drives the FastPath snapshot RPCs for the E2E script.
+//
+//	create <endpoint> <ns> <sandbox> <request-id> <template-name>
+//	get    <endpoint> <ns> <request-id>
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+func dial(endpoint string) fastpathv2.FastPathServiceClient {
+	conn, err := grpc.Dial(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return fastpathv2.NewFastPathServiceClient(conn)
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: snapshotctl <create|get> ...")
+		os.Exit(1)
+	}
+	switch os.Args[1] {
+	case "create":
+		if len(os.Args) != 7 {
+			fmt.Fprintln(os.Stderr, "usage: create <endpoint> <ns> <sandbox> <request-id> <template-name>")
+			os.Exit(1)
+		}
+		client := dial(os.Args[2])
+		started := time.Now()
+		response, err := client.CreateSandboxSnapshot(context.Background(), &fastpathv2.CreateSandboxSnapshotRequest{
+			RequestId: os.Args[5],
+			Sandbox: &fastpathv2.SandboxReference{
+				NamespacedName: &fastpathv2.NamespacedName{Namespace: os.Args[3], Name: os.Args[4]},
+			},
+			TemplateName: os.Args[6],
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		snapshot := response.GetSnapshot()
+		fmt.Printf("rpc_ms=%d\tphase=%d\tmessage=%s\n",
+			time.Since(started).Milliseconds(), snapshot.GetPhase(), snapshot.GetMessage())
+	case "get":
+		if len(os.Args) != 5 {
+			fmt.Fprintln(os.Stderr, "usage: get <endpoint> <ns> <request-id>")
+			os.Exit(1)
+		}
+		client := dial(os.Args[2])
+		response, err := client.GetSandboxSnapshot(context.Background(), &fastpathv2.GetSandboxSnapshotRequest{
+			Snapshot: &fastpathv2.NamespacedName{Namespace: os.Args[3], Name: os.Args[4]},
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		snapshot := response.GetSnapshot()
+		fmt.Printf("phase=%d\tmessage=%s\tmanifestRef=%s\tartifactDigest=%s\tsizeBytes=%d\tfastletName=%s\n",
+			snapshot.GetPhase(), snapshot.GetMessage(), snapshot.GetManifestRef(),
+			snapshot.GetArtifactDigest(), snapshot.GetSizeBytes(), snapshot.GetFastletName())
+	default:
+		fmt.Fprintln(os.Stderr, "unknown subcommand", os.Args[1])
+		os.Exit(1)
+	}
+}
+SNAPCTL_EOF
+}
+
+snapshot_env_up() {
+	# The snapshot chain is new code: rebuild + roll the three carrying
+	# images and apply the new CRD so a pre-snapshot environment converges.
+	if [[ "$SNAPSHOT_SKIP_IMAGE_REBUILD" != 1 ]]; then
+		log "verify-snapshot: rebuilding controller/fastlet/agent images"
+		(cd "$REPO_ROOT" && make images COMPONENT=controller >/dev/null)
+		(cd "$REPO_ROOT" && make images COMPONENT=fastlet >/dev/null)
+		(cd "$REPO_ROOT" && make images COMPONENT=firecracker-runtime-agent >/dev/null)
+		for image in "$IMG_CONTROLLER" "$IMG_FASTLET" "$IMG_AGENT"; do
+			kind load docker-image "$image" --name "$KIND_CLUSTER" >/dev/null
+		done
+	else
+		log "verify-snapshot: SNAPSHOT_SKIP_IMAGE_REBUILD=1 (assuming deployed images carry the chain)"
+	fi
+	kubectl apply -k "$REPO_ROOT/config/crd" >/dev/null
+	kubectl get crd sandboxsnapshots.sandbox.fast.io >/dev/null 2>&1 \
+		|| fail "SandboxSnapshot CRD missing after apply"
+
+	# Agent write credential: publish requires it. MinIO root keys are
+	# already read-write, so the same pair is reused as the write pair.
+	local host
+	host="${MINIO_ENDPOINT#http://}"
+	host="${host#https://}"
+	gen_registry "$host" "$MINIO_AK" "$MINIO_SK" "$MINIO_ENDPOINT" "$MINIO_AK" "$MINIO_SK" \
+		> "$WORK/agent-registry-write.json"
+	jq -e '.credentials[0].writeUsername' "$WORK/agent-registry-write.json" >/dev/null \
+		|| fail "generated agent registry carries no write credential"
+	kubectl -n "$NS" create secret generic fast-sandbox-agent-registry \
+		--from-file=registry.json="$WORK/agent-registry-write.json" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+	kubectl -n "$NS" rollout restart deploy/fast-sandbox-controller >/dev/null
+	kubectl -n "$NS" rollout restart daemonset/firecracker-runtime-agent >/dev/null
+	# Fastlet pods are pool-managed: deleting them lets the pool controller
+	# recreate them with the freshly loaded image.
+	kubectl -n "$NS" delete pod -l app=sandbox-fastlet --wait=true >/dev/null 2>&1 || true
+	wait_for "controller rollout ready" 120 \
+		kubectl -n "$NS" rollout status deploy/fast-sandbox-controller --timeout=10s
+	wait_for "agent rollout ready (write credential)" 180 \
+		kubectl -n "$NS" rollout status daemonset/firecracker-runtime-agent --timeout=10s
+	wait_for "fastlet pod ready (recreated)" 180 fastlet_pod_ready
+	pass "snapshot-capable images rolled (controller + fastlet + agent, write credential wired)"
+}
+
+snapshot_helpers_up() {
+	write_snapshotctl_source
+	log "verify-snapshot: building snapshotctl"
+	(cd "$REPO_ROOT" && GOTOOLCHAIN=local go build -o "$SNAPSHOTCTL_BIN" .integration-env-gen/snapshotctl.go)
+	pass "snapshotctl built"
+}
+
+snapshot_snapshot_cr_gone() {
+	! kubectl -n "$NS" get sandboxsnapshot "$SNAPSHOT_NAME" >/dev/null 2>&1
+}
+
+snapshot_source_up() {
+	sandbox_exists "$SNAPSHOT_TARGET" && {
+		fastctl delete "$SNAPSHOT_TARGET" >/dev/null 2>&1 || true
+		wait_for "leftover $SNAPSHOT_TARGET gone" 90 sandbox_gone "$SNAPSHOT_TARGET"
+	}
+	sandbox_exists "$SNAPSHOT_RESTORE" && {
+		fastctl delete "$SNAPSHOT_RESTORE" >/dev/null 2>&1 || true
+		wait_for "leftover $SNAPSHOT_RESTORE gone" 90 sandbox_gone "$SNAPSHOT_RESTORE"
+	}
+	kubectl -n "$NS" delete sandboxsnapshot "$SNAPSHOT_NAME" >/dev/null 2>&1 || true
+	wait_for "leftover snapshot CR gone" 90 snapshot_snapshot_cr_gone
+
+	fastctl_run_sandbox "$SNAPSHOT_TARGET"
+	wait_for "source sandbox $SNAPSHOT_TARGET Ready" 300 sandbox_ready "$SNAPSHOT_TARGET"
+	pass "source sandbox $SNAPSHOT_TARGET Ready (image=$SBX_IMAGE)"
+}
+
+# snapshot_ping_warm resolves the source route once and makes sure the
+# assigned fastlet has a local port-forward; it prints the "ip port" pair the
+# monitor reuses for the whole run.
+snapshot_ping_warm() { # sandbox-name
+	local out path host
+	out="$(gen_endpoint_for "$1" 44772 2>/dev/null)" || fail "warm resolve failed for $1"
+	path="$(printf '%s' "$out" | cut -f1)"
+	host="$(printf '%s' "$path" | sed 's|^[a-z]*://\([^/:]*\).*|\1|')"
+	ensure_fastlet_forward "$host" || fail "no local forward for fastlet $host"
+	echo "$host $FASTLET_RESOLVED_PORT"
+}
+
+# snapshot_ping_monitor probes /ping at ms granularity across the whole
+# snapshot, re-resolving the (cheap, daemon-served) route every iteration and
+# reusing the pre-warmed fastlet port-forward. Output: "<ts_ms>\t<200|FAIL>".
+snapshot_ping_monitor_start() { # sandbox-name ip port
+	local target="$1" fwd_ip="$2" fwd_port="$3"
+	SNAP_PING_LOG="$SNAP_E2E_DIR/ping-monitor.log"
+	: > "$SNAP_PING_LOG"
+	(
+		while :; do
+			ts="$(date +%s%3N)"
+			status=FAIL
+			out="$(gen_endpoint_for "$target" 44772 2>/dev/null)" || out=""
+			if [[ -n "$out" ]]; then
+				path="$(printf '%s' "$out" | cut -f1)"
+				cred="$(printf '%s' "$out" | cut -f2)"
+				host="$(printf '%s' "$path" | sed 's|^[a-z]*://\([^/:]*\).*|\1|')"
+				if [[ "$host" == "$fwd_ip" && -n "$cred" ]]; then
+					uri="$(printf '%s' "$path" | sed 's|^[a-z]*://[^/]*||')"
+					if curl -fsS -m 3 -o /dev/null \
+						-H "X-Fast-Sandbox-Route-Credential: $cred" \
+						"http://127.0.0.1:$fwd_port$uri/ping" 2>/dev/null; then
+						status=200
+					fi
+				fi
+			fi
+			printf '%s\t%s\n' "$ts" "$status" >> "$SNAP_PING_LOG"
+			sleep "$(awk -v ms="$SNAPSHOT_PING_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')"
+		done
+	) &
+	SNAP_PING_PID=$!
+}
+
+snapshot_ping_monitor_stop() {
+	[[ -n "$SNAP_PING_PID" ]] && {
+		kill "$SNAP_PING_PID" 2>/dev/null || true
+		wait "$SNAP_PING_PID" 2>/dev/null || true
+		SNAP_PING_PID=""
+	}
+}
+
+# snapshot_ping_gap reports "failures=<n> max_gap_ms=<ms>" — the longest FAIL
+# streak is the business-visible pause window of the snapshot.
+snapshot_ping_gap() {
+	awk -F'\t' '
+		$2 == "FAIL" {
+			failures++
+			if (!in_gap) { in_gap = 1; gap_start = $1 }
+			next
+		}
+		{
+			if (in_gap) {
+				gap = $1 - gap_start
+				if (gap > max_gap) max_gap = gap
+				in_gap = 0
+			}
+		}
+		END {
+			if (in_gap) max_gap = -1  # still failing when the monitor stopped
+			printf "failures=%d max_gap_ms=%d\n", failures + 0, max_gap + 0
+		}' "$SNAP_PING_LOG"
+}
+
+snapshot_record() { # key value
+	printf '%s\t%s\n' "$1" "$2" >> "$SNAP_TIMINGS"
+}
+
+# snapshot_run triggers the snapshot through fastpath, polls the CR to a
+# terminal phase, and extracts the driver-side pause/publish timings.
+snapshot_run() {
+	local fwd t0 rpc_out rpc_ms phase last_phase="" t_terminal fastlet snapshot_id gap line
+	fwd="$(snapshot_ping_warm "$SNAPSHOT_TARGET")"
+	wait_until "warm execd /ping on $SNAPSHOT_TARGET" 120000 probe_execd "$SNAPSHOT_TARGET"
+
+	snapshot_ping_monitor_start "$SNAPSHOT_TARGET" "$fwd"
+	t0="$(now_ms)"
+	rpc_out="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$SNAPSHOT_TARGET" "$SNAPSHOT_NAME" "$SNAPSHOT_TEMPLATE")"
+	log "CreateSandboxSnapshot: $rpc_out"
+	rpc_ms="$(printf '%s' "$rpc_out" | grep -o 'rpc_ms=[0-9]*' | cut -d= -f2)"
+	snapshot_record "fastpath_create_rpc_ms" "${rpc_ms:-0}"
+
+	: > "$SNAP_PHASES_LOG"
+	local deadline_ns=$(( t0 + SNAPSHOT_TIMEOUT_S * 1000000000 ))
+	while :; do
+		phase="$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.phase}' 2>/dev/null || true)"
+		if [[ -n "$phase" && "$phase" != "$last_phase" ]]; then
+			printf '%s\t+%s\t%s\n' "$(date +%s%3N)" "$(ms2s $(( ($(now_ms) - t0) / 1000000 )))s" "$phase" >> "$SNAP_PHASES_LOG"
+			log "snapshot phase -> $phase ($(ms2s $(( ($(now_ms) - t0) / 1000000 )))s after create)"
+			last_phase="$phase"
+		fi
+		if [[ "$phase" == "Succeeded" || "$phase" == "Failed" ]]; then
+			t_terminal="$(now_ms)"
+			break
+		fi
+		if [[ "$(now_ms)" -gt "$deadline_ns" ]]; then
+			snapshot_ping_monitor_stop
+			fail "snapshot did not terminate within ${SNAPSHOT_TIMEOUT_S}s (phase=$phase)"
+		fi
+		sleep 1
+	done
+	snapshot_record "create_to_terminal_ms" "$(( (t_terminal - t0) / 1000000 ))"
+	snapshot_ping_monitor_stop
+	[[ "$phase" == "Succeeded" ]] || {
+		kubectl -n "$NS" get sandboxsnapshot "$SNAPSHOT_NAME" -o yaml >&2 || true
+		fail "snapshot terminated as $phase: $(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.message}')"
+	}
+
+	# Business-visible pause: the longest /ping failure streak.
+	gap="$(snapshot_ping_gap)"
+	log "ping monitor: $gap"
+	snapshot_record "ping_max_gap_ms" "$(printf '%s' "$gap" | grep -o 'max_gap_ms=-\?[0-9]*' | cut -d= -f2)"
+	snapshot_record "ping_failures" "$(printf '%s' "$gap" | grep -o 'failures=[0-9]*' | cut -d= -f2)"
+
+	fastlet="$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.fastletName}')"
+	snapshot_id="$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.snapshotID}')"
+	log "snapshotID=$snapshot_id fastlet=$fastlet manifestRef=$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.manifestRef}')"
+
+	# Driver timings: pause window + publish duration from the fastlet logs.
+	log "driver timings (fastlet $fastlet):"
+	while IFS= read -r line; do
+		log "  $line"
+		case "$line" in
+			*sandbox\ dumped*)
+				snapshot_record "vm_pause_window_ms" "$(duration_to_ms "$(klog_field "$line" pauseWindow)")"
+				;;
+			*snapshot\ published*)
+				snapshot_record "agent_publish_ms" "$(duration_to_ms "$(klog_field "$line" publish)")"
+				;;
+		esac
+	done < <(kubectl -n "$NS" logs "$fastlet" --since=30m --tail=2000 2>/dev/null \
+		| grep -E "sandbox dumped|snapshot published" | tail -4)
+	pass "snapshot Succeeded in $(ms2s $(( (t_terminal - t0) / 1000000 )))s"
+}
+
+# snapshot_validate_artifacts mirrors the builder's assert_publish_layout
+# against the published snapshot set.
+snapshot_validate_artifacts() {
+	local manifest_ref digest template_sha index_key index_json manifest_key manifest_json build_dir
+	manifest_ref="$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.manifestRef}')"
+	digest="$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.artifactDigest}')"
+	template_sha="$(printf '%s' "$SNAPSHOT_TEMPLATE" | sha256sum | awk '{print $1}')"
+	index_key="publish/index/$template_sha.json"
+
+	index_json="$(mc cat "chain/$MINIO_BUCKET/$index_key")" || fail "snapshot index object missing: $index_key"
+	[[ "$(printf '%s' "$index_json" | jq -r .image)" == "$SNAPSHOT_TEMPLATE" ]] \
+		|| fail "index.image != $SNAPSHOT_TEMPLATE"
+	[[ "$(printf '%s' "$index_json" | jq -r .manifestRef)" == "$manifest_ref" ]] \
+		|| fail "index.manifestRef != CR status.manifestRef"
+
+	manifest_key="${manifest_ref#s3://$MINIO_BUCKET/}"
+	manifest_json="$(mc cat "chain/$MINIO_BUCKET/$manifest_key")" || fail "snapshot manifest missing: $manifest_key"
+	[[ "$(mc cat "chain/$MINIO_BUCKET/$manifest_key" | sha256sum | awk '{print $1}')" == "$digest" ]] \
+		|| fail "index.artifactDigest != sha256(manifest)"
+	[[ "$(printf '%s' "$index_json" | jq -r .artifactDigest)" == "$digest" ]] \
+		|| fail "CR artifactDigest != index artifactDigest"
+
+	build_dir="$(dirname "$manifest_key")"
+	for object in rootfs.ext4 vmstate.snap memory.snap SHA256SUMS manifest.json; do
+		mc stat "chain/$MINIO_BUCKET/$build_dir/$object" >/dev/null 2>&1 \
+			|| fail "snapshot artifact missing: $object"
+	done
+
+	# Manifest facts: the baked guest network is copied from the source
+	# image; a live snapshot records native format and boot-only validation.
+	[[ "$(printf '%s' "$manifest_json" | jq -r .guestNetwork.ip)" == "172.30.0.3" ]] \
+		|| fail "manifest.guestNetwork.ip != 172.30.0.3 (source facts not copied)"
+	[[ "$(printf '%s' "$manifest_json" | jq -r .format)" == "native" ]] || fail "manifest.format != native"
+	[[ "$(printf '%s' "$manifest_json" | jq -r .validation.booted)" == "true" ]] || fail "manifest.validation.booted != true"
+	[[ "$(printf '%s' "$manifest_json" | jq -r .validation.restored)" == "false" ]] || fail "manifest.validation.restored != false"
+
+	# Per-object sizes against manifest.files, and the total against the CR.
+	local object want_size stored_size total=0
+	while IFS= read -r object; do
+		[[ -n "$object" ]] || continue
+		want_size="$(printf '%s' "$manifest_json" | jq -r --arg n "$object" '.files[$n].sizeBytes')"
+		[[ "$want_size" != "null" && -n "$want_size" ]] || fail "manifest.files has no entry for $object"
+		stored_size="$(mc stat --json "chain/$MINIO_BUCKET/$build_dir/$object" 2>/dev/null | jq -r .size)"
+		[[ "$stored_size" == "$want_size" ]] || fail "stored $object size $stored_size != manifest $want_size"
+		total=$((total + want_size))
+	done < <(printf '%s' "$manifest_json" | jq -r '.files | keys[]')
+	[[ "$total" == "$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.sizeBytes}')" ]] \
+		|| fail "CR sizeBytes != sum(manifest.files.sizeBytes)"
+
+	mc ls --recursive "chain/$MINIO_BUCKET/$build_dir" > "$SNAP_E2E_DIR/artifact-listing.txt" || true
+	pass "artifact set complete and consistent (index + 5 objects, sizes match, facts copied)"
+}
+
+# snapshot_restore boots a NEW sandbox whose image IS the snapshot's template
+# name: the agent pull resolves it through the index this run published — the
+# end-to-end proof that the snapshot is restorable.
+snapshot_restore() {
+	local t0 t_ready
+	t0="$(now_ms)"
+	fastctl_run_sandbox "$SNAPSHOT_RESTORE" "$SNAPSHOT_TEMPLATE"
+	snapshot_record "restore_run_cmd_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
+	wait_for "restored sandbox $SNAPSHOT_RESTORE Ready" 300 sandbox_ready "$SNAPSHOT_RESTORE"
+	snapshot_record "restore_to_ready_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
+	wait_for "execd /ping on restored sandbox" 120 probe_execd "$SNAPSHOT_RESTORE"
+	snapshot_record "restore_first_ping_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
+	[[ "$(kubectl -n "$NS" get sandbox "$SNAPSHOT_RESTORE" -o jsonpath='{.spec.image}')" == "$SNAPSHOT_TEMPLATE" ]] \
+		|| fail "restored sandbox image is not $SNAPSHOT_TEMPLATE"
+	show_restore_timings "$SNAPSHOT_RESTORE"
+	pass "restored sandbox Ready + /ping (image=$SNAPSHOT_TEMPLATE pulled through the snapshot index)"
+}
+
+snapshot_evidence() {
+	local fastlet node sandbox_uid
+	fastlet="$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.fastletName}' 2>/dev/null || true)"
+	{
+		echo "=== verify-snapshot evidence ($(date -u +%FT%TZ)) ==="
+		echo "snapshot=$SNAPSHOT_NAME template=$SNAPSHOT_TEMPLATE source=$SNAPSHOT_TARGET restore=$SNAPSHOT_RESTORE"
+	} > "$SNAP_E2E_DIR/summary.txt"
+	kubectl -n "$NS" get sandboxsnapshot "$SNAPSHOT_NAME" -o yaml > "$SNAP_E2E_DIR/sandboxsnapshot.yaml" 2>&1 || true
+	kubectl -n "$NS" describe sandboxsnapshot "$SNAPSHOT_NAME" > "$SNAP_E2E_DIR/sandboxsnapshot.describe.txt" 2>&1 || true
+	kubectl -n "$NS" get sandbox "$SNAPSHOT_TARGET" -o yaml > "$SNAP_E2E_DIR/sandbox-source.yaml" 2>&1 || true
+	kubectl -n "$NS" get sandbox "$SNAPSHOT_RESTORE" -o yaml > "$SNAP_E2E_DIR/sandbox-restore.yaml" 2>&1 || true
+	kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=400 > "$SNAP_E2E_DIR/controller.log" 2>&1 || true
+	kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=2000 2>/dev/null \
+		| grep -iE "snapshot" > "$SNAP_E2E_DIR/controller-snapshot.log" || true
+	[[ -n "$fastlet" ]] && kubectl -n "$NS" logs "$fastlet" --since=30m --tail=600 > "$SNAP_E2E_DIR/fastlet.log" 2>&1 || true
+	kubectl -n "$NS" logs daemonset/firecracker-runtime-agent --tail=300 > "$SNAP_E2E_DIR/agent.log" 2>&1 || true
+	sandbox_uid="$(kubectl -n "$NS" get sandbox "$SNAPSHOT_TARGET" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+	node="$(kind_node)"
+	if [[ -n "$node" && -n "$sandbox_uid" ]]; then
+		docker exec "$node" sh -c \
+			"cat /var/lib/fast-sandbox/firecracker/sandboxes/$sandbox_uid/firecracker.log 2>/dev/null" \
+			> "$SNAP_E2E_DIR/firecracker-source.log" 2>&1 || true
+	fi
+	log "verify-snapshot evidence: $SNAP_E2E_DIR"
+}
+
+snapshot_timing_report() {
+	highlight "== snapshot key timings =="
+	local key ms
+	while IFS=$'\t' read -r key ms; do
+		[[ -n "$key" ]] || continue
+		printf '  %-32s %8sms\n' "$key" "$ms"
+	done < "$SNAP_TIMINGS"
+	highlight "== phase transitions (wallclock ms / offset / phase) =="
+	cat "$SNAP_PHASES_LOG" 2>/dev/null || true
+}
+
+verify_snapshot() {
+	SNAP_E2E_DIR="$LOGS_DIR/snapshot-e2e-$(date +%s)"
+	mkdir -p "$SNAP_E2E_DIR"
+	SNAP_TIMINGS="$SNAP_E2E_DIR/timings.tsv"
+	SNAP_PHASES_LOG="$SNAP_E2E_DIR/phase-transitions.log"
+	: > "$SNAP_TIMINGS"
+
+	port_forward_up
+	resolve_daemon_up
+	trap 'snapshot_on_error' EXIT
+	run_stage "snapshot 1: snapshot-capable images + write credential" snapshot_env_up
+	run_stage "snapshot 2: source sandbox Ready" snapshot_source_up
+	run_stage "snapshot 3: live snapshot (pause/dump/resume/publish)" snapshot_run
+	run_stage "snapshot 4: artifact validation (MinIO)" snapshot_validate_artifacts
+	run_stage "snapshot 5: restore from snapshot image" snapshot_restore
+	trap - EXIT
+	resolve_daemon_down
+	port_forward_down
+
+	snapshot_evidence
+	snapshot_timing_report
+	stage_summary
+	highlight "== verify-snapshot complete; evidence: $SNAP_E2E_DIR =="
+}
+
+snapshot_on_error() {
+	[[ "$SNAP_ON_ERROR" == 1 ]] && return 0
+	SNAP_ON_ERROR=1
+	snapshot_ping_monitor_stop || true
+	snapshot_evidence || true
+	failure_dump "verify-snapshot" || true
+	port_forward_down || true
+	resolve_daemon_down || true
+	printf '\033[1;31m[snapshot-e2e] FAILED; evidence: %s\033[0m\n' "$SNAP_E2E_DIR" >&2
+}
+
 # --- status --------------------------------------------------------------------------------------
 status() {
 	log "status: components"
@@ -2969,6 +3479,12 @@ case "$ACTION" in
 	verify)
 		trap 'on_error verify' ERR
 		verify
+		trap - ERR
+		;;
+	verify-snapshot)
+		set -o errtrace
+		trap 'snapshot_on_error' ERR
+		verify_snapshot
 		trap - ERR
 		;;
 	verify-p2p)
