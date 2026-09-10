@@ -233,6 +233,15 @@ func (r *SandboxSnapshotReconciler) projectObservation(ctx context.Context, snap
 		if envelope != nil {
 			status.FastletName = envelope.FastletName
 			status.FastletPodUID = types.UID(envelope.FastletPodUID)
+			// Pin the trigger placement once: later observations resolve
+			// against it even if the Sandbox is reassigned mid-flight.
+			if status.Triggered == nil {
+				status.Triggered = &apiv1alpha2.SnapshotTrigger{
+					FastletName: envelope.FastletName, FastletPodUID: envelope.FastletPodUID,
+					RuntimeInstanceID:  envelope.RuntimeInstanceID,
+					InstanceGeneration: envelope.InstanceGeneration, AssignmentAttempt: envelope.Attempt,
+				}
+			}
 		}
 		status.SandboxUID = sandbox.UID
 		orchestration.ProjectSnapshotStatus(status, observed)
@@ -347,6 +356,13 @@ func (r *SandboxSnapshotReconciler) patchStatus(ctx context.Context, snapshot *a
 			return err
 		}
 		before := current.DeepCopy().Status
+		// Terminal phases are monotonic: once Succeeded/Failed is visible,
+		// neither this controller nor a racing FastPath patch may rewrite
+		// the object (a deletion-time target recheck or a stale observation
+		// would otherwise roll a terminal object backwards).
+		if before.Phase.Terminal() {
+			return nil
+		}
 		mutate(&current.Status)
 		current.Status.ObservedGeneration = current.Generation
 		if reflect.DeepEqual(before, current.Status) {

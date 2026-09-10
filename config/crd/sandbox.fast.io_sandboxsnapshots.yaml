@@ -213,6 +213,35 @@ spec:
                 description: StartedAt is when the fastlet accepted the snapshot.
                 format: date-time
                 type: string
+              triggered:
+                description: |-
+                  Triggered pins the full trigger-time placement (fastlet plus the
+                  Sandbox identity fence) once the snapshot is accepted. Observations
+                  resolve against it, not the Sandbox's live assignment. Residual
+                  window: if the fastlet crashes exactly during the final index upload,
+                  the object can be terminal Failed with the index still landed
+                  (last-writer-wins for the template name); every other failure path
+                  publishes nothing.
+                properties:
+                  assignmentAttempt:
+                    format: int64
+                    type: integer
+                  fastletName:
+                    description: FastletName/FastletPodUID identify the fastlet that
+                      accepted the task.
+                    type: string
+                  fastletPodUid:
+                    type: string
+                  instanceGeneration:
+                    format: int64
+                    type: integer
+                  runtimeInstanceId:
+                    description: |-
+                      RuntimeInstanceID/InstanceGeneration/AssignmentAttempt are the Sandbox
+                      identity fence captured at trigger time; observations replay them so
+                      the fastlet-side claim check matches exactly.
+                    type: string
+                type: object
             type: object
         type: object
     served: true

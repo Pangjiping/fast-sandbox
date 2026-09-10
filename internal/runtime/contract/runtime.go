@@ -108,9 +108,12 @@ type SnapshotInput struct {
 // ErrSnapshotUnsupported instead of attempting a partial fallback.
 //
 // CreateSnapshot is one-shot per (SandboxID, SnapshotID) pair and blocking;
-// it must resume the Sandbox on every failure path. Callers run it off the
-// admission path in a dedicated worker. DeleteSnapshot discards node-local
-// artifacts of a previous snapshot; it never unpublishes stored objects.
+// it must resume the Sandbox on every in-process failure path. A host or
+// Fastlet crash mid-dump can still leave the runtime paused — implementers
+// that also implement ResourceRecoverer must resume such runtimes during
+// RecoverRuntimeResources so recovery never strands a paused guest.
+// DeleteSnapshot discards node-local artifacts of a previous snapshot; it
+// never unpublishes stored objects.
 type Snapshotter interface {
 	CreateSnapshot(ctx context.Context, input *SnapshotInput) (*SnapshotResult, error)
 	DeleteSnapshot(ctx context.Context, snapshotID string) error
