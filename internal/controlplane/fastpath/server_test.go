@@ -65,6 +65,7 @@ type fastpathFastlet struct {
 	inspectError   error
 	diagnostics    *fastletapi.SandboxDiagnosticsResponse
 	diagnosticsErr error
+	snapshotErr    error
 }
 
 func (f *fastpathFastlet) CreateSandbox(_ context.Context, fastletIP string, request *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
@@ -109,6 +110,31 @@ func (f *fastpathFastlet) InspectSandbox(_ context.Context, _ string, request *f
 
 func (*fastpathFastlet) DeleteSandbox(context.Context, string, *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error) {
 	return &fastletapi.DeleteSandboxResponse{}, nil
+}
+
+func (f *fastpathFastlet) CreateSnapshot(_ context.Context, _ string, request *fastletapi.CreateSnapshotRequest) (*fastletapi.CreateSnapshotResponse, error) {
+	f.mu.Lock()
+	snapshotErr := f.snapshotErr
+	f.mu.Unlock()
+	if snapshotErr != nil {
+		return &fastletapi.CreateSnapshotResponse{Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects}, snapshotErr
+	}
+	return &fastletapi.CreateSnapshotResponse{
+		Disposition: fastletapi.CreateDispositionCreated,
+		Snapshot: &fastletapi.SnapshotStatus{
+			SnapshotID: "snap-" + request.Identity.SnapshotUID, Phase: fastletapi.SnapshotPhaseCreating,
+		},
+	}, nil
+}
+
+func (*fastpathFastlet) InspectSnapshot(_ context.Context, _ string, request *fastletapi.InspectSnapshotRequest) (*fastletapi.InspectSnapshotResponse, error) {
+	return &fastletapi.InspectSnapshotResponse{Snapshot: &fastletapi.SnapshotStatus{
+		SnapshotID: "snap-" + request.Identity.SnapshotUID, Phase: fastletapi.SnapshotPhaseCreating,
+	}}, nil
+}
+
+func (*fastpathFastlet) DeleteSnapshot(context.Context, string, *fastletapi.DeleteSnapshotRequest) (*fastletapi.DeleteSnapshotResponse, error) {
+	return &fastletapi.DeleteSnapshotResponse{}, nil
 }
 
 func (f *fastpathFastlet) ReconcileBindings(_ context.Context, _ string, request *fastletapi.ReconcileBindingsRequest) (*fastletapi.ReconcileBindingsResponse, error) {
@@ -164,6 +190,9 @@ func (c *countingUIDClient) Create(ctx context.Context, object client.Object, op
 		if sandbox.Generation == 0 {
 			sandbox.Generation = 1
 		}
+	}
+	if snapshot, ok := object.(*apiv1alpha2.SandboxSnapshot); ok && snapshot.UID == "" {
+		snapshot.UID = types.UID("snapshot-uid-" + snapshot.Name)
 	}
 	c.mu.Unlock()
 	return c.Client.Create(ctx, object, options...)
