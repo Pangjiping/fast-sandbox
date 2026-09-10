@@ -385,8 +385,9 @@ message GetSandboxSnapshotResponse {
 }
 
 message DeleteSandboxSnapshotRequest {
-  // snapshot references the SandboxSnapshot to delete. Deleting a snapshot
-  // does not unpublish its artifacts.
+  // snapshot references the SandboxSnapshot to delete; expected_uid, when
+  // set, must match the SandboxSnapshot UID. Deleting a snapshot does not
+  // unpublish its artifacts.
   SandboxReference snapshot = 1;
 }
 

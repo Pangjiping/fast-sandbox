@@ -3160,8 +3160,9 @@ func (x *GetSandboxSnapshotResponse) GetSnapshot() *SandboxSnapshotInfo {
 
 type DeleteSandboxSnapshotRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// snapshot references the SandboxSnapshot to delete. Deleting a snapshot
-	// does not unpublish its artifacts.
+	// snapshot references the SandboxSnapshot to delete; expected_uid, when
+	// set, must match the SandboxSnapshot UID. Deleting a snapshot does not
+	// unpublish its artifacts.
 	Snapshot      *SandboxReference `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

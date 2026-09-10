@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"testing"
+	"time"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/assignment"
@@ -27,9 +28,6 @@ type snapshotHarness struct {
 
 func newSnapshotReconcilerHarness(t *testing.T) (*snapshotHarness, *apiv1alpha2.SandboxSnapshot) {
 	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
-	sandbox := snapshotTargetSandbox(t)
 	snapshot := &apiv1alpha2.SandboxSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "default", UID: types.UID("snapshot-uid-a")},
 		Spec: apiv1alpha2.SandboxSnapshotSpec{
@@ -37,6 +35,14 @@ func newSnapshotReconcilerHarness(t *testing.T) (*snapshotHarness, *apiv1alpha2.
 			TemplateName: "app-v2",
 		},
 	}
+	return newSnapshotReconcilerHarnessWith(t, snapshot)
+}
+
+func newSnapshotReconcilerHarnessWith(t *testing.T, snapshot *apiv1alpha2.SandboxSnapshot) (*snapshotHarness, *apiv1alpha2.SandboxSnapshot) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	sandbox := snapshotTargetSandbox(t)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&apiv1alpha2.Sandbox{}, &apiv1alpha2.SandboxSnapshot{}).
 		WithObjects(sandbox, snapshot).Build()
@@ -53,6 +59,96 @@ func newSnapshotReconcilerHarness(t *testing.T) (*snapshotHarness, *apiv1alpha2.
 	orchestrator := &orchestration.Orchestrator{Client: k8sClient, Registry: registry, FastletClient: fastlet}
 	reconciler := &SandboxSnapshotReconciler{Client: k8sClient, Scheme: scheme, Orchestrator: orchestrator}
 	return &snapshotHarness{reconciler: reconciler, fastlet: fastlet, k8sClient: k8sClient}, snapshot
+}
+
+// agedSnapshotCopy returns the harness snapshot seeded with the given
+// creation age and admitted state.
+func agedSnapshot(admitted bool, age time.Duration) *apiv1alpha2.SandboxSnapshot {
+	snapshot := &apiv1alpha2.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "snap-a", Namespace: "default", UID: types.UID("snapshot-uid-a"),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-age)),
+		},
+		Spec: apiv1alpha2.SandboxSnapshotSpec{
+			SandboxRef:   apiv1alpha2.SandboxRef{Name: "sandbox-a", Namespace: "default", UID: "sandbox-uid-a"},
+			TemplateName: "app-v2",
+		},
+	}
+	if admitted {
+		snapshot.Status.SnapshotID = "snap-known"
+		snapshot.Status.Phase = apiv1alpha2.SandboxSnapshotPhaseCreating
+	}
+	return snapshot
+}
+
+func TestSnapshotPendingDeadlineFailsUnadmittedFence(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarnessWith(t, agedSnapshot(false, 11*time.Minute))
+	harness.reconciler.Now = func() time.Time { return time.Now() }
+
+	// Target Sandbox stays not-Ready: without the deadline this would retry
+	// forever and hold the reentrancy fence indefinitely.
+	var sandbox apiv1alpha2.Sandbox
+	require.NoError(t, harness.reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &sandbox))
+	sandbox.Status.Runtime.State = apiv1alpha2.RuntimeCreating
+	require.NoError(t, harness.reconciler.Status().Update(context.Background(), &sandbox))
+
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	current := getSnapshot(t, harness, "snap-a")
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhaseFailed, current.Status.Phase)
+	require.Equal(t, "SnapshotDeadlineExceeded", snapshotCompletedCondition(t, current).Reason)
+	require.NotNil(t, current.Status.CompletedAt, "the fence is released with a terminal phase")
+}
+
+func TestSnapshotActiveDeadlineFailsLostAdmittedTask(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarnessWith(t, agedSnapshot(true, 46*time.Minute))
+	harness.reconciler.Now = func() time.Time { return time.Now() }
+	harness.fastlet.mu.Lock()
+	harness.fastlet.snapshotInspectPhase = fastletapi.SnapshotPhaseCreating
+	harness.fastlet.mu.Unlock()
+
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	current := getSnapshot(t, harness, "snap-a")
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhaseFailed, current.Status.Phase)
+	require.Equal(t, "SnapshotDeadlineExceeded", snapshotCompletedCondition(t, current).Reason)
+}
+
+func TestSnapshotDeadlineDoesNotTerminateFreshSnapshots(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarnessWith(t, agedSnapshot(true, time.Minute))
+	harness.reconciler.Now = func() time.Time { return time.Now() }
+
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	current := getSnapshot(t, harness, "snap-a")
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhaseSucceeded, current.Status.Phase)
+}
+
+func TestSnapshotDeletionUnwedgesPastDeadline(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarnessWith(t, agedSnapshot(true, 46*time.Minute))
+	harness.reconciler.Now = func() time.Time { return time.Now() }
+	harness.fastlet.mu.Lock()
+	harness.fastlet.snapshotInspectPhase = fastletapi.SnapshotPhaseCreating
+	harness.fastlet.mu.Unlock()
+
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	require.NoError(t, harness.k8sClient.Delete(context.Background(), &apiv1alpha2.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "default", UID: types.UID("snapshot-uid-a")},
+	}))
+
+	result, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	require.Zero(t, result.Requeue, "delegation past the deadline must not wait forever")
+	var current apiv1alpha2.SandboxSnapshot
+	require.Error(t, harness.reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "snap-a"}, &current),
+		"finalizer removal lets the wedged object disappear")
 }
 
 func snapshotTargetSandbox(t *testing.T) *apiv1alpha2.Sandbox {
