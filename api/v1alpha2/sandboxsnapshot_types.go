@@ -83,6 +83,23 @@ type SandboxSnapshotSpec struct {
 	TemplateName string `json:"templateName"`
 }
 
+// SnapshotTrigger pins the target placement a snapshot was triggered
+// against. Subsequent observations (and best-effort cleanup) resolve this
+// fastlet instead of the Sandbox's current assignment, so a mid-flight
+// Sandbox reassignment cannot silently retarget the task: the observation
+// keeps hitting the fastlet that owns it until the task terminates.
+type SnapshotTrigger struct {
+	// FastletName/FastletPodUID identify the fastlet that accepted the task.
+	FastletName   string `json:"fastletName,omitempty"`
+	FastletPodUID string `json:"fastletPodUid,omitempty"`
+	// RuntimeInstanceID/InstanceGeneration/AssignmentAttempt are the Sandbox
+	// identity fence captured at trigger time; observations replay them so
+	// the fastlet-side claim check matches exactly.
+	RuntimeInstanceID  string `json:"runtimeInstanceId,omitempty"`
+	InstanceGeneration int64  `json:"instanceGeneration,omitempty"`
+	AssignmentAttempt  int64  `json:"assignmentAttempt,omitempty"`
+}
+
 // SandboxSnapshotStatus reports the observed state of one snapshot attempt.
 // All fields are projections written by the control plane; the artifact
 // facts come from the fastlet that executed the snapshot.
@@ -107,6 +124,16 @@ type SandboxSnapshotStatus struct {
 	// +optional
 	FastletName   string    `json:"fastletName,omitempty"`
 	FastletPodUID types.UID `json:"fastletPodUID,omitempty"`
+
+	// Triggered pins the full trigger-time placement (fastlet plus the
+	// Sandbox identity fence) once the snapshot is accepted. Observations
+	// resolve against it, not the Sandbox's live assignment. Residual
+	// window: if the fastlet crashes exactly during the final index upload,
+	// the object can be terminal Failed with the index still landed
+	// (last-writer-wins for the template name); every other failure path
+	// publishes nothing.
+	// +optional
+	Triggered *SnapshotTrigger `json:"triggered,omitempty"`
 
 	// SnapshotID is the fastlet-side identity of the snapshot task.
 	// +optional

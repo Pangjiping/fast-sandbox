@@ -17,9 +17,13 @@ import (
 
 // ProjectSnapshotStatus is the pure projection from a Fastlet snapshot
 // observation onto the SandboxSnapshot status. It is used by both FastPath
-// (after the direct trigger) and the Controller (observe loop).
+// (after the direct trigger) and the Controller (observe loop). A terminal
+// phase is final: a stale observation from the optimistic-concurrency loser
+// must never roll Succeeded/Failed back to an in-flight phase (the
+// Controller already stopped reconciling a terminal object, so a rollback
+// would wedge it non-terminal forever).
 func ProjectSnapshotStatus(status *apiv1alpha2.SandboxSnapshotStatus, observed *fastletapi.SnapshotStatus) {
-	if status == nil || observed == nil {
+	if status == nil || observed == nil || status.Phase.Terminal() {
 		return
 	}
 	now := metav1.Now()
@@ -115,10 +119,35 @@ func (o *Orchestrator) CreateSnapshot(ctx context.Context, snapshot *apiv1alpha2
 	return response.Snapshot, callErr
 }
 
-// ObserveSnapshot inspects the snapshot task on the assigned Fastlet.
-// A structured status is returned whenever the Fastlet knows the task.
+// observeTarget resolves the fastlet an observation (or cleanup) must hit:
+// the pinned trigger placement when present, else the Sandbox's live
+// assignment. Pinning keeps observations on the fastlet that owns the task
+// across a mid-flight Sandbox reassignment.
+func (o *Orchestrator) observeTarget(snapshot *apiv1alpha2.SandboxSnapshot, sandbox *apiv1alpha2.Sandbox) (fastletapi.SnapshotIdentity, placement.FastletInfo, error) {
+	if triggered := snapshot.Status.Triggered; triggered != nil && triggered.FastletName != "" {
+		fastlet, ok := o.Registry.GetFastletByID(placement.FastletID(triggered.FastletName))
+		if !ok || fastlet.PodUID != triggered.FastletPodUID || fastlet.PodIP == "" {
+			return fastletapi.SnapshotIdentity{}, placement.FastletInfo{},
+				fmt.Errorf("%w: pinned fastlet %s is unavailable", ErrAssignedFastletUnavailable, triggered.FastletName)
+		}
+		identity := fastletapi.SnapshotIdentity{
+			SnapshotUID: string(snapshot.UID), Namespace: snapshot.Namespace, Name: snapshot.Name,
+			Sandbox: fastletapi.SandboxIdentity{
+				SandboxUID: string(sandbox.UID), Namespace: sandbox.Namespace, Name: sandbox.Name,
+				InstanceGeneration: triggered.InstanceGeneration, RuntimeInstanceID: triggered.RuntimeInstanceID,
+				AssignmentAttempt: triggered.AssignmentAttempt, FastletPodUID: triggered.FastletPodUID,
+			},
+		}
+		return identity, fastlet, nil
+	}
+	return o.SnapshotTarget(snapshot, sandbox)
+}
+
+// ObserveSnapshot inspects the snapshot task on the fastlet that owns it
+// (the pinned trigger placement when present). A structured status is
+// returned whenever the Fastlet knows the task.
 func (o *Orchestrator) ObserveSnapshot(ctx context.Context, snapshot *apiv1alpha2.SandboxSnapshot, sandbox *apiv1alpha2.Sandbox) (*fastletapi.SnapshotStatus, error) {
-	identity, fastlet, err := o.SnapshotTarget(snapshot, sandbox)
+	identity, fastlet, err := o.observeTarget(snapshot, sandbox)
 	if err != nil {
 		return nil, err
 	}
@@ -132,11 +161,12 @@ func (o *Orchestrator) ObserveSnapshot(ctx context.Context, snapshot *apiv1alpha
 	return response.Snapshot, nil
 }
 
-// DeleteSnapshot discards node-local artifacts of a terminal snapshot task.
-// It never unpublishes stored objects; callers treat the outcome as
+// DeleteSnapshot discards node-local artifacts of a terminal snapshot task,
+// resolving the owning fastlet from the pinned trigger placement when
+// present. It never unpublishes stored objects; callers treat the outcome as
 // best-effort cleanup.
 func (o *Orchestrator) DeleteSnapshot(ctx context.Context, snapshot *apiv1alpha2.SandboxSnapshot, sandbox *apiv1alpha2.Sandbox) error {
-	identity, fastlet, err := o.SnapshotTarget(snapshot, sandbox)
+	identity, fastlet, err := o.observeTarget(snapshot, sandbox)
 	if err != nil {
 		return err
 	}

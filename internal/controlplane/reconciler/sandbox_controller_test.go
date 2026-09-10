@@ -53,6 +53,7 @@ type controllerFastlet struct {
 	snapshotInspectErr   error
 	snapshotInspectPhase fastletapi.SnapshotPhase
 	snapshotDeleteCall   int
+	lastSnapshotInspect  *fastletapi.SnapshotIdentity
 }
 
 func (f *controllerFastlet) CreateSandbox(_ context.Context, _ string, request *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
@@ -128,6 +129,7 @@ func (f *controllerFastlet) CreateSnapshot(_ context.Context, _ string, request 
 func (f *controllerFastlet) InspectSnapshot(_ context.Context, _ string, request *fastletapi.InspectSnapshotRequest) (*fastletapi.InspectSnapshotResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastSnapshotInspect = &request.Identity
 	if f.snapshotInspectErr != nil {
 		return &fastletapi.InspectSnapshotResponse{}, f.snapshotInspectErr
 	}

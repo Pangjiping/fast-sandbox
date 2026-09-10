@@ -209,6 +209,15 @@ func (s *Server) triggerSnapshot(ctx context.Context, snapshot *apiv1alpha2.Sand
 		if envelope != nil {
 			status.FastletName = envelope.FastletName
 			status.FastletPodUID = types.UID(envelope.FastletPodUID)
+			// Pin the trigger placement once so Controller observations stay
+			// on this fastlet across a later Sandbox reassignment.
+			if status.Triggered == nil {
+				status.Triggered = &apiv1alpha2.SnapshotTrigger{
+					FastletName: envelope.FastletName, FastletPodUID: envelope.FastletPodUID,
+					RuntimeInstanceID:  envelope.RuntimeInstanceID,
+					InstanceGeneration: envelope.InstanceGeneration, AssignmentAttempt: envelope.Attempt,
+				}
+			}
 		}
 		if observed != nil {
 			orchestration.ProjectSnapshotStatus(status, observed)
@@ -334,6 +343,13 @@ func (s *Server) patchSnapshotStatus(ctx context.Context, key client.ObjectKey, 
 			return err
 		}
 		before := current.DeepCopy().Status
+		// Terminal phases are monotonic: after a conflict-triggered re-read,
+		// applying an older in-flight observation would roll a terminal
+		// object back to Creating while the Controller has already stopped.
+		if before.Phase.Terminal() {
+			result = current.DeepCopy()
+			return nil
+		}
 		mutate(&current.Status)
 		if reflect.DeepEqual(before, current.Status) {
 			result = current.DeepCopy()

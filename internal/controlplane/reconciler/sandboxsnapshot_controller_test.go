@@ -334,3 +334,107 @@ func TestSnapshotDeletionCleansUpAfterTerminal(t *testing.T) {
 	require.Error(t, harness.reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "snap-a"}, &current),
 		"finalizer removal lets the object disappear")
 }
+
+func TestSnapshotNotReadyTargetStaysPendingWithRequeue(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarness(t)
+	var sandbox apiv1alpha2.Sandbox
+	require.NoError(t, harness.reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &sandbox))
+	sandbox.Status.Runtime.State = apiv1alpha2.RuntimeCreating
+	require.NoError(t, harness.reconciler.Status().Update(context.Background(), &sandbox))
+
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	result, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	require.Equal(t, SnapshotRetryInterval, result.RequeueAfter, "a not-Ready target backs off without terminating")
+	current := getSnapshot(t, harness, "snap-a")
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhasePending, current.Status.Phase)
+	require.Contains(t, current.Status.Message, "Creating")
+	require.Empty(t, current.Status.SnapshotID, "no trigger happened while the target is not Ready")
+}
+
+func TestSnapshotTerminalPhaseIsMonotonic(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarness(t)
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhaseSucceeded, getSnapshot(t, harness, "snap-a").Status.Phase)
+
+	// A stale in-flight observation (fastlet briefly reports Creating again)
+	// must not roll the terminal phase back.
+	harness.fastlet.mu.Lock()
+	harness.fastlet.snapshotInspectPhase = fastletapi.SnapshotPhaseCreating
+	harness.fastlet.mu.Unlock()
+	result, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	require.Zero(t, result.Requeue)
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhaseSucceeded, getSnapshot(t, harness, "snap-a").Status.Phase)
+}
+
+func TestSnapshotDeletionAfterSuccessWithTargetGone(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarness(t)
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	succeeded := getSnapshot(t, harness, "snap-a")
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhaseSucceeded, succeeded.Status.Phase)
+
+	// The target Sandbox disappears before the object is deleted: the
+	// terminal phase must survive the deletion reconcile untouched.
+	require.NoError(t, harness.k8sClient.Delete(context.Background(), snapshotTargetSandbox(t)))
+	require.NoError(t, harness.k8sClient.Delete(context.Background(), &apiv1alpha2.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "default", UID: types.UID("snapshot-uid-a")},
+	}))
+	result, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	require.Zero(t, result.Requeue, "deletion of a terminal snapshot completes even without a target")
+	var current apiv1alpha2.SandboxSnapshot
+	require.Error(t, harness.reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "snap-a"}, &current))
+}
+
+func TestSnapshotObservePinnedAcrossReassignment(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarness(t)
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	triggered := getSnapshot(t, harness, "snap-a").Status.Triggered
+	require.NotNil(t, triggered)
+	require.Equal(t, int64(1), triggered.AssignmentAttempt)
+	require.Equal(t, "runtime-a", triggered.RuntimeInstanceID)
+
+	// Reassign the Sandbox to another fastlet with a fresh fence; the
+	// observation must keep resolving the pinned placement (attempt 1,
+	// fastlet-a) instead of drifting to the new assignment.
+	var sandbox apiv1alpha2.Sandbox
+	require.NoError(t, harness.reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &sandbox))
+	newEnvelope := assignment.AssignmentEnvelope{
+		Version: assignment.AssignmentEnvelopeVersion, FastletName: "fastlet-b", FastletPodUID: "pod-b", NodeName: "node-b",
+		Attempt: 2, InstanceGeneration: 1, RouteGeneration: 1, RuntimeInstanceID: "runtime-b",
+		RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash", InfraRevision: "infra-hash",
+	}
+	require.NoError(t, assignment.SetAssignmentAnnotation(&sandbox, newEnvelope))
+	require.NoError(t, harness.reconciler.Update(context.Background(), &sandbox))
+	// Keep the status projection consistent with the new annotation
+	// (EffectiveAssignment fails closed on a conflict).
+	require.NoError(t, harness.reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &sandbox))
+	sandbox.Status.Placement = apiv1alpha2.PlacementStatus{FastletName: "fastlet-b", FastletPodUID: "pod-b", Attempt: 2}
+	require.NoError(t, harness.reconciler.Status().Update(context.Background(), &sandbox))
+
+	_, err = harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	harness.fastlet.mu.Lock()
+	lastIdentity := harness.fastlet.lastSnapshotInspect
+	harness.fastlet.mu.Unlock()
+	require.NotNil(t, lastIdentity, "the pinned fastlet was observed despite the reassignment")
+	require.Equal(t, int64(1), lastIdentity.Sandbox.AssignmentAttempt, "the observation replays the trigger-time fence")
+	require.Equal(t, "runtime-a", lastIdentity.Sandbox.RuntimeInstanceID)
+	require.Equal(t, "pod-a", lastIdentity.Sandbox.FastletPodUID)
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhaseSucceeded, getSnapshot(t, harness, "snap-a").Status.Phase)
+}

@@ -781,9 +781,45 @@ func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 			d.killAndForget(state.Config.Identity.SandboxUID, state.PID)
 			d.removeJailRoot(state.Config.Identity.SandboxUID)
 			_ = removeSandboxDir(directory)
+			continue
 		}
+		// A Fastlet crash during a snapshot dump leaves the VM paused (the
+		// Snapshotter contract only covers in-process failure paths). The
+		// surviving VMM is resumed here so recovery never strands a guest.
+		d.resumePausedVM(ctx, state)
 	}
 	return nil
+}
+
+// resumePausedVM resumes a live but paused microVM (snapshot-dump crash
+// recovery). The VM state is polled first: resuming a Running VM is a
+// Firecracker API error, so only a confirmed Paused state is resumed.
+func (d *Driver) resumePausedVM(ctx context.Context, state *SandboxState) {
+	if state == nil || state.APIAddress == "" {
+		return
+	}
+	client := d.newClient(state.APIAddress)
+	defer client.Close()
+	vmState, err := client.VMState(ctx)
+	if err != nil || vmState != "Paused" {
+		return
+	}
+	if _, err := resumeVM(ctx, client, d.bootTimeoutOrDefault()); err != nil {
+		klog.ErrorS(err, "Resume paused microVM after crash recovery failed; Sandbox remains paused",
+			"sandboxId", state.Config.Identity.SandboxUID)
+		return
+	}
+	klog.InfoS("Resumed paused microVM after crash recovery", "sandboxId", state.Config.Identity.SandboxUID)
+}
+
+// bootTimeoutOrDefault returns the configured boot (resume) poll timeout.
+func (d *Driver) bootTimeoutOrDefault() int32 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.config.BootTimeoutSeconds > 0 {
+		return d.config.BootTimeoutSeconds
+	}
+	return 60
 }
 
 // GetAccessDescriptor returns the pod-side DirectIP descriptor of the Sandbox.
