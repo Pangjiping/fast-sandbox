@@ -201,24 +201,27 @@ func (s *Server) triggerSnapshot(ctx context.Context, snapshot *apiv1alpha2.Sand
 		return response, nil
 	}
 	observed, callErr := orchestrator.CreateSnapshot(ctx, snapshot, sandbox)
-	envelope, envelopeErr := assignment.EffectiveAssignment(sandbox)
-	if envelopeErr == nil && envelope != nil {
-		updated, patchErr := s.patchSnapshotStatus(ctx, client.ObjectKeyFromObject(snapshot), func(status *apiv1alpha2.SandboxSnapshotStatus) {
+	// A missing envelope only means the Sandbox has no durable placement
+	// right now: the trigger failed transitively, and the response still
+	// reports a meaningful Pending instead of an unspecified phase.
+	envelope, _ := assignment.EffectiveAssignment(sandbox)
+	updated, patchErr := s.patchSnapshotStatus(ctx, client.ObjectKeyFromObject(snapshot), func(status *apiv1alpha2.SandboxSnapshotStatus) {
+		if envelope != nil {
 			status.FastletName = envelope.FastletName
 			status.FastletPodUID = types.UID(envelope.FastletPodUID)
-			if observed != nil {
-				orchestration.ProjectSnapshotStatus(status, observed)
-			} else if status.Phase == "" {
-				status.Phase = apiv1alpha2.SandboxSnapshotPhasePending
-				status.Message = "SandboxSnapshot intent is persisted and will be triggered by the Controller"
-			}
-		})
-		if patchErr != nil {
-			klog.FromContext(ctx).Error(patchErr, "Patch initial SandboxSnapshot status", "snapshot", snapshot.Name)
-		} else {
-			snapshot = updated
-			response.Snapshot = snapshotInfo(snapshot)
 		}
+		if observed != nil {
+			orchestration.ProjectSnapshotStatus(status, observed)
+		} else if status.Phase == "" {
+			status.Phase = apiv1alpha2.SandboxSnapshotPhasePending
+			status.Message = "SandboxSnapshot intent is persisted and will be triggered by the Controller"
+		}
+	})
+	if patchErr != nil {
+		klog.FromContext(ctx).Error(patchErr, "Patch initial SandboxSnapshot status", "snapshot", snapshot.Name)
+	} else {
+		snapshot = updated
+		response.Snapshot = snapshotInfo(snapshot)
 	}
 	if callErr != nil {
 		if code, message, deterministic := snapshotRejection(callErr); deterministic {
@@ -296,6 +299,9 @@ func (s *Server) DeleteSandboxSnapshot(ctx context.Context, request *fastpathv2.
 			return &fastpathv2.DeleteSandboxSnapshotResponse{}, nil
 		}
 		return nil, err
+	}
+	if request.Snapshot.ExpectedUid != "" && string(snapshot.UID) != request.Snapshot.ExpectedUid {
+		return nil, status.Errorf(codes.Aborted, "SandboxSnapshot UID changed: expected %s, current %s", request.Snapshot.ExpectedUid, snapshot.UID)
 	}
 	uid := snapshot.UID
 	if err := s.K8sClient.Delete(ctx, snapshot, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {

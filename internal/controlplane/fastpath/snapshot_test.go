@@ -223,6 +223,31 @@ func TestCreateSandboxSnapshotUnreachableFastletKeepsPending(t *testing.T) {
 	require.Equal(t, apiv1alpha2.SandboxSnapshotPhasePending, persisted.Status.Phase)
 }
 
+func TestCreateSandboxSnapshotUnassignedSandboxReportsPending(t *testing.T) {
+	server, k8sClient, _ := newSnapshotServer(t)
+	unassigned := &apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-free", Namespace: "default", UID: types.UID("sandbox-uid-free")},
+		Spec:       apiv1alpha2.SandboxSpec{Image: "alpine:latest", PoolRef: "pool-a"},
+		Status: apiv1alpha2.SandboxStatus{
+			Runtime:   apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeReady, Generation: 1},
+			DataPlane: apiv1alpha2.DataPlaneStatus{State: apiv1alpha2.DataPlaneReady, RouteGeneration: 1},
+		},
+	}
+	require.NoError(t, k8sClient.Client.Create(context.Background(), unassigned))
+	require.NoError(t, k8sClient.Client.Status().Update(context.Background(), unassigned))
+
+	request := snapshotCreateRequest("snap-free", "app-free")
+	request.Sandbox.NamespacedName.Name = "sandbox-free"
+	request.Sandbox.ExpectedUid = "sandbox-uid-free"
+	response, err := server.CreateSandboxSnapshot(context.Background(), request)
+	require.NoError(t, err, "the intent is persisted; the Controller converges once the Sandbox is placed")
+	require.Equal(t, fastpathv2.SnapshotPhase_SNAPSHOT_PHASE_PENDING, response.Snapshot.Phase)
+
+	var persisted apiv1alpha2.SandboxSnapshot
+	require.NoError(t, k8sClient.Client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "snap-free"}, &persisted))
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhasePending, persisted.Status.Phase)
+}
+
 func TestGetAndDeleteSandboxSnapshot(t *testing.T) {
 	server, _, _ := newSnapshotServer(t)
 	created, err := server.CreateSandboxSnapshot(context.Background(), snapshotCreateRequest("snap-a", "app-v2"))
@@ -238,6 +263,16 @@ func TestGetAndDeleteSandboxSnapshot(t *testing.T) {
 		Snapshot: &fastpathv2.NamespacedName{Name: "snap-a", Namespace: "default"}, ExpectedUid: "wrong-uid",
 	})
 	require.Equal(t, codes.Aborted, status.Code(err))
+
+	_, err = server.DeleteSandboxSnapshot(context.Background(), &fastpathv2.DeleteSandboxSnapshotRequest{
+		Snapshot: &fastpathv2.SandboxReference{
+			NamespacedName: &fastpathv2.NamespacedName{Name: "snap-a", Namespace: "default"}, ExpectedUid: "wrong-uid",
+		},
+	})
+	require.Equal(t, codes.Aborted, status.Code(err), "delete must honor expected_uid like get")
+	var survivors apiv1alpha2.SandboxSnapshotList
+	require.NoError(t, server.K8sClient.List(context.Background(), &survivors, client.InNamespace("default")))
+	require.Len(t, survivors.Items, 1, "a UID-mismatched delete must not remove the object")
 
 	_, err = server.DeleteSandboxSnapshot(context.Background(), &fastpathv2.DeleteSandboxSnapshotRequest{
 		Snapshot: &fastpathv2.SandboxReference{NamespacedName: &fastpathv2.NamespacedName{Name: "snap-a", Namespace: "default"}},

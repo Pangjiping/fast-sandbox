@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -34,6 +35,17 @@ const (
 	// SnapshotRetryInterval backs off placement problems (unavailable
 	// Fastlet, not-Ready target Sandbox).
 	SnapshotRetryInterval = 5 * time.Second
+	// SnapshotPendingDeadline bounds how long a never-admitted intent may
+	// hold its reentrancy fence (same Sandbox, same template name) while
+	// the target Sandbox or the assigned Fastlet stays unavailable. Past
+	// the deadline the object terminates Failed and the fence is released;
+	// clients retry with a new request_id.
+	SnapshotPendingDeadline = 10 * time.Minute
+	// SnapshotActiveDeadline bounds an admitted snapshot the Controller can
+	// no longer observe (Fastlet lost with its in-memory task). It safely
+	// exceeds the Fastlet worker's own dump/publish timeout, so a live task
+	// always terminates itself before the Controller gives up on it.
+	SnapshotActiveDeadline = 45 * time.Minute
 )
 
 // SandboxSnapshotReconciler converges one SandboxSnapshot: it resolves the
@@ -75,6 +87,14 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, request ctrl.
 	if snapshot.Status.Phase.Terminal() {
 		return ctrl.Result{}, nil
 	}
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	if exceeded, elapsed := snapshotDeadlineExceeded(&snapshot, now); exceeded {
+		return ctrl.Result{}, r.markSnapshotFailed(ctx, &snapshot, "SnapshotDeadlineExceeded",
+			fmt.Sprintf("snapshot did not reach a terminal phase within %s; reentrancy fence released, retry with a new request", elapsed.Round(time.Second)))
+	}
 
 	sandbox, result, err := r.resolveTarget(ctx, &snapshot)
 	if err != nil {
@@ -87,6 +107,25 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, request ctrl.
 		return r.reconcileTrigger(ctx, &snapshot, sandbox)
 	}
 	return r.reconcileObserve(ctx, &snapshot, sandbox)
+}
+
+// snapshotDeadlineExceeded reports whether a non-terminal snapshot has held
+// its fence past the pending (never admitted) or active (admitted but no
+// longer observable) deadline. The remaining time is returned for callers
+// that want to schedule a wakeup.
+func snapshotDeadlineExceeded(snapshot *apiv1alpha2.SandboxSnapshot, now time.Time) (bool, time.Duration) {
+	if snapshot.Status.Phase.Terminal() || snapshot.CreationTimestamp.IsZero() {
+		return false, 0
+	}
+	deadline := SnapshotActiveDeadline
+	if snapshot.Status.SnapshotID == "" {
+		deadline = SnapshotPendingDeadline
+	}
+	elapsed := now.Sub(snapshot.CreationTimestamp.Time)
+	if elapsed > deadline {
+		return true, elapsed
+	}
+	return false, deadline - elapsed
 }
 
 // resolveTarget loads and validates the target Sandbox. A nil result means
@@ -236,9 +275,18 @@ func (r *SandboxSnapshotReconciler) reconcileDeletion(ctx context.Context, snaps
 
 // waitSnapshotTerminal reports whether the in-flight task reached a terminal
 // phase on the Fastlet. The Fastlet never aborts a running dump, so deletion
-// deliberately waits instead of cancelling.
+// deliberately waits instead of cancelling — but a fence that outlived its
+// deadline (Fastlet lost with the task) is treated as done so object deletion
+// and the fence itself are never wedged.
 func (r *SandboxSnapshotReconciler) waitSnapshotTerminal(ctx context.Context, snapshot *apiv1alpha2.SandboxSnapshot) (bool, error) {
 	if snapshot.Status.Phase.Terminal() {
+		return true, nil
+	}
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	if exceeded, _ := snapshotDeadlineExceeded(snapshot, now); exceeded {
 		return true, nil
 	}
 	sandbox, result, err := r.resolveTarget(ctx, snapshot)
