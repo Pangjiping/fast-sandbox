@@ -61,6 +61,7 @@ type SandboxRef struct {
 
 // SandboxSnapshotSpec defines the desired snapshot. The spec is immutable:
 // a snapshot is one-shot; re-snapshotting requires a new object.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="SandboxSnapshot spec is immutable"
 type SandboxSnapshotSpec struct {
 	// SandboxRef is the running Sandbox to snapshot. The Sandbox must be
 	// Ready and assigned when the snapshot is triggered.
@@ -72,6 +73,10 @@ type SandboxSnapshotSpec struct {
 	// a later Sandbox create with image=TemplateName boots from the
 	// snapshot through the standard pull/restore chain. Unlike a
 	// SandboxTemplate build, no default sha256(image) index is written.
+	// The index key is global across namespaces: two concurrently running
+	// snapshots with the same TemplateName overwrite each other's artifacts
+	// (last writer wins), and FastPath's pre-check therefore rejects a
+	// non-terminal holder of a name cluster-wide.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*(/[a-zA-Z0-9._-]+)*(:[a-zA-Z0-9._-]{1,127})?$`
 	// +kubebuilder:validation:MaxLength=255

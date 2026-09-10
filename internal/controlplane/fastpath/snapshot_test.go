@@ -107,6 +107,28 @@ func TestCreateSandboxSnapshotReplaysIdempotently(t *testing.T) {
 	require.Len(t, list.Items, 1, "replay must not persist a second object")
 }
 
+func TestCreateSandboxSnapshotOmittedNamespaceReplayMatchesExplicit(t *testing.T) {
+	server, k8sClient, _ := newSnapshotServer(t)
+	server.DefaultNamespace = "tenant-default"
+	request := snapshotCreateRequest("snap-a", "app-v2")
+	request.Sandbox.NamespacedName.Namespace = ""
+	request.Sandbox.NamespacedName.Name = "sandbox-b" // lives in tenant-default
+	request.Sandbox.ExpectedUid = "sandbox-uid-b"
+	tenantSandbox := assignedReadySandbox(t, "sandbox-b", "sandbox-uid-b")
+	tenantSandbox.Namespace = "tenant-default"
+	require.NoError(t, k8sClient.Client.Create(context.Background(), tenantSandbox))
+
+	_, err := server.CreateSandboxSnapshot(context.Background(), request)
+	require.NoError(t, err)
+	// The explicit-namespace replay must resolve to the same spec hash.
+	request.Sandbox.NamespacedName.Namespace = "tenant-default"
+	_, err = server.CreateSandboxSnapshot(context.Background(), request)
+	require.NoError(t, err, "omitted-namespace replay must hash identically to the explicit form")
+	var list apiv1alpha2.SandboxSnapshotList
+	require.NoError(t, k8sClient.Client.List(context.Background(), &list, client.InNamespace("tenant-default")))
+	require.Len(t, list.Items, 1)
+}
+
 func TestCreateSandboxSnapshotRejectsConflictingReplay(t *testing.T) {
 	server, _, _ := newSnapshotServer(t)
 	_, err := server.CreateSandboxSnapshot(context.Background(), snapshotCreateRequest("snap-a", "app-v2"))
@@ -138,13 +160,26 @@ func TestCreateSandboxSnapshotRejectsNonTerminalPredecessor(t *testing.T) {
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 	require.Contains(t, err.Error(), "snap-first")
 
-	// Same template name on a different Sandbox is rejected too.
-	other := snapshotCreateRequest("snap-second", "app-v2")
+	// The template-name fence is cluster-wide: a non-terminal holder in
+	// another namespace on a different Sandbox is rejected too.
+	other := snapshotCreateRequest("snap-second", "app-v9")
 	other.Sandbox.NamespacedName.Name = "sandbox-b"
 	other.Sandbox.ExpectedUid = "sandbox-uid-b"
+	var foreign apiv1alpha2.SandboxSnapshot
+	foreign.Namespace = "other-ns"
+	foreign.Name = "snap-foreign"
+	foreign.Spec = apiv1alpha2.SandboxSnapshotSpec{
+		SandboxRef:   apiv1alpha2.SandboxRef{Name: "sandbox-x", Namespace: "other-ns", UID: "uid-x"},
+		TemplateName: "app-v9",
+	}
+	foreign.Status.Phase = apiv1alpha2.SandboxSnapshotPhaseCreating
+	require.NoError(t, server.K8sClient.Create(context.Background(), &foreign))
+	require.NoError(t, server.K8sClient.Status().Update(context.Background(), &foreign))
+
 	_, err = server.CreateSandboxSnapshot(context.Background(), other)
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 	require.Contains(t, err.Error(), "template name")
+	require.Contains(t, err.Error(), "other-ns/snap-foreign")
 }
 
 func TestCreateSandboxSnapshotAllowsRequestAfterTerminalPredecessor(t *testing.T) {

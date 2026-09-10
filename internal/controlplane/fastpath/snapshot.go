@@ -43,16 +43,17 @@ func validateTemplateName(name string) error {
 }
 
 // SnapshotSpecHash returns a deterministic digest of the immutable snapshot
-// intent. The transport-only request_id is excluded from the identity.
+// intent. The transport-only request_id is excluded from the identity. The
+// caller must have normalized the namespace (CreateSandboxSnapshot rewrites
+// an omitted namespace to the server default before hashing, mirroring
+// CreateSandbox), so an omitted-namespace request and its explicit replay
+// hash identically.
 func SnapshotSpecHash(request *fastpathv2.CreateSandboxSnapshotRequest) (string, error) {
 	if request == nil {
 		return "", errors.New("snapshot request is required")
 	}
 	normalized := proto.Clone(request).(*fastpathv2.CreateSandboxSnapshotRequest)
 	normalized.RequestId = ""
-	if normalized.Sandbox != nil && normalized.Sandbox.NamespacedName != nil && normalized.Sandbox.NamespacedName.Namespace == "" {
-		normalized.Sandbox.NamespacedName.Namespace = "fast-sandbox"
-	}
 	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(normalized)
 	if err != nil {
 		return "", err
@@ -93,6 +94,12 @@ func (s *Server) CreateSandboxSnapshot(ctx context.Context, request *fastpathv2.
 	if err := validateMetadata(request.Metadata); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	// Normalize the namespace on the request itself (CreateSandbox pattern)
+	// so the spec hash of an omitted-namespace request matches its explicit
+	// replay under a configured default namespace.
+	if request.Sandbox != nil && request.Sandbox.NamespacedName != nil && request.Sandbox.NamespacedName.Namespace == "" {
+		request.Sandbox.NamespacedName.Namespace = s.defaultNamespace()
+	}
 	sandbox, err := s.sandboxFromReference(ctx, request.Sandbox)
 	if err != nil {
 		return nil, err
@@ -107,7 +114,7 @@ func (s *Server) CreateSandboxSnapshot(ctx context.Context, request *fastpathv2.
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "hash snapshot request: %v", err)
 	}
-	if err := s.checkSnapshotReentrancy(ctx, sandbox, request.TemplateName, request.RequestId); err != nil {
+	if err := s.checkSnapshotReentrancy(ctx, sandbox, request.TemplateName, snapshotSelfKey(sandbox.Namespace, request.RequestId)); err != nil {
 		return nil, err
 	}
 	snapshot := snapshotFromCreateRequest(request, sandbox, specHash)
@@ -119,36 +126,43 @@ func (s *Server) CreateSandboxSnapshot(ctx context.Context, request *fastpathv2.
 }
 
 // checkSnapshotReentrancy rejects the request while any non-terminal snapshot
-// holds the same Sandbox or template name. It is a UX pre-check only: the
-// authoritative fence lives on the Fastlet, so the cache may lag a concurrent
-// create without breaking correctness.
-func (s *Server) checkSnapshotReentrancy(ctx context.Context, sandbox *apiv1alpha2.Sandbox, templateName, selfName string) error {
+// holds the same Sandbox or the same template name. The template-name check
+// is cluster-wide because the published image index is a global key
+// (index/<sha256(templateName)>.json): two namespaces snapshotting to one
+// name would silently overwrite each other's artifacts. This is a UX
+// pre-check only — the authoritative Sandbox fence lives on the Fastlet and
+// the cache may lag a concurrent create — so a residual cross-namespace race
+// degrades to last-writer-wins at publish time rather than breaking
+// correctness of a single snapshot.
+func (s *Server) checkSnapshotReentrancy(ctx context.Context, sandbox *apiv1alpha2.Sandbox, templateName, selfKey string) error {
 	reader := s.K8sClient
 	if s.RouteCache != nil {
 		reader = s.RouteCache
 	}
 	var list apiv1alpha2.SandboxSnapshotList
-	err := reader.List(ctx, &list, client.InNamespace(sandbox.Namespace))
+	err := reader.List(ctx, &list)
 	if err != nil && reader != s.K8sClient {
-		err = s.K8sClient.List(ctx, &list, client.InNamespace(sandbox.Namespace))
+		err = s.K8sClient.List(ctx, &list)
 	}
 	if err != nil {
 		return grpcKubernetesError(err)
 	}
 	for index := range list.Items {
 		item := &list.Items[index]
-		if item.Name == selfName || item.Status.Phase.Terminal() {
+		if snapshotSelfKey(item.Namespace, item.Name) == selfKey || item.Status.Phase.Terminal() {
 			continue
 		}
 		if item.Spec.SandboxRef.Namespace == sandbox.Namespace && item.Spec.SandboxRef.Name == sandbox.Name && item.Spec.SandboxRef.UID == sandbox.UID {
 			return status.Errorf(codes.FailedPrecondition, "Sandbox already has snapshot %q in phase %q; retry after it terminates", item.Name, item.Status.Phase)
 		}
 		if item.Spec.TemplateName == templateName {
-			return status.Errorf(codes.FailedPrecondition, "template name %q is held by snapshot %q in phase %q; retry after it terminates", templateName, item.Name, item.Status.Phase)
+			return status.Errorf(codes.FailedPrecondition, "template name %q is held by snapshot %s/%s in phase %q; retry after it terminates", templateName, item.Namespace, item.Name, item.Status.Phase)
 		}
 	}
 	return nil
 }
+
+func snapshotSelfKey(namespace, name string) string { return namespace + "/" + name }
 
 // acceptSnapshotIntent persists the snapshot intent idempotently: an
 // AlreadyExists with the same request-id and spec hash replays the persisted
@@ -226,8 +240,9 @@ func (s *Server) triggerSnapshot(ctx context.Context, snapshot *apiv1alpha2.Sand
 }
 
 // snapshotRejection classifies a Fastlet snapshot trigger failure. A
-// deterministic rejection terminates the snapshot (Failed); everything else is
-// retried by the Controller.
+// deterministic rejection terminates the snapshot (Failed); everything else —
+// including the transient ErrorDraining/ErrorInProgress states a rolling or
+// restarting Fastlet reports — is retried by the Controller.
 func snapshotRejection(err error) (codes.Code, string, bool) {
 	var failure *fastletapi.FastletError
 	if !errors.As(err, &failure) {
@@ -242,8 +257,6 @@ func snapshotRejection(err error) (codes.Code, string, bool) {
 		return codes.NotFound, failure.Error(), true
 	case fastletapi.ErrorConflict, fastletapi.ErrorStaleAssignment, fastletapi.ErrorStaleGeneration, fastletapi.ErrorGenerationFenced:
 		return codes.Aborted, failure.Error(), true
-	case fastletapi.ErrorDraining, fastletapi.ErrorInProgress:
-		return codes.FailedPrecondition, failure.Error(), true
 	default:
 		return codes.Unavailable, failure.Error(), false
 	}

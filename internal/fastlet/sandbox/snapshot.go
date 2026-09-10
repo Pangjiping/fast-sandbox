@@ -22,6 +22,10 @@ var snapshotWorkerTimeout = 30 * time.Minute
 // SandboxSnapshot UID. Tasks are deliberately ephemeral: a Fastlet restart
 // loses them and the Controller terminates the object (SnapshotLost) instead
 // of resuming a half-published artifact set (snapshots are non-reentrant).
+// Terminal tasks are retained until the object is deleted (the finalizer
+// cleanup path removes them): the map is bounded by the number of snapshots
+// ever taken toward this Fastlet since start, which is accepted as a small,
+// inspectable leak.
 type snapshotTask struct {
 	identity    fastletapi.SnapshotIdentity
 	snapshotID  string
@@ -117,11 +121,13 @@ func (m *SandboxManager) CreateSnapshot(_ context.Context, req *fastletapi.Creat
 	}
 	task := &snapshotTask{identity: req.Identity, snapshotID: snapshotID, phase: fastletapi.SnapshotPhasePending}
 	m.snapshots[req.Identity.SnapshotUID] = task
+	// Read the admitted status while still holding the lock: the worker
+	// goroutine mutates task fields under m.mu from here on.
+	status := task.status()
 	m.mu.Unlock()
 
 	m.recordDiagnostic(sandboxUID, "info", "snapshot", "pending", "snapshot task admitted; worker starting")
 	go m.runSnapshotWorker(snapshotter, task)
-	status := task.status()
 	return &fastletapi.CreateSnapshotResponse{Disposition: fastletapi.CreateDispositionCreated, Snapshot: &status}, nil
 }
 
@@ -177,6 +183,10 @@ func (m *SandboxManager) runSnapshotWorker(snapshotter RuntimeSnapshotter, task 
 		m.finishSnapshotTask(task, fastletapi.SnapshotPhaseFailed, message)
 		return
 	}
+	// SnapshotPhasePublishing is reserved: the firecracker driver
+	// implementation will report the artifact upload as a distinct stage
+	// once the runtime-agent publish path lands. This worker keeps the
+	// coarse Creating -> Succeeded/Failed projection until then.
 	m.mu.Lock()
 	task.result = result
 	m.mu.Unlock()
