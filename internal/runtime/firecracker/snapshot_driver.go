@@ -1,0 +1,316 @@
+package firecracker
+
+// snapshot_driver.go implements the optional Snapshotter contract
+// (runtimecontract.Snapshotter) for the live firecracker driver: pause the
+// running microVM, dump the writable instance rootfs plus the vmstate/memory
+// pair, resume the VM on every path, assemble a restore-compatible manifest
+// (byte-format shared with the golden-image builder via internal/artifacts),
+// and publish the set through the node runtime-agent. Local mode (no agent)
+// refuses snapshots: publication requires the agent's store credentials.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"fast-sandbox/internal/artifacts"
+	runtimecontract "fast-sandbox/internal/runtime/contract"
+
+	"k8s.io/klog/v2"
+)
+
+// snapshotStagingDir holds per-snapshot staging directories:
+//
+//	<StateRoot>/snapshots/<snapshotID>/{rootfs.ext4, vmstate.snap, memory.snap, manifest.json, SHA256SUMS}
+const snapshotStagingDir = "snapshots"
+
+// publishedRootfsName is the rootfs file name in a published artifact set.
+// The instance drive file is rootfs.img; consumers (the agent pull layer)
+// rename it back on arrival, exactly as for builder-produced sets.
+const publishedRootfsName = "rootfs.ext4"
+
+// jailerSnapshotDumpDir is the directory (inside the jail root) the jailed
+// VMM dumps its snapshot files into: a chrooted VMM cannot write outside its
+// jail. The driver moves the files into the staging directory after the dump.
+const jailerSnapshotDumpDir = "snapshots"
+
+// snapshotManifestName is the commit-point document of the artifact set.
+const snapshotManifestName = "manifest.json"
+
+// Driver implements the optional snapshot extension.
+var _ runtimecontract.Snapshotter = (*Driver)(nil)
+
+// snapshotMu serializes the pause/dump/resume window across all Sandboxes of
+// this driver: only one VM on the node is ever paused at a time. Manifest
+// assembly and publication run outside the lock.
+var snapshotMu sync.Mutex
+
+// CreateSnapshot snapshots a running Sandbox in place and publishes the
+// artifact set under the template name. The VM is always resumed; a failed
+// dump leaves the Sandbox running and discards the staging directory without
+// publishing anything.
+func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.SnapshotInput) (*runtimecontract.SnapshotResult, error) {
+	if input == nil || input.SandboxID == "" || input.SnapshotID == "" || input.TemplateName == "" {
+		return nil, fmt.Errorf("%w: sandboxId, snapshotId, and templateName are required", ErrInvalidConfig)
+	}
+	if err := validateSandboxID(input.SnapshotID); err != nil {
+		return nil, fmt.Errorf("%w: invalid snapshot id %q", ErrInvalidConfig, input.SnapshotID)
+	}
+	d.mu.RLock()
+	plan := dumpPlan{
+		stateRoot:   d.config.StateRoot,
+		binaryName:  filepath.Base(d.config.BinaryPath),
+		sandboxID:   input.SandboxID,
+		snapshotID:  input.SnapshotID,
+		jailed:      d.config.JailerPath != "",
+		bootTimeout: d.config.BootTimeoutSeconds,
+	}
+	firecrackerBinary := d.config.BinaryPath
+	d.mu.RUnlock()
+	plan.sandboxDir = filepath.Join(plan.stateRoot, sandboxStateDir, plan.sandboxID)
+	plan.staging = filepath.Join(plan.stateRoot, snapshotStagingDir, plan.snapshotID)
+	if err := os.RemoveAll(plan.staging); err != nil {
+		return nil, fmt.Errorf("clear stale snapshot staging %s: %w", plan.staging, err)
+	}
+
+	dumpStarted := time.Now()
+	dumpErr := d.dumpRunningSandbox(ctx, plan)
+	if dumpErr != nil {
+		_ = os.RemoveAll(plan.staging)
+		return nil, dumpErr
+	}
+	klog.InfoS("firecracker sandbox dumped",
+		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "pauseWindow", time.Since(dumpStarted).String())
+
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, firecrackerBinary)
+	if err != nil {
+		_ = os.RemoveAll(plan.staging)
+		return nil, err
+	}
+
+	client, err := d.agentClientOrNil()
+	if err != nil {
+		_ = os.RemoveAll(plan.staging)
+		return nil, err
+	}
+	if client == nil {
+		_ = os.RemoveAll(plan.staging)
+		return nil, fmt.Errorf("%w: live snapshots require the firecracker runtime-agent for artifact publication", ErrInvalidConfig)
+	}
+	publishStarted := time.Now()
+	outcome, publishErr := client.PublishImage(ctx, "snapshot-"+plan.snapshotID, input.TemplateName, plan.staging)
+	_ = os.RemoveAll(plan.staging)
+	if publishErr != nil {
+		return nil, fmt.Errorf("publish snapshot artifacts: %w", publishErr)
+	}
+	klog.InfoS("firecracker snapshot published",
+		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "templateName", input.TemplateName,
+		"manifestRef", outcome.ManifestRef, "sizeBytes", sizeBytes, "publish", time.Since(publishStarted).String())
+	return &runtimecontract.SnapshotResult{
+		SnapshotID:     input.SnapshotID,
+		ManifestRef:    outcome.ManifestRef,
+		ArtifactDigest: outcome.ArtifactDigest,
+		SizeBytes:      sizeBytes,
+	}, nil
+}
+
+// DeleteSnapshot discards the staging directory of a snapshot. It never
+// unpublishes stored objects. A missing directory is a successful no-op.
+func (d *Driver) DeleteSnapshot(_ context.Context, snapshotID string) error {
+	if err := validateSandboxID(snapshotID); err != nil {
+		return fmt.Errorf("%w: invalid snapshot id %q", ErrInvalidConfig, snapshotID)
+	}
+	d.mu.RLock()
+	stateRoot := d.config.StateRoot
+	d.mu.RUnlock()
+	staging := filepath.Join(stateRoot, snapshotStagingDir, snapshotID)
+	if err := os.RemoveAll(staging); err != nil {
+		return fmt.Errorf("remove snapshot staging %s: %w", staging, err)
+	}
+	return nil
+}
+
+// dumpPlan carries one serialized pause/dump/resume execution.
+type dumpPlan struct {
+	stateRoot   string
+	binaryName  string
+	sandboxID   string
+	snapshotID  string
+	sandboxDir  string
+	staging     string
+	jailed      bool
+	bootTimeout int32
+}
+
+// jailRoot returns the jail root of the plan's Sandbox (jailer mode only).
+func (p dumpPlan) jailRoot() string {
+	return jailerRoot(filepath.Join(p.stateRoot, jailerChrootBaseDir), p.binaryName, truncatedSandboxID(p.sandboxID))
+}
+
+// dumpRunningSandbox performs the pause/dump/resume window. The rootfs copy
+// and the vmstate/memory dump both happen inside the pause window for
+// consistency; the Sandbox keeps running on every failure path, with a
+// failed resume joined after (and never masking) the dump error.
+func (d *Driver) dumpRunningSandbox(ctx context.Context, plan dumpPlan) error {
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
+
+	state, err := loadState(plan.sandboxDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %s", runtimecontract.ErrSandboxNotFound, plan.sandboxID)
+		}
+		return err
+	}
+	if state.Phase != PhaseRunning {
+		return fmt.Errorf("%w: sandbox runtime is %q, must be Running", ErrInvalidConfig, state.Phase)
+	}
+	if state.APIAddress == "" {
+		return fmt.Errorf("%w: sandbox state carries no API socket", ErrInvalidConfig)
+	}
+	if err := os.MkdirAll(plan.staging, 0o750); err != nil {
+		return err
+	}
+
+	// The instance root drive: the state-directory copy in direct mode, the
+	// jail-root copy in jailer mode.
+	rootfs := filepath.Join(plan.sandboxDir, instanceRootfsName)
+	// Snapshot paths as the (possibly jailed) VMM sees them.
+	vmstateTarget := filepath.Join(plan.staging, vmstateSnapshotName)
+	memoryTarget := filepath.Join(plan.staging, memorySnapshotName)
+	dumpDir := plan.staging
+	if plan.jailed {
+		rootfs = filepath.Join(plan.jailRoot(), rootfsImageName)
+		dumpDir = filepath.Join(plan.jailRoot(), jailerSnapshotDumpDir)
+		vmstateTarget = filepath.Join(dumpDir, vmstateSnapshotName)
+		memoryTarget = filepath.Join(dumpDir, memorySnapshotName)
+		if err := os.MkdirAll(dumpDir, 0o750); err != nil {
+			return err
+		}
+	}
+
+	client := d.newClient(state.APIAddress)
+	defer client.Close()
+	if err := client.Pause(ctx); err != nil {
+		return fmt.Errorf("pause microVM: %w", err)
+	}
+	dumpErr := func() error {
+		if err := copyReflinkOrCopy(rootfs, filepath.Join(plan.staging, publishedRootfsName)); err != nil {
+			return fmt.Errorf("copy instance rootfs: %w", err)
+		}
+		if err := client.CreateSnapshot(ctx, SnapshotCreateRequest{
+			SnapshotType: "Full",
+			SnapshotPath: vmstateTarget,
+			MemFilePath:  memoryTarget,
+		}); err != nil {
+			return fmt.Errorf("create Firecracker snapshot: %w", err)
+		}
+		return nil
+	}()
+	// The VM resumes regardless of the dump outcome.
+	if _, resumeErr := resumeVM(ctx, client, plan.bootTimeout); resumeErr != nil {
+		if dumpErr != nil {
+			return errors.Join(dumpErr, fmt.Errorf("resume microVM after failed dump: %w", resumeErr))
+		}
+		return fmt.Errorf("resume microVM after snapshot: %w", resumeErr)
+	}
+	if dumpErr != nil {
+		return dumpErr
+	}
+	if plan.jailed {
+		// Move the chroot-local dump into the staging directory: the jailed
+		// VMM wrote under its own credentials, but the files are regular and
+		// movable by this (privileged) driver.
+		for _, name := range []string{vmstateSnapshotName, memorySnapshotName} {
+			if err := os.Rename(filepath.Join(dumpDir, name), filepath.Join(plan.staging, name)); err != nil {
+				return fmt.Errorf("move dumped %s out of the jail root: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// assembleSnapshotManifest builds the restore-compatible manifest of the
+// dumped set: the machine/guestNetwork/kernel/envs facts baked into the
+// SOURCE image manifest are copied verbatim (they describe the vmstate
+// lineage and are what restore validation checks), while the compatibility
+// tuple, files, rootfsSize, format, and validation describe this dump. It
+// returns the total logical size of the artifact set.
+func assembleSnapshotManifest(stateRoot, staging, sandboxDir, firecrackerBinary string) (int64, error) {
+	state, err := loadState(sandboxDir)
+	if err != nil {
+		return 0, err
+	}
+	document, err := readSourceManifest(stateRoot, state.Config.Spec.Image)
+	if err != nil {
+		return 0, err
+	}
+
+	cache := map[string]string{}
+	files := map[string]any{}
+	var sizeBytes, rootfsSize int64
+	for _, name := range []string{publishedRootfsName, vmstateSnapshotName, memorySnapshotName} {
+		entry, err := artifacts.FileEntry(filepath.Join(staging, name), cache)
+		if err != nil {
+			return 0, fmt.Errorf("checksum %s: %w", name, err)
+		}
+		files[name] = entry
+		if entrySize, ok := entry["sizeBytes"].(int64); ok {
+			sizeBytes += entrySize
+			if name == publishedRootfsName {
+				rootfsSize = entrySize
+			}
+		}
+	}
+	if err := artifacts.WriteSHA256SUMS(staging, []string{publishedRootfsName, vmstateSnapshotName, memorySnapshotName}, cache); err != nil {
+		return 0, err
+	}
+
+	document["schemaVersion"] = 1
+	document["runtime"] = "firecracker"
+	document["sourceImage"] = state.Config.Spec.Image
+	document["compatibility"] = map[string]any{
+		"firecrackerVersion": artifacts.FirecrackerVersion(firecrackerBinary),
+		"hostKernel":         artifacts.HostKernelRelease(),
+		"cpuModel":           artifacts.HostCPUModel(),
+	}
+	document["files"] = files
+	document["rootfsSize"] = fmt.Sprintf("%dG", artifacts.SizeGiB(rootfsSize))
+	document["format"] = "native"
+	document["validation"] = map[string]any{"booted": true, "restored": false}
+
+	manifestBytes, err := artifacts.MarshalManifest(document)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.WriteFile(filepath.Join(staging, snapshotManifestName), manifestBytes, 0o644); err != nil {
+		return 0, err
+	}
+	return sizeBytes, nil
+}
+
+// readSourceManifest loads the cached manifest of the image the Sandbox
+// boots from. machine and guestNetwork are required: restore validation
+// rejects a snapshot manifest without them, so a hand-seeded cache cannot
+// produce a restorable snapshot.
+func readSourceManifest(stateRoot, image string) (map[string]any, error) {
+	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
+	if err != nil {
+		return nil, fmt.Errorf("read source image manifest: %w", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(payload, &document); err != nil {
+		return nil, fmt.Errorf("decode source image manifest: %w", err)
+	}
+	for _, key := range []string{"machine", "guestNetwork"} {
+		if _, ok := document[key]; !ok {
+			return nil, fmt.Errorf("%w: source image manifest carries no %s; a restorable snapshot cannot be published", ErrInvalidConfig, key)
+		}
+	}
+	return document, nil
+}

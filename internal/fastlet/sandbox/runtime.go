@@ -18,6 +18,7 @@ type ImageDelivery = runtimecontract.ImageDelivery
 type ImageDeliveryStatus = runtimecontract.ImageDeliveryStatus
 type RuntimeSnapshotter = runtimecontract.Snapshotter
 type SnapshotResult = runtimecontract.SnapshotResult
+type RuntimeSnapshotInput = runtimecontract.SnapshotInput
 
 const (
 	ImageDelivering = runtimecontract.ImageDelivering

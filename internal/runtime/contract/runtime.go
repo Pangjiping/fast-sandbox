@@ -90,17 +90,29 @@ type SnapshotResult struct {
 	SizeBytes int64
 }
 
+// SnapshotInput carries one snapshot request to the runtime driver.
+type SnapshotInput struct {
+	// SandboxID identifies the running Sandbox to snapshot.
+	SandboxID string
+	// SnapshotID is the node-local identity of the snapshot; it scopes the
+	// staging directory and any cleanup.
+	SnapshotID string
+	// TemplateName is the artifact-store index key the artifact set is
+	// published under.
+	TemplateName string
+}
+
 // Snapshotter is the optional runtime extension for snapshotting a running
 // Sandbox in place. Runtimes that cannot snapshot (containerd, kata, boxlite)
 // simply do not implement it; Fastlet then rejects the request with
 // ErrSnapshotUnsupported instead of attempting a partial fallback.
 //
-// CreateSnapshot is one-shot per (sandboxID, snapshotID) pair and blocking;
+// CreateSnapshot is one-shot per (SandboxID, SnapshotID) pair and blocking;
 // it must resume the Sandbox on every failure path. Callers run it off the
 // admission path in a dedicated worker. DeleteSnapshot discards node-local
 // artifacts of a previous snapshot; it never unpublishes stored objects.
 type Snapshotter interface {
-	CreateSnapshot(ctx context.Context, sandboxID, snapshotID string) (*SnapshotResult, error)
+	CreateSnapshot(ctx context.Context, input *SnapshotInput) (*SnapshotResult, error)
 	DeleteSnapshot(ctx context.Context, snapshotID string) error
 }
 
