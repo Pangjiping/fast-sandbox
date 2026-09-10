@@ -77,6 +77,10 @@ spec:
                   a later Sandbox create with image=TemplateName boots from the
                   snapshot through the standard pull/restore chain. Unlike a
                   SandboxTemplate build, no default sha256(image) index is written.
+                  The index key is global across namespaces: two concurrently running
+                  snapshots with the same TemplateName overwrite each other's artifacts
+                  (last writer wins), and FastPath's pre-check therefore rejects a
+                  non-terminal holder of a name cluster-wide.
                 maxLength: 255
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*(/[a-zA-Z0-9._-]+)*(:[a-zA-Z0-9._-]{1,127})?$
                 type: string
@@ -84,6 +88,9 @@ spec:
             - sandboxRef
             - templateName
             type: object
+            x-kubernetes-validations:
+            - message: SandboxSnapshot spec is immutable
+              rule: self == oldSelf
           status:
             description: |-
               SandboxSnapshotStatus reports the observed state of one snapshot attempt.

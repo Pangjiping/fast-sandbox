@@ -154,6 +154,25 @@ func TestSnapshotReconcileDeterministicRejectionFails(t *testing.T) {
 	require.Equal(t, "SnapshotInProgress", snapshotCompletedCondition(t, current).Reason)
 }
 
+func TestSnapshotReconcileDrainingIsTransientNotFailed(t *testing.T) {
+	harness, _ := newSnapshotReconcilerHarness(t)
+	harness.fastlet.mu.Lock()
+	harness.fastlet.snapshotCreateErr = &fastletapi.FastletError{Code: fastletapi.ErrorDraining, Message: "rollout in progress"}
+	harness.fastlet.mu.Unlock()
+
+	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	result, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
+	require.NoError(t, err)
+	require.Equal(t, SnapshotRetryInterval, result.RequeueAfter, "draining keeps the intent Pending")
+	current := getSnapshot(t, harness, "snap-a")
+	require.Equal(t, apiv1alpha2.SandboxSnapshotPhasePending, current.Status.Phase)
+	for _, condition := range current.Status.Conditions {
+		require.NotEqual(t, apiv1alpha2.SandboxSnapshotConditionCompleted, condition.Type,
+			"a transient drain must not terminate the one-shot snapshot")
+	}
+}
+
 func TestSnapshotReconcileLostTaskFails(t *testing.T) {
 	harness, _ := newSnapshotReconcilerHarness(t)
 	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))

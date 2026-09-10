@@ -172,8 +172,14 @@ func (r *SandboxSnapshotReconciler) handleSnapshotCallError(ctx context.Context,
 		case fastletapi.ErrorSnapshotInProgress, fastletapi.ErrorSnapshotUnsupported, fastletapi.ErrorNotFound,
 			fastletapi.ErrorConflict, fastletapi.ErrorStaleAssignment, fastletapi.ErrorStaleGeneration, fastletapi.ErrorGenerationFenced:
 			return ctrl.Result{}, r.markSnapshotFailed(ctx, snapshot, string(failure.Code), failure.Message)
-		case fastletapi.ErrorInProgress, fastletapi.ErrorDraining:
-			return ctrl.Result{}, r.markSnapshotFailed(ctx, snapshot, string(failure.Code), failure.Message)
+		case fastletapi.ErrorDraining, fastletapi.ErrorInProgress:
+			// Draining and in-progress states are transient (rollout,
+			// restart): keep the intent Pending instead of terminating a
+			// one-shot snapshot over an ambient condition.
+			if statusErr := r.markSnapshotPending(ctx, snapshot, string(failure.Code), failure.Message); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: SnapshotRetryInterval}, nil
 		}
 	}
 	return ctrl.Result{RequeueAfter: SnapshotObservationPollInterval}, err
