@@ -16,6 +16,7 @@ type snapshotRuntime struct {
 	*admissionRuntime
 	mu          sync.Mutex
 	createCalls int
+	lastInput   *RuntimeSnapshotInput
 	createErr   error
 	block       chan struct{}
 	deleted     []string
@@ -25,9 +26,10 @@ func newSnapshotRuntime() *snapshotRuntime {
 	return &snapshotRuntime{admissionRuntime: newAdmissionRuntime()}
 }
 
-func (r *snapshotRuntime) CreateSnapshot(_ context.Context, _, snapshotID string) (*SnapshotResult, error) {
+func (r *snapshotRuntime) CreateSnapshot(_ context.Context, input *RuntimeSnapshotInput) (*SnapshotResult, error) {
 	r.mu.Lock()
 	r.createCalls++
+	r.lastInput = input
 	err := r.createErr
 	block := r.block
 	r.mu.Unlock()
@@ -38,8 +40,8 @@ func (r *snapshotRuntime) CreateSnapshot(_ context.Context, _, snapshotID string
 		return nil, err
 	}
 	return &SnapshotResult{
-		SnapshotID: snapshotID, ManifestRef: "s3://bucket/publish/" + snapshotID[:8] + "/manifest.json",
-		ArtifactDigest: "digest-" + snapshotID, SizeBytes: 1234,
+		SnapshotID: input.SnapshotID, ManifestRef: "s3://bucket/publish/" + input.SnapshotID[:8] + "/manifest.json",
+		ArtifactDigest: "digest-" + input.SnapshotID, SizeBytes: 1234,
 	}, nil
 }
 

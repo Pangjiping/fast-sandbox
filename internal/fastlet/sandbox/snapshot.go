@@ -27,13 +27,14 @@ var snapshotWorkerTimeout = 30 * time.Minute
 // ever taken toward this Fastlet since start, which is accepted as a small,
 // inspectable leak.
 type snapshotTask struct {
-	identity    fastletapi.SnapshotIdentity
-	snapshotID  string
-	phase       fastletapi.SnapshotPhase
-	message     string
-	result      *SnapshotResult
-	startedAt   time.Time
-	completedAt time.Time
+	identity     fastletapi.SnapshotIdentity
+	templateName string
+	snapshotID   string
+	phase        fastletapi.SnapshotPhase
+	message      string
+	result       *SnapshotResult
+	startedAt    time.Time
+	completedAt  time.Time
 }
 
 func (t *snapshotTask) status() fastletapi.SnapshotStatus {
@@ -119,7 +120,7 @@ func (m *SandboxManager) CreateSnapshot(_ context.Context, req *fastletapi.Creat
 		return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, fastletErrorWithCause(fastletapi.ErrorUnknownOutcome,
 			"generate snapshot id: "+err.Error(), true, err))
 	}
-	task := &snapshotTask{identity: req.Identity, snapshotID: snapshotID, phase: fastletapi.SnapshotPhasePending}
+	task := &snapshotTask{identity: req.Identity, templateName: req.Snapshot.TemplateName, snapshotID: snapshotID, phase: fastletapi.SnapshotPhasePending}
 	m.snapshots[req.Identity.SnapshotUID] = task
 	// Read the admitted status while still holding the lock: the worker
 	// goroutine mutates task fields under m.mu from here on.
@@ -174,7 +175,15 @@ func (m *SandboxManager) runSnapshotWorker(snapshotter RuntimeSnapshotter, task 
 	}
 
 	m.setSnapshotPhase(task, fastletapi.SnapshotPhaseCreating, "")
-	result, err := snapshotter.CreateSnapshot(ctx, sandboxUID, task.snapshotID)
+	// SnapshotPhasePublishing is reserved: the firecracker driver reports
+	// the artifact upload as a distinct stage once finer-grained progress
+	// lands; this worker keeps the coarse Creating -> Succeeded/Failed
+	// projection.
+	result, err := snapshotter.CreateSnapshot(ctx, &RuntimeSnapshotInput{
+		SandboxID:    sandboxUID,
+		SnapshotID:   task.snapshotID,
+		TemplateName: task.templateName,
+	})
 	if err != nil || result == nil {
 		message := "snapshot dump failed"
 		if err != nil {
