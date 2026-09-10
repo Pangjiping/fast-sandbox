@@ -76,6 +76,34 @@ type ImageDelivery interface {
 	DeliverImage(ctx context.Context, image string) (ImageDeliveryStatus, error)
 }
 
+// SnapshotResult reports the artifact set produced by one snapshot.
+type SnapshotResult struct {
+	// SnapshotID is the node-local identity of the snapshot; it scopes the
+	// on-disk staging directory and any cleanup.
+	SnapshotID string
+	// ManifestRef locates the published manifest in the artifact store
+	// (SandboxTemplate layout), e.g. s3://bucket/prefix/<digest>/manifest.json.
+	ManifestRef string
+	// ArtifactDigest is the sha256 of the published manifest document.
+	ArtifactDigest string
+	// SizeBytes is the total logical size of the artifact set.
+	SizeBytes int64
+}
+
+// Snapshotter is the optional runtime extension for snapshotting a running
+// Sandbox in place. Runtimes that cannot snapshot (containerd, kata, boxlite)
+// simply do not implement it; Fastlet then rejects the request with
+// ErrSnapshotUnsupported instead of attempting a partial fallback.
+//
+// CreateSnapshot is one-shot per (sandboxID, snapshotID) pair and blocking;
+// it must resume the Sandbox on every failure path. Callers run it off the
+// admission path in a dedicated worker. DeleteSnapshot discards node-local
+// artifacts of a previous snapshot; it never unpublishes stored objects.
+type Snapshotter interface {
+	CreateSnapshot(ctx context.Context, sandboxID, snapshotID string) (*SnapshotResult, error)
+	DeleteSnapshot(ctx context.Context, snapshotID string) error
+}
+
 type ResourceRecoverer interface {
 	RecoverRuntimeResources(ctx context.Context, managed []*Metadata) error
 }

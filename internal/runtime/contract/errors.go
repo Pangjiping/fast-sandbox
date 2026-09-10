@@ -17,4 +17,7 @@ var (
 	// firecracker runtime-agent pull layer so both can fail a create with
 	// the same sentinel.
 	ErrImageNotReady = errors.New("rootfs image is not ready in the local cache")
+	// ErrSnapshotUnsupported reports that the runtime driver does not
+	// implement the optional Snapshotter extension.
+	ErrSnapshotUnsupported = errors.New("runtime does not support sandbox snapshots")
 )
