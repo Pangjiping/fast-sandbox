@@ -3246,12 +3246,31 @@ snapshot_validate_artifacts() {
 # snapshot_restore boots a NEW sandbox whose image IS the snapshot's template
 # name: the agent pull resolves it through the index this run published — the
 # end-to-end proof that the snapshot is restorable.
+# snapshot_restore_progress prints the sandbox's current condition so a slow
+# cold pull (multi-GiB artifact set through the agent) is visible in the log.
+snapshot_restore_progress() { # sandbox
+	local message
+	message="$(kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)"
+	log "restore progress: ${message:-<no condition yet>}"
+}
+
 snapshot_restore() {
-	local t0
+	local t0 elapsed=0
 	t0="$(now_ms)"
 	fastctl_run_sandbox "$SNAPSHOT_RESTORE" "$SNAPSHOT_TEMPLATE"
 	snapshot_record "restore_run_cmd_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
-	wait_for "restored sandbox $SNAPSHOT_RESTORE Ready" 300 sandbox_ready "$SNAPSHOT_RESTORE"
+	# The restored sandbox cold-pulls the just-published 3.5GiB artifact set
+	# through the agent (DART with direct-S3 fallback): allow 10 minutes and
+	# surface the Ready condition every 15s instead of blocking silently.
+	until sandbox_ready "$SNAPSHOT_RESTORE"; do
+		if (( elapsed % 15 == 0 )); then
+			snapshot_restore_progress "$SNAPSHOT_RESTORE"
+		fi
+		sleep 2
+		elapsed=$((elapsed + 2))
+		[[ "$elapsed" -ge 600 ]] && fail "restored sandbox $SNAPSHOT_RESTORE not Ready after 600s"
+	done
+	pass "restored sandbox $SNAPSHOT_RESTORE Ready"
 	snapshot_record "restore_to_ready_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
 	wait_for "execd /ping on restored sandbox" 120 probe_execd "$SNAPSHOT_RESTORE"
 	snapshot_record "restore_first_ping_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
