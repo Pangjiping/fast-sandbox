@@ -108,7 +108,14 @@ func (s *Server) CreateSandboxSnapshot(ctx context.Context, request *fastpathv2.
 		RequestID: request.RequestId, Namespace: sandbox.Namespace, SandboxName: sandbox.Name, SandboxUID: string(sandbox.UID),
 	})
 	if sandbox.Status.Runtime.State != apiv1alpha2.RuntimeReady {
-		return nil, status.Errorf(codes.FailedPrecondition, "Sandbox runtime is %q; snapshot requires a Ready Sandbox", sandbox.Status.Runtime.State)
+		// The CR status is a lagging projection: a Sandbox created with
+		// completion=READY can be serving while the reconciler has not
+		// written Ready yet. Confirm against the assigned fastlet (the
+		// authoritative runtime observation) before rejecting.
+		live, _, _, inspectErr := s.inspectAssignedSandbox(ctx, sandbox)
+		if inspectErr != nil || live == nil || live.Runtime == nil || live.Runtime.State != fastpathv2.RuntimeState_RUNTIME_STATE_READY {
+			return nil, status.Errorf(codes.FailedPrecondition, "Sandbox runtime is %q; snapshot requires a Ready Sandbox", sandbox.Status.Runtime.State)
+		}
 	}
 	specHash, err := SnapshotSpecHash(request)
 	if err != nil {
