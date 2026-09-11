@@ -21,10 +21,10 @@
 #   ./scripts/integration-env.sh up --auto-clean   # down automatically on failure
 #
 # Environment overrides (all optional):
-#   WORK (script state/logs/caches; default $PWD/.integration-env — point
-#   it at /data to keep the root disk clean),
-#   DOCKER_DATA_ROOT (opt-in /var/lib/docker relocation, e.g. /data/docker:
-#   restarts docker, existing images are re-pulled),
+#   WORK (script state/logs/caches; default /data/fast-sandbox-env when
+#   /data exists, else $PWD/.integration-env),
+#   DOCKER_DATA_ROOT (default /data/docker when /data exists; opt OUT with
+#   DOCKER_DATA_ROOT= — restarts docker, existing images are re-pulled),
 #   KIND_CLUSTER, MINIO_PORT, MINIO_AK, MINIO_SK, MINIO_IMAGE,
 #   MINIO_ENDPOINT, MINIO_DATA (default /data/fast-sandbox-minio),
 #   XFS_LOOP_FILE (default /data/fast-sandbox.img),
@@ -42,7 +42,16 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${WORK:-$PWD/.integration-env}"
+# Default the whole environment to /data when the host has it: run state,
+# logs, helper binaries, Go caches, the MinIO data directory, the XFS loop
+# image, and (below) the docker data-root all grow with the workload, which
+# a small root disk cannot absorb. Hosts without /data fall back to the
+# repo workdir.
+if [[ -d /data ]] && [[ -z "${WORK:-}" ]]; then
+	WORK="/data/fast-sandbox-env"
+else
+	WORK="${WORK:-$PWD/.integration-env}"
+fi
 LOGS_DIR="$WORK/logs"
 GEN_DIR="$REPO_ROOT/.integration-env-gen"
 
@@ -436,7 +445,13 @@ EOF
 # root disk. Opt-in: restarting docker affects everything running on the
 # host, and existing images are NOT migrated (they are re-pulled/rebuilt).
 ensure_docker_data_root() {
-	[[ -n "${DOCKER_DATA_ROOT:-}" ]] || return 0
+	# Opt-out with DOCKER_DATA_ROOT= (empty): hosts that must keep
+	# /var/lib/docker on the root filesystem set it explicitly empty.
+	if [[ -z "${DOCKER_DATA_ROOT+x}" ]]; then
+		[[ -d /data ]] && DOCKER_DATA_ROOT="/data/docker" || return 0
+	elif [[ -z "$DOCKER_DATA_ROOT" ]]; then
+		return 0
+	fi
 	local current cfg=/etc/docker/daemon.json tmp
 	current="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
 	[[ "$current" == "$DOCKER_DATA_ROOT" ]] && return 0
