@@ -62,6 +62,59 @@ func (f *snapshotAgentFake) PublishImage(_ context.Context, _, key, dir string) 
 	return PublishOutcome{ManifestRef: "s3://bucket/publish/0123456789abcdef/manifest.json", ArtifactDigest: "digest-" + key}, nil
 }
 
+// withSnapshotSpill points the driver at a per-test spill root.
+func withSnapshotSpill(t *testing.T) string {
+	t.Helper()
+	spill := t.TempDir()
+	t.Setenv("FAST_SANDBOX_SNAPSHOT_SPILL_DIR", spill)
+	return spill
+}
+
+func TestCreateSnapshotSpillsDumpOutsideStateRoot(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	spill := withSnapshotSpill(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+
+	result, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "digest-app-v2", result.ArtifactDigest)
+
+	// The dump targeted the spill area (absolute paths in direct mode).
+	require.Len(t, fixture.server.snapshotDumps, 1)
+	require.Equal(t, filepath.Join(spill, "snap-1", jailedDumpVMStateName), fixture.server.snapshotDumps[0].SnapshotPath)
+	require.Equal(t, filepath.Join(spill, "snap-1", jailedDumpMemoryName), fixture.server.snapshotDumps[0].MemFilePath)
+
+	// The relocation landed the artifacts in the publish staging: the
+	// agent-side manifest assembly saw all three files.
+	require.Len(t, agent.manifest["files"].(map[string]any), 3)
+
+	// The spill area is empty again and no dump leaked into the staging
+	// placement the driver itself controls (staging is fully removed after
+	// publication by CreateSnapshot).
+	entries, readErr := os.ReadDir(spill)
+	require.NoError(t, readErr)
+	require.Empty(t, entries, "the per-snapshot spill directory is removed")
+}
+
+func TestCreateSnapshotFallsBackWhenSpillUnavailable(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	// A spill root that does not exist: the capacity guard fails and the
+	// dump falls back to the staging directory (legacy absolute paths).
+	t.Setenv("FAST_SANDBOX_SNAPSHOT_SPILL_DIR", filepath.Join(t.TempDir(), "missing"))
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
+	})
+	require.NoError(t, err)
+	require.Len(t, fixture.server.snapshotDumps, 1)
+	require.Equal(t, filepath.Join(fixture.stateRoot, snapshotStagingDir, "snap-1", vmstateSnapshotName),
+		fixture.server.snapshotDumps[0].SnapshotPath)
+	require.Len(t, agent.manifest["files"].(map[string]any), 3)
+}
+
 func newSnapshotFixture(t *testing.T) (*driverFixture, *snapshotAgentFake) {
 	t.Helper()
 	fixture := newSnapshotDriverFixture(t)

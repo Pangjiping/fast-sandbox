@@ -15,7 +15,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"fast-sandbox/internal/artifacts"
@@ -49,6 +51,16 @@ const (
 // snapshotManifestName is the commit-point document of the artifact set.
 const snapshotManifestName = "manifest.json"
 
+// snapshotSpillDirEnv names a fast local staging area (tmpfs, an emptyDir
+// with medium: Memory, or a local NVMe path) mounted into the fastlet. When
+// set (and roomy enough), the paused VMM dumps vmstate/memory THERE and the
+// driver moves the files to the publish staging after the resume — the
+// memory dump then pays tmpfs bandwidth instead of the (often
+// network-backed) StateRoot filesystem, shrinking the business-visible
+// pause window from seconds to sub-second. Empty (default) keeps the
+// legacy direct-to-staging dump.
+const snapshotSpillDirEnv = "FAST_SANDBOX_SNAPSHOT_SPILL_DIR"
+
 // Driver implements the optional snapshot extension.
 var _ runtimecontract.Snapshotter = (*Driver)(nil)
 
@@ -76,6 +88,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		snapshotID:  input.SnapshotID,
 		jailed:      d.config.JailerPath != "",
 		bootTimeout: d.config.BootTimeoutSeconds,
+		spillRoot:   d.snapshotSpillRoot(),
 	}
 	firecrackerBinary := d.config.BinaryPath
 	d.mu.RUnlock()
@@ -85,14 +98,15 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, fmt.Errorf("clear stale snapshot staging %s: %w", plan.staging, err)
 	}
 
-	dumpStarted := time.Now()
-	dumpErr := d.dumpRunningSandbox(ctx, plan)
+	dumpErr := d.dumpRunningSandbox(ctx, &plan)
 	if dumpErr != nil {
 		_ = os.RemoveAll(plan.staging)
 		return nil, dumpErr
 	}
 	klog.InfoS("firecracker sandbox dumped",
-		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "pauseWindow", time.Since(dumpStarted).String())
+		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID,
+		"pauseWindow", plan.pauseWindow.String(), "spillMove", plan.spillMove.String(),
+		"spilled", plan.spilled)
 
 	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, firecrackerBinary)
 	if err != nil {
@@ -142,7 +156,10 @@ func (d *Driver) DeleteSnapshot(_ context.Context, snapshotID string) error {
 	return nil
 }
 
-// dumpPlan carries one serialized pause/dump/resume execution.
+// dumpPlan carries one serialized pause/dump/resume execution. spilled
+// reports whether the dump landed on the fast spill area; pauseWindow
+// covers pause→resume (the business-visible interruption), spillMove the
+// post-resume relocation into the publish staging.
 type dumpPlan struct {
 	stateRoot   string
 	binaryName  string
@@ -152,6 +169,10 @@ type dumpPlan struct {
 	staging     string
 	jailed      bool
 	bootTimeout int32
+	spillRoot   string
+	spilled     bool
+	pauseWindow time.Duration
+	spillMove   time.Duration
 }
 
 // jailRoot returns the jail root of the plan's Sandbox (jailer mode only).
@@ -159,11 +180,61 @@ func (p dumpPlan) jailRoot() string {
 	return jailerRoot(filepath.Join(p.stateRoot, jailerChrootBaseDir), p.binaryName, truncatedSandboxID(p.sandboxID))
 }
 
+// snapshotSpillRoot returns the configured spill root ("" disables
+// spilling). It is read per call so tests can inject without racing the
+// driver lock.
+func (d *Driver) snapshotSpillRoot() string {
+	return strings.TrimSpace(os.Getenv(snapshotSpillDirEnv))
+}
+
+// spillDirFor resolves the per-snapshot spill directory and applies the
+// capacity guard. It returns "" when spilling is disabled or the area
+// cannot hold the dump (the caller falls back to the legacy
+// direct-to-staging dump). The guard needs the VM's memory size: unknown
+// sizes fall back rather than risk a mid-dump ENOSPC.
+func (d *Driver) spillDirFor(snapshotID, memoryQuantity string) string {
+	root := d.snapshotSpillRoot()
+	if root == "" {
+		return ""
+	}
+	if err := validateSandboxID(snapshotID); err != nil {
+		return ""
+	}
+	memBytes := int64(512 << 20)
+	if memoryQuantity != "" {
+		if mib, err := parseMemMiB(memoryQuantity); err == nil && mib > 0 {
+			memBytes = int64(mib) << 20
+		} else {
+			return ""
+		}
+	}
+	// vmstate is small; the margin covers filesystem overhead growth.
+	need := memBytes + memBytes/8 + (64 << 20)
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(root, &stat); err != nil {
+		return ""
+	}
+	free := int64(stat.Bavail) * int64(stat.Bsize)
+	if free < need {
+		klog.V(2).InfoS("snapshot spill area too small, falling back to staging dump",
+			"spillRoot", root, "freeBytes", free, "needBytes", need)
+		return ""
+	}
+	dir := filepath.Join(root, snapshotID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return ""
+	}
+	return dir
+}
+
 // dumpRunningSandbox performs the pause/dump/resume window. The rootfs copy
 // and the vmstate/memory dump both happen inside the pause window for
-// consistency; the Sandbox keeps running on every failure path, with a
-// failed resume joined after (and never masking) the dump error.
-func (d *Driver) dumpRunningSandbox(ctx context.Context, plan dumpPlan) error {
+// consistency; when a spill area is available the dump lands THERE and the
+// relocation into the publish staging runs after the resume, so the pause
+// window pays the spill area's bandwidth (tmpfs/local NVMe) instead of the
+// StateRoot filesystem. The Sandbox keeps running on every failure path,
+// with a failed resume joined after (and never masking) the dump error.
+func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
 
@@ -184,30 +255,64 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan dumpPlan) error {
 		return err
 	}
 
+	// Resolve the spill area BEFORE pausing: an unspillable dump falls back
+	// up front, never mid-window.
+	spillDir := d.spillDirFor(plan.snapshotID, state.Config.Spec.Memory)
+	plan.spilled = spillDir != ""
+
 	// The instance root drive: the state-directory copy in direct mode, the
 	// jail-root copy in jailer mode.
 	rootfs := filepath.Join(plan.sandboxDir, instanceRootfsName)
-	// Snapshot paths as the (possibly jailed) VMM sees them. A jailed VMM
-	// resolves paths against its chroot (the jail root), so the dump files
-	// are addressed chroot-relatively under snapshots/ and moved out after
-	// the dump — the restore snapshot hard links in the same directory are
-	// never touched (dedicated dump file names).
+	// Snapshot paths as the (possibly jailed) VMM sees them:
+	//   - direct + no spill: absolute staging paths;
+	//   - direct + spill: absolute paths inside the spill area;
+	//   - jailed (either way): chroot-relative under snapshots/, with the
+	//     spill area bind-mounted over the jail's snapshots/ when spilled —
+	//     the restore hard links in that directory are never touched
+	//     (dedicated dump file names, and hidden behind the bind anyway).
 	vmstateTarget := filepath.Join(plan.staging, vmstateSnapshotName)
 	memoryTarget := filepath.Join(plan.staging, memorySnapshotName)
-	dumpDir := plan.staging
+	if plan.spilled && !plan.jailed {
+		vmstateTarget = filepath.Join(spillDir, jailedDumpVMStateName)
+		memoryTarget = filepath.Join(spillDir, jailedDumpMemoryName)
+	}
+	jailDumpDir := ""
 	if plan.jailed {
 		rootfs = filepath.Join(plan.jailRoot(), rootfsImageName)
-		dumpDir = filepath.Join(plan.jailRoot(), jailerSnapshotDumpDir)
-		vmstateTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpVMStateName))
-		memoryTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpMemoryName))
-		if err := os.MkdirAll(dumpDir, 0o750); err != nil {
+		jailDumpDir = filepath.Join(plan.jailRoot(), jailerSnapshotDumpDir)
+		if err := os.MkdirAll(jailDumpDir, 0o750); err != nil {
 			return err
 		}
+		if plan.spilled {
+			if err := bindMount(spillDir, jailDumpDir); err != nil {
+				klog.V(2).InfoS("spill bind mount into the jail root failed, falling back to the staging dump", "err", err)
+				plan.spilled = false
+				_ = os.RemoveAll(spillDir)
+			}
+		}
+		vmstateTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpVMStateName))
+		memoryTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpMemoryName))
+	}
+
+	// cleanupSpill releases every resource the spill path holds (the jail
+	// bind mount first — RemoveAll through a mount would descend into the
+	// spill area only, but the mount itself must not outlive the dump).
+	cleanupSpill := func() {
+		if !plan.spilled {
+			return
+		}
+		if plan.jailed && jailDumpDir != "" {
+			_ = unmountPath(jailDumpDir)
+		}
+		_ = os.RemoveAll(spillDir)
 	}
 
 	client := d.newClient(state.APIAddress)
 	defer client.Close()
+	pauseStarted := time.Now()
 	if err := client.Pause(ctx); err != nil {
+		plan.pauseWindow = time.Since(pauseStarted)
+		cleanupSpill()
 		return fmt.Errorf("pause microVM: %w", err)
 	}
 	dumpErr := func() error {
@@ -223,29 +328,59 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan dumpPlan) error {
 		}
 		return nil
 	}()
-	// The VM resumes regardless of the dump outcome.
+	// The VM resumes regardless of the dump outcome: the business-visible
+	// pause window closes here.
 	if _, resumeErr := resumeVM(ctx, client, plan.bootTimeout); resumeErr != nil {
+		plan.pauseWindow = time.Since(pauseStarted)
+		cleanupSpill()
 		if dumpErr != nil {
 			return errors.Join(dumpErr, fmt.Errorf("resume microVM after failed dump: %w", resumeErr))
 		}
 		return fmt.Errorf("resume microVM after snapshot: %w", resumeErr)
 	}
+	plan.pauseWindow = time.Since(pauseStarted)
 	if dumpErr != nil {
+		cleanupSpill()
 		return dumpErr
 	}
-	if plan.jailed {
-		// Move the chroot-local dump into the staging directory: the jailed
-		// VMM wrote under its own credentials, but the files are regular and
-		// movable by this (privileged) driver.
-		for dumped, staged := range map[string]string{
-			jailedDumpVMStateName: vmstateSnapshotName,
-			jailedDumpMemoryName:  memorySnapshotName,
-		} {
-			if err := os.Rename(filepath.Join(dumpDir, dumped), filepath.Join(plan.staging, staged)); err != nil {
-				return fmt.Errorf("move dumped %s out of the jail root: %w", dumped, err)
+	if !plan.spilled {
+		if plan.jailed {
+			// Move the chroot-local dump into the staging directory: the
+			// jailed VMM wrote under its own credentials, but the files are
+			// regular and movable by this (privileged) driver.
+			for dumped, staged := range map[string]string{
+				jailedDumpVMStateName: vmstateSnapshotName,
+				jailedDumpMemoryName:  memorySnapshotName,
+			} {
+				if err := os.Rename(filepath.Join(jailDumpDir, dumped), filepath.Join(plan.staging, staged)); err != nil {
+					return fmt.Errorf("move dumped %s out of the jail root: %w", dumped, err)
+				}
 			}
 		}
+		return nil
 	}
+
+	// Spilled: relocate the dump into the publish staging OUTSIDE the pause
+	// window (cross-device tmpfs→StateRoot is a plain copy), then release
+	// the jail bind mount and the spill area.
+	moveStarted := time.Now()
+	if plan.jailed {
+		if err := unmountPath(jailDumpDir); err != nil {
+			_ = os.RemoveAll(spillDir)
+			return fmt.Errorf("unmount the spill bind from the jail root: %w", err)
+		}
+	}
+	for dumped, staged := range map[string]string{
+		jailedDumpVMStateName: vmstateSnapshotName,
+		jailedDumpMemoryName:  memorySnapshotName,
+	} {
+		if err := copyFile(filepath.Join(spillDir, dumped), filepath.Join(plan.staging, staged)); err != nil {
+			_ = os.RemoveAll(spillDir)
+			return fmt.Errorf("move spilled %s into the staging directory: %w", dumped, err)
+		}
+	}
+	plan.spillMove = time.Since(moveStarted)
+	_ = os.RemoveAll(spillDir)
 	return nil
 }
 
