@@ -13,6 +13,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,25 +71,27 @@ func (c *Client) PublishImage(ctx context.Context, key, dir string) (PublishResu
 		return PublishResult{}, err
 	}
 	indexKey := "index/" + artifacts.ImageIndexKey(key) + ".json"
-	if err := c.s3.put(ctx, indexKey, strings.NewReader(string(indexPayload)), int64(len(indexPayload))); err != nil {
+	payload := string(indexPayload)
+	if err := c.s3.put(ctx, indexKey, int64(len(payload)), func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(payload)), nil
+	}); err != nil {
 		return PublishResult{}, fmt.Errorf("publish index: %w", err)
 	}
 	return PublishResult{ManifestRef: manifestURI, ArtifactDigest: artifactDigest}, nil
 }
 
-// putFile streams one staged file into the store under a store-relative key.
+// putFile streams one staged file into the store under a store-relative
+// key. The opener reopens the file per attempt (net/http closes request
+// bodies), so a transient failure retries against a fresh reader.
 func (c *Client) putFile(ctx context.Context, dir, name, storeKey string) error {
 	path := filepath.Join(dir, name)
-	handle, err := os.Open(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	defer handle.Close()
-	info, err := handle.Stat()
-	if err != nil {
-		return err
-	}
-	return c.s3.put(ctx, storeKey, handle, info.Size())
+	return c.s3.put(ctx, storeKey, info.Size(), func() (io.ReadCloser, error) {
+		return os.Open(path)
+	})
 }
 
 // now returns the publish clock; factored for tests.
