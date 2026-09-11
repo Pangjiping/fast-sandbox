@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -67,10 +68,18 @@ func snapshotFromCreateRequest(request *fastpathv2.CreateSandboxSnapshotRequest,
 	for name, value := range request.Metadata {
 		labels[metadataLabelKey(name)] = value
 	}
+	annotations := map[string]string{assignment.AnnotationRequestID: request.RequestId, assignment.AnnotationCreateSpecHash: specHash}
+	// Provenance: the source Sandbox's action bindings ride along verbatim
+	// so a restore (CreateSandbox with image=<templateName>) can re-apply
+	// the same runtime policy (egress rules, hooks). Opaque, best-effort:
+	// oversized payloads are skipped rather than rejected.
+	if encoded, err := encodeSourceActionBindings(sandbox.Spec.ActionBindings); err == nil && encoded != "" {
+		annotations[assignment.AnnotationSourceActionBindings] = encoded
+	}
 	return &apiv1alpha2.SandboxSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: request.RequestId, Namespace: sandbox.Namespace, Labels: labels,
-			Annotations: map[string]string{assignment.AnnotationRequestID: request.RequestId, assignment.AnnotationCreateSpecHash: specHash},
+			Annotations: annotations,
 		},
 		Spec: apiv1alpha2.SandboxSnapshotSpec{
 			SandboxRef: apiv1alpha2.SandboxRef{
@@ -182,6 +191,38 @@ func snapshotSelfKey(namespace, name string) string { return namespace + "/" + n
 // acceptSnapshotIntent persists the snapshot intent idempotently: an
 // AlreadyExists with the same request-id and spec hash replays the persisted
 // object, anything else is a conflict.
+// maxSourceActionBindingsAnnotation bounds the provenance annotation so a
+// pathological binding set cannot exceed the object annotation budget.
+const maxSourceActionBindingsAnnotation = 128 << 10
+
+// encodeSourceActionBindings serializes the bindings verbatim; empty input
+// and oversized payloads encode to "" (record nothing).
+func encodeSourceActionBindings(bindings []apiv1alpha2.ActionBinding) (string, error) {
+	if len(bindings) == 0 {
+		return "", nil
+	}
+	payload, err := json.Marshal(bindings)
+	if err != nil {
+		return "", err
+	}
+	if len(payload) > maxSourceActionBindingsAnnotation {
+		return "", nil
+	}
+	return string(payload), nil
+}
+
+// decodeSourceActionBindings parses a provenance annotation.
+func decodeSourceActionBindings(encoded string) ([]apiv1alpha2.ActionBinding, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	var bindings []apiv1alpha2.ActionBinding
+	if err := json.Unmarshal([]byte(encoded), &bindings); err != nil {
+		return nil, err
+	}
+	return bindings, nil
+}
+
 func (s *Server) acceptSnapshotIntent(ctx context.Context, snapshot *apiv1alpha2.SandboxSnapshot) (*apiv1alpha2.SandboxSnapshot, error) {
 	createErr := s.K8sClient.Create(ctx, snapshot)
 	if createErr == nil {

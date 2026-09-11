@@ -94,6 +94,24 @@ The first create on a node pulls and verifies the artifact set into the
 node cache (multi-GiB sets take seconds to minutes over the store/P2P
 path); later creates on that node restore in milliseconds.
 
+## Network policy on restore
+
+The snapshot CR records the source Sandbox's **action bindings** verbatim
+(`sandbox.fast.io/source-action-bindings` annotation) — including egress
+network policy applied through the egress handler. Creating a Sandbox whose
+`image` equals a snapshot's `templateName` re-applies them automatically:
+
+- bindings you pass **explicitly** on the create win per handler (override
+  one policy, keep the rest);
+- recorded handlers the target Pool does not declare are dropped (they
+  could not take effect there);
+- in-guest network state (routes, connections, in-guest firewall) comes
+  along in the memory image itself.
+
+The policy is provenance, not authority: it is only consulted through the
+normal declarative create path and still passes the target Pool's handler
+validation. The store manifest stays a pure image contract.
+
 ## Rules of thumb
 
 - **Same Sandbox, back-to-back snapshots**: allowed once the previous one
