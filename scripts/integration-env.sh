@@ -3083,11 +3083,13 @@ snapshot_record() { # key value
 # snapshot_run triggers the snapshot through fastpath, polls the CR to a
 # terminal phase, and extracts the driver-side pause/publish timings.
 snapshot_run() {
-	local fwd t0 rpc_out rpc_ms phase last_phase="" t_terminal fastlet snapshot_id gap line
+	local fwd fwd_ip fwd_port t0 rpc_out rpc_ms phase last_phase="" t_terminal fastlet snapshot_id gap line
 	fwd="$(snapshot_ping_warm "$SNAPSHOT_TARGET")"
+	fwd_ip="${fwd%% *}"
+	fwd_port="${fwd##* }"
 	wait_until "warm execd /ping on $SNAPSHOT_TARGET" 120000 probe_execd "$SNAPSHOT_TARGET"
 
-	snapshot_ping_monitor_start "$SNAPSHOT_TARGET" "$fwd"
+	snapshot_ping_monitor_start "$SNAPSHOT_TARGET" "$fwd_ip" "$fwd_port"
 	t0="$(now_ms)"
 	rpc_out="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$SNAPSHOT_TARGET" "$SNAPSHOT_NAME" "$SNAPSHOT_TEMPLATE")"
 	log "CreateSandboxSnapshot: $rpc_out"
