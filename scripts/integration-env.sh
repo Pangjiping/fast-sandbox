@@ -590,9 +590,16 @@ stateroot_xfs_up() {
 # partial down would otherwise be silently ignored.
 xfs_assert_size() { # path-or-loop-source
 	local source="$1" actual_bytes want_bytes
-	[[ -f "$source" ]] || source="/dev/$source"
-	[[ -f "$source" ]] || return 0
-	actual_bytes="$(stat -c%s "$source" 2>/dev/null || echo 0)"
+	if [[ -b "$source" ]]; then
+		# A mounted loop device: the backing file may already be gone (an
+		# orphaned mount from an interrupted down); blockdev still reports
+		# the attached size.
+		actual_bytes="$(blockdev --getsize64 "$source" 2>/dev/null || echo 0)"
+	elif [[ -f "$source" ]]; then
+		actual_bytes="$(stat -c%s "$source" 2>/dev/null || echo 0)"
+	else
+		return 0
+	fi
 	want_bytes="$(numfmt --from=iec "$XFS_SIZE" 2>/dev/null || echo 0)"
 	[[ "$actual_bytes" -gt 0 && "$want_bytes" -gt 0 ]] || return 0
 	if [[ "$actual_bytes" -lt "$want_bytes" ]]; then
