@@ -3052,6 +3052,18 @@ snapshot_env_up() {
 		--from-file=registry.json="$WORK/agent-registry-write.json" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
+	# Re-apply the pool so fastletTemplate changes (the snapshot spill
+	# volume/env) reach the recreated fastlet pods — stage 1 deletes the
+	# pods, but their template comes from the pool CR. Keep up's warmImages
+	# handling (default: on-demand, warmImages stripped).
+	local pool_spec="$WORK/pool-firecracker-snapshot.yaml"
+	if [[ "$WARM_IMAGES" == "1" ]]; then
+		cp "$REPO_ROOT/config/samples/pool-firecracker.yaml" "$pool_spec"
+	else
+		sed '/^  warmImages:/,$d' "$REPO_ROOT/config/samples/pool-firecracker.yaml" > "$pool_spec"
+	fi
+	kubectl apply -f "$pool_spec" >/dev/null
+
 	snapshot_prune_store
 	kubectl -n "$NS" rollout restart deploy/fast-sandbox-controller >/dev/null
 	kubectl -n "$NS" rollout restart daemonset/firecracker-runtime-agent >/dev/null
