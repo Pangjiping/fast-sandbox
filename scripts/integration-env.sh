@@ -527,6 +527,9 @@ sysctl_restore() {
 # Disable with XFS_STATEROOT=0; the plain directory then works as before.
 XFS_STATEROOT="${XFS_STATEROOT:-1}"
 XFS_LOOP_FILE="${XFS_LOOP_FILE:-$WORK/fast-sandbox.img}"
+# verify-snapshot adds a second multi-GiB artifact set (the published
+# snapshot) plus its dump staging on top of the golden set and the DART
+# caches: 24G is tight, 48G is comfortable.
 XFS_SIZE="${XFS_SIZE:-24G}"
 XFS_MOUNT_POINT="${XFS_MOUNT_POINT:-/var/lib/fast-sandbox}"
 
@@ -3254,7 +3257,26 @@ snapshot_restore_progress() { # sandbox
 	log "restore progress: ${message:-<no condition yet>}"
 }
 
+# snapshot_ensure_disk reclaims space before the restore's cold pull: the
+# DART block caches (8GiB per node, both under the shared StateRoot) are the
+# biggest safe-to-drop chunk, and stale snapshot staging directories may
+# survive interrupted runs. Threshold: 8GiB free (the artifact set is
+# multi-GiB and the pull writes it as a non-sparse temp file).
+snapshot_ensure_disk() {
+	local mount="$XFS_MOUNT_POINT" avail_kb need_kb=$((8 * 1024 * 1024))
+	avail_kb="$(df -Pk "$mount" 2>/dev/null | awk 'NR==2 {print $4}')"
+	[[ "$avail_kb" =~ ^[0-9]+$ ]] || return 0
+	if [[ "$avail_kb" -lt "$need_kb" ]]; then
+		log "verify-snapshot: low space on $mount ($((avail_kb / 1024))MiB free); purging DART block caches and stale staging"
+		sudo_ rm -rf "$mount"/firecracker/cache/dart-* 2>/dev/null || true
+		sudo_ rm -rf "$mount"/firecracker/snapshots/* 2>/dev/null || true
+	fi
+	avail_kb="$(df -Pk "$mount" 2>/dev/null | awk 'NR==2 {print $4}')"
+	log "verify-snapshot: $mount has $((avail_kb / 1024))MiB free"
+}
+
 snapshot_restore() {
+	snapshot_ensure_disk
 	local t0 elapsed=0
 	t0="$(now_ms)"
 	fastctl_run_sandbox "$SNAPSHOT_RESTORE" "$SNAPSHOT_TEMPLATE"
