@@ -1005,9 +1005,14 @@ func (d *Driver) prepareInstance(stateRoot, sandboxID, image, stateDir, vmstateP
 		// only disables spilling for this sandbox (the dump falls back to
 		// the staging directory).
 		if spillRoot := d.snapshotSpillRoot(); spillRoot != "" {
+			spillMount := filepath.Join(jailRoot, jailerSpillDirName)
+			// The bind target must exist before MS_BIND (the jail root only
+			// carries snapshots/ from prepareJailRoot).
 			if err := os.MkdirAll(spillRoot, 0o750); err != nil {
 				klog.InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
-			} else if err := bindMount(spillRoot, filepath.Join(jailRoot, jailerSpillDirName)); err != nil {
+			} else if err := os.MkdirAll(spillMount, 0o750); err != nil {
+				klog.InfoS("create the jail spill mount point failed; spilling disabled", "err", err)
+			} else if err := bindMount(spillRoot, spillMount); err != nil {
 				klog.InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
 			}
 		}
