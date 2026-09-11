@@ -1441,12 +1441,15 @@ fastctl_run_sandbox() { # sandbox-name [image]
 	# Creation can transiently fail while the pool scales out ("no eligible
 	# Fastlet": the first fastlet is full and the second has not heartbeated
 	# yet). Retry; a succeeded create that errored on the wire surfaces as
-	# AlreadyExists on the next attempt, which is also success.
+	# AlreadyExists on the next attempt, which is also success. The final
+	# attempt's error is surfaced so a failed run shows the real cause.
+	local attempt output
 	for attempt in $(seq 1 30); do
-		if fastctl run "$name" --image "$image" --pool "$SBX_POOL" >/dev/null 2>&1 \
+		if output="$(fastctl run "$name" --image "$image" --pool "$SBX_POOL" 2>&1)" \
 			|| sandbox_exists "$name"; then
 			return 0
 		fi
+		[[ "$attempt" -eq 30 ]] && log "fastctl run $name last error: ${output:-<empty>}"
 		sleep 2
 	done
 	die "fastctl run $name failed"
@@ -2985,7 +2988,19 @@ snapshot_snapshot_cr_gone() {
 	! kubectl -n "$NS" get sandboxsnapshot "$SNAPSHOT_NAME" >/dev/null 2>&1
 }
 
+# pool_idle_fastlets: >=1 idle fastlet means the heartbeat-fed placement
+# view has converged after the stage-1 restarts (the pool status is a
+# projection of the controller's in-memory registry hints).
+pool_idle_fastlets() {
+	[[ "$(kubectl_get "sandboxpool/$SBX_POOL" '{.status.idleFastlets}' 2>/dev/null || echo 0)" -ge 1 ]]
+}
+
 snapshot_source_up() {
+	# Stage 1 restarted the controller and recreated the fastlet pods: the
+	# replacement controller's in-memory placement registry only learns the
+	# new fastlets through heartbeats. Gate the first create on the pool
+	# reporting an idle fastlet instead of burning the retry window blind.
+	wait_for "pool placement converged (idle fastlets >= 1)" 180 pool_idle_fastlets
 	sandbox_exists "$SNAPSHOT_TARGET" && {
 		fastctl delete "$SNAPSHOT_TARGET" >/dev/null 2>&1 || true
 		wait_for "leftover $SNAPSHOT_TARGET gone" 90 sandbox_gone "$SNAPSHOT_TARGET"
