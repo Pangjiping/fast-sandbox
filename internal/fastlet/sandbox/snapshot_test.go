@@ -14,12 +14,13 @@ import (
 
 type snapshotRuntime struct {
 	*admissionRuntime
-	mu          sync.Mutex
-	createCalls int
-	lastInput   *RuntimeSnapshotInput
-	createErr   error
-	block       chan struct{}
-	deleted     []string
+	mu                    sync.Mutex
+	createCalls           int
+	lastInput             *RuntimeSnapshotInput
+	createErr             error
+	block                 chan struct{}
+	blockBeforePublishing bool
+	deleted               []string
 }
 
 func newSnapshotRuntime() *snapshotRuntime {
@@ -32,7 +33,12 @@ func (r *snapshotRuntime) CreateSnapshot(_ context.Context, input *RuntimeSnapsh
 	r.lastInput = input
 	err := r.createErr
 	block := r.block
+	blockBeforePublishing := r.blockBeforePublishing
 	r.mu.Unlock()
+	if blockBeforePublishing && input.OnPublishing != nil {
+		// Surface Publishing, then stall inside the (excluded) upload.
+		input.OnPublishing()
+	}
 	if block != nil {
 		<-block
 	}
@@ -105,6 +111,59 @@ func TestCreateSnapshotAdmitsRunsAndObserves(t *testing.T) {
 	require.NotEmpty(t, inspected.Snapshot.ManifestRef)
 	require.False(t, inspected.Snapshot.StartedAt.IsZero())
 	require.False(t, inspected.Snapshot.CompletedAt.IsZero())
+}
+
+func TestCreateSnapshotAllowsNextSandboxSnapshotWhilePublishing(t *testing.T) {
+	runtime := newSnapshotRuntime()
+	runtime.block = make(chan struct{})
+	runtime.blockBeforePublishing = true
+	manager := newSnapshotManager(t, runtime)
+	_, err := manager.CreateSnapshot(context.Background(), snapshotRequest("snap-a"))
+	require.NoError(t, err)
+	// The task reached Publishing and is stalled in its upload.
+	require.Eventually(t, func() bool {
+		inspected, err := manager.InspectSnapshot(&fastletapi.InspectSnapshotRequest{Identity: snapshotIdentityFor("snap-a")})
+		return err == nil && inspected.Snapshot.Phase == fastletapi.SnapshotPhasePublishing
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Same Sandbox, DIFFERENT template name: admitted while the upload runs.
+	second := snapshotRequest("snap-b")
+	second.Snapshot.TemplateName = "app-v3"
+	response, err := manager.CreateSnapshot(context.Background(), second)
+	require.NoError(t, err)
+	require.Equal(t, fastletapi.CreateDispositionCreated, response.Disposition)
+
+	close(runtime.block)
+	for _, id := range []string{"snap-a", "snap-b"} {
+		require.Eventually(t, func() bool {
+			inspected, err := manager.InspectSnapshot(&fastletapi.InspectSnapshotRequest{Identity: snapshotIdentityFor(id)})
+			return err == nil && inspected.Snapshot.Phase == fastletapi.SnapshotPhaseSucceeded
+		}, 2*time.Second, 10*time.Millisecond)
+	}
+}
+
+func TestCreateSnapshotRejectsSameTemplateNameWhilePublishing(t *testing.T) {
+	runtime := newSnapshotRuntime()
+	runtime.block = make(chan struct{})
+	runtime.blockBeforePublishing = true
+	defer close(runtime.block)
+	manager := newSnapshotManager(t, runtime)
+	_, err := manager.CreateSnapshot(context.Background(), snapshotRequest("snap-a"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		inspected, err := manager.InspectSnapshot(&fastletapi.InspectSnapshotRequest{Identity: snapshotIdentityFor("snap-a")})
+		return err == nil && inspected.Snapshot.Phase == fastletapi.SnapshotPhasePublishing
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Same template name on the SAME Sandbox (whose sandbox fence already
+	// released at Publishing): the index key stays exclusive until the
+	// holder terminates.
+	other := snapshotRequest("snap-b")
+	other.Snapshot.TemplateName = "app-v2"
+	_, err = manager.CreateSnapshot(context.Background(), other)
+	var failure *fastletapi.FastletError
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, fastletapi.ErrorSnapshotInProgress, failure.Code)
 }
 
 func TestCreateSnapshotRedeliveryIsDeduplicated(t *testing.T) {

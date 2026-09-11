@@ -106,10 +106,26 @@ func (m *SandboxManager) CreateSnapshot(_ context.Context, req *fastletapi.Creat
 		return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, fastletError(fastletapi.ErrorRuntimeUnavailable,
 			fmt.Sprintf("target Sandbox runtime is %q, not running", metadata.Phase), true))
 	}
+	// Sandbox fence — only the pause window (Pending/Creating) is
+	// exclusive: a task in Publishing no longer touches the VM, and its
+	// upload may overlap the next snapshot's dump.
 	for _, task := range m.snapshots {
-		if !fastletapi.SnapshotPhaseTerminal(task.phase) && task.identity.Sandbox.SandboxUID == sandboxUID {
+		if task.identity.Sandbox.SandboxUID != sandboxUID {
+			continue
+		}
+		if holdsPauseWindow(task.phase) {
 			failure := fastletError(fastletapi.ErrorSnapshotInProgress,
-				"another non-terminal snapshot holds the Sandbox; snapshots are not reentrant", false)
+				"another snapshot is still dumping this Sandbox; retry once it reaches Publishing", false)
+			m.mu.Unlock()
+			return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, failure)
+		}
+	}
+	// Template-name fence — holds to terminal: concurrent publishers of one
+	// index key would race last-writer-wins on the store.
+	for _, task := range m.snapshots {
+		if !fastletapi.SnapshotPhaseTerminal(task.phase) && task.templateName == req.Snapshot.TemplateName {
+			failure := fastletError(fastletapi.ErrorSnapshotInProgress,
+				"template name is held by a snapshot that has not terminated; retry after it terminates or use another name", false)
 			m.mu.Unlock()
 			return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, failure)
 		}
@@ -145,6 +161,12 @@ func (m *SandboxManager) validateSnapshotRequest(req *fastletapi.CreateSnapshotR
 	return nil
 }
 
+// holdsPauseWindow reports whether a phase still occupies the sandbox's
+// pause window (the exclusive resource). Publishing only uploads.
+func holdsPauseWindow(phase fastletapi.SnapshotPhase) bool {
+	return !fastletapi.SnapshotPhaseTerminal(phase) && phase != fastletapi.SnapshotPhasePublishing
+}
+
 func sameSnapshotSandboxClaim(existing, requested fastletapi.SandboxIdentity) bool {
 	return existing.SandboxUID == requested.SandboxUID && existing.Namespace == requested.Namespace &&
 		existing.Name == requested.Name && existing.InstanceGeneration == requested.InstanceGeneration &&
@@ -175,14 +197,16 @@ func (m *SandboxManager) runSnapshotWorker(snapshotter RuntimeSnapshotter, task 
 	}
 
 	m.setSnapshotPhase(task, fastletapi.SnapshotPhaseCreating, "")
-	// SnapshotPhasePublishing is reserved: the firecracker driver reports
-	// the artifact upload as a distinct stage once finer-grained progress
-	// lands; this worker keeps the coarse Creating -> Succeeded/Failed
-	// projection.
 	result, err := snapshotter.CreateSnapshot(ctx, &RuntimeSnapshotInput{
 		SandboxID:    sandboxUID,
 		SnapshotID:   task.snapshotID,
 		TemplateName: task.templateName,
+		// The driver reports Publishing once the pause window closed and the
+		// staged set is complete: from that moment the task no longer
+		// touches the VM and the sandbox fence releases.
+		OnPublishing: func() {
+			m.setSnapshotPhase(task, fastletapi.SnapshotPhasePublishing, "")
+		},
 	})
 	if err != nil || result == nil {
 		message := "snapshot dump failed"

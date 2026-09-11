@@ -128,6 +128,12 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		_ = os.RemoveAll(plan.staging)
 		return nil, fmt.Errorf("%w: live snapshots require the firecracker runtime-agent for artifact publication", ErrInvalidConfig)
 	}
+	// The pause window is closed and the staged set is complete: report
+	// Publishing before the (potentially long) upload — the caller may
+	// admit the next snapshot of this Sandbox from here on.
+	if input.OnPublishing != nil {
+		input.OnPublishing()
+	}
 	publishStarted := time.Now()
 	outcome, publishErr := client.PublishImage(ctx, "snapshot-"+plan.snapshotID, input.TemplateName, plan.staging)
 	_ = os.RemoveAll(plan.staging)

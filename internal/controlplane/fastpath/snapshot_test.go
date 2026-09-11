@@ -201,6 +201,26 @@ func TestCreateSandboxSnapshotRejectsNonTerminalPredecessor(t *testing.T) {
 	require.Contains(t, err.Error(), "other-ns/snap-foreign")
 }
 
+func TestCreateSandboxSnapshotPublishingHolderReleasesSandboxFenceOnly(t *testing.T) {
+	server, _, _ := newSnapshotServer(t)
+	_, err := server.CreateSandboxSnapshot(context.Background(), snapshotCreateRequest("snap-first", "app-v2"))
+	require.NoError(t, err)
+	var holder apiv1alpha2.SandboxSnapshot
+	require.NoError(t, server.K8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "snap-first"}, &holder))
+	holder.Status.Phase = apiv1alpha2.SandboxSnapshotPhasePublishing
+	require.NoError(t, server.K8sClient.Status().Update(context.Background(), &holder))
+
+	// Same Sandbox, different template: the pause window is over, admitted.
+	_, err = server.CreateSandboxSnapshot(context.Background(), snapshotCreateRequest("snap-second", "app-v9"))
+	require.NoError(t, err)
+
+	// Same template name (even though the sandbox fence is released): the
+	// index key stays exclusive until the holder terminates.
+	_, err = server.CreateSandboxSnapshot(context.Background(), snapshotCreateRequest("snap-third", "app-v2"))
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.Contains(t, err.Error(), "template name")
+}
+
 func TestCreateSandboxSnapshotAllowsRequestAfterTerminalPredecessor(t *testing.T) {
 	server, _, _ := newSnapshotServer(t)
 	_, err := server.CreateSandboxSnapshot(context.Background(), snapshotCreateRequest("snap-first", "app-v2"))
