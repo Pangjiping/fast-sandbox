@@ -2988,6 +2988,38 @@ snapshot_snapshot_cr_gone() {
 	! kubectl -n "$NS" get sandboxsnapshot "$SNAPSHOT_NAME" >/dev/null 2>&1
 }
 
+# snapshot_sandbox_cr_exists/gone check the CR directly: a sandbox whose
+# assigned fastlet disappeared (pool recreation) fails fastctl get with
+# "assignment is not ready", so fastctl-based existence checks would skip
+# cleaning exactly the wedged objects that block a re-run.
+snapshot_sandbox_cr_exists() { # name
+	kubectl -n "$NS" get sandbox "$1" >/dev/null 2>&1
+}
+
+snapshot_sandbox_cr_gone() { # name
+	! snapshot_sandbox_cr_exists "$1"
+}
+
+# snapshot_cleanup_sandbox deletes a sandbox CR even when it is wedged on a
+# lost fastlet (fastctl delete only reads the CR, so it works there); the
+# cleanup finalizer is force-removed as a last resort.
+snapshot_cleanup_sandbox() { # name
+	snapshot_sandbox_cr_exists "$1" || return 0
+	log "verify-snapshot: removing leftover sandbox $1"
+	fastctl delete "$1" >/dev/null 2>&1 || true
+	local attempt=0
+	until snapshot_sandbox_cr_gone "$1"; do
+		attempt=$((attempt + 1))
+		if [[ "$attempt" -ge 60 ]]; then
+			log "leftover $1 still terminating after 120s; force-removing the cleanup finalizer"
+			kubectl -n "$NS" patch sandbox "$1" --type=merge \
+				-p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+		fi
+		[[ "$attempt" -ge 90 ]] && fail "leftover sandbox $1 could not be removed"
+		sleep 2
+	done
+}
+
 # pool_idle_fastlets: >=1 idle fastlet means the heartbeat-fed placement
 # view has converged after the stage-1 restarts (the pool status is a
 # projection of the controller's in-memory registry hints).
@@ -3001,14 +3033,8 @@ snapshot_source_up() {
 	# new fastlets through heartbeats. Gate the first create on the pool
 	# reporting an idle fastlet instead of burning the retry window blind.
 	wait_for "pool placement converged (idle fastlets >= 1)" 180 pool_idle_fastlets
-	sandbox_exists "$SNAPSHOT_TARGET" && {
-		fastctl delete "$SNAPSHOT_TARGET" >/dev/null 2>&1 || true
-		wait_for "leftover $SNAPSHOT_TARGET gone" 90 sandbox_gone "$SNAPSHOT_TARGET"
-	}
-	sandbox_exists "$SNAPSHOT_RESTORE" && {
-		fastctl delete "$SNAPSHOT_RESTORE" >/dev/null 2>&1 || true
-		wait_for "leftover $SNAPSHOT_RESTORE gone" 90 sandbox_gone "$SNAPSHOT_RESTORE"
-	}
+	snapshot_cleanup_sandbox "$SNAPSHOT_TARGET"
+	snapshot_cleanup_sandbox "$SNAPSHOT_RESTORE"
 	kubectl -n "$NS" delete sandboxsnapshot "$SNAPSHOT_NAME" >/dev/null 2>&1 || true
 	wait_for "leftover snapshot CR gone" 90 snapshot_snapshot_cr_gone
 
@@ -3221,7 +3247,7 @@ snapshot_validate_artifacts() {
 # name: the agent pull resolves it through the index this run published — the
 # end-to-end proof that the snapshot is restorable.
 snapshot_restore() {
-	local t0 t_ready
+	local t0
 	t0="$(now_ms)"
 	fastctl_run_sandbox "$SNAPSHOT_RESTORE" "$SNAPSHOT_TEMPLATE"
 	snapshot_record "restore_run_cmd_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
