@@ -46,6 +46,11 @@ const (
 	jailerSnapshotDumpDir = "snapshots"
 	jailedDumpVMStateName = "dump-vmstate.snap"
 	jailedDumpMemoryName  = "dump-memory.snap"
+	// jailerSpillDirName is the chroot-relative mount point of the snapshot
+	// spill root inside a jailed VMM (bind-mounted at instance creation —
+	// the jailer clones its mount namespace at process start, so a dump
+	// window bind would never be visible to the running VMM).
+	jailerSpillDirName = "spill"
 )
 
 // snapshotManifestName is the commit-point document of the artifact set.
@@ -284,25 +289,27 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 			return err
 		}
 		if plan.spilled {
-			if err := bindMount(spillDir, jailDumpDir); err != nil {
-				klog.V(2).InfoS("spill bind mount into the jail root failed, falling back to the staging dump", "err", err)
+			// The spill root was bind-mounted into the jail at instance
+			// creation; the per-snapshot directory is reachable behind it.
+			// A sandbox created before the spill was configured (or whose
+			// bind failed) falls back to the legacy in-jail dump.
+			if _, err := os.Stat(filepath.Join(plan.jailRoot(), jailerSpillDirName, plan.snapshotID)); err != nil {
 				plan.spilled = false
 				_ = os.RemoveAll(spillDir)
 			}
 		}
-		vmstateTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpVMStateName))
-		memoryTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpMemoryName))
+		if plan.spilled {
+			vmstateTarget = filepath.ToSlash(filepath.Join("/", jailerSpillDirName, plan.snapshotID, jailedDumpVMStateName))
+			memoryTarget = filepath.ToSlash(filepath.Join("/", jailerSpillDirName, plan.snapshotID, jailedDumpMemoryName))
+		} else {
+			vmstateTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpVMStateName))
+			memoryTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpMemoryName))
+		}
 	}
 
-	// cleanupSpill releases every resource the spill path holds (the jail
-	// bind mount first — RemoveAll through a mount would descend into the
-	// spill area only, but the mount itself must not outlive the dump).
 	cleanupSpill := func() {
 		if !plan.spilled {
 			return
-		}
-		if plan.jailed && jailDumpDir != "" {
-			_ = unmountPath(jailDumpDir)
 		}
 		_ = os.RemoveAll(spillDir)
 	}
@@ -361,15 +368,9 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 	}
 
 	// Spilled: relocate the dump into the publish staging OUTSIDE the pause
-	// window (cross-device tmpfs→StateRoot is a plain copy), then release
-	// the jail bind mount and the spill area.
+	// window (cross-device tmpfs→StateRoot is a plain copy). The jail's
+	// spill bind persists with the sandbox and is released at its deletion.
 	moveStarted := time.Now()
-	if plan.jailed {
-		if err := unmountPath(jailDumpDir); err != nil {
-			_ = os.RemoveAll(spillDir)
-			return fmt.Errorf("unmount the spill bind from the jail root: %w", err)
-		}
-	}
 	for dumped, staged := range map[string]string{
 		jailedDumpVMStateName: vmstateSnapshotName,
 		jailedDumpMemoryName:  memorySnapshotName,
