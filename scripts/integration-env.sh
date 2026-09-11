@@ -527,10 +527,11 @@ sysctl_restore() {
 # Disable with XFS_STATEROOT=0; the plain directory then works as before.
 XFS_STATEROOT="${XFS_STATEROOT:-1}"
 XFS_LOOP_FILE="${XFS_LOOP_FILE:-$WORK/fast-sandbox.img}"
-# verify-snapshot adds a second multi-GiB artifact set (the published
-# snapshot) plus its dump staging on top of the golden set and the DART
-# caches: 24G is tight, 48G is comfortable.
-XFS_SIZE="${XFS_SIZE:-24G}"
+# The default comfortably covers the snapshot workflows: the golden set
+# (~3G) + two 8GiB DART block caches + transient dump staging (~4G) + the
+# cold pull of a second multi-GiB published snapshot set, with headroom for
+# repeated verify-snapshot runs. Override down for constrained hosts.
+XFS_SIZE="${XFS_SIZE:-60G}"
 XFS_MOUNT_POINT="${XFS_MOUNT_POINT:-/var/lib/fast-sandbox}"
 
 ensure_xfsprogs() {
