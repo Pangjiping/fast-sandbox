@@ -553,10 +553,14 @@ stateroot_xfs_up() {
 	}
 	if findmnt -no FSTYPE "$XFS_MOUNT_POINT" 2>/dev/null | grep -qx xfs; then
 		log "XFS StateRoot already mounted at $XFS_MOUNT_POINT: $(findmnt -no SOURCE,FSTYPE "$XFS_MOUNT_POINT")"
+		xfs_assert_size "$(findmnt -no SOURCE "$XFS_MOUNT_POINT")"
 		pass "XFS StateRoot ready (reflink CoW rootfs)"
 		return 0
 	fi
 	ensure_xfsprogs
+	if [[ -f "$XFS_LOOP_FILE" ]]; then
+		xfs_assert_size "$XFS_LOOP_FILE"
+	fi
 	if [[ ! -f "$XFS_LOOP_FILE" ]]; then
 		log "creating sparse XFS image $XFS_LOOP_FILE (virtual $XFS_SIZE)"
 		truncate -s "$XFS_SIZE" "$XFS_LOOP_FILE"
@@ -578,6 +582,21 @@ stateroot_xfs_up() {
 	else
 		sudo_ rm -f "$a" "$b"
 		die "reflink probe failed on $XFS_MOUNT_POINT (CoW rootfs would not work)"
+	fi
+}
+
+# xfs_assert_size fails loudly when an existing image (or mounted source)
+# is smaller than XFS_SIZE: up reuses present images, so a size bump after a
+# partial down would otherwise be silently ignored.
+xfs_assert_size() { # path-or-loop-source
+	local source="$1" actual_bytes want_bytes
+	[[ -f "$source" ]] || source="/dev/$source"
+	[[ -f "$source" ]] || return 0
+	actual_bytes="$(stat -c%s "$source" 2>/dev/null || echo 0)"
+	want_bytes="$(numfmt --from=iec "$XFS_SIZE" 2>/dev/null || echo 0)"
+	[[ "$actual_bytes" -gt 0 && "$want_bytes" -gt 0 ]] || return 0
+	if [[ "$actual_bytes" -lt "$want_bytes" ]]; then
+		die "existing XFS image $source is $actual_bytes bytes but XFS_SIZE=$XFS_SIZE; it would be silently reused. Run 'integration-env.sh down' (and remove $XFS_LOOP_FILE if it survives) to recreate it"
 	fi
 }
 
@@ -3268,9 +3287,10 @@ snapshot_ensure_disk() {
 	avail_kb="$(df -Pk "$mount" 2>/dev/null | awk 'NR==2 {print $4}')"
 	[[ "$avail_kb" =~ ^[0-9]+$ ]] || return 0
 	if [[ "$avail_kb" -lt "$need_kb" ]]; then
-		log "verify-snapshot: low space on $mount ($((avail_kb / 1024))MiB free); purging DART block caches and stale staging"
+		log "verify-snapshot: low space on $mount ($((avail_kb / 1024))MiB free); purging DART block caches, stale staging, and stale pull temp files"
 		sudo_ rm -rf "$mount"/firecracker/cache/dart-* 2>/dev/null || true
 		sudo_ rm -rf "$mount"/firecracker/snapshots/* 2>/dev/null || true
+		sudo_ find "$mount"/firecracker/images -maxdepth 2 -name '*.tmp-*' -delete 2>/dev/null || true
 	fi
 	avail_kb="$(df -Pk "$mount" 2>/dev/null | awk 'NR==2 {print $4}')"
 	log "verify-snapshot: $mount has $((avail_kb / 1024))MiB free"
