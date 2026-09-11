@@ -3300,6 +3300,8 @@ snapshot_run() {
 		case "$line" in
 			*sandbox\ dumped*)
 				snapshot_record "vm_pause_window_ms" "$(duration_to_ms "$(klog_field "$line" pauseWindow)")"
+				snapshot_record "vm_spill_move_ms" "$(duration_to_ms "$(klog_field "$line" spillMove)")"
+				log "  spilled=$(klog_field "$line" spilled)"
 				;;
 			*snapshot\ published*)
 				snapshot_record "agent_publish_ms" "$(duration_to_ms "$(klog_field "$line" publish)")"
