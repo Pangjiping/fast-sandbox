@@ -531,7 +531,12 @@ sysctl_restore() {
 # StateRoot lives under it) turns the copy into a CoW reflink (~ms).
 # Disable with XFS_STATEROOT=0; the plain directory then works as before.
 XFS_STATEROOT="${XFS_STATEROOT:-1}"
-XFS_LOOP_FILE="${XFS_LOOP_FILE:-$WORK/fast-sandbox.img}"
+# The loop image backing the StateRoot lives on /data for the same reason
+# as MINIO_DATA: it is SPARSE and grows with every artifact the node caches
+# (golden set, snapshot staging, DART caches). On a full root disk the
+# sparse file cannot extend and XFS turns write failures into EIO even
+# while reporting free space. Override XFS_LOOP_FILE to relocate.
+XFS_LOOP_FILE="${XFS_LOOP_FILE:-/data/fast-sandbox.img}"
 # The default comfortably covers the snapshot workflows: the golden set
 # (~3G) + two 8GiB DART block caches + transient dump staging (~4G) + the
 # cold pull of a second multi-GiB published snapshot set, with headroom for
