@@ -21,8 +21,13 @@
 #   ./scripts/integration-env.sh up --auto-clean   # down automatically on failure
 #
 # Environment overrides (all optional):
-#   WORK, KIND_CLUSTER, MINIO_PORT, MINIO_AK, MINIO_SK, MINIO_IMAGE,
+#   WORK (script state/logs/caches; default $PWD/.integration-env — point
+#   it at /data to keep the root disk clean),
+#   DOCKER_DATA_ROOT (opt-in /var/lib/docker relocation, e.g. /data/docker:
+#   restarts docker, existing images are re-pulled),
+#   KIND_CLUSTER, MINIO_PORT, MINIO_AK, MINIO_SK, MINIO_IMAGE,
 #   MINIO_ENDPOINT, MINIO_DATA (default /data/fast-sandbox-minio),
+#   XFS_LOOP_FILE (default /data/fast-sandbox.img),
 #   IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE,
 #   WARM_IMAGES (=1: restore the preheat; default 0 = on-demand pulls)
 #
@@ -424,6 +429,34 @@ func main() {
 EOF
 	(cd "$REPO_ROOT" && GOTOOLCHAIN=local go run .integration-env-gen/gen-registry.go "$@")
 }
+
+# --- task 0: optional docker data-root relocation ---------------------------------
+# DOCKER_DATA_ROOT (e.g. /data/docker) relocates /var/lib/docker — the
+# images, build cache, and kind node container layers that dominate a small
+# root disk. Opt-in: restarting docker affects everything running on the
+# host, and existing images are NOT migrated (they are re-pulled/rebuilt).
+ensure_docker_data_root() {
+	[[ -n "${DOCKER_DATA_ROOT:-}" ]] || return 0
+	local current cfg=/etc/docker/daemon.json tmp
+	current="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+	[[ "$current" == "$DOCKER_DATA_ROOT" ]] && return 0
+	log "relocating docker data-root $current -> $DOCKER_DATA_ROOT (existing images are NOT migrated)"
+	sudo_ mkdir -p "$DOCKER_DATA_ROOT"
+	if [[ -f "$cfg" ]]; then
+		tmp="$(mktemp)"
+		jq --arg dr "$DOCKER_DATA_ROOT" '.["data-root"] = $dr' "$cfg" > "$tmp" \
+			|| die "cannot merge $cfg (invalid JSON?); set data-root manually and re-run"
+		sudo_ cp "$tmp" "$cfg"
+		rm -f "$tmp"
+	else
+		printf '{"data-root": %s}\n' "$(jq -Rn --arg dr "$DOCKER_DATA_ROOT" '$dr')" | sudo_ tee "$cfg" >/dev/null
+	fi
+	sudo_ systemctl restart docker 2>/dev/null || sudo_ service docker restart
+	wait_for "docker daemon ready after data-root move" 60 docker_info_ok
+	pass "docker data-root at $DOCKER_DATA_ROOT"
+}
+
+docker_info_ok() { docker info >/dev/null 2>&1; }
 
 # --- task 1: preflight + sysctl ----------------------------------------------------
 # Missing tooling is installed automatically (kind/kubectl from official
@@ -3630,6 +3663,7 @@ case "$ACTION" in
 			down
 		fi
 		trap 'on_error up' ERR
+		ensure_docker_data_root
 		run_stage "task 1: preflight + tooling" preflight
 		run_stage "task 1: sysctl (fs.inotify)" sysctl_set
 		run_stage "task 1: build images (7)" build_images
