@@ -3394,6 +3394,15 @@ usage: integration-env.sh [--cleanup|--auto-clean] {up|down|status|verify}
   status   component / template / pool / sandbox health
   verify   create 2 sandboxes, probe execd /ping, then a max-concurrency
            batch (CONCURRENCY=5 at pool capacity), delete all, assert cleanup
+  verify-snapshot
+           live sandbox snapshot E2E: fastpath CreateSandboxSnapshot ->
+           SandboxSnapshot CR -> fastlet -> firecracker pause/dump/resume ->
+           runtime-agent publish to MinIO -> validate the artifact set ->
+           restore a NEW sandbox from image=<templateName> -> /ping;
+           records key timings (RPC, phase transitions, VM pause window,
+           agent publish, /ping unavailability gap) and collects component
+           logs into logs/snapshot-e2e-<ts>/ (env: SNAPSHOT_*,
+           SNAPSHOT_SKIP_IMAGE_REBUILD=1 skips the image refresh)
   verify-p2p
            DART data-plane evidence (stage 2): presigned URL -> node-local
            DART -> origin (cold) -> block cache (warm, origin delta 0);
@@ -3420,7 +3429,7 @@ for arg in "$@"; do
 	case "$arg" in
 		--cleanup) ACTION="down" ;;
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|verify|verify-p2p|verify-execd-api|verify-egress) ACTION="$arg" ;;
+		up|down|status|verify|verify-snapshot|verify-p2p|verify-execd-api|verify-egress) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
