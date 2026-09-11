@@ -138,7 +138,12 @@ func TestCreateSandboxSnapshotRejectsConflictingReplay(t *testing.T) {
 }
 
 func TestCreateSandboxSnapshotRejectsNotReadySandbox(t *testing.T) {
-	server, _, _ := newSnapshotServer(t)
+	server, _, fastlet := newSnapshotServer(t)
+	// Both the lagging CR projection AND the live fastlet observation report
+	// a non-Ready runtime: the request must be rejected before any CR write.
+	fastlet.mu.Lock()
+	fastlet.inspectStatus = testObservedStatus("sandbox-uid-a", "creating", 1, nil)
+	fastlet.mu.Unlock()
 	var sandbox apiv1alpha2.Sandbox
 	require.NoError(t, server.K8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &sandbox))
 	sandbox.Status.Runtime.State = apiv1alpha2.RuntimeCreating
@@ -149,6 +154,20 @@ func TestCreateSandboxSnapshotRejectsNotReadySandbox(t *testing.T) {
 	var list apiv1alpha2.SandboxSnapshotList
 	require.NoError(t, server.K8sClient.List(context.Background(), &list))
 	require.Empty(t, list.Items, "rejected request must not persist an object")
+}
+
+func TestCreateSandboxSnapshotAcceptsReadyBehindLaggingProjection(t *testing.T) {
+	server, _, _ := newSnapshotServer(t)
+	// The fastlet reports the runtime Running (the default fixture) while
+	// the CR projection still says Creating: the snapshot must proceed.
+	var sandbox apiv1alpha2.Sandbox
+	require.NoError(t, server.K8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "sandbox-a"}, &sandbox))
+	sandbox.Status.Runtime.State = apiv1alpha2.RuntimeCreating
+	require.NoError(t, server.K8sClient.Status().Update(context.Background(), &sandbox))
+
+	response, err := server.CreateSandboxSnapshot(context.Background(), snapshotCreateRequest("snap-a", "app-v2"))
+	require.NoError(t, err)
+	require.Equal(t, "snap-a", response.Snapshot.Identity.GetName())
 }
 
 func TestCreateSandboxSnapshotRejectsNonTerminalPredecessor(t *testing.T) {
