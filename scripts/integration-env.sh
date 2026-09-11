@@ -2820,7 +2820,6 @@ SNAP_TIMINGS=""
 SNAP_PHASES_LOG=""
 SNAP_PING_LOG=""
 SNAP_PING_PID=""
-SNAP_ON_ERROR=0
 
 # duration_to_ms converts a Go duration string (1.5s, 2m3s, 850ms) to ms.
 duration_to_ms() { # value
@@ -2944,6 +2943,10 @@ snapshot_env_up() {
 	kubectl apply -k "$REPO_ROOT/config/crd" >/dev/null
 	kubectl get crd sandboxsnapshots.sandbox.fast.io >/dev/null 2>&1 \
 		|| fail "SandboxSnapshot CRD missing after apply"
+
+	# MINIO_ENDPOINT is derived during `up` and does not survive into this
+	# process; resolve it (kind-network IP) when the env did not pin it.
+	[[ -n "$MINIO_ENDPOINT" ]] || resolve_minio_endpoint
 
 	# Agent write credential: publish requires it. MinIO root keys are
 	# already read-write, so the same pair is reused as the write pair.
@@ -3259,10 +3262,13 @@ verify_snapshot() {
 	SNAP_PHASES_LOG="$SNAP_E2E_DIR/phase-transitions.log"
 	: > "$SNAP_TIMINGS"
 
+	trap 'snapshot_on_error' EXIT
+	# Stage 1 restarts the controller and fastlet: run it BEFORE the
+	# port-forward/daemon attach, or the rollout kills the forward mid-run.
+	run_stage "snapshot 1: snapshot-capable images + write credential" snapshot_env_up
+	snapshot_helpers_up
 	port_forward_up
 	resolve_daemon_up
-	trap 'snapshot_on_error' EXIT
-	run_stage "snapshot 1: snapshot-capable images + write credential" snapshot_env_up
 	run_stage "snapshot 2: source sandbox Ready" snapshot_source_up
 	run_stage "snapshot 3: live snapshot (pause/dump/resume/publish)" snapshot_run
 	run_stage "snapshot 4: artifact validation (MinIO)" snapshot_validate_artifacts
@@ -3278,8 +3284,11 @@ verify_snapshot() {
 }
 
 snapshot_on_error() {
-	[[ "$SNAP_ON_ERROR" == 1 ]] && return 0
-	SNAP_ON_ERROR=1
+	# The ERR trap can fire inside a subshell (gen_registry builds in a
+	# ( ) subshell) where a variable guard would not persist to the parent:
+	# mkdir is the atomic cross-context check-and-set.
+	[[ -n "$SNAP_E2E_DIR" ]] || return 0
+	mkdir "$SNAP_E2E_DIR/.on-error" 2>/dev/null || return 0
 	snapshot_ping_monitor_stop || true
 	snapshot_evidence || true
 	failure_dump "verify-snapshot" || true
