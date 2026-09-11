@@ -35,4 +35,5 @@ var (
 	ErrInvalidConfig          = runtimecontract.ErrInvalidConfig
 	ErrImageNotReady          = runtimecontract.ErrImageNotReady
 	ErrSnapshotUnsupported    = runtimecontract.ErrSnapshotUnsupported
+	ErrInsufficientStorage    = runtimecontract.ErrInsufficientStorage
 )

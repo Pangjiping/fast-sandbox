@@ -429,10 +429,13 @@ type SnapshotSpec struct {
 	TemplateName string `json:"templateName"`
 }
 
-// SnapshotStatus is the Fastlet observation of one snapshot task.
+// SnapshotStatus is the Fastlet observation of one snapshot task. Reason
+// is a stable classification of a Failed task (e.g. InsufficientStorage);
+// empty for in-flight and unclassified failures.
 type SnapshotStatus struct {
 	SnapshotID     string        `json:"snapshotId,omitempty"`
 	Phase          SnapshotPhase `json:"phase"`
+	Reason         string        `json:"reason,omitempty"`
 	Message        string        `json:"message,omitempty"`
 	ManifestRef    string        `json:"manifestRef,omitempty"`
 	ArtifactDigest string        `json:"artifactDigest,omitempty"`

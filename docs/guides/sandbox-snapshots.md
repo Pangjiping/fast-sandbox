@@ -115,6 +115,7 @@ path); later creates on that node restore in milliseconds.
 
 | Symptom | Cause / action |
 | --- | --- |
+| `Failed` with `Completed.reason=InsufficientStorage` | Node-local staging space cannot hold the artifact set; the snapshot was **rejected before the VM was ever paused** (a best-effort image-cache GC already ran). Free node space and re-issue with a new `request_id` — distinct from a genuine failure, nothing was interrupted or staged |
 | `Failed: ... Forbidden`-family at publish | Agent has no write credential for the store; contact the platform operator |
 | `Failed: SandboxNotFound` / `SandboxUIDMismatch` | Target was deleted or recreated under the same name; re-issue against the current Sandbox |
 | `Failed: SnapshotLost` | The fastlet that owned the task restarted mid-flight; re-issue with a new `request_id` |

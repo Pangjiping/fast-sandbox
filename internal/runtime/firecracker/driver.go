@@ -84,6 +84,10 @@ type Driver struct {
 	// DeleteSandbox (set by fastlet when the profile requires it; nil in
 	// local/host mode).
 	nodeCleanup nodecleanup.RuntimeProcessCleaner
+	// snapshotCapacityWait overrides the GC self-heal window of the
+	// snapshot staging capacity gate (tests shorten it; 0 selects the
+	// default).
+	snapshotCapacityWait time.Duration
 }
 
 // defaultImageGCInterval bounds the image cache by usage without coupling GC

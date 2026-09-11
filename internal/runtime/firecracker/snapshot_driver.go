@@ -103,6 +103,12 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, fmt.Errorf("clear stale snapshot staging %s: %w", plan.staging, err)
 	}
 
+	// Capacity gate BEFORE any pause: a dump that cannot land wastes the
+	// business interruption. Self-heal once through the image cache GC.
+	if err := d.ensureDumpCapacity(plan); err != nil {
+		return nil, err
+	}
+
 	dumpErr := d.dumpRunningSandbox(ctx, &plan)
 	if dumpErr != nil {
 		_ = os.RemoveAll(plan.staging)
@@ -165,6 +171,83 @@ func (d *Driver) DeleteSnapshot(_ context.Context, snapshotID string) error {
 		return fmt.Errorf("remove snapshot staging %s: %w", staging, err)
 	}
 	return nil
+}
+
+// defaultSnapshotCapacityWait bounds the best-effort GC + recheck window
+// when the staging filesystem cannot hold the artifact set (a field so
+// tests can shorten it).
+const defaultSnapshotCapacityWait = 15 * time.Second
+
+// ensureDumpCapacity verifies the staging filesystem can hold the full
+// artifact set (instance rootfs + memory + margin), once after triggering
+// the image-cache GC. It must run before the VM is paused: an ENOSPC
+// mid-dump would burn the pause window for nothing. Returns the
+// retryable ErrInsufficientStorage sentinel when space stays short.
+func (d *Driver) ensureDumpCapacity(plan dumpPlan) error {
+	need, err := d.dumpFootprintBytes(plan)
+	if err != nil {
+		// The dump itself will report a precise error; do not block on
+		// unmeasurable inputs (e.g. a vanished state directory).
+		return nil
+	}
+	d.mu.RLock()
+	stateRoot := d.config.StateRoot
+	d.mu.RUnlock()
+	if stagingFree(stateRoot) >= need {
+		return nil
+	}
+	d.TriggerImageGC()
+	wait := d.snapshotCapacityWait
+	if wait <= 0 {
+		wait = defaultSnapshotCapacityWait
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		if stagingFree(stateRoot) >= need {
+			return nil
+		}
+	}
+	free := stagingFree(stateRoot)
+	klog.InfoS("snapshot staging space insufficient; parking the task",
+		"stateRoot", stateRoot, "needBytes", need, "freeBytes", free)
+	return fmt.Errorf("%w: staging needs %d bytes, %d free", runtimecontract.ErrInsufficientStorage, need, free)
+}
+
+// dumpFootprintBytes computes the full artifact set size: the instance
+// rootfs logical size plus the guest memory with margin.
+func (d *Driver) dumpFootprintBytes(plan dumpPlan) (int64, error) {
+	state, err := loadState(plan.sandboxDir)
+	if err != nil {
+		return 0, err
+	}
+	if state.Config.Spec.Memory == "" {
+		return 0, fmt.Errorf("sandbox spec carries no memory size")
+	}
+	mib, err := parseMemMiB(state.Config.Spec.Memory)
+	if err != nil {
+		return 0, err
+	}
+	rootfs := filepath.Join(plan.sandboxDir, instanceRootfsName)
+	if plan.jailed {
+		rootfs = filepath.Join(plan.jailRoot(), rootfsImageName)
+	}
+	info, err := d.stat(rootfs)
+	if err != nil {
+		return 0, err
+	}
+	// vmstate is small; the margin covers filesystem overhead.
+	return info.Size() + int64(mib)<<20 + (64 << 20) + int64(mib)<<20/8, nil
+}
+
+// stagingFree reports the free bytes of the filesystem holding the
+// snapshot staging directory (the StateRoot).
+func stagingFree(stateRoot string) int64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(stateRoot, &stat); err != nil {
+		return 0
+	}
+	return int64(stat.Bavail) * int64(stat.Bsize)
 }
 
 // dumpPlan carries one serialized pause/dump/resume execution. spilled

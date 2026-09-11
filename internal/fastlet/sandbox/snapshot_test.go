@@ -166,6 +166,22 @@ func TestCreateSnapshotRejectsSameTemplateNameWhilePublishing(t *testing.T) {
 	require.Equal(t, fastletapi.ErrorSnapshotInProgress, failure.Code)
 }
 
+func TestSnapshotInsufficientStorageFailsWithDistinctReason(t *testing.T) {
+	runtime := newSnapshotRuntime()
+	runtime.createErr = ErrInsufficientStorage
+	manager := newSnapshotManager(t, runtime)
+	_, err := manager.CreateSnapshot(context.Background(), snapshotRequest("snap-a"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		inspected, err := manager.InspectSnapshot(&fastletapi.InspectSnapshotRequest{Identity: snapshotIdentityFor("snap-a")})
+		return err == nil && inspected.Snapshot.Phase == fastletapi.SnapshotPhaseFailed
+	}, 2*time.Second, 10*time.Millisecond)
+	inspected, err := manager.InspectSnapshot(&fastletapi.InspectSnapshotRequest{Identity: snapshotIdentityFor("snap-a")})
+	require.NoError(t, err)
+	require.Equal(t, "InsufficientStorage", inspected.Snapshot.Reason)
+	require.Contains(t, inspected.Snapshot.Message, "insufficient local storage")
+}
+
 func TestCreateSnapshotRedeliveryIsDeduplicated(t *testing.T) {
 	runtime := newSnapshotRuntime()
 	runtime.block = make(chan struct{})
