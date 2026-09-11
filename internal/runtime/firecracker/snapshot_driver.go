@@ -36,8 +36,15 @@ const publishedRootfsName = "rootfs.ext4"
 
 // jailerSnapshotDumpDir is the directory (inside the jail root) the jailed
 // VMM dumps its snapshot files into: a chrooted VMM cannot write outside its
-// jail. The driver moves the files into the staging directory after the dump.
-const jailerSnapshotDumpDir = "snapshots"
+// jail, so the driver addresses the dump files CHROOT-RELATIVELY and moves
+// them into the staging directory afterwards. The dump uses dedicated file
+// names: the same directory also holds the hard-linked restore snapshots,
+// and truncating those through the shared inodes would corrupt the cache.
+const (
+	jailerSnapshotDumpDir = "snapshots"
+	jailedDumpVMStateName = "dump-vmstate.snap"
+	jailedDumpMemoryName  = "dump-memory.snap"
+)
 
 // snapshotManifestName is the commit-point document of the artifact set.
 const snapshotManifestName = "manifest.json"
@@ -180,15 +187,19 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan dumpPlan) error {
 	// The instance root drive: the state-directory copy in direct mode, the
 	// jail-root copy in jailer mode.
 	rootfs := filepath.Join(plan.sandboxDir, instanceRootfsName)
-	// Snapshot paths as the (possibly jailed) VMM sees them.
+	// Snapshot paths as the (possibly jailed) VMM sees them. A jailed VMM
+	// resolves paths against its chroot (the jail root), so the dump files
+	// are addressed chroot-relatively under snapshots/ and moved out after
+	// the dump — the restore snapshot hard links in the same directory are
+	// never touched (dedicated dump file names).
 	vmstateTarget := filepath.Join(plan.staging, vmstateSnapshotName)
 	memoryTarget := filepath.Join(plan.staging, memorySnapshotName)
 	dumpDir := plan.staging
 	if plan.jailed {
 		rootfs = filepath.Join(plan.jailRoot(), rootfsImageName)
 		dumpDir = filepath.Join(plan.jailRoot(), jailerSnapshotDumpDir)
-		vmstateTarget = filepath.Join(dumpDir, vmstateSnapshotName)
-		memoryTarget = filepath.Join(dumpDir, memorySnapshotName)
+		vmstateTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpVMStateName))
+		memoryTarget = filepath.ToSlash(filepath.Join("/", jailerSnapshotDumpDir, jailedDumpMemoryName))
 		if err := os.MkdirAll(dumpDir, 0o750); err != nil {
 			return err
 		}
@@ -226,9 +237,12 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan dumpPlan) error {
 		// Move the chroot-local dump into the staging directory: the jailed
 		// VMM wrote under its own credentials, but the files are regular and
 		// movable by this (privileged) driver.
-		for _, name := range []string{vmstateSnapshotName, memorySnapshotName} {
-			if err := os.Rename(filepath.Join(dumpDir, name), filepath.Join(plan.staging, name)); err != nil {
-				return fmt.Errorf("move dumped %s out of the jail root: %w", name, err)
+		for dumped, staged := range map[string]string{
+			jailedDumpVMStateName: vmstateSnapshotName,
+			jailedDumpMemoryName:  memorySnapshotName,
+		} {
+			if err := os.Rename(filepath.Join(dumpDir, dumped), filepath.Join(plan.staging, staged)); err != nil {
+				return fmt.Errorf("move dumped %s out of the jail root: %w", dumped, err)
 			}
 		}
 	}
