@@ -22,7 +22,8 @@
 #
 # Environment overrides (all optional):
 #   WORK, KIND_CLUSTER, MINIO_PORT, MINIO_AK, MINIO_SK, MINIO_IMAGE,
-#   MINIO_ENDPOINT, IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE,
+#   MINIO_ENDPOINT, MINIO_DATA (default /data/fast-sandbox-minio),
+#   IMAGE_<NAME> (image tags), FC_VERSION, SBX_IMAGE,
 #   WARM_IMAGES (=1: restore the preheat; default 0 = on-demand pulls)
 #
 # Every task logs to $WORK/logs/; failures dump component logs to
@@ -54,7 +55,11 @@ MINIO_AK="${MINIO_AK:-integration-env}"
 MINIO_SK="${MINIO_SK:-integration-env-secret}"
 MINIO_BUCKET="sandbox-images"
 MINIO_CONTAINER="integration-env-minio"
-MINIO_DATA="$WORK/minio-data"
+# MinIO data lives on /data by default: the artifact store holds multi-GiB
+# sets and MinIO refuses writes (XMinioStorageFull) when the backing
+# filesystem runs low — the repo workdir usually shares the root disk with
+# docker images and build caches. Override MINIO_DATA to relocate.
+MINIO_DATA="${MINIO_DATA:-/data/fast-sandbox-minio}"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"   # auto-derived from the Kind network
 STORE_ROOT="s3://$MINIO_BUCKET/publish"
 
@@ -845,7 +850,7 @@ minio_up() {
 	# run's data can only be purged through sudo_ (a non-root runner would
 	# fail on every part.* file and abort the whole up).
 	sudo_ rm -rf "$MINIO_DATA"
-	mkdir -p "$MINIO_DATA"
+	sudo_ mkdir -p "$MINIO_DATA"
 	local net
 	net="$(kind_network)"
 	# Joining the kind network avoids docker-proxy/hairpin reachability
