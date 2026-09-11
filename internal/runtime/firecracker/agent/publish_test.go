@@ -19,14 +19,15 @@ import (
 
 // fakePublishStore records every PUT: its key, body, and the order of arrival.
 type fakePublishStore struct {
-	mu     sync.Mutex
-	puts   []string
-	bodies map[string][]byte
-	authed map[string]string
+	mu        sync.Mutex
+	puts      []string
+	bodies    map[string][]byte
+	authed    map[string]string
+	failFirst map[string]int // key suffix -> respond 500 on the first N attempts
 }
 
 func newFakePublishStore() *fakePublishStore {
-	return &fakePublishStore{bodies: map[string][]byte{}, authed: map[string]string{}}
+	return &fakePublishStore{bodies: map[string][]byte{}, authed: map[string]string{}, failFirst: map[string]int{}}
 }
 
 func (s *fakePublishStore) handle(w http.ResponseWriter, r *http.Request) {
@@ -37,9 +38,16 @@ func (s *fakePublishStore) handle(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.puts = append(s.puts, strings.Trim(r.URL.Path, "/"))
-	s.bodies[strings.Trim(r.URL.Path, "/")] = body
-	s.authed[strings.Trim(r.URL.Path, "/")] = r.Header.Get("Authorization")
+	key := strings.Trim(r.URL.Path, "/")
+	if s.failFirst[key] > 0 {
+		s.failFirst[key]--
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"transient"}`))
+		return
+	}
+	s.puts = append(s.puts, key)
+	s.bodies[key] = body
+	s.authed[key] = r.Header.Get("Authorization")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -122,6 +130,29 @@ func TestPublishImageUploadOrderAndIndexLayout(t *testing.T) {
 
 	require.Contains(t, store.authed[base+"/manifest.json"], "Credential=writer/",
 		"PUTs sign with the write credential")
+}
+
+func TestPublishImageRetriesTransientFailureWithFreshBody(t *testing.T) {
+	store := newFakePublishStore()
+	server := httptest.NewServer(http.HandlerFunc(store.handle))
+	defer server.Close()
+
+	client, err := NewClient("s3://bucket/publish", writeCredential(), WithEndpoint(server.URL))
+	require.NoError(t, err)
+	// 500 on the FIRST attempt of every object: the retry must open a fresh
+	// body (net/http closes request bodies after each attempt; seeking the
+	// closed *os.File was the field bug).
+	dir := stageArtifactSet(t)
+	digest16 := artifacts.Digest16(mustManifestBytes(t, dir))
+	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap", "SHA256SUMS", "manifest.json"} {
+		store.failFirst["bucket/publish/"+digest16+"/"+name] = 1
+	}
+
+	result, err := client.PublishImage(t.Context(), "app-v2", dir)
+	require.NoError(t, err)
+	require.Contains(t, result.ManifestRef, digest16)
+	// Every object landed exactly once (the failed attempts are not recorded).
+	require.Len(t, store.ordered(), 6)
 }
 
 func TestPublishImageRefusesReadOnlyStore(t *testing.T) {

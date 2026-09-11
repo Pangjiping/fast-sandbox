@@ -140,7 +140,10 @@ func (c *s3Client) storeRootURI() string {
 // put streams one object into the store under a store-relative key with the
 // write credential. Transport errors and 5xx responses are retried with
 // exponential backoff; 4xx responses (including auth failures) are not.
-func (c *s3Client) put(ctx context.Context, storeKey string, body io.Reader, size int64) error {
+// The body is provided by an opener callback because net/http takes
+// ownership of a request body and closes it after the attempt: a retry
+// must open a fresh reader (seeking a closed *os.File was the field bug).
+func (c *s3Client) put(ctx context.Context, storeKey string, size int64, open func() (io.ReadCloser, error)) error {
 	if !c.writable() {
 		return ErrNotWritable
 	}
@@ -163,7 +166,12 @@ func (c *s3Client) put(ctx context.Context, storeKey string, body io.Reader, siz
 			}
 			backoff *= 2
 		}
+		body, openErr := open()
+		if openErr != nil {
+			return openErr
+		}
 		err := c.putOnce(ctx, urlString, key, body, size)
+		_ = body.Close()
 		if err == nil {
 			return nil
 		}
@@ -172,15 +180,6 @@ func (c *s3Client) put(ctx context.Context, storeKey string, body io.Reader, siz
 			return err
 		}
 		lastErr = err
-		// The reader was consumed by the failed attempt: callers always
-		// pass a fresh *os.File-backed reader, so seek back to the start.
-		if seeker, ok := body.(io.Seeker); ok {
-			if _, seekErr := seeker.Seek(0, io.SeekStart); seekErr != nil {
-				return fmt.Errorf("rewind %s for retry: %w", key, seekErr)
-			}
-		} else {
-			return err
-		}
 	}
 	return fmt.Errorf("PUT %s: %w", key, lastErr)
 }
