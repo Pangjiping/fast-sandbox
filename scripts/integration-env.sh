@@ -3326,6 +3326,100 @@ snapshot_run() {
 	pass "snapshot Succeeded in $(ms2s $(( (t_terminal - t0) / 1000000 )))s"
 }
 
+# --- reentrancy fencing: rejected inside the pause window, admitted during
+# Publishing. Three objects: A (the long one), B (fired while A holds the
+# sandbox fence — must be rejected before any CR write), C (fired while A is
+# Publishing, different template name — must be admitted and succeed).
+FENCE_SNAPSHOT_A="e2e-fence-a"
+FENCE_SNAPSHOT_B="e2e-fence-b"
+FENCE_SNAPSHOT_C="e2e-fence-c"
+FENCE_TEMPLATE_A="e2e-fence-tpl-a"
+FENCE_TEMPLATE_B="e2e-fence-tpl-b"
+FENCE_TEMPLATE_C="e2e-fence-tpl-c"
+
+snapshot_cr_phase() { # name
+	kubectl_get "sandboxsnapshot/$1" '{.status.phase}' 2>/dev/null || true
+}
+
+snapshot_fence_cleanup() {
+	local name
+	for name in "$FENCE_SNAPSHOT_A" "$FENCE_SNAPSHOT_B" "$FENCE_SNAPSHOT_C"; do
+		kubectl -n "$NS" delete sandboxsnapshot "$name" >/dev/null 2>&1 || true
+	done
+	for name in "$FENCE_SNAPSHOT_A" "$FENCE_SNAPSHOT_B" "$FENCE_SNAPSHOT_C"; do
+		local attempt=0
+		while kubectl -n "$NS" get sandboxsnapshot "$name" >/dev/null 2>&1; do
+			attempt=$((attempt + 1))
+			if [[ "$attempt" -ge 45 ]]; then
+				kubectl -n "$NS" patch sandboxsnapshot "$name" --type=merge \
+					-p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+				fail "fence leftover $name could not be removed"
+			fi
+			sleep 2
+		done
+	done
+}
+
+snapshot_phase_reaches() { # name phase
+	[[ "$(snapshot_cr_phase "$1")" == "$2" ]]
+}
+
+snapshot_fencing() {
+	snapshot_fence_cleanup
+	local out_a out_b out_c rc t0
+
+	# A: the reference snapshot.
+	t0="$(now_ms)"
+	out_a="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$SNAPSHOT_TARGET" "$FENCE_SNAPSHOT_A" "$FENCE_TEMPLATE_A")"
+	log "fence A create: $out_a"
+
+	# B: fired one second in — A is still Pending (or just entered Creating):
+	# the sandbox fence must reject it BEFORE any CR write.
+	sleep 1
+	rc=0
+	out_b="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$SNAPSHOT_TARGET" "$FENCE_SNAPSHOT_B" "$FENCE_TEMPLATE_B" 2>&1)" || rc=$?
+	log "fence B create (expected rejection): rc=$rc out=${out_b:0:140}"
+	[[ "$rc" -ne 0 ]] || fail "fence B was admitted while A held the pause window (phase=$(snapshot_cr_phase "$FENCE_SNAPSHOT_A"))"
+	printf '%s' "$out_b" | grep -q "retry once it reaches Publishing" \
+		|| fail "fence B rejection is not the sandbox-fence error: $out_b"
+	if kubectl -n "$NS" get sandboxsnapshot "$FENCE_SNAPSHOT_B" >/dev/null 2>&1; then
+		fail "rejected fence B must not persist a CR"
+	fi
+	pass "fence B rejected during A's pause window (no CR persisted)"
+
+	# Wait for A to surface Publishing, then fire C (different template).
+	local waited=0
+	until snapshot_phase_reaches "$FENCE_SNAPSHOT_A" "Publishing"; do
+		if [[ "$(snapshot_cr_phase "$FENCE_SNAPSHOT_A")" == "Succeeded" ]]; then
+			fail "A reached Succeeded before Publishing was observed (publish too fast to fence-test?)"
+		fi
+		[[ "$waited" -ge 120 ]] && fail "A never reached Publishing (phase=$(snapshot_cr_phase "$FENCE_SNAPSHOT_A"))"
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+	snapshot_record "fence_a_to_publishing_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
+	log "fence A in Publishing after ${waited} polls — firing C"
+
+	out_c="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$SNAPSHOT_TARGET" "$FENCE_SNAPSHOT_C" "$FENCE_TEMPLATE_C")"
+	log "fence C create (expected admission): $out_c"
+
+	# Both must terminate Succeeded; C's dump overlapped A's upload.
+	for name in "$FENCE_SNAPSHOT_A" "$FENCE_SNAPSHOT_C"; do
+		wait_for "fence $name Succeeded" 240 snapshot_phase_reaches "$name" "Succeeded"
+	done
+	snapshot_record "fence_c_to_succeeded_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
+
+	local ref_a ref_c
+	ref_a="$(kubectl_get "sandboxsnapshot/$FENCE_SNAPSHOT_A" '{.status.manifestRef}')"
+	ref_c="$(kubectl_get "sandboxsnapshot/$FENCE_SNAPSHOT_C" '{.status.manifestRef}')"
+	[[ -n "$ref_a" && -n "$ref_c" && "$ref_a" != "$ref_c" ]] \
+		|| fail "fence snapshots lack distinct manifestRefs (a=$ref_a c=$ref_c)"
+
+	# The sandbox kept serving through the overlapping dump+upload.
+	probe_execd "$SNAPSHOT_TARGET" || fail "execd /ping failed after the fenced snapshots"
+	pass "fence C admitted during A's Publishing; both Succeeded, distinct artifacts, sandbox healthy"
+}
+
 # snapshot_validate_artifacts mirrors the builder's assert_publish_layout
 # against the published snapshot set.
 snapshot_validate_artifacts() {
@@ -3443,6 +3537,7 @@ snapshot_evidence() {
 		echo "=== verify-snapshot evidence ($(date -u +%FT%TZ)) ==="
 		echo "snapshot=$SNAPSHOT_NAME template=$SNAPSHOT_TEMPLATE source=$SNAPSHOT_TARGET restore=$SNAPSHOT_RESTORE"
 	} > "$SNAP_E2E_DIR/summary.txt"
+	kubectl -n "$NS" get sandboxsnapshot -o yaml > "$SNAP_E2E_DIR/sandboxsnapshots-all.yaml" 2>&1 || true
 	kubectl -n "$NS" get sandboxsnapshot "$SNAPSHOT_NAME" -o yaml > "$SNAP_E2E_DIR/sandboxsnapshot.yaml" 2>&1 || true
 	kubectl -n "$NS" describe sandboxsnapshot "$SNAPSHOT_NAME" > "$SNAP_E2E_DIR/sandboxsnapshot.describe.txt" 2>&1 || true
 	kubectl -n "$NS" get sandbox "$SNAPSHOT_TARGET" -o yaml > "$SNAP_E2E_DIR/sandbox-source.yaml" 2>&1 || true
@@ -3492,8 +3587,9 @@ verify_snapshot() {
 	resolve_daemon_up
 	run_stage "snapshot 2: source sandbox Ready" snapshot_source_up
 	run_stage "snapshot 3: live snapshot (pause/dump/resume/publish)" snapshot_run
-	run_stage "snapshot 4: artifact validation (MinIO)" snapshot_validate_artifacts
-	run_stage "snapshot 5: restore from snapshot image" snapshot_restore
+	run_stage "snapshot 4: reentrancy fencing (reject in window / admit in Publishing)" snapshot_fencing
+	run_stage "snapshot 5: artifact validation (MinIO)" snapshot_validate_artifacts
+	run_stage "snapshot 6: restore from snapshot image" snapshot_restore
 	trap - EXIT
 	resolve_daemon_down
 	port_forward_down
