@@ -108,9 +108,14 @@ network policy applied through the egress handler. Creating a Sandbox whose
 - in-guest network state (routes, connections, in-guest firewall) comes
   along in the memory image itself.
 
-The policy is provenance, not authority: it is only consulted through the
-normal declarative create path and still passes the target Pool's handler
-validation. The store manifest stays a pure image contract.
+The bindings are also recorded **in the published manifest**
+(`actionBindings`, an optional field existing consumers ignore): the
+artifact set outlives the SandboxSnapshot CR — deleting the CR keeps the
+artifacts — so the manifest is the durable record. A restore after the CR
+is gone (or in another cluster) reads the policy from the store and
+constructs the create with those bindings; the fastpath auto-apply only
+consults the CR because the control plane cannot read the object store at
+binding time (the image has not been placed on a node yet).
 
 ## Rules of thumb
 

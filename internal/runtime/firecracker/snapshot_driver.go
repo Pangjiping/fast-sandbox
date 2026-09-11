@@ -119,7 +119,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		"pauseWindow", plan.pauseWindow.String(), "spillMove", plan.spillMove.String(),
 		"spilled", plan.spilled)
 
-	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, firecrackerBinary)
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, firecrackerBinary, input.ActionBindings)
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
 		return nil, err
@@ -480,7 +480,7 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 // lineage and are what restore validation checks), while the compatibility
 // tuple, files, rootfsSize, format, and validation describe this dump. It
 // returns the total logical size of the artifact set.
-func assembleSnapshotManifest(stateRoot, staging, sandboxDir, firecrackerBinary string) (int64, error) {
+func assembleSnapshotManifest(stateRoot, staging, sandboxDir, firecrackerBinary string, actionBindings []runtimecontract.SnapshotActionBinding) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
@@ -522,6 +522,18 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir, firecrackerBinary 
 	document["rootfsSize"] = fmt.Sprintf("%dG", artifacts.SizeGiB(rootfsSize))
 	document["format"] = "native"
 	document["validation"] = map[string]any{"booted": true, "restored": false}
+	// Durable policy provenance: the artifact set outlives the
+	// SandboxSnapshot CR (deleting the CR keeps the artifacts), so the
+	// source Sandbox's action bindings ride in the manifest itself.
+	// Optional field — every existing consumer (pull reads `files`,
+	// restore reads machine/guestNetwork) ignores it.
+	if len(actionBindings) > 0 {
+		recorded := make([]map[string]string, 0, len(actionBindings))
+		for _, binding := range actionBindings {
+			recorded = append(recorded, map[string]string{"handler": binding.Handler, "input": binding.Input})
+		}
+		document["actionBindings"] = recorded
+	}
 
 	manifestBytes, err := artifacts.MarshalManifest(document)
 	if err != nil {

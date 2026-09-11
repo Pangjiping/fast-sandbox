@@ -106,10 +106,18 @@ func (o *Orchestrator) CreateSnapshot(ctx context.Context, snapshot *apiv1alpha2
 	if err != nil {
 		return nil, err
 	}
-	response, callErr := o.FastletClient.CreateSnapshot(ctx, fastlet.PodIP, &fastletapi.CreateSnapshotRequest{
+	request := &fastletapi.CreateSnapshotRequest{
 		RequestID: snapshot.Annotations[assignment.AnnotationRequestID], Identity: identity,
 		Snapshot: fastletapi.SnapshotSpec{TemplateName: snapshot.Spec.TemplateName},
-	})
+	}
+	// The source Sandbox's bindings ride along: the driver records them in
+	// the published manifest, making the artifact set self-contained (the
+	// CR annotation is only the in-cluster auto-apply path and may be gone
+	// by restore time).
+	if bindings, bindErr := compileActionBindings(sandbox.Spec.ActionBindings); bindErr == nil {
+		request.ActionBindings = bindings
+	}
+	response, callErr := o.FastletClient.CreateSnapshot(ctx, fastlet.PodIP, request)
 	if callErr == nil && response != nil &&
 		(response.Disposition == fastletapi.CreateDispositionCreated || response.Disposition == fastletapi.CreateDispositionExisting) &&
 		response.Snapshot != nil {
