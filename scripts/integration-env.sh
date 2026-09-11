@@ -2994,6 +2994,7 @@ snapshot_env_up() {
 		--from-file=registry.json="$WORK/agent-registry-write.json" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
+	snapshot_prune_store
 	kubectl -n "$NS" rollout restart deploy/fast-sandbox-controller >/dev/null
 	kubectl -n "$NS" rollout restart daemonset/firecracker-runtime-agent >/dev/null
 	# Fastlet pods are pool-managed: deleting them lets the pool controller
@@ -3005,6 +3006,37 @@ snapshot_env_up() {
 		kubectl -n "$NS" rollout status daemonset/firecracker-runtime-agent --timeout=10s
 	wait_for "fastlet pod ready (recreated)" 180 fastlet_pod_ready
 	pass "snapshot-capable images rolled (controller + fastlet + agent, write credential wired)"
+}
+
+# snapshot_prune_store drops artifact sets previously published by
+# verify-snapshot runs: every run publishes a fresh ~3.5GiB set, and the
+# MinIO data directory lives on the host root disk — stale sets eventually
+# push MinIO into XMinioStorageFull (507). The golden set (and its index)
+# is preserved; the current run republishes its own index anyway.
+snapshot_prune_store() {
+	local golden_ref golden_dir index dir pruned=0 indexes=0
+	golden_ref="$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.manifestRef}' 2>/dev/null || true)"
+	golden_dir=""
+	if [[ "$golden_ref" == s3://* ]]; then
+		golden_dir="$(dirname "${golden_ref#s3://$MINIO_BUCKET/}")"
+	fi
+	while IFS= read -r dir; do
+		[[ -z "$dir" ]] && continue
+		[[ -n "$golden_dir" && "$dir" == "$golden_dir" ]] && continue
+		mc rm --recursive --force "chain/$MINIO_BUCKET/$dir" >/dev/null 2>&1 || true
+		pruned=$((pruned + 1))
+	done < <(mc ls "chain/$MINIO_BUCKET/publish/" 2>/dev/null | awk '{print $NF}' | sed 's:/$::')
+	local golden_index
+	golden_index="$(printf '%s' "$SBX_IMAGE" | sha256sum | awk '{print $1}').json"
+	while IFS= read -r index; do
+		[[ -z "$index" ]] && continue
+		[[ "$(basename "$index")" == "$golden_index" ]] && continue
+		mc rm --force "chain/$MINIO_BUCKET/$index" >/dev/null 2>&1 || true
+		indexes=$((indexes + 1))
+	done < <(mc ls "chain/$MINIO_BUCKET/publish/index/" 2>/dev/null | awk '{print $NF}')
+	[[ "$pruned" -gt 0 || "$indexes" -gt 0 ]] \
+		&& log "verify-snapshot: pruned $pruned old artifact set(s) and $indexes stale index object(s) from MinIO"
+	return 0
 }
 
 snapshot_helpers_up() {
