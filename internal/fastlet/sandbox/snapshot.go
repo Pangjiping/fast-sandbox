@@ -31,6 +31,7 @@ type snapshotTask struct {
 	templateName string
 	snapshotID   string
 	phase        fastletapi.SnapshotPhase
+	reason       string
 	message      string
 	result       *SnapshotResult
 	startedAt    time.Time
@@ -39,7 +40,7 @@ type snapshotTask struct {
 
 func (t *snapshotTask) status() fastletapi.SnapshotStatus {
 	status := fastletapi.SnapshotStatus{
-		SnapshotID: t.snapshotID, Phase: t.phase, Message: t.message,
+		SnapshotID: t.snapshotID, Phase: t.phase, Reason: t.reason, Message: t.message,
 		StartedAt: t.startedAt, CompletedAt: t.completedAt,
 	}
 	if t.result != nil {
@@ -210,10 +211,17 @@ func (m *SandboxManager) runSnapshotWorker(snapshotter RuntimeSnapshotter, task 
 	})
 	if err != nil || result == nil {
 		message := "snapshot dump failed"
+		reason := ""
 		if err != nil {
 			message = err.Error()
+			if errors.Is(err, ErrInsufficientStorage) {
+				// Rejected before the VM was ever paused: zero interruption,
+				// nothing staged. Clients free space and re-issue with a new
+				// request_id (the object is one-shot).
+				reason = "InsufficientStorage"
+			}
 		}
-		m.finishSnapshotTask(task, fastletapi.SnapshotPhaseFailed, message)
+		m.finishSnapshotTaskWithReason(task, fastletapi.SnapshotPhaseFailed, reason, message)
 		return
 	}
 	// SnapshotPhasePublishing is reserved: the firecracker driver
@@ -255,8 +263,17 @@ func (m *SandboxManager) setSnapshotPhaseLocked(task *snapshotTask, phase fastle
 }
 
 func (m *SandboxManager) finishSnapshotTask(task *snapshotTask, phase fastletapi.SnapshotPhase, message string) {
+	m.finishSnapshotTaskWithReason(task, phase, "", message)
+}
+
+// finishSnapshotTaskWithReason terminates a task with a stable machine-readable
+// classification (clients branch on it; the message is human-oriented).
+func (m *SandboxManager) finishSnapshotTaskWithReason(task *snapshotTask, phase fastletapi.SnapshotPhase, reason, message string) {
 	m.mu.Lock()
 	m.setSnapshotPhaseLocked(task, phase, message)
+	if task.reason != reason {
+		task.reason = reason
+	}
 	m.mu.Unlock()
 	level := "info"
 	if phase == fastletapi.SnapshotPhaseFailed {

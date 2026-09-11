@@ -234,6 +234,25 @@ func TestCreateSnapshotRequiresSourceManifestFacts(t *testing.T) {
 	require.Contains(t, err.Error(), "machine")
 }
 
+func TestCreateSnapshotRejectsInsufficientStagingBeforePause(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	fixture.driver.snapshotCapacityWait = 0 // no GC self-heal wait
+	// An absurd memory size makes the footprint exceed any tmpdir's free
+	// space without touching the disk.
+	fixture.sandboxSpec.Spec.Memory = "99999Gi"
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
+	})
+	require.ErrorIs(t, err, runtimecontract.ErrInsufficientStorage)
+	require.Contains(t, err.Error(), "staging needs")
+	// The VM was never paused and nothing was published.
+	require.True(t, fixture.server.running)
+	require.Empty(t, fixture.server.snapshotDumps)
+	require.Empty(t, agent.fakeAgentClient.publishes)
+}
+
 func TestDeleteSnapshotDiscardsStaging(t *testing.T) {
 	fixture, _ := newSnapshotFixture(t)
 	staging := filepath.Join(fixture.stateRoot, snapshotStagingDir, "snap-1")

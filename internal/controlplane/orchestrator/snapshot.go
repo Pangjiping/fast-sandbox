@@ -51,9 +51,16 @@ func ProjectSnapshotStatus(status *apiv1alpha2.SandboxSnapshotStatus, observed *
 			LastTransitionTime: now,
 		})
 	case fastletapi.SnapshotPhaseFailed:
+		reason := "SnapshotFailed"
+		if observed.Reason != "" {
+			// Stable classification from the fastlet (e.g. InsufficientStorage):
+			// clients branch on it to decide between freeing space and
+			// re-issuing versus treating the failure as permanent.
+			reason = observed.Reason
+		}
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type: apiv1alpha2.SandboxSnapshotConditionCompleted, Status: metav1.ConditionFalse,
-			Reason: "SnapshotFailed", Message: observed.Message, LastTransitionTime: now,
+			Reason: reason, Message: observed.Message, LastTransitionTime: now,
 		})
 	}
 }

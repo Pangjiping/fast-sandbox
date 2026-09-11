@@ -269,6 +269,19 @@ func TestSnapshotReconcileDrainingIsTransientNotFailed(t *testing.T) {
 	}
 }
 
+func TestSnapshotFailedReasonFlowsToCondition(t *testing.T) {
+	// The fastlet observation is a pure projection: a Failed task carrying a
+	// stable reason must surface it verbatim in the Completed condition.
+	status := &apiv1alpha2.SandboxSnapshotStatus{}
+	orchestration.ProjectSnapshotStatus(status, &fastletapi.SnapshotStatus{
+		Phase: fastletapi.SnapshotPhaseFailed, Reason: "InsufficientStorage",
+		Message: "staging needs X bytes, Y free",
+	})
+	condition := status.Conditions[len(status.Conditions)-1]
+	require.Equal(t, "InsufficientStorage", condition.Reason)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+}
+
 func TestSnapshotReconcileLostTaskFails(t *testing.T) {
 	harness, _ := newSnapshotReconcilerHarness(t)
 	_, err := harness.reconciler.Reconcile(context.Background(), snapshotRequestFor("snap-a"))
