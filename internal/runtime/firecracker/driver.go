@@ -1006,9 +1006,9 @@ func (d *Driver) prepareInstance(stateRoot, sandboxID, image, stateDir, vmstateP
 		// the staging directory).
 		if spillRoot := d.snapshotSpillRoot(); spillRoot != "" {
 			if err := os.MkdirAll(spillRoot, 0o750); err != nil {
-				klog.V(2).InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
+				klog.InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
 			} else if err := bindMount(spillRoot, filepath.Join(jailRoot, jailerSpillDirName)); err != nil {
-				klog.V(2).InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
+				klog.InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
 			}
 		}
 		return instanceRootfs, jailRoot, apiAddress, nil

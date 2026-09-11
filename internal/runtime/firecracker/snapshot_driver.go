@@ -221,7 +221,7 @@ func (d *Driver) spillDirFor(snapshotID, memoryQuantity string) string {
 	}
 	free := int64(stat.Bavail) * int64(stat.Bsize)
 	if free < need {
-		klog.V(2).InfoS("snapshot spill area too small, falling back to staging dump",
+		klog.InfoS("snapshot spill area too small, falling back to staging dump",
 			"spillRoot", root, "freeBytes", free, "needBytes", need)
 		return ""
 	}
