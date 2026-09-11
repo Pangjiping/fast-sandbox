@@ -2912,20 +2912,22 @@ SNAP_PHASES_LOG=""
 SNAP_PING_LOG=""
 SNAP_PING_PID=""
 
-# duration_to_ms converts a Go duration string (1.5s, 2m3s, 850ms) to ms.
+# duration_to_ms converts a Go duration string (259.538772ms, 2m3s, 1.5s)
+# to whole milliseconds. The alternation order and the exclusive if/else
+# chain matter: "ms" must not fall through to the "s" branch (the earlier
+# version double-counted and reported 259798ms for a 259ms window).
 duration_to_ms() { # value
 	awk -v d="$1" 'BEGIN {
 		total = 0
 		rest = d
+		gsub(/\305\265/, "u", rest)  # µs -> us (klog emits the unicode micro sign)
 		while (match(rest, /[0-9.]+(ns|us|ms|m|s)/)) {
 			v = substr(rest, RSTART, RLENGTH)
 			n = v + 0
 			if (v ~ /ns$/) total += n / 1000000
 			else if (v ~ /us$/) total += n / 1000
 			else if (v ~ /ms$/) total += n
-			else if (v ~ /m[0-9.]*s*$/) { }  # handled below
-			if (v ~ /m$/ && v !~ /ms$/) total += n * 60000
-			if (v ~ /m[0-9]/ && v ~ /s$/) { split(v, p, /[ms]/); total += p[1] * 60000 + p[2] * 1000 }
+			else if (v ~ /m$/) total += n * 60000
 			else if (v ~ /s$/) total += n * 1000
 			rest = substr(rest, RSTART + RLENGTH)
 		}
