@@ -3449,9 +3449,12 @@ snapshot_evidence() {
 snapshot_timing_report() {
 	highlight "== snapshot key timings =="
 	local key ms
-	while IFS=$'\t' read -r key ms; do
+	while IFS=$'\t' read -r key value; do
 		[[ -n "$key" ]] || continue
-		printf '  %-32s %8sms\n' "$key" "$ms"
+		case "$key" in
+			*failures) printf '  %-32s %8s\n' "$key" "$value" ;;
+			*) printf '  %-32s %8sms\n' "$key" "$value" ;;
+		esac
 	done < "$SNAP_TIMINGS"
 	highlight "== phase transitions (wallclock ms / offset / phase) =="
 	cat "$SNAP_PHASES_LOG" 2>/dev/null || true
