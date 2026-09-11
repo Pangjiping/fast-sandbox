@@ -999,6 +999,18 @@ func (d *Driver) prepareInstance(stateRoot, sandboxID, image, stateDir, vmstateP
 		if prepareErr := prepareJailRoot(jailRoot, cached, vmstatePath, memoryPath); prepareErr != nil {
 			return "", "", "", prepareErr
 		}
+		// Bind the snapshot spill root into the jail BEFORE the VMM starts:
+		// the jailer clones its mount namespace at process start, so a dump
+		// window bind would be invisible to the running VMM. A failed bind
+		// only disables spilling for this sandbox (the dump falls back to
+		// the staging directory).
+		if spillRoot := d.snapshotSpillRoot(); spillRoot != "" {
+			if err := os.MkdirAll(spillRoot, 0o750); err != nil {
+				klog.V(2).InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
+			} else if err := bindMount(spillRoot, filepath.Join(jailRoot, jailerSpillDirName)); err != nil {
+				klog.V(2).InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
+			}
+		}
 		return instanceRootfs, jailRoot, apiAddress, nil
 	}
 	instanceRootfs, err = prepareInstanceRootfs(stateRoot, image, stateDir)
@@ -1015,6 +1027,10 @@ func (d *Driver) removeJailRoot(sandboxID string) {
 		return
 	}
 	root := jailerRoot(filepath.Join(d.config.StateRoot, jailerChrootBaseDir), filepath.Base(d.config.BinaryPath), truncatedSandboxID(sandboxID))
+	// Release the spill bind before the recursive removal: RemoveAll would
+	// otherwise descend into the SHARED spill root and delete other
+	// sandboxes' dumps.
+	_ = unmountPath(filepath.Join(root, jailerSpillDirName))
 	if err := os.RemoveAll(filepath.Dir(root)); err != nil {
 		klog.V(2).InfoS("remove firecracker jail root failed", "sandboxId", sandboxID, "err", err)
 	}
