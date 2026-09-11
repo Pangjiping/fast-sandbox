@@ -98,6 +98,25 @@ func TestCreateSnapshotSpillsDumpOutsideStateRoot(t *testing.T) {
 	require.Empty(t, entries, "the per-snapshot spill directory is removed")
 }
 
+func TestCreateSnapshotRecordsActionBindingsInManifest(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
+		ActionBindings: []runtimecontract.SnapshotActionBinding{
+			{Handler: "egress", Input: `{"egressPolicy":"deny-all"}`},
+		},
+	})
+	require.NoError(t, err)
+	recorded, ok := agent.manifest["actionBindings"].([]any)
+	require.True(t, ok, "manifest lacks actionBindings")
+	require.Len(t, recorded, 1)
+	entry := recorded[0].(map[string]any)
+	require.Equal(t, "egress", entry["handler"])
+	require.Equal(t, `{"egressPolicy":"deny-all"}`, entry["input"])
+}
+
 func TestCreateSnapshotFallsBackWhenSpillUnavailable(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	// A spill root that does not exist: the capacity guard fails and the

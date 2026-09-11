@@ -452,6 +452,9 @@ type CreateSnapshotRequest struct {
 	RequestID string           `json:"requestId,omitempty"`
 	Identity  SnapshotIdentity `json:"identity"`
 	Snapshot  SnapshotSpec     `json:"snapshot"`
+	// ActionBindings are the source Sandbox's bindings, recorded in the
+	// published manifest (durable policy provenance).
+	ActionBindings []ActionBindingInput `json:"actionBindings,omitempty"`
 }
 
 type CreateSnapshotResponse struct {

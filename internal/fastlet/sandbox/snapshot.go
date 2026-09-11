@@ -8,6 +8,7 @@ import (
 
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	runtimecontract "fast-sandbox/internal/runtime/contract"
 	"fast-sandbox/pkg/util/idgen"
 
 	"k8s.io/klog/v2"
@@ -27,15 +28,16 @@ var snapshotWorkerTimeout = 30 * time.Minute
 // ever taken toward this Fastlet since start, which is accepted as a small,
 // inspectable leak.
 type snapshotTask struct {
-	identity     fastletapi.SnapshotIdentity
-	templateName string
-	snapshotID   string
-	phase        fastletapi.SnapshotPhase
-	reason       string
-	message      string
-	result       *SnapshotResult
-	startedAt    time.Time
-	completedAt  time.Time
+	identity       fastletapi.SnapshotIdentity
+	templateName   string
+	actionBindings []runtimecontract.SnapshotActionBinding
+	snapshotID     string
+	phase          fastletapi.SnapshotPhase
+	reason         string
+	message        string
+	result         *SnapshotResult
+	startedAt      time.Time
+	completedAt    time.Time
 }
 
 func (t *snapshotTask) status() fastletapi.SnapshotStatus {
@@ -137,7 +139,14 @@ func (m *SandboxManager) CreateSnapshot(_ context.Context, req *fastletapi.Creat
 		return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, fastletErrorWithCause(fastletapi.ErrorUnknownOutcome,
 			"generate snapshot id: "+err.Error(), true, err))
 	}
-	task := &snapshotTask{identity: req.Identity, templateName: req.Snapshot.TemplateName, snapshotID: snapshotID, phase: fastletapi.SnapshotPhasePending}
+	bindings := make([]runtimecontract.SnapshotActionBinding, 0, len(req.ActionBindings))
+	for _, binding := range req.ActionBindings {
+		bindings = append(bindings, runtimecontract.SnapshotActionBinding{Handler: binding.Handler, Input: binding.Input})
+	}
+	task := &snapshotTask{
+		identity: req.Identity, templateName: req.Snapshot.TemplateName, actionBindings: bindings,
+		snapshotID: snapshotID, phase: fastletapi.SnapshotPhasePending,
+	}
 	m.snapshots[req.Identity.SnapshotUID] = task
 	// Read the admitted status while still holding the lock: the worker
 	// goroutine mutates task fields under m.mu from here on.
@@ -199,9 +208,10 @@ func (m *SandboxManager) runSnapshotWorker(snapshotter RuntimeSnapshotter, task 
 
 	m.setSnapshotPhase(task, fastletapi.SnapshotPhaseCreating, "")
 	result, err := snapshotter.CreateSnapshot(ctx, &RuntimeSnapshotInput{
-		SandboxID:    sandboxUID,
-		SnapshotID:   task.snapshotID,
-		TemplateName: task.templateName,
+		SandboxID:      sandboxUID,
+		SnapshotID:     task.snapshotID,
+		TemplateName:   task.templateName,
+		ActionBindings: task.actionBindings,
 		// The driver reports Publishing once the pause window closed and the
 		// staged set is complete: from that moment the task no longer
 		// touches the VM and the sandbox fence releases.
