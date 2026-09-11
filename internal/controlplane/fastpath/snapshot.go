@@ -159,9 +159,17 @@ func (s *Server) checkSnapshotReentrancy(ctx context.Context, sandbox *apiv1alph
 		if snapshotSelfKey(item.Namespace, item.Name) == selfKey || item.Status.Phase.Terminal() {
 			continue
 		}
-		if item.Spec.SandboxRef.Namespace == sandbox.Namespace && item.Spec.SandboxRef.Name == sandbox.Name && item.Spec.SandboxRef.UID == sandbox.UID {
-			return status.Errorf(codes.FailedPrecondition, "Sandbox already has snapshot %q in phase %q; retry after it terminates", item.Name, item.Status.Phase)
+		sandboxMatch := item.Spec.SandboxRef.Namespace == sandbox.Namespace &&
+			item.Spec.SandboxRef.Name == sandbox.Name && item.Spec.SandboxRef.UID == sandbox.UID
+		// The sandbox fence covers only the pause window: a snapshot in
+		// Publishing no longer touches the VM and does not block the next
+		// snapshot of this Sandbox (the template check below still applies
+		// to it).
+		if sandboxMatch && item.Status.Phase != apiv1alpha2.SandboxSnapshotPhasePublishing {
+			return status.Errorf(codes.FailedPrecondition, "Sandbox already has snapshot %q in phase %q; retry once it reaches Publishing", item.Name, item.Status.Phase)
 		}
+		// The template-name fence holds to terminal: concurrent publishers
+		// of one index key would race last-writer-wins on the store.
 		if item.Spec.TemplateName == templateName {
 			return status.Errorf(codes.FailedPrecondition, "template name %q is held by snapshot %s/%s in phase %q; retry after it terminates", templateName, item.Namespace, item.Name, item.Status.Phase)
 		}

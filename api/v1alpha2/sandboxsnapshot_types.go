@@ -5,9 +5,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// SandboxSnapshotPhase is the lifecycle of one snapshot attempt. A snapshot
-// is one-shot and non-reentrant: a Sandbox (or template name) with a
-// non-terminal snapshot rejects new snapshot requests until it terminates.
+// SandboxSnapshotPhase is the lifecycle of one snapshot attempt. The
+// sandbox fence covers only Pending/Creating (the pause window): once a
+// snapshot reaches Publishing (dump complete, VM resumed, upload running)
+// the same Sandbox accepts a new snapshot. The template-name fence holds
+// to terminal. A Failed snapshot never moved the store index, so nothing
+// it produced is addressable (partial upload objects may linger as
+// unreachable garbage).
 // +kubebuilder:validation:Enum=Pending;Creating;Publishing;Succeeded;Failed
 type SandboxSnapshotPhase string
 

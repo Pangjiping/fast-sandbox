@@ -100,6 +100,12 @@ type SnapshotInput struct {
 	// TemplateName is the artifact-store index key the artifact set is
 	// published under.
 	TemplateName string
+	// OnPublishing is invoked once the pause window has closed and the
+	// local artifact set is complete — right before the store upload
+	// begins. The caller uses it to surface the Publishing phase, which no
+	// longer touches the VM and therefore does not block the next snapshot
+	// of the same Sandbox. Optional; drivers must tolerate nil.
+	OnPublishing func()
 }
 
 // Snapshotter is the optional runtime extension for snapshotting a running
