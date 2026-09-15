@@ -1786,7 +1786,9 @@ report_create_tail() { # name t0-ns t-run-done-ns
 	local name="$1" t0="$2" t_done="$3"
 	local run_rpc fp_total dr_total fp_line dr_line fastlet
 	run_rpc=$(( (t_done - t0) / 1000000 ))
-	fp_line="$(kubectl -n "$NS" logs --request-timeout=10s --tail=500 deploy/fast-sandbox-controller 2>/dev/null | grep 'fastpath sandbox created' | grep "requestId=\"$name\"" | tail -1)"
+	# The fastpath completion log carries the identity-injected snake_case
+	# key (request_id=...), not the ad-hoc camelCase from earlier revisions.
+	fp_line="$(kubectl -n "$NS" logs --request-timeout=10s --tail=500 deploy/fast-sandbox-controller 2>/dev/null | grep 'fastpath sandbox created' | grep "request_id=\"$name\"" | tail -1)"
 	[[ -n "$fp_line" ]] || return 0
 	fp_total="$(klog_field "$fp_line" total | tr -d 'ms')"
 	fp_total="${fp_total%%.*}"
