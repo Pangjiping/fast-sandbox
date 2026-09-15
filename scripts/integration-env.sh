@@ -4696,6 +4696,14 @@ dart_metrics_summary() {
 # --- down ---------------------------------------------------------------------------------------
 down() {
 	log "down: teardown"
+	# Sweep this script's own host-side processes too: a forward or resolver
+	# daemon leaked by an interrupted run holds the local ports and poisons
+	# the next up (a stale listener silently answers probes meant for the
+	# new forward — observed as persistent HTTP 400). The EXIT trap only
+	# covers graceful exits; down must not assume it ran.
+	pkill -f "kubectl -n $NS port-forward" 2>/dev/null || true
+	pkill -f "gen-endpoint --daemon" 2>/dev/null || true
+	sleep 0.2
 	if kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null; then
 		kind delete cluster --name "$KIND_CLUSTER" > "$LOGS_DIR/kind-delete.log" 2>&1 || true
 	fi
