@@ -308,9 +308,15 @@ wait_for() { # description attempts command [args...]
 wait_until() { # description timeout-ms command [args...]
 	local description="$1" timeout_ms="$2"
 	shift 2
-	local deadline=$(( $(now_ms) + timeout_ms ))
+	# now_ms returns epoch NANOSECONDS (date +%s%N) despite the name — the
+	# latency reports divide by 1e6. Convert here, or the deadline is
+	# 120000ns = 0.12ms and every probe gets exactly one attempt.
+	local deadline=$(( $(now_ms) / 1000000 + timeout_ms ))
 	while ! "$@" >/dev/null 2>&1; do
-		if [[ "$(now_ms)" -ge "$deadline" ]]; then
+		if [[ $(( $(now_ms) / 1000000 )) -ge "$deadline" ]]; then
+			if [[ "${#PROBE_LOG[@]}" -gt 0 ]]; then
+				log "last probes: ${PROBE_LOG[@]: -5}"
+			fi
 			fail "$description (after ${timeout_ms}ms)"
 		fi
 		sleep 0.01
