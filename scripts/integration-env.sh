@@ -1345,6 +1345,11 @@ FASTLET_NEXT_PORT=18081
 
 port_forward_up() {
 	local pid
+	# tcp_listening degrades to "assume alive" without nc, and
+	# allocate_next_local_port then cannot detect occupied ports: a stale
+	# kubectl holding 18081 would silently answer every probe (observed as
+	# persistent HTTP 400 from the wrong listener). Fail loudly instead.
+	command -v nc >/dev/null 2>&1 || die "nc is required for local port-forward liveness checks (yum install -y nc)"
 	[[ -x "$FASTCTL" ]] || die "fastctl not built ($FASTCTL); run up first"
 	# A stale forward from an interrupted run holds the local ports and makes
 	# the new kubectl port-forward exit immediately ("address already in
