@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -305,6 +306,11 @@ func (o *Orchestrator) ReassignDeclarativeAfterRejection(ctx context.Context, sa
 		if err != nil {
 			return nil, false, err
 		}
+		// A major identity transition: the sandbox moves to a different
+		// fastlet with attempt+1 / routeGeneration+1. Always traceable.
+		klog.FromContext(ctx).Info("Reassigned sandbox to a different Fastlet after runtime rejection",
+			"sandbox", sandbox.Name, "fromFastlet", current.FastletName, "toFastlet", candidate.PodName,
+			"attempt", next.Attempt, "routeGeneration", next.RouteGeneration)
 		return updated, true, nil
 	}
 	return sandbox.DeepCopy(), false, nil
@@ -740,6 +746,9 @@ func (o *Orchestrator) recordFeedback(id placement.FastletID, err error) {
 	if !errors.As(err, &failure) {
 		return
 	}
+	// The feedback blacklists the fastlet for a short window (scheduling-
+	// visible via RejectedUntil); leave one line explaining why.
+	klog.V(2).InfoS("Recording fastlet rejection feedback; candidate penalized", "fastlet", id, "code", failure.Code)
 	now := time.Now()
 	if o.Now != nil {
 		now = o.Now()

@@ -13,6 +13,7 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"google.golang.org/grpc/codes"
@@ -35,9 +36,10 @@ func (s *Server) PauseSandbox(ctx context.Context, request *fastpathv2.PauseSand
 	if sandbox.DeletionTimestamp != nil {
 		return nil, status.Error(codes.FailedPrecondition, "Sandbox is being deleted")
 	}
-	// Pause is impossible only once the runtime is terminal; every other
-	// state (including an in-flight create) simply waits for Ready in the
-	// Controller. An effective pause replayed here is an idempotent success.
+	// Pause is impossible once the runtime is terminal or tearing down
+	// (Stopping); every other state (including an in-flight create) simply
+	// waits for Ready in the Controller. An effective pause replayed here is
+	// an idempotent success.
 	switch sandbox.Status.Runtime.State {
 	case apiv1alpha2.RuntimeStopped, apiv1alpha2.RuntimeFailed, apiv1alpha2.RuntimeStopping:
 		return nil, status.Errorf(codes.FailedPrecondition, "Sandbox runtime is %q; only a Ready runtime can be paused", sandbox.Status.Runtime.State)
@@ -46,6 +48,7 @@ func (s *Server) PauseSandbox(ctx context.Context, request *fastpathv2.PauseSand
 	if err != nil {
 		return nil, err
 	}
+	klog.FromContext(ctx).Info("fastpath sandbox pause requested")
 	return &fastpathv2.PauseSandboxResponse{Sandbox: sandboxInfoFromCRD(updated), Generation: updated.Generation}, nil
 }
 
@@ -85,6 +88,7 @@ func (s *Server) ResumeSandbox(ctx context.Context, request *fastpathv2.ResumeSa
 	if err != nil {
 		return nil, err
 	}
+	klog.FromContext(ctx).Info("fastpath sandbox resume requested")
 	return &fastpathv2.ResumeSandboxResponse{Sandbox: sandboxInfoFromCRD(updated), Generation: updated.Generation}, nil
 }
 

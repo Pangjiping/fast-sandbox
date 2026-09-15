@@ -123,7 +123,9 @@ func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *o
 	assigned, newlyAssigned, err := orchestrator.AssignDeclarativePreferring(ctx, sandbox, string(sandbox.UID), preferredFastlet, preferredPodUID)
 	if err != nil {
 		if errors.Is(err, orchestration.ErrNoCandidate) {
-			_ = r.markPending(ctx, sandbox, "NoCandidate", "No Ready Fastlet currently accepts this Pool/profile")
+			if statusErr := r.markPending(ctx, sandbox, "NoCandidate", "No Ready Fastlet currently accepts this Pool/profile"); statusErr != nil {
+				klog.FromContext(ctx).Error(statusErr, "Failed to mark Sandbox Pending after NoCandidate", "sandbox", sandbox.Name)
+			}
 			return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
 		}
 		if errors.Is(err, orchestration.ErrAssignedFastletUnavailable) {
@@ -166,12 +168,17 @@ func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *o
 				// before the new identity is sent to Fastlet.
 				return ctrl.Result{Requeue: true}, nil
 			}
-			_ = r.markPending(ctx, assigned, "FastletRejected", err.Error())
+			statusErr := r.markPending(ctx, assigned, "FastletRejected", err.Error())
+			if statusErr != nil {
+				klog.FromContext(ctx).Error(statusErr, "Failed to mark Sandbox Pending after Fastlet rejection", "sandbox", assigned.Name)
+			}
 			return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
 		}
 		var failure *fastletapi.FastletError
 		if errors.As(err, &failure) && failure.Code == fastletapi.ErrorInProgress {
-			_ = r.markCreating(ctx, assigned, failure.Message)
+			if statusErr := r.markCreating(ctx, assigned, failure.Message); statusErr != nil {
+				klog.FromContext(ctx).Error(statusErr, "Failed to mark Sandbox Creating after ErrorInProgress", "sandbox", assigned.Name)
+			}
 			return ctrl.Result{RequeueAfter: ObservationPollInterval}, nil
 		}
 		if errors.Is(err, orchestration.ErrUnknownFastletOutcome) {
@@ -350,10 +357,12 @@ func (r *SandboxReconciler) reconcileDeletion(ctx context.Context, orchestrator 
 		return ctrl.Result{RequeueAfter: DeletionPollInterval}, err
 	}
 	if !done {
-		_ = r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
+		if statusErr := r.patchStatus(ctx, sandbox, func(status *apiv1alpha2.SandboxStatus) {
 			setControllerStates(status, apiv1alpha2.RuntimeStopping, apiv1alpha2.DataPlaneDraining, "Sandbox deletion is in progress")
 			setSandboxReadyCondition(status, sandbox.Generation, "Deleting", "Sandbox deletion is in progress")
-		})
+		}); statusErr != nil {
+			klog.FromContext(ctx).Error(statusErr, "Failed to project deletion-in-progress status", "sandbox", sandbox.Name)
+		}
 		return ctrl.Result{RequeueAfter: DeletionPollInterval}, nil
 	}
 	return ctrl.Result{}, retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -547,6 +556,9 @@ func (r *SandboxReconciler) mapPodToSandboxes(ctx context.Context, object client
 	}
 	var list apiv1alpha2.SandboxList
 	if err := r.List(ctx, &list, client.InNamespace(object.GetNamespace()), client.MatchingFields{"status.placement.fastletName": object.GetName()}); err != nil {
+		// A failed lookup silently stops every Sandbox on a lost Fastlet Pod
+		// from being enqueued — the pod-loss recovery would stall invisibly.
+		klog.FromContext(ctx).Error(err, "Failed to list Sandboxes for Fastlet Pod event", "fastletPod", object.GetName(), "namespace", object.GetNamespace())
 		return nil
 	}
 	result := make([]ctrl.Request, 0, len(list.Items))

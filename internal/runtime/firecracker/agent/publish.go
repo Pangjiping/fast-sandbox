@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	"fast-sandbox/internal/artifacts"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
 )
@@ -64,6 +66,8 @@ func (c *Client) PublishImage(ctx context.Context, kind, key, dir string) (Publi
 	}
 	artifactDigest := artifacts.SHA256Of(manifestBytes)
 	base := artifacts.Digest16(manifestBytes)
+	started := time.Now()
+	klog.InfoS("runtime-agent publish started", "kind", kind, "key", key, "digest", artifactDigest, "stagingDir", dir)
 
 	// Artifacts and SHA256SUMS first: the namespace stays incomplete (and
 	// unaddressable) until the manifest lands.
@@ -71,15 +75,18 @@ func (c *Client) PublishImage(ctx context.Context, kind, key, dir string) (Publi
 	entries = append(entries, artifacts.SHA256SUMSName)
 	for _, name := range entries {
 		if err := c.putFile(ctx, dir, name, base+"/"+name); err != nil {
+			klog.ErrorS(err, "runtime-agent publish failed", "kind", kind, "key", key, "file", name, "elapsed", time.Since(started).String())
 			return PublishResult{}, fmt.Errorf("publish %s: %w", name, err)
 		}
 	}
 	manifestURI := c.s3.storeRootURI() + "/" + base + "/" + publishManifestName
 	if err := c.putFile(ctx, dir, publishManifestName, base+"/"+publishManifestName); err != nil {
+		klog.ErrorS(err, "runtime-agent publish failed", "kind", kind, "key", key, "file", publishManifestName, "elapsed", time.Since(started).String())
 		return PublishResult{}, fmt.Errorf("publish manifest: %w", err)
 	}
 	if kind == agentprotocol.PublishKindCheckpoint {
 		// No index: the set is complete and addressed by ref + digest only.
+		klog.InfoS("runtime-agent publish completed", "kind", kind, "key", key, "manifestRef", manifestURI, "elapsed", time.Since(started).String())
 		return PublishResult{ManifestRef: manifestURI, ArtifactDigest: artifactDigest}, nil
 	}
 
@@ -95,8 +102,10 @@ func (c *Client) PublishImage(ctx context.Context, kind, key, dir string) (Publi
 	if err := c.s3.put(ctx, indexKey, int64(len(payload)), func() (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader(payload)), nil
 	}); err != nil {
+		klog.ErrorS(err, "runtime-agent publish failed", "kind", kind, "key", key, "file", indexKey, "elapsed", time.Since(started).String())
 		return PublishResult{}, fmt.Errorf("publish index: %w", err)
 	}
+	klog.InfoS("runtime-agent publish completed", "kind", kind, "key", key, "manifestRef", manifestURI, "elapsed", time.Since(started).String())
 	return PublishResult{ManifestRef: manifestURI, ArtifactDigest: artifactDigest}, nil
 }
 
@@ -114,5 +123,5 @@ func (c *Client) putFile(ctx context.Context, dir, name, storeKey string) error 
 	})
 }
 
-// now returns the publish clock; factored for tests.
+// nowFunc is the publish clock; factored for tests.
 var nowFunc = time.Now

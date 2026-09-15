@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -230,6 +232,9 @@ func (p *FileProvider) CredentialsForHost(host string) (Credential, bool, error)
 func (p *FileProvider) Revision() string {
 	compiled, err := p.load()
 	if err != nil {
+		// Serving the last-good revision is deliberate (fail-open for a
+		// transient read failure), but the degraded state must be visible.
+		klog.V(2).InfoS("Registry configuration read failed; serving last-good revision", "path", p.path, "err", err)
 		p.mu.RLock()
 		defer p.mu.RUnlock()
 		return p.compiled.Revision

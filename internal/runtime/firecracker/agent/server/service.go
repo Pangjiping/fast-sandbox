@@ -1,7 +1,7 @@
 package server
 
-// Service implements the Backend interface for stage 1: it ties the pull
-// layer (agent.Client), the durable state (agent/state), and the shared
+// Service implements the Backend interface: it ties the pull layer
+// (agent.Client), the durable state (agent/state), and the shared
 // node cache (<StateRoot>/images/<sha256(image)>/) together. The native
 // stage returns cache file paths as devices; overlaybd ublk devices arrive
 // with stage 3.

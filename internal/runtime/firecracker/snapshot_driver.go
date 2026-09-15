@@ -135,7 +135,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, dumpErr
 	}
 	klog.InfoS("firecracker sandbox dumped",
-		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID,
+		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID,
 		"pauseWindow", plan.pauseWindow.String(), "spillMove", plan.spillMove.String(),
 		"spilled", plan.spilled, "rootfsClone", plan.rootfsClone.String(), "rootfsCopy", plan.rootfsCopy.String(),
 		"pauseAPI", plan.pauseAPI.String(), "dumpAPI", plan.dumpAPI.String(), "resumeAPI", plan.resumeAPI.String())
@@ -146,7 +146,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 	klog.InfoS("firecracker checkpoint manifest assembled",
-		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind,
+		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind,
 		"sizeBytes", sizeBytes, "staging", plan.staging)
 
 	client, err := d.agentClientOrNil()
@@ -186,13 +186,13 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	if kind == fastletapi.SnapshotKindCheckpoint {
 		if cacheErr := d.commitCheckpointCache(result, plan.staging); cacheErr != nil {
 			klog.ErrorS(cacheErr, "checkpoint local cache commit failed; a resume will pull from the store",
-				"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "manifestRef", outcome.ManifestRef)
+				"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "manifestRef", outcome.ManifestRef)
 		}
 	} else {
 		_ = os.RemoveAll(plan.staging)
 	}
 	klog.InfoS("firecracker snapshot published",
-		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind, "templateName", input.TemplateName,
+		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind, "templateName", input.TemplateName,
 		"manifestRef", outcome.ManifestRef, "sizeBytes", sizeBytes, "publish", time.Since(publishStarted).String())
 	return result, nil
 }
@@ -468,7 +468,7 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 	spillDir := d.spillDirFor(plan.snapshotID, state.Config.Spec.Memory)
 	plan.spilled = spillDir != ""
 	klog.InfoS("firecracker sandbox dump starting",
-		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID,
+		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID,
 		"staging", plan.staging, "jailed", plan.jailed, "spilled", plan.spilled)
 
 	// The instance root drive: the state-directory copy in direct mode, the
@@ -545,7 +545,7 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 	}
 	plan.pauseAPI = time.Since(pauseStarted)
 	klog.InfoS("firecracker sandbox paused for dump",
-		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "spilled", plan.spilled,
+		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "spilled", plan.spilled,
 		"rootfsCloned", rootfsCloned)
 	dumpErr := func() error {
 		if !rootfsCloned {
@@ -585,7 +585,7 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		return dumpErr
 	}
 	klog.InfoS("firecracker sandbox resumed after dump",
-		"sandboxId", plan.sandboxID, "snapshotId", plan.snapshotID, "pauseWindow", plan.pauseWindow.String(),
+		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "pauseWindow", plan.pauseWindow.String(),
 		"rootfsClone", plan.rootfsClone.String(), "rootfsCopy", plan.rootfsCopy.String(),
 		"pauseAPI", plan.pauseAPI.String(), "dumpAPI", plan.dumpAPI.String(), "resumeAPI", plan.resumeAPI.String())
 	if !plan.spilled {

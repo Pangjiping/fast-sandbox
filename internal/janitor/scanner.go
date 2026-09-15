@@ -29,6 +29,7 @@ func (j *Janitor) Scan(ctx context.Context) {
 				continue
 			}
 			if !decision.Eligible {
+				klog.V(2).InfoS("Janitor scan skip; resource not eligible for cleanup", "backend", resource.Backend, "resource", resource.ResourceID, "reason", decision.Reason)
 				continue
 			}
 			klog.InfoS("Enqueuing orphan node resource", "backend", resource.Backend, "resource", resource.ResourceID, "reason", decision.Reason)

@@ -84,7 +84,6 @@ func newWithConfig(rt apiv1alpha2.RuntimeName, profileHash string, cfg RuntimeCo
 	}
 }
 
-// Initialize init containerd client
 func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	r.socketPath = socketPath
 	if r.socketPath == "" {
@@ -137,7 +136,7 @@ func (r *Driver) CreateSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	totalStart := time.Now()
 	ctx, finishTotal := startContainerdCreateStage(ctx, string(r.runtimeName), "total")
 	defer func() { finishTotal(resultErr) }()
-	logger := klog.FromContext(ctx).WithValues("sandbox_id", identity.SandboxUID)
+	logger := klog.FromContext(ctx).WithValues("sandboxID", identity.SandboxUID)
 
 	logger.Info("Creating sandbox", "image", spec.Image, "runtime", r.config.Handler, "netns", network.NamespacePath)
 	ctx, cancel := context.WithTimeout(ctx, defaultOperationTimeout)
@@ -167,7 +166,9 @@ func (r *Driver) CreateSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if infraInstance != nil {
 		defer func() {
 			if !created {
-				_ = r.infraMgr.RemoveInstance(config)
+				if removeErr := r.infraMgr.RemoveInstance(config); removeErr != nil {
+					logger.V(2).Info("Infra instance removal on failed create leaked resources", "err", removeErr)
+				}
 			}
 		}()
 	}
@@ -247,7 +248,9 @@ func (r *Driver) CreateSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if err != nil {
 		logger.Error(err, "Failed to create containerd task", "logPath", logPath)
 		logFile.Close()
-		_ = container.Delete(ctx, containerd.WithSnapshotCleanup)
+		if deleteErr := container.Delete(ctx, containerd.WithSnapshotCleanup); deleteErr != nil {
+			logger.V(2).Info("Container cleanup on failed task create leaked resources", "err", deleteErr)
+		}
 		return nil, fmt.Errorf("failed to create task: %w", err)
 	}
 	taskCreateDuration := time.Since(taskCreateStarted)
@@ -259,8 +262,12 @@ func (r *Driver) CreateSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	finishTaskStart(err)
 	if err != nil {
 		logger.Error(err, "Failed to start containerd task")
-		_, _ = task.Delete(ctx, containerd.WithProcessKill)
-		_ = container.Delete(ctx, containerd.WithSnapshotCleanup)
+		if _, deleteErr := task.Delete(ctx, containerd.WithProcessKill); deleteErr != nil {
+			logger.V(2).Info("Task cleanup on failed start leaked resources", "err", deleteErr)
+		}
+		if deleteErr := container.Delete(ctx, containerd.WithSnapshotCleanup); deleteErr != nil {
+			logger.V(2).Info("Container cleanup on failed start leaked resources", "err", deleteErr)
+		}
 		return nil, fmt.Errorf("failed to start task: %w", err)
 	}
 	userProcessStartedAt, userProcessStartSource := userProcessStartAfterTaskStart(infraInstance, time.Now())
@@ -522,17 +529,6 @@ func withSandboxInit() oci.SpecOpts {
 	}
 }
 
-func cloneStringMap(input map[string]string) map[string]string {
-	if input == nil {
-		return nil
-	}
-	result := make(map[string]string, len(input))
-	for key, value := range input {
-		result[key] = value
-	}
-	return result
-}
-
 func sandboxResourceSpecOpts(config *fastletapi.SandboxSpec) ([]oci.SpecOpts, error) {
 	var opts []oci.SpecOpts
 	if config.CPU != "" {
@@ -708,13 +704,14 @@ func (r *Driver) GetSandboxStatus(ctx context.Context, sandboxID string) (string
 	ctx = r.withNamespace(ctx)
 	container, err := r.client.LoadContainer(ctx, sandboxID)
 	if err != nil {
-		// 容器不存在
+		// No container object: nothing remains of the sandbox.
 		return "terminated", nil
 	}
 
 	task, err := container.Task(ctx, nil)
 	if err != nil {
-		// 任务不存在，容器已停止
+		// Container object exists but has no running task: the process
+		// already exited.
 		return "stopped", nil
 	}
 

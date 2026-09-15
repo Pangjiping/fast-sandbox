@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -64,7 +65,11 @@ type SandboxSnapshotReconciler struct {
 }
 
 func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, request ctrl.Request) (_ ctrl.Result, resultErr error) {
-	ctx = observability.WithIdentity(ctx, observability.Identity{Namespace: request.Namespace, SandboxName: request.Name})
+	// The reconciled object is the SandboxSnapshot, not a Sandbox: key the
+	// logs by the snapshot name and refine with the target Sandbox identity
+	// once resolveTarget succeeds (see enrichSnapshotIdentity).
+	ctx = observability.WithIdentity(ctx, observability.Identity{Namespace: request.Namespace})
+	ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("snapshot", request.Name))
 	ctx, span := observability.Start(ctx, "controller.reconcile SandboxSnapshot")
 	defer func() { observability.End(span, resultErr) }()
 	var snapshot apiv1alpha2.SandboxSnapshot
@@ -103,10 +108,22 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, request ctrl.
 	if result != nil {
 		return *result, nil
 	}
+	ctx = enrichSnapshotIdentity(ctx, sandbox)
 	if snapshot.Status.SnapshotID == "" {
 		return r.reconcileTrigger(ctx, &snapshot, sandbox)
 	}
 	return r.reconcileObserve(ctx, &snapshot, sandbox)
+}
+
+// enrichSnapshotIdentity re-keys the logger to the snapshot's target Sandbox
+// once it is resolved, so observe/trigger/deletion logs correlate with the
+// Sandbox lifecycle they affect.
+func enrichSnapshotIdentity(ctx context.Context, sandbox *apiv1alpha2.Sandbox) context.Context {
+	if sandbox == nil {
+		return ctx
+	}
+	identity := observability.Identity{Namespace: sandbox.Namespace, SandboxName: sandbox.Name, SandboxUID: string(sandbox.UID)}
+	return observability.WithIdentity(ctx, identity)
 }
 
 // snapshotDeadlineExceeded reports whether a non-terminal snapshot has held
@@ -262,15 +279,21 @@ func (r *SandboxSnapshotReconciler) reconcileDeletion(ctx context.Context, snaps
 	// node-side leftovers are bounded by driver-local garbage collection.
 	sandbox, result, resolveErr := r.resolveTarget(ctx, snapshot)
 	if resolveErr == nil && result == nil && sandbox != nil {
+		ctx = enrichSnapshotIdentity(ctx, sandbox)
 		if err := r.Orchestrator.DeleteSnapshot(ctx, snapshot, sandbox); err != nil && !orchestration.IsNotFound(err) {
 			var failure *fastletapi.FastletError
 			if errors.As(err, &failure) && failure.Code == fastletapi.ErrorRuntimeUnavailable {
 				// The artifacts may still exist but the runtime is down;
 				// proceed so object deletion is not wedged on cleanup.
-			} else if !errors.Is(err, orchestration.ErrAssignedFastletUnavailable) {
+				klog.FromContext(ctx).Info("Skipping node-side snapshot cleanup: runtime unavailable", "snapshot", snapshot.Name)
+			} else if errors.Is(err, orchestration.ErrAssignedFastletUnavailable) {
+				klog.FromContext(ctx).Info("Skipping node-side snapshot cleanup: assigned Fastlet unavailable", "snapshot", snapshot.Name)
+			} else {
 				return ctrl.Result{RequeueAfter: SnapshotRetryInterval}, err
 			}
 		}
+	} else if resolveErr != nil || result != nil {
+		klog.FromContext(ctx).Info("Skipping node-side snapshot cleanup: target Sandbox no longer resolvable", "snapshot", snapshot.Name)
 	}
 	return ctrl.Result{}, retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var current apiv1alpha2.SandboxSnapshot

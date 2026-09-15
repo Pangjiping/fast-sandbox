@@ -359,32 +359,6 @@ func (m *SandboxManager) validateInfraRevision(spec *fastletapi.SandboxSpec) err
 	return nil
 }
 
-func (m *SandboxManager) beginDelete(sandboxID string) {
-	m.mu.Lock()
-	sandbox, ok := m.sandboxes[sandboxID]
-	if !ok {
-		m.mu.Unlock()
-		return
-	}
-	if sandbox.Phase == "terminating" {
-		m.mu.Unlock()
-		return
-	}
-	if sandbox.Phase == "creating" {
-		sandbox.Phase = "terminating"
-		m.recordDiagnosticLocked(sandboxID, "info", "fastlet", "terminating", "creation cancellation recorded")
-		m.mu.Unlock()
-		klog.InfoS("DeleteSandbox: creation cancellation recorded", "sandboxID", sandboxID)
-		return
-	}
-	m.cancelDataPlaneReconcileLocked(sandbox)
-	sandbox.Phase = "terminating"
-	m.recordDiagnosticLocked(sandboxID, "info", "fastlet", "terminating", "runtime deletion started")
-	m.mu.Unlock()
-	klog.InfoS("Sandbox deletion started", "sandboxID", sandboxID)
-	go m.asyncDelete(sandboxID, sandbox)
-}
-
 func (m *SandboxManager) asyncDelete(sandboxID string, expected *SandboxMetadata) {
 	const gracefulTimeout = 10 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), gracefulTimeout+5*time.Second)

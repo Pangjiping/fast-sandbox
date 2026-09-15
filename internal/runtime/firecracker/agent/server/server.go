@@ -4,8 +4,10 @@ package server
 // versioned JSON-over-HTTP service on a Unix socket (design docs §2.2).
 // The server layer enforces the caller identity (empty PodUID -> 403), the
 // idempotency key contract (requestId required on mutating RPCs), routes
-// the seven stage-1 RPCs, and maps backend errors onto stable wire codes;
-// idempotency and the journal live in the state package.
+// the RPCs (PinImage / UnpinImage / LeaseDevices / ReleaseDevices /
+// ListLeases / Compatibility / Health / PublishImage), and maps backend
+// errors onto stable wire codes; idempotency and the journal live in the
+// state package.
 
 import (
 	"context"
@@ -21,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"fast-sandbox/internal/observability"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
 	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
@@ -112,6 +115,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // ServeHTTP routes the versioned RPCs. Every request carries the caller
 // identity in its body; an empty PodUID is rejected (403).
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	request, span := observability.StartHTTPServer(request, "runtime-agent")
+	recorder := &statusRecorder{ResponseWriter: writer, status: http.StatusOK}
+	defer func() { observability.End(span, recorder.err()) }()
+	writer = recorder
 	if s.Backend == nil {
 		writeError(writer, &Error{Code: agentprotocol.ErrorInternal, Message: "runtime-agent backend is not configured"})
 		return
@@ -223,6 +230,35 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 // handleMutating runs a mutating RPC: POST only, bounded body, and a
 // non-empty idempotency key (validated per route on the decoded identity).
+// statusRecorder captures the response status so the request span reflects
+// server-side failures: writeError maps backend errors onto the status code,
+// and the span must not report a failed RPC as successful.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) err() error {
+	if r.status >= http.StatusInternalServerError {
+		return fmt.Errorf("runtime-agent RPC failed with HTTP %d", r.status)
+	}
+	return nil
+}
+
+// withAgentIdentity merges the caller's wire identity into the trace span and
+// the ctx logger, so agent-side logs correlate with the driver request that
+// issued the RPC.
+func withAgentIdentity(ctx context.Context, identity agentprotocol.Identity) context.Context {
+	return observability.WithIdentity(ctx, observability.Identity{
+		RequestID: identity.RequestID, Namespace: identity.Namespace, FastletPodUID: identity.PodUID,
+	})
+}
+
 func (s *Server) handleMutating(writer http.ResponseWriter, request *http.Request, run func(ctx context.Context, payload json.RawMessage) (any, error)) {
 	if request.Method != http.MethodPost {
 		methodNotAllowed(writer)
@@ -233,7 +269,13 @@ func (s *Server) handleMutating(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, invalidRequest("%v", err))
 		return
 	}
-	result, err := run(request.Context(), payload)
+	// The identity envelope decodes the common subset of every mutating
+	// request; the route handler decodes the full payload itself.
+	var envelope struct {
+		Identity agentprotocol.Identity `json:"identity"`
+	}
+	_ = json.Unmarshal(payload, &envelope)
+	result, err := run(withAgentIdentity(request.Context(), envelope.Identity), payload)
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -266,7 +308,7 @@ func (s *Server) handleRead(writer http.ResponseWriter, request *http.Request, r
 		writeError(writer, err)
 		return
 	}
-	result, err := run(request.Context(), identity)
+	result, err := run(withAgentIdentity(request.Context(), identity), identity)
 	if err != nil {
 		writeError(writer, err)
 		return

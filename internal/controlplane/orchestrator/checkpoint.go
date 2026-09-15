@@ -15,6 +15,8 @@ import (
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+
+	"k8s.io/klog/v2"
 )
 
 // CreateCheckpoint registers (or replays) the checkpoint task of a pause on
@@ -38,6 +40,10 @@ func (o *Orchestrator) CreateCheckpoint(ctx context.Context, sandbox *apiv1alpha
 	// and the resume path needs no side records.
 	if bindings, bindErr := compileActionBindings(sandbox.Spec.ActionBindings); bindErr == nil {
 		request.ActionBindings = bindings
+	} else {
+		// Publishing without bindings breaks the self-contained artifact
+		// promise; never silent.
+		klog.FromContext(ctx).Error(bindErr, "Failed to compile checkpoint action bindings; manifest will lack them", "sandbox", sandbox.Name)
 	}
 	response, callErr := o.FastletClient.CreateSnapshot(ctx, fastlet.PodIP, request)
 	if callErr == nil && response != nil &&

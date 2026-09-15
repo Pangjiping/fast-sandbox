@@ -92,8 +92,8 @@ type instanceInfoResponse struct {
 }
 
 // Client is a thin Firecracker REST API client over the per-Sandbox Unix
-// socket. It deliberately covers only the lifecycle surface consumed by the
-// runtime driver; snapshot and metrics endpoints are out of scope.
+// socket. It deliberately covers only the lifecycle and snapshot surface
+// consumed by the runtime driver; metrics endpoints are out of scope.
 type Client struct {
 	httpClient *http.Client
 }

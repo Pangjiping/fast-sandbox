@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -66,9 +67,30 @@ func traceFastletAPI(next http.Handler) http.Handler {
 			return
 		}
 		request, span := observability.StartHTTPServer(request, "fastlet")
-		defer observability.End(span, nil)
-		next.ServeHTTP(writer, request)
+		recorder := &statusRecorder{ResponseWriter: writer, status: http.StatusOK}
+		defer func() { observability.End(span, recorder.err()) }()
+		next.ServeHTTP(recorder, request)
 	})
+}
+
+// statusRecorder captures the response status so the request span reflects
+// server-side failures: writeResponse maps handler errors onto the status
+// code, and the span must not report a failed request as successful.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) err() error {
+	if r.status >= http.StatusInternalServerError {
+		return fmt.Errorf("fastlet API handler failed with HTTP %d", r.status)
+	}
+	return nil
 }
 
 func (s *FastletServer) handleReady(w http.ResponseWriter, _ *http.Request) {
@@ -260,14 +282,14 @@ func statusForFastletError(err error) int {
 func (s *FastletServer) heartbeat(r *http.Request, cursor fastletapi.CacheCursor) fastletapi.HeartbeatResponse {
 	cacheSnapshot, err := s.sandboxManager.CacheSnapshot(r.Context(), cursor)
 	if err != nil {
-		klog.ErrorS(err, "Warning: failed to refresh cache inventory")
+		klog.ErrorS(err, "Failed to refresh cache inventory")
 	}
 	sbStatuses := s.sandboxManager.GetSandboxStatuses(r.Context())
 	nodeName := os.Getenv("NODE_NAME")
 	admission, recovering, draining := s.sandboxManager.State()
 	infraRevision, infraReady, preparedArtifacts, _ := s.sandboxManager.InfraStatus()
 	status := fastletapi.FastletStatus{
-		FastletID:           os.Getenv("POD_NAME"), // Use Pod Name as Fastlet ID
+		FastletID:           os.Getenv("POD_NAME"),
 		NodeName:            nodeName,
 		SandboxStatuses:     sbStatuses,
 		Admission:           admission,

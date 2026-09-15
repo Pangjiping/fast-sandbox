@@ -84,7 +84,9 @@ func main() {
 	flag.IntVar(&sandboxReconcileWorkers, "sandbox-reconcile-workers", 4, "Concurrent Sandbox reconcilers (per-key serialization is guaranteed by the workqueue).")
 	flag.StringVar(&runtimeEnvironmentNamespace, "runtime-environment-namespace", envOrDefault("FAST_SANDBOX_RUNTIME_ENVIRONMENT_NAMESPACE", runtimeenv.SystemNamespace), "Namespace containing the platform runtime environment ConfigMap.")
 	flag.StringVar(&runtimeEnvironmentConfigMap, "runtime-environment-configmap", envOrDefault("FAST_SANDBOX_RUNTIME_ENVIRONMENT_CONFIGMAP", runtimeenv.ConfigMapName), "Platform runtime environment ConfigMap name.")
+	klog.InitFlags(nil)
 	flag.Parse()
+	defer klog.Flush()
 
 	role, err := controlplane.ParseRole(roleValue)
 	if err != nil {

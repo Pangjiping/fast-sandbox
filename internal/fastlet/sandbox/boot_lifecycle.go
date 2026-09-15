@@ -94,7 +94,7 @@ func (m *SandboxManager) parkForImageDelivery(req *fastletapi.CreateSandboxReque
 
 	m.startImageBootWorker(placeholder, req, input, started)
 	m.recordDiagnostic(sandboxUID, "info", "runtime", "image-pending", message)
-	klog.InfoS("sandbox parked for async image delivery", "sandboxId", sandboxUID, "image", input.Sandbox.Spec.Image)
+	klog.InfoS("sandbox parked for async image delivery", "sandboxID", sandboxUID, "image", input.Sandbox.Spec.Image)
 	return &fastletapi.CreateSandboxResponse{
 		Disposition: fastletapi.CreateDispositionCreated,
 		Sandbox:     &status,
@@ -188,7 +188,7 @@ func (m *SandboxManager) runImageBootWorker(ctx context.Context, metadata *Sandb
 		// below is identical to the synchronous create tail, so lifecycle
 		// hooks, data-plane reconciliation, and readiness observations stay
 		// the same regardless of the delivery path.
-		klog.InfoS("sandbox artifacts delivered; booting runtime", "sandboxId", uid, "image", input.Sandbox.Spec.Image)
+		klog.InfoS("sandbox artifacts delivered; booting runtime", "sandboxID", uid, "image", input.Sandbox.Spec.Image)
 		bootCtx, cancel := context.WithTimeout(ctx, imageBootTimeout)
 		result, ensureErr := m.runtime.EnsureSandbox(bootCtx, input)
 		cancel()
@@ -239,7 +239,7 @@ func (m *SandboxManager) markCreateFailed(metadata *SandboxMetadata, cause error
 	m.runtimeMessages[uid] = cause.Error()
 	m.cacheProtection.ProtectHotUntil(metadata.Config.Spec.Image, m.clock.Now().Add(time.Hour))
 	m.recordDiagnosticLocked(uid, "error", "runtime", "create-failed", cause.Error())
-	klog.ErrorS(cause, "cold Sandbox create failed", "sandboxId", uid, "image", metadata.Config.Spec.Image)
+	klog.ErrorS(cause, "cold Sandbox create failed", "sandboxID", uid, "image", metadata.Config.Spec.Image)
 }
 
 func sleepImageBootPoll(ctx context.Context, delay time.Duration) bool {

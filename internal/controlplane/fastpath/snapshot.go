@@ -340,7 +340,7 @@ func (s *Server) applyManifestRecordedBindings(ctx context.Context, request *fas
 	}
 	bindings, err := s.ManifestPolicy.ActionBindings(ctx, pool, request.Image)
 	if err != nil {
-		klog.FromContext(ctx).Info("Snapshot-recorded policy unavailable; proceeding without it", "image", request.Image, "err", err)
+		klog.FromContext(ctx).Error(err, "Snapshot-recorded policy unavailable; proceeding without it", "image", request.Image)
 		return explicit, nil
 	}
 	if len(bindings) == 0 {
@@ -374,6 +374,9 @@ func (s *Server) applyManifestRecordedBindings(ctx context.Context, request *fas
 func (s *Server) acceptSnapshotIntent(ctx context.Context, snapshot *apiv1alpha2.SandboxSnapshot) (*apiv1alpha2.SandboxSnapshot, error) {
 	createErr := s.K8sClient.Create(ctx, snapshot)
 	if createErr == nil {
+		// A durable intent write: operators must be able to see that a
+		// snapshot object now exists even if the trigger later fails.
+		klog.FromContext(ctx).Info("SandboxSnapshot intent created", "snapshot", snapshot.Name)
 		return snapshot, nil
 	} else if !apierrors.IsAlreadyExists(createErr) {
 		return nil, grpcKubernetesError(createErr)
@@ -408,7 +411,10 @@ func (s *Server) triggerSnapshot(ctx context.Context, snapshot *apiv1alpha2.Sand
 	// A missing envelope only means the Sandbox has no durable placement
 	// right now: the trigger failed transitively, and the response still
 	// reports a meaningful Pending instead of an unspecified phase.
-	envelope, _ := assignment.EffectiveAssignment(sandbox)
+	envelope, envelopeErr := assignment.EffectiveAssignment(sandbox)
+	if envelopeErr != nil {
+		klog.FromContext(ctx).Error(envelopeErr, "Failed to read effective assignment while projecting snapshot trigger status", "sandbox", sandbox.Name)
+	}
 	updated, patchErr := s.patchSnapshotStatus(ctx, client.ObjectKeyFromObject(snapshot), func(status *apiv1alpha2.SandboxSnapshotStatus) {
 		if envelope != nil {
 			status.FastletName = envelope.FastletName
@@ -450,15 +456,18 @@ func (s *Server) triggerSnapshot(ctx context.Context, snapshot *apiv1alpha2.Sand
 			}
 			return nil, status.Error(code, message)
 		}
-		klog.FromContext(ctx).Info("SandboxSnapshot intent persisted; Controller will trigger", "snapshot", snapshot.Name, "error", callErr.Error())
+		klog.FromContext(ctx).Error(callErr, "SandboxSnapshot intent persisted; Controller will trigger", "snapshot", snapshot.Name)
 	}
 	return response, nil
 }
 
 // snapshotRejection classifies a Fastlet snapshot trigger failure. A
-// deterministic rejection terminates the snapshot (Failed); everything else —
-// including the transient ErrorDraining/ErrorInProgress states a rolling or
-// restarting Fastlet reports — is retried by the Controller.
+// deterministic rejection terminates the snapshot (Failed) — including
+// ErrorSnapshotInProgress, the Fastlet's non-reentrancy guard, which the
+// client is expected to surface rather than re-trigger blindly. Everything
+// else — the transient ErrorDraining state a rolling or restarting Fastlet
+// reports, transport failures, and unclassified errors — is retried by the
+// Controller.
 func snapshotRejection(err error) (codes.Code, string, bool) {
 	var failure *fastletapi.FastletError
 	if !errors.As(err, &failure) {
@@ -520,6 +529,7 @@ func (s *Server) DeleteSandboxSnapshot(ctx context.Context, request *fastpathv2.
 	if err := s.K8sClient.Delete(ctx, snapshot, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 		return nil, grpcKubernetesError(err)
 	}
+	klog.FromContext(ctx).Info("fastpath sandbox snapshot deleted", "snapshot", snapshot.Name)
 	return &fastpathv2.DeleteSandboxSnapshotResponse{}, nil
 }
 

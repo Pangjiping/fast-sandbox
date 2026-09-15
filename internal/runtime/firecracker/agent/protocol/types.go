@@ -2,10 +2,11 @@
 // firecracker-runtime-agent server and the fastlet driver client. Messages
 // are JSON over HTTP on a Unix socket (design docs §2.2).
 //
-// Stage 1 carries the startup flow RPCs only: PinImage / UnpinImage /
-// LeaseDevices / ReleaseDevices / ListLeases / Compatibility / Health.
-// Snapshot RPCs (PinSnapshot / LeaseSnapshotDevices / SealSnapshot) arrive
-// with stage 4.
+// The served surface covers image lifecycle (PinImage / UnpinImage),
+// device leases (LeaseDevices / ReleaseDevices / ListLeases), node
+// capability reporting (Compatibility / Health), and artifact publication
+// (PublishImage). Snapshot RPCs (PinSnapshot / LeaseSnapshotDevices /
+// SealSnapshot) arrive with stage 4.
 package protocol
 
 import "time"

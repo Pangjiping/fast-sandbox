@@ -53,6 +53,7 @@ func main() {
 
 	klog.InitFlags(nil)
 	flag.Parse()
+	defer klog.Flush()
 
 	if nodeName == "" {
 		klog.ErrorS(nil, "node-name is required (or set NODE_NAME env)")

@@ -18,6 +18,8 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	actionapi "fast-sandbox/internal/protocol/action"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -744,7 +746,11 @@ func (m *Manager) retryState(parent context.Context, state *sandboxState) {
 	terminating := state.terminating
 	state.mu.RUnlock()
 	if !terminating {
-		_ = m.convergeLocked(ctx, state)
+		if convergeErr := m.convergeLocked(ctx, state); convergeErr != nil {
+			// The retry loop swallows nothing else; without this line a
+			// persistently failing hook converge is invisible.
+			klog.V(2).InfoS("Sandbox action retry converge failed", "sandbox", state.attachment.SandboxUID, "err", convergeErr)
+		}
 	}
 }
 

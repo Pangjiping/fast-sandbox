@@ -24,7 +24,9 @@ func ValidateRequestID(requestID string) error {
 }
 
 // CreateSpecHash returns a deterministic digest of the immutable Create
-// intent. The transport-only request_id is excluded from the identity.
+// intent. The transport-only request_id and the requested completion
+// projection (which the caller may relax without changing the workload) are
+// excluded from the identity.
 func CreateSpecHash(req *fastpathv2.CreateSandboxRequest) (string, error) {
 	if req == nil {
 		return "", errors.New("create request is required")

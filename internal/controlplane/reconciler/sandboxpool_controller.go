@@ -72,52 +72,71 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, req.NamespacedName, &pool); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// The Identity struct has no pool field, so attach the pool key directly:
+	// every log in this reconcile (drain retries, scale-up, condition writes)
+	// must stay attributable when multiple pools share the controller.
+	logger = logger.WithValues("pool", req.NamespacedName.String())
+	ctx = klog.NewContext(ctx, logger)
 
 	runtimePlan, err := r.resolveRuntimePlan(ctx, &pool)
 	if err != nil {
 		logger.Error(err, "Runtime profile resolution failed")
-		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+		if condErr := r.updatePoolCondition(ctx, &pool, metav1.Condition{
 			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
 			Reason:  apiv1alpha2.ReasonRuntimeProfileInvalid,
 			Message: err.Error(),
-		})
+		}); condErr != nil {
+			logger.Error(condErr, "Failed to update Pool condition", "condition", apiv1alpha2.PoolConditionRuntimeReady)
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	profile := runtimePlan.Profile
 	if profile.Capabilities.DefaultState == runtimecatalog.CapabilityUnsupported {
-		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+		logger.V(1).Info("Pool runtime unsupported by this node", "reason", profile.Capabilities.Reason)
+		if condErr := r.updatePoolCondition(ctx, &pool, metav1.Condition{
 			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
 			Reason:  apiv1alpha2.ReasonRuntimeUnsupported,
 			Message: profile.Capabilities.Reason,
-		})
+		}); condErr != nil {
+			logger.Error(condErr, "Failed to update Pool condition", "condition", apiv1alpha2.PoolConditionRuntimeReady)
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if profile.Capabilities.DefaultState == runtimecatalog.CapabilityDegraded {
-		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+		logger.V(1).Info("Pool runtime degraded on this node", "reason", profile.Capabilities.Reason)
+		if condErr := r.updatePoolCondition(ctx, &pool, metav1.Condition{
 			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
 			Reason:  apiv1alpha2.ReasonRuntimeUnavailable,
 			Message: profile.Capabilities.Reason,
-		})
+		}); condErr != nil {
+			logger.Error(condErr, "Failed to update Pool condition", "condition", apiv1alpha2.PoolConditionRuntimeReady)
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if err := apiv1alpha2.ValidateSandboxResourceProfile(pool.Spec.SandboxResources); err != nil {
-		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+		logger.V(1).Info("Pool sandbox resource profile is invalid", "reason", err.Error())
+		if condErr := r.updatePoolCondition(ctx, &pool, metav1.Condition{
 			Type:    apiv1alpha2.PoolConditionRuntimeReady,
 			Status:  metav1.ConditionFalse,
 			Reason:  apiv1alpha2.ReasonResourceProfileInvalid,
 			Message: err.Error(),
-		})
+		}); condErr != nil {
+			logger.Error(condErr, "Failed to update Pool condition", "condition", apiv1alpha2.PoolConditionRuntimeReady)
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	compiledRegistry, err := r.ensureRegistrySecret(ctx, &pool)
 	if err != nil {
-		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+		logger.V(1).Info("Pool registry configuration is invalid", "reason", boundedStatusMessage(err.Error()))
+		if condErr := r.updatePoolCondition(ctx, &pool, metav1.Condition{
 			Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionFalse,
 			Reason: apiv1alpha2.ReasonRegistryInvalid, Message: boundedStatusMessage(err.Error()),
-		})
+		}); condErr != nil {
+			logger.Error(condErr, "Failed to update Pool condition", "condition", apiv1alpha2.PoolConditionRegistryReady)
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
@@ -126,10 +145,13 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	})
 	infraPlan, err := r.resolveInfraPlan(&pool, profile)
 	if err != nil {
-		_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+		logger.V(1).Info("Pool Infra Components are invalid", "reason", err.Error())
+		if condErr := r.updatePoolCondition(ctx, &pool, metav1.Condition{
 			Type: apiv1alpha2.PoolConditionInfraReady, Status: metav1.ConditionFalse,
 			Reason: apiv1alpha2.ReasonInfraComponentsInvalid, Message: err.Error(),
-		})
+		}); condErr != nil {
+			logger.Error(condErr, "Failed to update Pool condition", "condition", apiv1alpha2.PoolConditionInfraReady)
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
@@ -472,7 +494,17 @@ func (r *SandboxPoolReconciler) reconcileDraining(
 	for _, pod := range draining {
 		acked, err := r.requestDrain(ctx, pod, true, pod.Annotations[placement.AnnotationDrainReason])
 		if err != nil {
-			klog.FromContext(ctx).Error(err, "Retry Fastlet drain request", "pod", pod.Name)
+			// Re-fires every drain requeue until acked; the attempt counter
+			// keeps the repeats attributable without suppressing them.
+			attempt := 1
+			if started := drainStartedAt(pod); !started.IsZero() && drainRequeue > 0 {
+				attempt = int(now.Sub(started)/drainRequeue) + 1
+			}
+			if attempt <= 1 {
+				klog.FromContext(ctx).Error(err, "Retry Fastlet drain request", "pod", pod.Name)
+			} else {
+				klog.FromContext(ctx).V(1).Error(err, "Retry Fastlet drain request still failing", "pod", pod.Name, "attempt", attempt)
+			}
 		}
 		empty := active[podIdentity(pod)] == 0
 		timedOut := !drainStartedAt(pod).IsZero() && now.Sub(drainStartedAt(pod)) >= timeout
@@ -1272,8 +1304,8 @@ func (r *SandboxPoolReconciler) registryCredentialFromSecret(
 	return credential, nil
 }
 
-// registryWriteCredentialFromSecret keys of the write (publish) secret; they
-// mirror the SandboxTemplate PublishSecretRef convention.
+// Keys of the Opaque write (publish) secret; they mirror the SandboxTemplate
+// PublishSecretRef convention.
 const (
 	writeSecretAccessKeyID = "accessKeyId"
 	writeSecretAccessKey   = "secretAccessKey"
@@ -1693,7 +1725,9 @@ func mountPropagation(value *corev1.MountPropagationMode) corev1.MountPropagatio
 	return *value
 }
 
-// updatePoolCondition updates a condition on the pool status.
+// updatePoolCondition stamps ObservedGeneration and persists the condition;
+// an unchanged condition is a no-op, avoiding a pointless status write per
+// reconcile.
 func (r *SandboxPoolReconciler) updatePoolCondition(ctx context.Context, pool *apiv1alpha2.SandboxPool, condition metav1.Condition) error {
 	condition.ObservedGeneration = pool.Generation
 	existing := apiMeta.FindStatusCondition(pool.Status.Conditions, condition.Type)
@@ -1752,6 +1786,7 @@ func (r *SandboxPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *SandboxPoolReconciler) mapAllPools(ctx context.Context) []ctrl.Request {
 	var pools apiv1alpha2.SandboxPoolList
 	if err := r.List(ctx, &pools); err != nil {
+		klog.FromContext(ctx).Error(err, "Failed to list Pools for ConfigMap event; pool reconciles are skipped")
 		return nil
 	}
 	result := make([]ctrl.Request, 0, len(pools.Items))
@@ -1764,6 +1799,7 @@ func (r *SandboxPoolReconciler) mapAllPools(ctx context.Context) []ctrl.Request 
 func (r *SandboxPoolReconciler) mapNamespaceToPools(ctx context.Context, namespace string) []ctrl.Request {
 	var pools apiv1alpha2.SandboxPoolList
 	if err := r.List(ctx, &pools, client.InNamespace(namespace)); err != nil {
+		klog.FromContext(ctx).Error(err, "Failed to list Pools for namespace event; pool reconciles are skipped", "poolNamespace", namespace)
 		return nil
 	}
 	result := make([]ctrl.Request, 0, len(pools.Items))

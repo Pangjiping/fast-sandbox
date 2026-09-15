@@ -263,14 +263,16 @@ func (m *Manager) Acquire(ctx context.Context, owner Owner) (_ *Slot, resultErr 
 	recordSlotAcquire("miss")
 	result = "empty"
 	klog.ErrorS(ErrNoCleanSlot, "network slot acquire missed",
-		"sandboxUid", owner.SandboxUID, "capacity", m.config.Capacity, "slotCount", len(m.slots))
+		"sandboxID", owner.SandboxUID, "capacity", m.config.Capacity, "slotCount", len(m.slots))
+	// Per-slot detail is diagnostics, not an error per slot: under
+	// saturation it would repeat capacity×QPS identical lines.
 	for _, id := range m.sortedSlotIDsLocked() {
 		slot := m.slots[id]
 		boundOwner := ""
 		if slot.Owner.SandboxUID != "" {
 			boundOwner = slot.Owner.SandboxUID
 		}
-		klog.ErrorS(ErrNoCleanSlot, "slot pool detail",
+		klog.V(2).InfoS("slot pool detail",
 			"id", id, "phase", slot.Phase, "owner", boundOwner,
 			"generation", slot.Owner.InstanceGeneration, "createdAt", slot.CreatedAt.Format(time.RFC3339Nano))
 	}
@@ -357,9 +359,19 @@ func (m *Manager) Release(ctx context.Context, owner Owner) error {
 	go func() {
 		replenishCtx, cancel := context.WithTimeout(context.Background(), m.config.ReplenishTimeout)
 		defer cancel()
-		_ = m.Replenish(replenishCtx)
+		if err := m.Replenish(replenishCtx); err != nil {
+			klog.V(2).InfoS("Background slot replenish failed", "err", err)
+		}
 	}()
 	return nil
+}
+
+// destroyFailedSlot tears down a slot whose preparation failed; a destroy
+// failure here leaks host network resources, so it is never silent.
+func (m *Manager) destroyFailedSlot(ctx context.Context, slot *Slot, stage string) {
+	if err := m.driver.Destroy(ctx, slot); err != nil {
+		klog.ErrorS(err, "Failed slot destroy after failed preparation", "slot", slot.ID, "stage", stage)
+	}
 }
 
 func (m *Manager) Replenish(ctx context.Context) error {
@@ -386,8 +398,8 @@ func (m *Manager) Replenish(ctx context.Context) error {
 // pool, bound, and destroying leftovers), leaving the host with no
 // per-slot resources. It is idempotent; a Close racing an in-flight
 // preparation discards the freshly created slot and tears its resources
-// down. Release and Acquire after Close fail with ErrSlotNotFound /
-// ErrNoCleanSlot.
+// down. Acquire after Close fails with ErrNoCleanSlot (the clean pool is
+// empty); Release after Close is a silent no-op.
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	select {
@@ -485,7 +497,7 @@ func (m *Manager) prepareOne(ctx context.Context) error {
 	m.mu.Unlock()
 
 	if err := m.driver.Prepare(ctx, slot); err != nil {
-		_ = m.driver.Destroy(context.Background(), slot)
+		m.destroyFailedSlot(context.Background(), slot, "prepare")
 		m.mu.Lock()
 		delete(m.slots, id)
 		m.mu.Unlock()
@@ -493,7 +505,7 @@ func (m *Manager) prepareOne(ctx context.Context) error {
 	}
 	slot.Phase = SlotPhaseClean
 	if err := m.store.Save(ctx, slot); err != nil {
-		_ = m.driver.Destroy(context.Background(), slot)
+		m.destroyFailedSlot(context.Background(), slot, "save")
 		m.mu.Lock()
 		delete(m.slots, id)
 		m.mu.Unlock()
@@ -506,7 +518,7 @@ func (m *Manager) prepareOne(ctx context.Context) error {
 		// freshly created host resources are torn down so Close leaves no
 		// leftovers.
 		m.mu.Unlock()
-		_ = m.driver.Destroy(context.Background(), slot)
+		m.destroyFailedSlot(context.Background(), slot, "close-race")
 		_ = m.store.Delete(ctx, id)
 		m.mu.Lock()
 		delete(m.slots, id)

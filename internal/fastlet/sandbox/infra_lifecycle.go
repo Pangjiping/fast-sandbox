@@ -11,6 +11,8 @@ import (
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	actionapi "fast-sandbox/internal/protocol/action"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+
+	"k8s.io/klog/v2"
 )
 
 type dataPlaneWorker struct {
@@ -115,7 +117,7 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 
 		retryDelay := initialDataPlaneRetry
 		readyObserved := false
-		for {
+		for attempt := 1; ; attempt++ {
 			ready, err := m.reconcileDataPlaneOnce(ctx, metadata)
 			if ready {
 				m.mu.RLock()
@@ -130,10 +132,16 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 						return
 					}
 					retryDelay = initialDataPlaneRetry
+					attempt = 0
 					continue
 				}
 				return
 			}
+			// The loop only writes in-memory diagnostics; without this line
+			// a sandbox flapping between infra/route-unavailable phases is
+			// invisible at default verbosity.
+			klog.V(2).InfoS("Data-plane reconcile attempt failed; retrying",
+				"sandboxID", sandboxUID, "attempt", attempt, "retryDelay", retryDelay.String(), "err", err)
 			timer := time.NewTimer(retryDelay)
 			select {
 			case <-ctx.Done():
@@ -305,7 +313,9 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 		m.mu.Unlock()
 		if routeApplied {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-			_ = m.removeRoute(cleanupCtx, metadata)
+			if removeErr := m.removeRoute(cleanupCtx, metadata); removeErr != nil {
+				klog.V(2).InfoS("Stale route removal after reconcile race failed", "sandboxID", sandboxUID, "err", removeErr)
+			}
 			cancel()
 		}
 		return true, nil
@@ -322,6 +332,7 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 	} else {
 		metadata.Phase = "running"
 		m.recordDiagnosticLocked(sandboxUID, "info", "fastlet", "running", "runtime, private network, Infra Components, proxy route, and Sandbox Actions are ready")
+		klog.InfoS("Sandbox data plane ready; route published", "sandboxID", sandboxUID)
 	}
 	m.mu.Unlock()
 	m.recordActionHook(metadata, actionapi.LifecycleHookDataPlaneReady, 2)

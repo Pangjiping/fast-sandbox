@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 type Server struct {
@@ -104,6 +106,7 @@ func ensureAbsentHandler(cleaner RuntimeProcessCleaner) http.Handler {
 			return
 		}
 		if err := cleaner.EnsureRuntimeProcessesAbsent(r.Context(), request.Kind, request.SandboxID); err != nil {
+			klog.ErrorS(err, "Failed to ensure runtime processes absent", "kind", request.Kind, "sandboxID", request.SandboxID)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

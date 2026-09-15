@@ -29,8 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// builderImageEnv is the environment variable carrying the serialized
-// SandboxTemplate spec into the build Pod.
 const (
 	workdirEnvName                       = "SANDBOX_TEMPLATE_WORKDIR"
 	sandboxTemplateBuildDir              = "/build"
@@ -54,6 +52,9 @@ const (
 	artifactStoreRetryInterval      = time.Minute
 	reasonArtifactStoreUnconfigured = "ArtifactStoreUnconfigured"
 )
+
+// builderImageEnv is the environment variable carrying the serialized
+// SandboxTemplate spec into the build Pod.
 const builderImageEnv = "SANDBOX_TEMPLATE_SPEC"
 
 // sandboxTemplateBuildLabel links a build Pod to its SandboxTemplate (name
@@ -220,7 +221,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 	case pod.Status.Phase == corev1.PodSucceeded:
 		// Build Pod finished: consume the reported annotations, mark the
 		// build succeeded, and clear the finished Pod.
-		logger.Info("sandbox template build pod succeeded", "template", template.Name, "pod", pod.Name)
+		logger.Info("Sandbox template build pod succeeded", "template", template.Name, "pod", pod.Name)
 		template.Status.ManifestRef = pod.Annotations[sandboxTemplateManifestRefAnnot]
 		template.Status.ArtifactDigest = pod.Annotations[sandboxTemplateArtifactDigestAnn]
 		template.Status.Phase = apiv1alpha2.SandboxTemplatePhaseSucceeded
@@ -258,6 +259,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 			}
 		}
 		failure := fmt.Errorf("%s%s%s", reason, exitCodeSuffix(exitCode), suffixIfNotEmpty(message))
+		logger.Error(failure, "Sandbox template build pod failed", "template", template.Name, "pod", pod.Name)
 		if err := r.failBuild(ctx, &template, "PodFailed", failure); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -269,6 +271,7 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 		// that never left Pending, and the terminal cleanup only reaps
 		// finished Pods.
 		err := fmt.Errorf("build pod %s stuck in Pending for %s", pod.Name, podPendingTimeout)
+		logger.Error(err, "Sandbox template build pod never left Pending", "template", template.Name)
 		if failErr := r.failBuild(ctx, &template, "PodPendingTimeout", err); failErr != nil {
 			return ctrl.Result{}, failErr
 		}
@@ -406,6 +409,7 @@ func (r *SandboxTemplateReconciler) cleanupStalePods(ctx context.Context, templa
 			// never adopt, delete immediately. If it is already being
 			// garbage-collected, nothing to do.
 			if pod.DeletionTimestamp == nil {
+				klog.FromContext(ctx).V(1).Info("Deleting un-owned stale template build pod", "template", template.Name, "pod", pod.Name, "podNamespace", pod.Namespace)
 				if err := r.Delete(ctx, pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 					return err
 				}
@@ -421,6 +425,7 @@ func (r *SandboxTemplateReconciler) cleanupStalePods(ctx context.Context, templa
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
+		klog.FromContext(ctx).V(1).Info("Deleting stale template build pod from a previous generation", "template", template.Name, "pod", pod.Name, "podNamespace", pod.Namespace)
 		if err := r.Delete(ctx, pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -831,8 +836,10 @@ func podCompletionTime(pod *corev1.Pod) *time.Time {
 
 // buildPodName derives the deterministic build Pod name from the template
 // name (Pods run in the template's own namespace, so names cannot collide
-// across tenants). Long names are truncated with a sha256 prefix, keeping
-// the result within a sane 63-char budget.
+// across tenants). Long names are truncated with a sha256 prefix; the
+// generation suffix keeps rebuilds distinct per revision, and the result is
+// bounded by the Pod-name (DNS subdomain) limit rather than the 63-char
+// label budget.
 func buildPodName(template *apiv1alpha2.SandboxTemplate) string {
 	seed := template.Name
 	if len(seed) > 40 {
