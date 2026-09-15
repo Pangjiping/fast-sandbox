@@ -30,25 +30,29 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	request, span := observability.StartHTTPServer(request, "sandbox-proxy")
 	started := time.Now()
 	metricResult := "success"
+	var requestErr error
 	defer func() {
 		span.SetAttributes(attribute.String("fast_sandbox.proxy_result", metricResult))
-		observability.End(span, nil)
+		observability.End(span, requestErr)
 		observeSandboxProxy(metricResult, started)
 	}()
 	sandboxUID, targetPort, componentName, err := parseSandboxTarget(request.URL.Path)
 	if err != nil {
 		metricResult = "invalid_route"
+		requestErr = err
 		writeProxyError(writer, http.StatusBadRequest, dataplane.ProxyErrorRouteUnavailable, err.Error())
 		return
 	}
 	if p.Resolver == nil || p.Verifier == nil {
 		metricResult = "unconfigured"
-		writeProxyError(writer, http.StatusServiceUnavailable, dataplane.ProxyErrorRouteUnavailable, "Sandbox Proxy is not configured")
+		requestErr = errors.New("Sandbox Proxy is not configured")
+		writeProxyError(writer, http.StatusServiceUnavailable, dataplane.ProxyErrorRouteUnavailable, requestErr.Error())
 		return
 	}
 	token, err := routeCredential(request.Header.Get(dataplane.HeaderRouteCredential))
 	if err != nil {
 		metricResult = "missing_credential"
+		requestErr = err
 		writeProxyError(writer, http.StatusUnauthorized, dataplane.ProxyErrorCredentialRejected, err.Error())
 		return
 	}
@@ -57,6 +61,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		if verifyErr != nil || claims.SandboxUID != sandboxUID ||
 			claims.TargetKind != routeauth.TargetKindComponent || claims.ComponentName != componentName {
 			metricResult = "credential_rejected"
+			requestErr = errors.New("route credential rejected")
 			writeProxyError(writer, http.StatusForbidden, dataplane.ProxyErrorCredentialRejected, "route credential rejected")
 			return
 		}
@@ -65,6 +70,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	route, err := p.Resolver.Resolve(request.Context(), sandboxUID)
 	if err != nil {
 		metricResult = "resolve_error"
+		requestErr = err
 		writeResolveError(writer, err)
 		return
 	}
@@ -78,6 +84,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		route, err = p.Resolver.ResolveFresh(request.Context(), sandboxUID)
 		if err != nil {
 			metricResult = "resolve_error"
+			requestErr = err
 			writeResolveError(writer, err)
 			return
 		}
@@ -87,6 +94,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		}))
 		if _, err = p.verify(token, targetPort, componentName, route); err != nil {
 			metricResult = "credential_rejected"
+			requestErr = errors.New("route credential rejected")
 			writeProxyError(writer, http.StatusForbidden, dataplane.ProxyErrorCredentialRejected, "route credential rejected")
 			return
 		}
@@ -114,6 +122,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		},
 		ErrorHandler: func(response http.ResponseWriter, _ *http.Request, proxyErr error) {
 			metricResult = "upstream_error"
+			requestErr = proxyErr
 			writeProxyError(response, http.StatusBadGateway, dataplane.ProxyErrorUpstreamUnavailable, "assigned Fastlet Proxy unavailable: "+proxyErr.Error())
 		},
 	}

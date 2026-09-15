@@ -216,7 +216,7 @@ func (l *Loop) syncOnce(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			}
-			l.probeOne(ctx, info, timeout)
+			l.probeOne(ctx, info, timeout, 1)
 		}(info)
 	}
 	group.Wait()
@@ -279,7 +279,7 @@ func (l *Loop) probeUntilSchedulable(ctx context.Context, observed placement.Fas
 		semaphore = make(chan struct{}, maxConcurrent)
 	}
 
-	for {
+	for attempt := 1; ; attempt++ {
 		current, exists := l.Registry.GetFastletByID(observed.ID)
 		if !exists || current.PodUID != observed.PodUID || !current.PodReady || current.DrainRequested || current.Draining {
 			return
@@ -297,7 +297,7 @@ func (l *Loop) probeUntilSchedulable(ctx context.Context, observed placement.Fas
 		if timeout <= 0 {
 			timeout = 5 * time.Second
 		}
-		settled := l.probeOne(ctx, current, timeout)
+		settled := l.probeOne(ctx, current, timeout, attempt)
 		<-semaphore
 		if settled {
 			return
@@ -321,11 +321,13 @@ func (l *Loop) probeUntilSchedulable(ctx context.Context, observed placement.Fas
 	}
 }
 
-// probeOne returns true once the heartbeat contains a complete initial
-// scheduling observation. A full Fastlet may be ineligible, but its positive
-// capacity proves that readiness initialization has converged and steady-state
-// polling can resume.
-func (l *Loop) probeOne(ctx context.Context, info placement.FastletInfo, timeout time.Duration) bool {
+// probeOne returns true once the heartbeat carries an observation the
+// registry can act on: either the Fastlet is draining (the drain settle is
+// recorded and no further startup probing is useful), or it reports a
+// complete readiness observation — a full Fastlet may still be ineligible,
+// but positive capacity proves readiness initialization has converged and
+// steady-state polling can resume.
+func (l *Loop) probeOne(ctx context.Context, info placement.FastletInfo, timeout time.Duration, attempt int) bool {
 	logger := klog.Background().WithName("fastlet-heartbeat-loop")
 	requestContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -333,7 +335,14 @@ func (l *Loop) probeOne(ctx context.Context, info placement.FastletInfo, timeout
 		Cache: fastletapi.CacheCursor{Epoch: info.CacheEpoch, Revision: info.CacheRevision},
 	})
 	if err != nil {
-		logger.Error(err, "Fastlet Heartbeat failed", "pod", info.PodName, "podUID", info.PodUID)
+		// A partitioned fastlet would otherwise repeat an identical
+		// ErrorS every retry interval; keep the first failure loud and
+		// downgrade the repeats.
+		if attempt <= 1 {
+			logger.Error(err, "Fastlet Heartbeat failed", "pod", info.PodName, "podUID", info.PodUID)
+		} else {
+			logger.V(2).Info("Fastlet Heartbeat still failing", "pod", info.PodName, "podUID", info.PodUID, "consecutiveFailures", attempt, "err", err)
+		}
 		return false
 	}
 	if err := l.Registry.ApplyHeartbeat(info.ID, info.PodUID, heartbeat, time.Now()); err != nil {

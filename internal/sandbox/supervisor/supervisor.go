@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -195,60 +193,6 @@ func (s *Supervisor) untrack(pid int) {
 	s.mu.Lock()
 	delete(s.processes, pid)
 	s.mu.Unlock()
-}
-
-func waitReady(ctx context.Context, readiness Readiness) error {
-	if readiness.Type == "" {
-		return nil
-	}
-	timeout := readiness.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	retryCeiling := readiness.Interval
-	if retryCeiling <= 0 || retryCeiling > 10*time.Millisecond {
-		retryCeiling = 10 * time.Millisecond
-	}
-	retryDelay := min(time.Millisecond, retryCeiling)
-	probeContext, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	for {
-		var err error
-		switch readiness.Type {
-		case infracatalog.ProbeHTTP:
-			request, requestErr := http.NewRequestWithContext(probeContext, http.MethodGet, "http://"+readiness.Address+readiness.Path, nil)
-			if requestErr != nil {
-				return requestErr
-			}
-			response, requestErr := http.DefaultClient.Do(request)
-			err = requestErr
-			if response != nil {
-				_ = response.Body.Close()
-				if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusBadRequest {
-					err = fmt.Errorf("readiness returned HTTP %d", response.StatusCode)
-				}
-			}
-		case infracatalog.ProbeTCP:
-			var connection net.Conn
-			connection, err = (&net.Dialer{}).DialContext(probeContext, "tcp", readiness.Address)
-			if connection != nil {
-				_ = connection.Close()
-			}
-		default:
-			return fmt.Errorf("unsupported readiness type %s", readiness.Type)
-		}
-		if err == nil {
-			return nil
-		}
-		timer := time.NewTimer(retryDelay)
-		select {
-		case <-probeContext.Done():
-			timer.Stop()
-			return errors.Join(probeContext.Err(), err)
-		case <-timer.C:
-		}
-		retryDelay = min(retryDelay*2, retryCeiling)
-	}
 }
 
 func shouldRestart(policy infracatalog.RestartPolicy, err error) bool {

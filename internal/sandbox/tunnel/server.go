@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 const DefaultHandshakeTimeout = 5 * time.Second
@@ -66,7 +68,12 @@ func (s *Server) Serve(ctx context.Context) error {
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
-			_ = s.handle(ctx, connection, dial, timeout)
+			if err := s.handle(ctx, connection, dial, timeout); err != nil {
+				// Without this line a guest that cannot authenticate, hits a
+				// reserved port, or dials a dead target is undebuggable from
+				// the host side.
+				klog.ErrorS(err, "sandbox tunnel connection failed", "remote", connection.RemoteAddr().String())
+			}
 		}()
 	}
 }

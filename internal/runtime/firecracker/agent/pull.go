@@ -294,7 +294,9 @@ func (c *Client) getArtifact(ctx context.Context, storeKey string) (io.ReadClose
 	}
 	// Transport error, gateway error (502/503) or prefix drift (400): the
 	// DART instance cannot serve this object; fall back to the direct
-	// header-signed path (which carries its own retry loop).
+	// header-signed path (which carries its own retry loop). Never silent:
+	// origin-bandwidth spikes are diagnosed from exactly this line.
+	klog.ErrorS(err, "DART artifact fetch failed; falling back to direct S3", "storeKey", storeKey, "err", err)
 	return c.s3.get(ctx, storeKey)
 }
 

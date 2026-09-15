@@ -33,8 +33,10 @@ import (
 )
 
 func main() {
+	klog.InitFlags(nil)
 	flag.Parse()
-	klog.Info("starting sandbox fastlet")
+	defer klog.Flush()
+	klog.InfoS("Starting sandbox fastlet")
 	traceShutdown, err := observability.Configure(context.Background(), "fast-sandbox-fastlet")
 	if err != nil {
 		klog.ErrorS(err, "Configure OpenTelemetry")
@@ -274,15 +276,17 @@ type agentClientConfigurable interface {
 }
 
 func recoverUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager, proxyClient *fastletproxy.ControlClient) {
-	for {
+	for attempt := 1; ; attempt++ {
 		if err := manager.Recover(ctx); err == nil {
-			klog.Info("Fastlet runtime recovery completed")
+			klog.InfoS("Fastlet runtime recovery completed")
 			go warmCacheUntilReady(ctx, manager)
 			go prepareInfraUntilReady(ctx, manager)
 			go watchProxyRoutes(ctx, manager, proxyClient)
 			return
-		} else {
+		} else if attempt <= 1 {
 			klog.ErrorS(err, "Fastlet runtime recovery failed; readiness remains false")
+		} else {
+			klog.V(2).Info("Fastlet runtime recovery still failing", "consecutiveFailures", attempt, "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -293,12 +297,14 @@ func recoverUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManag
 }
 
 func warmCacheUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager) {
-	for ctx.Err() == nil {
+	for attempt := 1; ctx.Err() == nil; attempt++ {
 		if err := manager.WarmCache(ctx); err == nil {
-			klog.Info("Asynchronous warmImages preparation completed")
+			klog.InfoS("Asynchronous warmImages preparation completed")
 			return
-		} else {
+		} else if attempt <= 1 {
 			klog.ErrorS(err, "Asynchronous warmImages preparation failed; retrying")
+		} else {
+			klog.V(2).Info("Asynchronous warmImages preparation still failing", "consecutiveFailures", attempt, "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -309,12 +315,14 @@ func warmCacheUntilReady(ctx context.Context, manager *fastletsandbox.SandboxMan
 }
 
 func prepareInfraUntilReady(ctx context.Context, manager *fastletsandbox.SandboxManager) {
-	for ctx.Err() == nil {
+	for attempt := 1; ctx.Err() == nil; attempt++ {
 		if err := manager.PrepareInfra(ctx); err == nil {
-			klog.Info("Fastlet Infra Component preparation completed")
+			klog.InfoS("Fastlet Infra Component preparation completed")
 			return
-		} else {
+		} else if attempt <= 1 {
 			klog.ErrorS(err, "Fastlet Infra Component preparation failed; revision admission remains disabled")
+		} else {
+			klog.V(2).Info("Fastlet Infra Component preparation still failing", "consecutiveFailures", attempt, "err", err)
 		}
 		select {
 		case <-ctx.Done():

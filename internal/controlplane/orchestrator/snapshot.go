@@ -12,7 +12,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 )
 
 // ProjectSnapshotStatus is the pure projection from a Fastlet snapshot
@@ -125,6 +125,10 @@ func (o *Orchestrator) CreateSnapshot(ctx context.Context, snapshot *apiv1alpha2
 	// by restore time).
 	if bindings, bindErr := compileActionBindings(sandbox.Spec.ActionBindings); bindErr == nil {
 		request.ActionBindings = bindings
+	} else {
+		// Publishing without bindings breaks the self-contained artifact
+		// promise; never silent.
+		klog.FromContext(ctx).Error(bindErr, "Failed to compile snapshot action bindings; manifest will lack them", "snapshot", snapshot.Name)
 	}
 	response, callErr := o.FastletClient.CreateSnapshot(ctx, fastlet.PodIP, request)
 	if callErr == nil && response != nil &&
@@ -196,10 +200,4 @@ func (o *Orchestrator) DeleteSnapshot(ctx context.Context, snapshot *apiv1alpha2
 	}
 	_, err = o.FastletClient.DeleteSnapshot(ctx, fastlet.PodIP, &fastletapi.DeleteSnapshotRequest{Identity: identity})
 	return err
-}
-
-// SnapshotSandboxKey returns the namespace/name key of a SandboxSnapshot's
-// target.
-func SnapshotSandboxKey(snapshot *apiv1alpha2.SandboxSnapshot) types.NamespacedName {
-	return types.NamespacedName{Namespace: snapshot.Spec.SandboxRef.Namespace, Name: snapshot.Spec.SandboxRef.Name}
 }

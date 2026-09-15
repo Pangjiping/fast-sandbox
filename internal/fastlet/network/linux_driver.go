@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 type CommandRunner interface {
@@ -69,7 +71,9 @@ func (d *LinuxNetNSDriver) Prepare(ctx context.Context, slot *Slot) (result erro
 	}
 	defer func() {
 		if result != nil {
-			_ = d.Destroy(context.Background(), slot)
+			if destroyErr := d.Destroy(context.Background(), slot); destroyErr != nil {
+				klog.V(2).InfoS("Slot destroy after failed preparation leaked resources", "slot", slot.ID, "err", destroyErr)
+			}
 		}
 	}()
 	if err := os.MkdirAll(filepath.Dir(slot.NetNSPath), 0o755); err != nil {

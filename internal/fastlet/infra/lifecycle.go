@@ -63,8 +63,8 @@ func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, config *fast
 				return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
 			}, service)
 			if serviceErr != nil {
-				klog.InfoS("Host-process component readiness probe failed on Pod loopback",
-					"error", serviceErr, "component", service.Component, "port", service.Port, "sandboxID", config.Identity.SandboxUID)
+				klog.ErrorS(serviceErr, "Host-process component readiness probe failed on Pod loopback",
+					"component", service.Component, "port", service.Port, "sandboxID", config.Identity.SandboxUID)
 			}
 		} else {
 			serviceErr = m.initializeServiceWithDialer(ctx, dial, service)
@@ -82,12 +82,6 @@ func (m *Manager) InitializeInstanceWithDialer(ctx context.Context, config *fast
 		return instance, fmt.Errorf("component %s: %w", service.Component, serviceErr)
 	}
 	return instance, nil
-}
-
-func (m *Manager) initializeService(ctx context.Context, privateIP string, service ServiceEndpoint) error {
-	return m.initializeServiceWithDialer(ctx, func(ctx context.Context, port uint32) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(privateIP, strconv.Itoa(int(port))))
-	}, service)
 }
 
 func (m *Manager) initializeServiceWithDialer(ctx context.Context, dial TargetDialer, service ServiceEndpoint) error {

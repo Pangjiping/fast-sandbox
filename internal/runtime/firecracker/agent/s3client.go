@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"fast-sandbox/internal/registryconfig"
+
+	"k8s.io/klog/v2"
 )
 
 // ErrObjectNotFound reports that the requested object does not exist in the
@@ -173,12 +175,16 @@ func (c *s3Client) put(ctx context.Context, storeKey string, size int64, open fu
 		err := c.putOnce(ctx, urlString, key, body, size)
 		_ = body.Close()
 		if err == nil {
+			if attempt > 0 {
+				klog.V(2).InfoS("S3 PUT succeeded after retries", "key", key, "attempt", attempt+1)
+			}
 			return nil
 		}
 		var status *httpError
 		if errors.As(err, &status) && status.StatusCode < http.StatusInternalServerError {
 			return err
 		}
+		klog.V(2).InfoS("S3 PUT attempt failed, retrying", "key", key, "attempt", attempt+1, "err", err)
 		lastErr = err
 	}
 	return fmt.Errorf("PUT %s: %w", key, lastErr)
@@ -278,6 +284,9 @@ func (c *s3Client) get(ctx context.Context, storeKey string) (io.ReadCloser, err
 		}
 		body, err := c.getOnce(ctx, urlString, key)
 		if err == nil {
+			if attempt > 0 {
+				klog.V(2).InfoS("S3 GET succeeded after retries", "key", key, "attempt", attempt+1)
+			}
 			return body, nil
 		}
 		if errors.Is(err, ErrObjectNotFound) {
@@ -287,6 +296,7 @@ func (c *s3Client) get(ctx context.Context, storeKey string) (io.ReadCloser, err
 		if errors.As(err, &status) && status.StatusCode < http.StatusInternalServerError {
 			return nil, err
 		}
+		klog.V(2).InfoS("S3 GET attempt failed, retrying", "key", key, "attempt", attempt+1, "err", err)
 		lastErr = err
 	}
 	return nil, fmt.Errorf("GET %s: %w", key, lastErr)

@@ -102,7 +102,9 @@ func metaPath(directory string) string {
 	return filepath.Join(directory, sandboxMetaName)
 }
 
-// saveState atomically persists the Sandbox state.
+// saveState persists the Sandbox state to meta.json. The write is in place
+// (no temp-file + rename): a crash mid-write can truncate the file, and
+// loadState then surfaces a decode error for the affected Sandbox.
 func saveState(directory string, state *SandboxState) error {
 	if state == nil {
 		return fmt.Errorf("%w: sandbox state is required", ErrInvalidConfig)

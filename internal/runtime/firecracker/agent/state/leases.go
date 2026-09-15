@@ -25,6 +25,8 @@ import (
 	"time"
 
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
+
+	"k8s.io/klog/v2"
 )
 
 // Op identifies a journaled mutating RPC.
@@ -438,6 +440,9 @@ func (s *State) recover() error {
 		return err
 	}
 	if truncateLength > 0 {
+		// A crash-torn journal tail changes which intents replay; recovery
+		// decisions must be auditable.
+		klog.InfoS("Recovered agent lease journal; truncating torn tail", "truncateLength", truncateLength)
 		if err := s.journal.truncate(truncateLength); err != nil {
 			return fmt.Errorf("truncate agent journal tail: %w", err)
 		}

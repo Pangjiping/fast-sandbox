@@ -38,7 +38,9 @@ func main() {
 	flag.StringVar(&metricsAddress, "metrics-bind-address", ":9094", "Prometheus metrics listen address; empty disables the server.")
 	flag.StringVar(&publicKeyValue, "route-verify-public-key", os.Getenv("FAST_SANDBOX_ROUTE_VERIFY_PUBLIC_KEY"), "Comma-separated base64 Ed25519 route credential public keys.")
 	flag.IntVar(&fastletPort, "fastlet-proxy-port", 5780, "Fastlet Proxy data port.")
+	klog.InitFlags(nil)
 	flag.Parse()
+	defer klog.Flush()
 	traceShutdown, err := observability.Configure(context.Background(), "fast-sandbox-proxy")
 	if err != nil {
 		klog.ErrorS(err, "Configure OpenTelemetry")
@@ -96,7 +98,7 @@ func main() {
 	go func() {
 		if watchCache.WaitForCacheSync(ctx) {
 			cacheReady.Store(true)
-			klog.Info("Sandbox Proxy watch cache synchronized")
+			klog.InfoS("Sandbox Proxy watch cache synchronized")
 		}
 	}()
 

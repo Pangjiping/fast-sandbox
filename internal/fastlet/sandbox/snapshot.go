@@ -251,10 +251,9 @@ func (m *SandboxManager) runSnapshotWorker(snapshotter RuntimeSnapshotter, task 
 		m.finishSnapshotTaskWithReason(task, fastletapi.SnapshotPhaseFailed, reason, message)
 		return
 	}
-	// SnapshotPhasePublishing is reserved: the firecracker driver
-	// implementation will report the artifact upload as a distinct stage
-	// once the runtime-agent publish path lands. This worker keeps the
-	// coarse Creating -> Succeeded/Failed projection until then.
+	// The driver has already transitioned the task through Publishing (via
+	// the OnPublishing callback above); CreateSnapshot returning nil means
+	// the artifact upload finished, so the projection lands on Succeeded.
 	m.mu.Lock()
 	task.result = result
 	m.mu.Unlock()

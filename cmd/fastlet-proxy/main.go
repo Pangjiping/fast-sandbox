@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,9 @@ import (
 )
 
 func main() {
+	klog.InitFlags(nil)
+	flag.Parse()
+	defer klog.Flush()
 	traceShutdown, err := observability.Configure(context.Background(), "fast-sandbox-fastlet-proxy")
 	if err != nil {
 		klog.ErrorS(err, "Configure OpenTelemetry")

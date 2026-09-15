@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -289,12 +291,16 @@ func (m *Manager) probe() {
 	client := &http.Client{Timeout: healthProbeTimeout}
 	response, err := client.Get(url)
 	if err != nil {
-		m.healthy.Store(false)
+		if wasHealthy := m.healthy.Swap(false); wasHealthy {
+			klog.ErrorS(err, "DART admin plane health probe failed; marking DART down", "admin", m.config.Admin)
+		}
 		return
 	}
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		m.healthy.Store(false)
+		if wasHealthy := m.healthy.Swap(false); wasHealthy {
+			klog.ErrorS(nil, "DART admin plane health probe returned non-200; marking DART down", "admin", m.config.Admin, "statusCode", response.StatusCode)
+		}
 		return
 	}
 	m.healthy.Store(true)

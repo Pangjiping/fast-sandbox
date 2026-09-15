@@ -199,10 +199,6 @@ func clonePreparedPlan(plan PreparedPlan) PreparedPlan {
 	return clone
 }
 
-func DefaultStorePaths(podUID string) (string, string, error) {
-	return StorePaths(podUID, "/var/lib/kubelet")
-}
-
 func StorePaths(podUID, kubeletRoot string) (string, string, error) {
 	if podUID == "" {
 		return "", "", errors.New("POD_UID is required for Infra artifact storage")

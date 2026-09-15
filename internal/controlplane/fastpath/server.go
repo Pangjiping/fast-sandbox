@@ -103,6 +103,9 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	if err != nil {
 		return nil, err
 	}
+	// Inject identity before any downstream logging: helper calls on this
+	// path log through the ctx logger and must carry request_id/namespace.
+	ctx = observability.WithIdentity(ctx, observability.Identity{RequestID: request.RequestId, Namespace: request.Namespace, SandboxName: request.RequestId})
 	// A create whose image resolves to a snapshot re-applies the
 	// manifest-recorded runtime policy (network policy via the egress
 	// handler, lifecycle hooks): explicit bindings win per handler, and
@@ -112,7 +115,6 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 		return nil, err
 	}
 
-	ctx = observability.WithIdentity(ctx, observability.Identity{RequestID: request.RequestId, Namespace: request.Namespace, SandboxName: request.RequestId})
 	createSpecHash, err := CreateSpecHash(request)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "hash create request: %v", err)
@@ -143,8 +145,7 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	if err != nil {
 		return nil, err
 	}
-	klog.InfoS("fastpath sandbox created",
-		"requestId", request.RequestId,
+	klog.FromContext(ctx).Info("fastpath sandbox created",
 		"total", time.Since(started).String(),
 		"prep", prepDur.String(),
 		"runtime", runtimeDur.String(),
@@ -388,6 +389,10 @@ func (s *Server) UpdateSandbox(ctx context.Context, request *fastpathv2.UpdateSa
 	if err != nil {
 		return nil, err
 	}
+	ctx = observability.WithIdentity(ctx, observability.Identity{
+		RequestID: initial.Annotations[assignment.AnnotationRequestID], Namespace: initial.Namespace,
+		SandboxName: initial.Name, SandboxUID: string(initial.UID), InstanceGeneration: initial.Generation,
+	})
 	key := client.ObjectKeyFromObject(initial)
 	var updated apiv1alpha2.Sandbox
 	firstAttempt := true
@@ -431,6 +436,7 @@ func (s *Server) UpdateSandbox(ctx context.Context, request *fastpathv2.UpdateSa
 		}
 		return nil, grpcKubernetesError(err)
 	}
+	klog.FromContext(ctx).Info("fastpath sandbox updated", "committedGeneration", updated.Generation)
 	return &fastpathv2.UpdateSandboxResponse{Sandbox: protoIdentity(&updated), CommittedGeneration: updated.Generation}, nil
 }
 
@@ -499,9 +505,13 @@ func (s *Server) DeleteSandbox(ctx context.Context, request *fastpathv2.DeleteRe
 		return nil, err
 	}
 	uid := sandbox.UID
+	ctx = observability.WithIdentity(ctx, observability.Identity{
+		Namespace: sandbox.Namespace, SandboxName: sandbox.Name, SandboxUID: string(sandbox.UID),
+	})
 	if err := s.K8sClient.Delete(ctx, sandbox, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 		return nil, grpcKubernetesError(err)
 	}
+	klog.FromContext(ctx).Info("fastpath sandbox deleted")
 	return &fastpathv2.DeleteResponse{}, nil
 }
 
@@ -1189,18 +1199,6 @@ func internalIdentity(sandbox *apiv1alpha2.Sandbox, envelope *assignment.Assignm
 		FastletPodUID: envelope.FastletPodUID, InstanceGeneration: envelope.InstanceGeneration,
 		RuntimeInstanceID: envelope.RuntimeInstanceID, AssignmentAttempt: envelope.Attempt, RouteGeneration: envelope.RouteGeneration,
 	}
-}
-
-func identityFromSandbox(sandbox *apiv1alpha2.Sandbox, targetPort uint32) observability.Identity {
-	identity := observability.Identity{TargetPort: targetPort}
-	if sandbox == nil {
-		return identity
-	}
-	identity.RequestID = sandbox.Annotations[assignment.AnnotationRequestID]
-	identity.Namespace, identity.SandboxName, identity.SandboxUID = sandbox.Namespace, sandbox.Name, string(sandbox.UID)
-	identity.InstanceGeneration, identity.RouteGeneration = sandbox.Status.Runtime.Generation, sandbox.Status.DataPlane.RouteGeneration
-	identity.FastletPodUID, identity.AssignmentAttempt = string(sandbox.Status.Placement.FastletPodUID), sandbox.Status.Placement.Attempt
-	return identity
 }
 
 func metadataLabelKey(name string) string { return metadataLabelPrefix + name }

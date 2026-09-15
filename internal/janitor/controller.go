@@ -2,6 +2,7 @@ package janitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -86,7 +87,8 @@ func (j *Janitor) Run(ctx context.Context) error {
 }
 
 func (j *Janitor) handlePodDeletion(ctx context.Context, pod *corev1.Pod) {
-	// 检查是否是 Fastlet Pod (通过 Label)
+	// Only Fastlet Pods carry the pool label; other Pod deletions never
+	// own node-local runtime resources.
 	if pool, ok := pod.Labels["fast-sandbox.io/pool"]; ok {
 		klog.InfoS("Detected Fastlet Pod deletion, scanning node resources", "pod", pod.Name, "podUID", pod.UID, "pool", pool)
 		go j.Scan(ctx)
@@ -120,14 +122,19 @@ func (j *Janitor) processNextItem(ctx context.Context) bool {
 
 	task, ok := item.(CleanupTask)
 	if !ok {
+		klog.ErrorS(errors.New("unexpected workqueue item"), "Janitor dropped non-task queue item", "item", fmt.Sprintf("%T", item))
 		j.queue.Forget(item)
 		return true
 	}
 	err := j.doCleanup(ctx, task)
 	if err != nil {
 		if j.queue.NumRequeues(item) < 3 {
+			klog.ErrorS(err, "Janitor cleanup failed; retrying", "backend", task.Resource.Backend, "resource", task.Resource.ResourceID, "requeues", j.queue.NumRequeues(item)+1)
 			j.queue.AddRateLimited(item)
 		} else {
+			// Terminal drop: without this line the orphan silently
+			// disappears from every signal and is never retried again.
+			klog.ErrorS(err, "Janitor cleanup failed; giving up after retries", "backend", task.Resource.Backend, "resource", task.Resource.ResourceID)
 			j.queue.Forget(item)
 		}
 		return true

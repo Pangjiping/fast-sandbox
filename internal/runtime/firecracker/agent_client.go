@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"time"
 
+	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
@@ -194,7 +195,9 @@ func (c *agentHTTPClient) identity(requestID string) agentprotocol.Identity {
 // doJSON performs one RPC and maps the wire errors onto runtime contract
 // errors: NotFound -> ErrImageNotReady, Unauthorized/Conflict -> invalid
 // config, transport failures -> errAgentUnreachable.
-func (c *agentHTTPClient) doJSON(ctx context.Context, path string, input, output any) error {
+func (c *agentHTTPClient) doJSON(ctx context.Context, path string, input, output any) (err error) {
+	ctx, span := observability.StartClient(ctx, "runtime-agent "+path)
+	defer observability.End(span, err)
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return err
@@ -204,6 +207,9 @@ func (c *agentHTTPClient) doJSON(ctx context.Context, path string, input, output
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
+	// Carry the W3C trace context across the UDS boundary so agent-side
+	// spans and logs join the driver's trace.
+	observability.InjectHTTP(ctx, request.Header)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errAgentUnreachable, err)

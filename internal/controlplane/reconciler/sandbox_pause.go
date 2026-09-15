@@ -6,8 +6,8 @@ package reconciler
 // release the runtime and the assignment. The release is resumable from CRD
 // state alone: the checkpoint facts are persisted before the runtime is
 // touched, so a Controller crash mid-release re-enters the same step instead
-// of losing the address. Resume is the ordinary ensure path carrying
-// spec.restore (see Orchestrator.createRuntimeOnTarget).
+// of losing the address. Resume reads that persisted checkpoint (see
+// Orchestrator.ResumeCheckpoint) on the ordinary ensure path.
 
 import (
 	"context"
@@ -180,6 +180,9 @@ func (r *SandboxReconciler) persistPauseCheckpoint(ctx context.Context, orchestr
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The most safety-critical write of the FSM: the checkpoint is durable
+	// before the runtime is touched, so this transition must be visible.
+	klog.FromContext(ctx).Info("Pause checkpoint persisted; releasing runtime", "sandbox", sandbox.Name, "checkpointID", checkpointID, "manifestRef", observed.ManifestRef)
 	return r.releasePausedRuntime(ctx, orchestrator, sandbox, checkpointID)
 }
 
@@ -205,12 +208,13 @@ func (r *SandboxReconciler) releasePausedRuntime(ctx context.Context, orchestrat
 	if err := orchestrator.DeleteCheckpoint(ctx, sandbox, checkpointID); err != nil {
 		var failure *fastletapi.FastletError
 		if !errors.As(err, &failure) || failure.Code != fastletapi.ErrorNotFound {
-			klog.FromContext(ctx).Info("Checkpoint task cleanup deferred", "sandbox", sandbox.Name, "err", err.Error())
+			klog.FromContext(ctx).Error(err, "Checkpoint task cleanup deferred", "sandbox", sandbox.Name)
 		}
 	}
 	if _, err := orchestrator.ClearAssignment(ctx, sandbox, false); err != nil {
 		return ctrl.Result{}, err
 	}
+	klog.FromContext(ctx).Info("Sandbox paused; runtime released and assignment cleared", "sandbox", sandbox.Name, "checkpointID", checkpointID)
 	return ctrl.Result{RequeueAfter: ReadyRequeueInterval}, nil
 }
 
@@ -223,7 +227,7 @@ func (r *SandboxReconciler) retryPause(ctx context.Context, orchestrator *orches
 	if err := orchestrator.DeleteCheckpoint(ctx, sandbox, checkpointID); err != nil {
 		var failure *fastletapi.FastletError
 		if !errors.As(err, &failure) || failure.Code != fastletapi.ErrorNotFound {
-			klog.FromContext(ctx).Info("Failed checkpoint task cleanup deferred", "sandbox", sandbox.Name, "err", err.Error())
+			klog.FromContext(ctx).Error(err, "Failed checkpoint task cleanup deferred", "sandbox", sandbox.Name)
 		}
 	}
 	if message == "" {

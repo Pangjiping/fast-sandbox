@@ -2,7 +2,7 @@ package fastletproxy
 
 import (
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	dataplane "fast-sandbox/internal/dataplane/contract"
 	routeauth "fast-sandbox/internal/dataplane/auth"
 	"fast-sandbox/internal/observability"
 
@@ -29,28 +30,32 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	request, span := observability.StartHTTPServer(request, "fastlet-proxy")
 	started := time.Now()
 	metricAccess, metricResult := "", "success"
+	var requestErr error
 	defer func() {
 		span.SetAttributes(
 			attribute.String("fast_sandbox.access_kind", metricAccess),
 			attribute.String("fast_sandbox.proxy_result", metricResult),
 		)
-		observability.End(span, nil)
+		observability.End(span, requestErr)
 		observeFastletProxy(metricAccess, metricResult, started)
 	}()
 	sandboxUID, targetPort, componentName, suffix, err := parseTarget(request.URL.Path)
 	if err != nil {
 		metricResult = "invalid_route"
+		requestErr = err
 		writeProxyError(writer, http.StatusBadRequest, dataplane.ProxyErrorRouteUnavailable, err.Error())
 		return
 	}
 	if p.Store == nil || p.Verifier == nil {
 		metricResult = "unconfigured"
-		writeProxyError(writer, http.StatusServiceUnavailable, dataplane.ProxyErrorRouteUnavailable, "Fastlet Proxy is not configured")
+		requestErr = errors.New("Fastlet Proxy is not configured")
+		writeProxyError(writer, http.StatusServiceUnavailable, dataplane.ProxyErrorRouteUnavailable, requestErr.Error())
 		return
 	}
 	route, err := p.Store.Lookup(sandboxUID)
 	if err != nil {
 		metricResult = "route_unavailable"
+		requestErr = err
 		status := http.StatusNotFound
 		if errors.Is(err, ErrRouteDraining) {
 			status = http.StatusServiceUnavailable
@@ -62,12 +67,14 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		component, found := route.Components[componentName]
 		if !found {
 			metricResult = "component_not_found"
-			writeProxyError(writer, http.StatusNotFound, dataplane.ProxyErrorComponentNotFound, "Infra Component route not found")
+			requestErr = errors.New("Infra Component route not found")
+			writeProxyError(writer, http.StatusNotFound, dataplane.ProxyErrorComponentNotFound, requestErr.Error())
 			return
 		}
 		if !strings.EqualFold(component.Protocol, "HTTP") {
 			metricResult = "unsupported_component_protocol"
-			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorComponentNotReady, "Infra Component protocol is not supported")
+			requestErr = fmt.Errorf("Infra Component protocol %q is not supported", component.Protocol)
+			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorComponentNotReady, requestErr.Error())
 			return
 		}
 		targetPort = component.Port
@@ -85,6 +92,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	token, err := routeCredential(request.Header.Get(dataplane.HeaderRouteCredential))
 	if err != nil {
 		metricResult = "missing_credential"
+		requestErr = err
 		writeProxyError(writer, http.StatusUnauthorized, dataplane.ProxyErrorCredentialRejected, err.Error())
 		return
 	}
@@ -95,6 +103,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	})
 	if err != nil {
 		metricResult = "credential_rejected"
+		requestErr = errors.New("route credential rejected")
 		writeProxyError(writer, http.StatusForbidden, dataplane.ProxyErrorCredentialRejected, "route credential rejected")
 		return
 	}
@@ -105,7 +114,8 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		metricAccess = string(dataplane.AccessKindDirectIP)
 		if net.ParseIP(route.Access.Address) == nil {
 			metricResult = "invalid_access"
-			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, "direct IP route address is invalid")
+			requestErr = errors.New("direct IP route address is invalid")
+			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, requestErr.Error())
 			return
 		}
 		upstream = net.JoinHostPort(route.Access.Address, strconv.Itoa(int(targetPort)))
@@ -120,6 +130,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		transport, err = newLocalForwardTransport(route.Access, targetPort, p.DialContext)
 		if err != nil {
 			metricResult = "invalid_access"
+			requestErr = err
 			writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, "local-forward route is invalid: "+err.Error())
 			return
 		}
@@ -128,7 +139,8 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		upstream = "sandbox.local"
 	default:
 		metricResult = "unsupported_access"
-		writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, "route access kind is not supported")
+		requestErr = fmt.Errorf("route access kind %q is not supported", route.Access.Kind)
+		writeProxyError(writer, http.StatusNotImplemented, dataplane.ProxyErrorRouteUnavailable, requestErr.Error())
 		return
 	}
 	proxy := &httputil.ReverseProxy{
@@ -150,6 +162,7 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		},
 		ErrorHandler: func(response http.ResponseWriter, _ *http.Request, proxyErr error) {
 			metricResult = "upstream_error"
+			requestErr = proxyErr
 			writeProxyError(response, http.StatusBadGateway, dataplane.ProxyErrorUpstreamUnavailable, "sandbox upstream unavailable: "+proxyErr.Error())
 		},
 	}

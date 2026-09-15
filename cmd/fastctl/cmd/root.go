@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -137,7 +136,12 @@ func defaultClientFactory() (fastpathv2.FastPathServiceClient, *grpc.ClientConn,
 func getClient() (fastpathv2.FastPathServiceClient, *grpc.ClientConn) {
 	client, conn, err := clientFactory()
 	if err != nil {
-		log.Fatalf("Error: %v", err)
+		// log.Fatalf would os.Exit under the hood and skip the klog and
+		// OTLP flushes; fail through the same path as Execute instead.
+		klog.ErrorS(err, "Failed to connect to FastPath")
+		klog.Flush()
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
 	}
 	return client, conn
 }

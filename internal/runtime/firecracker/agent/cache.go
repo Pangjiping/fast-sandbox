@@ -21,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -126,6 +128,7 @@ func stageFile(ctx context.Context, c *Client, dir, storeKey string, file native
 		// Corrupt cache entry: drop it before re-pulling. The local
 		// manifest is left alone; the commit-point check decides whether
 		// the whole pull needs redoing.
+		klog.InfoS("Corrupt cache entry detected; dropping it and re-pulling", "path", target)
 		if removeErr := os.Remove(target); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return removeErr
 		}

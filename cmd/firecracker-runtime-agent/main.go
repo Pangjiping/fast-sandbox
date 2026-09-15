@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 
 	"fast-sandbox/internal/artifactstore"
+	"fast-sandbox/internal/observability"
 	"fast-sandbox/internal/registryconfig"
 	agentpull "fast-sandbox/internal/runtime/firecracker/agent"
 	agentdart "fast-sandbox/internal/runtime/firecracker/agent/dart"
@@ -34,13 +36,25 @@ const (
 func main() {
 	if err := run(); err != nil {
 		klog.ErrorS(err, "firecracker-runtime-agent failed")
+		klog.Flush()
 		os.Exit(1)
 	}
+	klog.Flush()
 }
 
-// run assembles the agent. It returns an error when the agent cannot serve;
-// deferred cleanup (lease state close, DART child stop) runs on the way out.
+// run assembles the agent. It returns an error when the agent cannot serve.
+// Deferred cleanup (server stop, lease state close) runs only on a normal
+// return — the error path exits via os.Exit(1) in main after a klog.Flush.
+// The DART child stops when its Run goroutine observes the signal context
+// canceled (SIGTERM/SIGINT), not via defer.
 func run() error {
+	klog.InitFlags(nil)
+	flag.Parse()
+	shutdownTracing, err := observability.Configure(context.Background(), "firecracker-runtime-agent")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = shutdownTracing(context.Background()) }()
 	socketPath := getEnv("FAST_SANDBOX_RUNTIME_AGENT_SOCKET", defaultSocketPath)
 	stateRoot := getEnv("FAST_SANDBOX_STATE_ROOT", defaultStateRoot)
 	registryPath := getEnv("FAST_SANDBOX_REGISTRY_CONFIG_PATH", registryconfig.MountPath)
