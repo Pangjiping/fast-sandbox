@@ -7,12 +7,6 @@ import (
 	"reflect"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/assignment"
-	orchestration "fast-sandbox/internal/controlplane/orchestrator"
-	"fast-sandbox/internal/observability"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +18,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
+	orchestration "fast-sandbox/internal/controlplane/orchestrator"
+	"fast-sandbox/internal/observability"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 const (

@@ -13,10 +13,10 @@ import (
 	"errors"
 	"fmt"
 
+	"k8s.io/klog/v2"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"k8s.io/klog/v2"
 )
 
 // CreateCheckpoint registers (or replays) the checkpoint task of a pause on
@@ -56,7 +56,7 @@ func (o *Orchestrator) CreateCheckpoint(ctx context.Context, sandbox *apiv1alpha
 	} else {
 		var failure *fastletapi.FastletError
 		if !errors.As(callErr, &failure) {
-			callErr = fmt.Errorf("%w: %v", ErrUnknownFastletOutcome, callErr)
+			callErr = fmt.Errorf("%w: %w", ErrUnknownFastletOutcome, callErr)
 		}
 	}
 	return response.Snapshot, callErr

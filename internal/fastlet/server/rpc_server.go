@@ -10,12 +10,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/klog/v2"
+
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8s.io/klog/v2"
 )
 
 // FastletServer handles HTTP requests from controller.
@@ -119,7 +119,7 @@ func (s *FastletServer) handleInspect(w http.ResponseWriter, r *http.Request) {
 	if !decodePost(w, r, &req) {
 		return
 	}
-	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
+	_ = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
 	response, err := s.sandboxManager.InspectSandbox(&req)
 	writeResponse(w, response, err)
 }
@@ -159,7 +159,7 @@ func (s *FastletServer) handleSnapshotInspect(w http.ResponseWriter, r *http.Req
 	if !decodePost(w, r, &req) {
 		return
 	}
-	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity.Sandbox))
+	_ = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity.Sandbox))
 	response, err := s.sandboxManager.InspectSnapshot(&req)
 	writeResponse(w, response, err)
 }
@@ -229,7 +229,7 @@ func (s *FastletServer) handleSandboxDiagnostics(w http.ResponseWriter, r *http.
 	if !decodePost(w, r, &req) {
 		return
 	}
-	r = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
+	_ = r.WithContext(withFastletRequestIdentity(r.Context(), req.Identity))
 	response, err := s.sandboxManager.SandboxDiagnostics(&req)
 	writeResponse(w, response, err)
 }

@@ -11,11 +11,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"fast-sandbox/internal/artifacts"
 	"fast-sandbox/internal/registryconfig"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
-
-	"github.com/stretchr/testify/require"
 )
 
 // fakePublishStore records every PUT: its key, body, and the order of arrival.

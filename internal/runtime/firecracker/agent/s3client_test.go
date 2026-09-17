@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"fast-sandbox/internal/registryconfig"
-
 	"github.com/stretchr/testify/require"
+
+	"fast-sandbox/internal/registryconfig"
 )
 
 func TestParseStoreRoot(t *testing.T) {

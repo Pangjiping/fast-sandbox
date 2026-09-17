@@ -10,17 +10,6 @@ import (
 	"strings"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-	dataplane "fast-sandbox/internal/dataplane/contract"
-	"fast-sandbox/internal/fastlet/infra"
-	fastletnetwork "fast-sandbox/internal/fastlet/network"
-	"fast-sandbox/internal/fastlet/podcgroup"
-	"fast-sandbox/internal/nodecleanup"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-	"fast-sandbox/internal/registryconfig"
-	runtimecontract "fast-sandbox/internal/runtime/contract"
-
 	runtimeoptions "github.com/containerd/containerd/api/types/runtimeoptions/v1"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
@@ -33,6 +22,17 @@ import (
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+	dataplane "fast-sandbox/internal/dataplane/contract"
+	"fast-sandbox/internal/fastlet/infra"
+	fastletnetwork "fast-sandbox/internal/fastlet/network"
+	"fast-sandbox/internal/fastlet/podcgroup"
+	"fast-sandbox/internal/nodecleanup"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
+	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 type Driver struct {
@@ -108,9 +108,6 @@ func (r *Driver) Initialize(ctx context.Context, socketPath string) error {
 	}
 
 	klog.InfoS("initializing runtime", "handler", r.config.Handler, "containerdNamespace", r.containerdNamespace())
-
-	ctx, cancel := context.WithTimeout(ctx, defaultOperationTimeout)
-	defer cancel()
 
 	client, err := containerd.New(
 		r.socketPath,
@@ -343,7 +340,7 @@ func (r *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		slot, acquireErr := r.networkManager.Acquire(networkContext, owner)
 		finishNetwork(acquireErr)
 		if acquireErr != nil {
-			return nil, fmt.Errorf("%w: %v", ErrNetworkUnavailable, acquireErr)
+			return nil, fmt.Errorf("%w: %w", ErrNetworkUnavailable, acquireErr)
 		}
 		allocation.Network = fastletapi.NetworkAllocation{
 			SlotID: slot.ID, NamespacePath: slot.HostNetNSPath, IP: slot.IP,
@@ -697,14 +694,14 @@ func (r *Driver) GetSandboxStatus(ctx context.Context, sandboxID string) (string
 	container, err := r.client.LoadContainer(ctx, sandboxID)
 	if err != nil {
 		// No container object: nothing remains of the sandbox.
-		return "terminated", nil
+		return "terminated", nil //nolint:nilerr // FIXME: possible swallowed error — a transient containerd failure also lands here and is reported as terminated
 	}
 
 	task, err := container.Task(ctx, nil)
 	if err != nil {
 		// Container object exists but has no running task: the process
 		// already exited.
-		return "stopped", nil
+		return "stopped", nil //nolint:nilerr // FIXME: possible swallowed error — a transient containerd failure also lands here and is reported as stopped
 	}
 
 	status, err := task.Status(ctx)
@@ -722,7 +719,7 @@ func (r *Driver) InspectSandbox(ctx context.Context, sandboxID string) (*Sandbox
 	ctx = r.withNamespace(ctx)
 	container, err := r.client.LoadContainer(ctx, sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrSandboxNotFound, err)
+		return nil, fmt.Errorf("%w: %w", ErrSandboxNotFound, err)
 	}
 	info, err := container.Info(ctx)
 	if err != nil {

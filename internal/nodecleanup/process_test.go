@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-
 	"github.com/stretchr/testify/require"
+
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 )
 
 func TestMatchesFirecrackerProcessUsesExactKataTruncatedID(t *testing.T) {

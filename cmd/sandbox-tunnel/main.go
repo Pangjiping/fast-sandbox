@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"flag"
 	"fmt"
 	"net"
@@ -11,6 +10,7 @@ import (
 	"strconv"
 	"syscall"
 
+	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fast-sandbox/internal/sandbox/tunnel"
 )
 

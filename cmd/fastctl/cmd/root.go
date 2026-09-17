@@ -6,15 +6,15 @@ import (
 	"os"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-	"fast-sandbox/internal/observability"
-
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/klog/v2"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	"fast-sandbox/internal/observability"
 )
 
 const (
@@ -151,7 +151,7 @@ func defaultClientFactory() (fastpathv2.FastPathServiceClient, *grpc.ClientConn,
 	)
 	if err != nil {
 		klog.ErrorS(err, "Failed to connect to gRPC endpoint", "endpoint", ep)
-		return nil, nil, fmt.Errorf("failed to connect to %s: %v", ep, err)
+		return nil, nil, fmt.Errorf("failed to connect to %s: %w", ep, err)
 	}
 	klog.V(4).InfoS("successfully connected to gRPC endpoint", "endpoint", ep)
 	return fastpathv2.NewFastPathServiceClient(conn), conn, nil

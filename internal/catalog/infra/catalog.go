@@ -94,7 +94,7 @@ var (
 func Compile(components []apiv1alpha2.InfraComponent, runtimeProfile runtimecatalog.RuntimeProfile) (Plan, error) {
 	spec := apiv1alpha2.SandboxPoolSpec{InfraComponents: components}
 	if err := spec.ValidateInfraComponents(); err != nil {
-		return Plan{}, fmt.Errorf("%w: %v", ErrComponentsInvalid, err)
+		return Plan{}, fmt.Errorf("%w: %w", ErrComponentsInvalid, err)
 	}
 	plan := Plan{Components: make([]Component, 0, len(components))}
 	for index := range components {
@@ -106,7 +106,7 @@ func Compile(components []apiv1alpha2.InfraComponent, runtimeProfile runtimecata
 			plan.Components = append(plan.Components, compileComponent(components[index], Artifact{}, delivery))
 			continue
 		}
-		source := ArtifactSource{}
+		var source ArtifactSource
 		switch {
 		case components[index].Artifact.Source.Image != nil:
 			image := components[index].Artifact.Source.Image

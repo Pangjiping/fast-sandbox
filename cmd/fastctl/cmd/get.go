@@ -2,16 +2,14 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-
-	fastpathv2 "fast-sandbox/api/proto/v2"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 	"k8s.io/klog/v2"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 var outputFormat string
@@ -42,9 +40,7 @@ var getCmd = &cobra.Command{
 		info := resp.GetSandbox()
 		klog.V(4).InfoS("getSandbox request succeeded", "sandboxUid", info.GetIdentity().GetUid(), "sandboxName", info.GetIdentity().GetName(), "runtimeState", info.GetRuntime().GetState(), "dataPlaneState", info.GetDataPlane().GetState(), "outputFormat", outputFormat)
 		if outputFormat == "json" {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			enc.Encode(resp)
+			printJSON(resp)
 		} else {
 			y, _ := yaml.Marshal(resp)
 			fmt.Print(string(y))

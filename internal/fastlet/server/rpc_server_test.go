@@ -9,12 +9,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
-
-	"github.com/stretchr/testify/require"
 )
 
 type serverRuntime struct {

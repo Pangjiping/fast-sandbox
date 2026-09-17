@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 	"k8s.io/klog/v2"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 type SandboxConfig struct {
@@ -275,7 +275,7 @@ func parseActionBindings(values []string) ([]ActionBindingConfig, error) {
 func runInteractive(name string, config *SandboxConfig) error {
 	cacheDir := os.ExpandEnv("$HOME/.fastctl/cache")
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return fmt.Errorf("failed to create cache dir: %v", err)
+		return fmt.Errorf("failed to create cache dir: %w", err)
 	}
 	cacheFile := cacheDir + "/" + name + ".yaml"
 
@@ -290,12 +290,12 @@ func runInteractive(name string, config *SandboxConfig) error {
 
 	tmpFile, err := os.CreateTemp("", "fastctl-sandbox-*.yaml")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %v", err)
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 
 	if _, err := tmpFile.WriteString(template); err != nil {
-		return fmt.Errorf("failed to write template: %v", err)
+		return fmt.Errorf("failed to write template: %w", err)
 	}
 	tmpFile.Close()
 
@@ -316,11 +316,11 @@ func runInteractive(name string, config *SandboxConfig) error {
 
 	content, err := os.ReadFile(tmpFile.Name())
 	if err != nil {
-		return fmt.Errorf("failed to read config: %v", err)
+		return fmt.Errorf("failed to read config: %w", err)
 	}
 
 	if err := yaml.Unmarshal(content, config); err != nil {
-		return fmt.Errorf("YAML parse error: %v\n  Hint: Fix the format and run again with the same name", err)
+		return fmt.Errorf("YAML parse error: %w\n  Hint: Fix the format and run again with the same name", err)
 	}
 
 	if config.Image == "" {
@@ -329,13 +329,12 @@ func runInteractive(name string, config *SandboxConfig) error {
 
 	fmt.Printf("\n创建 sandbox '%s'? (y/n): ", name)
 	var confirm string
-	fmt.Scanln(&confirm)
-	if confirm != "y" && confirm != "Y" {
+	if _, err := fmt.Scanln(&confirm); err != nil || (confirm != "y" && confirm != "Y") {
 		fmt.Println("✅ Cancelled")
 		return fmt.Errorf("cancelled by user")
 	}
 
-	if err := os.WriteFile(cacheFile, content, 0644); err != nil {
+	if err := os.WriteFile(cacheFile, content, 0644); err != nil { //nolint:gosec // local CLI cache, no secrets
 		fmt.Fprintf(os.Stderr, "Warning: failed to update cache: %v\n", err)
 	}
 

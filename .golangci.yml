@@ -1,0 +1,269 @@
+version: "2"
+run:
+  tests: false
+linters:
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - copyloopvar
+    - decorder
+    - depguard
+    - errorlint
+    - forbidigo
+    - funlen
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - gocognit
+    - goconst
+    - gocyclo
+    - goheader
+    - gomodguard_v2
+    - goprintffuncname
+    - gosec
+    - grouper
+    - importas
+    - intrange
+    - maintidx
+    - makezero
+    - mirror
+    - misspell
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnil
+    - nosprintfhostport
+    - paralleltest
+    - perfsprint
+    - predeclared
+    - reassign
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - testableexamples
+    - testifylint
+    - testpackage
+    - tparallel
+    - usestdlibvars
+    - zerologlint
+  settings:
+    depguard:
+      rules:
+        prevent_unmaintained_packages:
+          list-mode: lax
+          files:
+            - $all
+            - '!$test'
+          allow:
+            - $gostd
+            - path/filepath
+          deny:
+            - pkg: io/ioutil
+              desc: 'replaced by io and os packages since Go 1.16: https://tip.golang.org/doc/go1.16#ioutil'
+            - pkg: path
+              desc: replaced by cross-platform package path/filepath
+    errcheck:
+      exclude-functions:
+        - flag.Set
+        - os.Setenv
+        - os.Unsetenv
+        - logger.Sync
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (k8s.io/client-go/tools/cache.SharedInformer).AddEventHandler
+    forbidigo:
+      forbid:
+        - pattern: ^spew\.(ConfigState\.)?Dump$
+        - pattern: ^v1.Dump$
+          pkg: ^example.com/pkg/api/v1$
+    funlen:
+      lines: 500
+      statements: 200
+    goconst:
+      match-constant: false
+      min-len: 3
+      min-occurrences: 3
+      numbers: true
+      min: 2
+      max: 10
+      ignore-calls: true
+    gocyclo:
+      min-complexity: 40
+    gosec:
+      includes:
+        - G101
+        - G102
+        - G103
+        - G104
+        - G106
+        - G107
+        - G108
+        - G109
+        - G110
+        - G111
+        - G112
+        - G113
+        - G201
+        - G202
+        - G203
+        - G301
+        - G302
+        - G303
+        - G304
+        - G305
+        - G306
+        - G307
+        - G402
+        - G403
+        - G404
+        - G502
+        - G503
+        - G504
+        - G505
+        - G601
+      severity: medium
+      confidence: medium
+      config:
+        G101:
+          entropy_threshold: "80.0"
+          ignore_entropy: false
+          pattern: (?i)example
+          per_char_threshold: "3.0"
+          truncate: "32"
+        G104:
+          fmt:
+            - Fscanf
+        G111:
+          pattern: custom\.Dir\(\)
+        G301: "0750"
+        G302: "0600"
+        G306: "0600"
+        global:
+          audit: true
+          nosec: true
+          show-ignored: true
+      concurrency: 12
+    govet:
+      enable:
+        - asmdecl
+        - assign
+        - atomic
+        - atomicalign
+        - bools
+        - buildtag
+        - cgocall
+        - copylocks
+        - deepequalerrors
+        - errorsas
+        - findcall
+        - framepointer
+        - httpresponse
+        - ifaceassert
+        - lostcancel
+        - nilfunc
+        - nilness
+        - reflectvaluecompare
+        - shift
+        - sigchanyzer
+        - sortslice
+        - stdmethods
+        - stringintconv
+        - testinggoroutine
+        - tests
+        - unmarshal
+        - unreachable
+        - unsafeptr
+        - unusedresult
+        - printf
+      disable:
+        - composites
+        - loopclosure
+        - fieldalignment
+        - shadow
+        - structtag
+        - unusedwrite
+    nestif:
+      min-complexity: 32
+    nilnil:
+      checked-types:
+        - ptr
+        - map
+        - chan
+    staticcheck:
+      checks:
+        - S1002
+        - S1019
+        - SA4006
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - forbidigo
+        path: main\.go
+      - linters:
+          - dogsled
+          - errcheck
+          - goconst
+          - gosec
+          - ineffassign
+          - maintidx
+        path: _test\.go
+      - path: \.go$
+        text: should have a package comment
+      - path: \.go$
+        text: exported (.+) should have comment( \(or a comment on this block\))? or be unexported
+      - path: \.go$
+        text: fmt.Sprintf can be replaced with string concatenation
+      - path: \.go$
+        text: fmt.Errorf can be replaced with errors.New
+      # path.Clean/Dir/Join are used for slash-separated spec paths and
+      # object-store keys, not OS filesystem paths, so filepath is wrong.
+      - linters:
+          - depguard
+        path: ^(api/v1alpha2/validation|internal/runtime/firecracker/agent/pull)\.go$
+      - linters:
+          - goconst
+        path: (.+)_test\.go
+    paths:
+      - .*/zz_generated.deepcopy.go
+      - .*/mock/*.go
+      - vendor
+      - tests
+      - scripts
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(fast-sandbox)
+        - blank
+        - dot
+        - localmodule
+      custom-order: true
+      no-lex-order: true
+  exclusions:
+    generated: lax
+    paths:
+      - .*/zz_generated.deepcopy.go
+      - .*/mock/*.go
+      - vendor
+      - tests
+      - scripts
+      - third_party$
+      - builtin$
+      - examples$

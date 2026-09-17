@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"fast-sandbox/internal/artifacts"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
-
-	"github.com/stretchr/testify/require"
 )
 
 // materializingAgent is a fake agent whose PinImage commits the rootfs into

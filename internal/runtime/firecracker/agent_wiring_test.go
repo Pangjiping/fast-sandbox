@@ -5,9 +5,9 @@ import (
 	"sync"
 	"testing"
 
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/stretchr/testify/require"
+
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 // fakeAgentClient is a scriptable AgentClient for wiring tests.

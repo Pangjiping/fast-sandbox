@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"k8s.io/klog/v2"
 )
 
 type TargetDialer func(context.Context, uint32) (net.Conn, error)
@@ -90,7 +90,7 @@ func (m *Manager) initializeServiceWithDialer(ctx context.Context, dial TargetDi
 	return probeServiceWithDialer(ctx, service.Port, service.Readiness, dial, client)
 }
 
-func probeService(ctx context.Context, address string, probe infracatalog.ReadinessProbe) error {
+func probeService(ctx context.Context, address string, probe infracatalog.ReadinessProbe) error { //nolint:unused // used by lifecycle tests
 	_, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return err

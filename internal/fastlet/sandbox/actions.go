@@ -35,7 +35,7 @@ func (m *SandboxManager) ReconcileBindings(ctx context.Context, req *fastletapi.
 		m.mu.Unlock()
 		return &fastletapi.ReconcileBindingsResponse{Error: failure}, failure
 	}
-	if metadata.Phase == "creating" || metadata.Phase == "terminating" || metadata.Phase == "deleting" {
+	if metadata.Phase == sandboxStateCreating || metadata.Phase == sandboxStateTerminating || metadata.Phase == sandboxStateDeleting {
 		m.mu.Unlock()
 		failure := fastletError(fastletapi.ErrorInProgress, "runtime is not ready for Sandbox Actions", true)
 		return &fastletapi.ReconcileBindingsResponse{Error: failure}, failure
@@ -76,13 +76,13 @@ func (m *SandboxManager) ReconcileBindings(ctx context.Context, req *fastletapi.
 	metadata.AcceptedGeneration = req.SpecGeneration
 	metadata.AppliedGeneration = appliedGeneration
 	if reconcileErr != nil {
-		if metadata.Phase == "running" || metadata.Phase == "action-pending" || metadata.Phase == "action-unavailable" {
-			metadata.Phase = "action-unavailable"
+		if metadata.Phase == sandboxStateRunning || metadata.Phase == sandboxStateActionPending || metadata.Phase == sandboxStateActionUnavailable {
+			metadata.Phase = sandboxStateActionUnavailable
 		}
-		m.recordDiagnosticLocked(metadata.Config.Identity.SandboxUID, "error", "action", "action-unavailable", reconcileErr.Error())
-	} else if (len(statuses) == 0 || actionStatusesReady(statuses)) && (metadata.Phase == "action-pending" || metadata.Phase == "action-unavailable") {
-		metadata.Phase = "running"
-		m.recordDiagnosticLocked(metadata.Config.Identity.SandboxUID, "info", "action", "running", "all Sandbox Actions are ready")
+		m.recordDiagnosticLocked(metadata.Config.Identity.SandboxUID, "error", "action", sandboxStateActionUnavailable, reconcileErr.Error())
+	} else if (len(statuses) == 0 || actionStatusesReady(statuses)) && (metadata.Phase == sandboxStateActionPending || metadata.Phase == sandboxStateActionUnavailable) {
+		metadata.Phase = sandboxStateRunning
+		m.recordDiagnosticLocked(metadata.Config.Identity.SandboxUID, "info", "action", sandboxStateRunning, "all Sandbox Actions are ready")
 	}
 	status := m.sandboxStatusLocked(metadata)
 	m.signalReadinessChangedLocked()
@@ -154,7 +154,7 @@ func (m *SandboxManager) actionStateChanged(sandboxUID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	metadata := m.sandboxes[sandboxUID]
-	if metadata == nil || metadata.Phase == "terminating" || metadata.Phase == "deleting" || metadata.Phase == "delete-failed" {
+	if metadata == nil || metadata.Phase == sandboxStateTerminating || metadata.Phase == sandboxStateDeleting || metadata.Phase == sandboxStateDeleteFailed {
 		return
 	}
 	metadata.ActionBindingStatuses = append(metadata.ActionBindingStatuses[:0], statuses...)
@@ -162,12 +162,12 @@ func (m *SandboxManager) actionStateChanged(sandboxUID string) {
 	ready := generation > 0 && actionStatusesReady(statuses)
 	dataPlaneReady := routeReadyForPhase(metadata.Phase)
 	if dataPlaneReady && ready {
-		metadata.Phase = "running"
+		metadata.Phase = sandboxStateRunning
 	} else if dataPlaneReady {
-		metadata.Phase = "action-pending"
+		metadata.Phase = sandboxStateActionPending
 		for _, status := range statuses {
 			if status.State == string(apiv1alpha2.ActionFailed) {
-				metadata.Phase = "action-unavailable"
+				metadata.Phase = sandboxStateActionUnavailable
 				break
 			}
 		}

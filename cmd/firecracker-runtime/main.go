@@ -15,6 +15,10 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
+
 	"fast-sandbox/internal/artifactstore"
 	"fast-sandbox/internal/observability"
 	"fast-sandbox/internal/registryconfig"
@@ -23,10 +27,6 @@ import (
 	agenthostready "fast-sandbox/internal/runtime/firecracker/agent/hostready"
 	agentserver "fast-sandbox/internal/runtime/firecracker/agent/server"
 	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
-
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/klog/v2"
 )
 
 const (

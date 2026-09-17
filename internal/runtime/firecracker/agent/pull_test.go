@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"fast-sandbox/internal/artifacts"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
-
-	"github.com/stretchr/testify/require"
 )
 
 const (

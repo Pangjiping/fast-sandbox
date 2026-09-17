@@ -13,9 +13,9 @@ import (
 	"sort"
 	"strings"
 
-	runtimecontract "fast-sandbox/internal/runtime/contract"
-
 	"k8s.io/klog/v2"
+
+	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 // imageCacheDir holds content-addressed rootfs images:

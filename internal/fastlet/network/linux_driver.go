@@ -7,10 +7,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
+)
+
+// Shared iproute2 literals used to build `ip` command lines.
+const (
+	// netDevFlag is the `ip` argument naming the target device.
+	netDevFlag = "dev"
+	// linkSubcommand is the `ip link` object subcommand.
+	linkSubcommand = "link"
+	// ipObjectNetns is the `ip netns` object name.
+	ipObjectNetns = "netns"
+	// execSubcommand is the `ip netns exec` subcommand.
+	execSubcommand = "exec"
+	// ipSetSubcommand is the `ip link set` device configuration subcommand.
+	ipSetSubcommand = "set"
+	// eth0Name is the in-namespace name of the sandbox interface.
+	eth0Name = "eth0"
 )
 
 type CommandRunner interface {
@@ -86,7 +103,7 @@ func (d *LinuxNetNSDriver) Prepare(ctx context.Context, slot *Slot) (result erro
 	if err != nil {
 		return fmt.Errorf("read resolver configuration: %w", err)
 	}
-	if err := os.WriteFile(slot.DNSPath, resolver, 0o644); err != nil {
+	if err := os.WriteFile(slot.DNSPath, resolver, 0o644); err != nil { //nolint:gosec // resolv.conf is bind-mounted into sandboxes and read by the guest init
 		return fmt.Errorf("write slot resolver configuration: %w", err)
 	}
 
@@ -96,28 +113,28 @@ func (d *LinuxNetNSDriver) Prepare(ctx context.Context, slot *Slot) (result erro
 	if err := d.ensureEgress(ctx, slot); err != nil {
 		return err
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "netns", "add", slot.NetNSName); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, ipObjectNetns, "add", slot.NetNSName); err != nil {
 		return err
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "link", "add", slot.HostVeth, "mtu", fmt.Sprint(slot.MTU), "type", "veth", "peer", "name", slot.PeerVeth); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, "add", slot.HostVeth, "mtu", strconv.Itoa(slot.MTU), "type", "veth", "peer", "name", slot.PeerVeth); err != nil {
 		return err
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "link", "set", slot.HostVeth, "master", slot.Bridge); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, ipSetSubcommand, slot.HostVeth, "master", slot.Bridge); err != nil {
 		return err
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "link", "set", slot.HostVeth, "up"); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, ipSetSubcommand, slot.HostVeth, "up"); err != nil {
 		return err
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "link", "set", slot.PeerVeth, "netns", slot.NetNSName); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, ipSetSubcommand, slot.PeerVeth, ipObjectNetns, slot.NetNSName); err != nil {
 		return err
 	}
 	commands := [][]string{
-		{"-n", slot.NetNSName, "link", "set", "lo", "up"},
-		{"-n", slot.NetNSName, "link", "set", slot.PeerVeth, "name", "eth0"},
-		{"-n", slot.NetNSName, "link", "set", "eth0", "mtu", fmt.Sprint(slot.MTU)},
-		{"-n", slot.NetNSName, "addr", "add", slot.Address, "dev", "eth0"},
-		{"-n", slot.NetNSName, "link", "set", "eth0", "up"},
-		{"-n", slot.NetNSName, "route", "add", "default", "via", slot.Gateway, "dev", "eth0"},
+		{"-n", slot.NetNSName, linkSubcommand, ipSetSubcommand, "lo", "up"},
+		{"-n", slot.NetNSName, linkSubcommand, ipSetSubcommand, slot.PeerVeth, "name", eth0Name},
+		{"-n", slot.NetNSName, linkSubcommand, ipSetSubcommand, eth0Name, "mtu", strconv.Itoa(slot.MTU)},
+		{"-n", slot.NetNSName, "addr", "add", slot.Address, netDevFlag, eth0Name},
+		{"-n", slot.NetNSName, linkSubcommand, ipSetSubcommand, eth0Name, "up"},
+		{"-n", slot.NetNSName, "route", "add", "default", "via", slot.Gateway, netDevFlag, eth0Name},
 	}
 	for _, args := range commands {
 		if _, err := d.runner.Run(ctx, d.ipCommand, args...); err != nil {
@@ -126,11 +143,11 @@ func (d *LinuxNetNSDriver) Prepare(ctx context.Context, slot *Slot) (result erro
 	}
 	// A Sandbox cannot reach a sibling private IP. The gateway remains
 	// reachable for egress, and Fastlet Proxy ingress is unaffected.
-	if _, err := d.runner.Run(ctx, d.ipCommand, "netns", "exec", slot.NetNSName,
+	if _, err := d.runner.Run(ctx, d.ipCommand, ipObjectNetns, execSubcommand, slot.NetNSName,
 		d.iptablesCommand, "-A", "OUTPUT", "-d", slot.Gateway+"/32", "-j", "ACCEPT"); err != nil {
 		return err
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "netns", "exec", slot.NetNSName,
+	if _, err := d.runner.Run(ctx, d.ipCommand, ipObjectNetns, execSubcommand, slot.NetNSName,
 		d.iptablesCommand, "-A", "OUTPUT", "-d", slot.PrivateCIDR, "-j", "REJECT"); err != nil {
 		return err
 	}
@@ -147,10 +164,10 @@ func (d *LinuxNetNSDriver) Validate(ctx context.Context, slot *Slot) error {
 	if _, err := os.Stat(slot.DNSPath); err != nil {
 		return fmt.Errorf("resolver state: %w", err)
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "link", "show", "dev", slot.HostVeth); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, "show", netDevFlag, slot.HostVeth); err != nil {
 		return err
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "-n", slot.NetNSName, "addr", "show", "dev", "eth0"); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, "-n", slot.NetNSName, "addr", "show", netDevFlag, eth0Name); err != nil {
 		return err
 	}
 	return nil
@@ -168,7 +185,7 @@ func (d *LinuxNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 	// slot and shadows the live netns). Removing the host end tears the peer
 	// out of the namespace first.
 	if slot.HostVeth != "" {
-		if _, err := d.runner.Run(ctx, d.ipCommand, "link", "delete", slot.HostVeth); err != nil && !isMissingNetworkResource(err) {
+		if _, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, "delete", slot.HostVeth); err != nil && !isMissingNetworkResource(err) {
 			result = errors.Join(result, err)
 		}
 	}
@@ -178,7 +195,7 @@ func (d *LinuxNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 	// until ARP re-resolves. Remove it eagerly (best-effort: a missing entry
 	// or an unresolvable device is not a destroy failure).
 	if slot.IP != "" && slot.Bridge != "" {
-		_, _ = d.runner.Run(ctx, d.ipCommand, "neigh", "del", slot.IP, "dev", slot.Bridge)
+		_, _ = d.runner.Run(ctx, d.ipCommand, "neigh", "del", slot.IP, netDevFlag, slot.Bridge)
 	}
 	if slot.NetNSName != "" {
 		if err := deleteNetNSWithRetry(ctx, d.runner, d.ipCommand, slot.NetNSName); err != nil && !isMissingNetworkResource(err) {
@@ -194,15 +211,15 @@ func (d *LinuxNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 }
 
 func (d *LinuxNetNSDriver) ensureBridge(ctx context.Context, slot *Slot) error {
-	if _, err := d.runner.Run(ctx, d.ipCommand, "link", "show", "dev", slot.Bridge); err != nil {
-		if _, addErr := d.runner.Run(ctx, d.ipCommand, "link", "add", slot.Bridge, "type", "bridge"); addErr != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, "show", netDevFlag, slot.Bridge); err != nil {
+		if _, addErr := d.runner.Run(ctx, d.ipCommand, linkSubcommand, "add", slot.Bridge, "type", "bridge"); addErr != nil {
 			return addErr
 		}
-		if _, addrErr := d.runner.Run(ctx, d.ipCommand, "addr", "add", gatewayPrefix(slot), "dev", slot.Bridge); addrErr != nil {
+		if _, addrErr := d.runner.Run(ctx, d.ipCommand, "addr", "add", gatewayPrefix(slot), netDevFlag, slot.Bridge); addrErr != nil {
 			return addrErr
 		}
 	}
-	_, err := d.runner.Run(ctx, d.ipCommand, "link", "set", slot.Bridge, "up")
+	_, err := d.runner.Run(ctx, d.ipCommand, linkSubcommand, ipSetSubcommand, slot.Bridge, "up")
 	if err != nil {
 		return err
 	}
@@ -260,7 +277,7 @@ func gatewayPrefix(slot *Slot) string {
 func defaultRouteDevice(output string) string {
 	fields := strings.Fields(output)
 	for index := 0; index+1 < len(fields); index++ {
-		if fields[index] == "dev" {
+		if fields[index] == netDevFlag {
 			return fields[index+1]
 		}
 	}
@@ -281,8 +298,8 @@ func isMissingNetworkResource(err error) bool {
 // drain before the leak is accepted.
 func deleteNetNSWithRetry(ctx context.Context, runner CommandRunner, ipCommand, name string) error {
 	var err error
-	for attempt := 0; attempt < 5; attempt++ {
-		if _, err = runner.Run(ctx, ipCommand, "netns", "delete", name); err == nil {
+	for range 5 {
+		if _, err = runner.Run(ctx, ipCommand, ipObjectNetns, "delete", name); err == nil {
 			return nil
 		}
 		select {

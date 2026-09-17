@@ -4,14 +4,14 @@ import (
 	"context"
 	"testing"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 func testAssignmentEnvelope() AssignmentEnvelope {

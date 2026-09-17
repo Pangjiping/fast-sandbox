@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/sandbox/supervisor"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestPrepareAndRecoverInstanceUsesFencedPrivateConfigWithoutComponentToken(t *testing.T) {

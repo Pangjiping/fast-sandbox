@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestWaitUntilSandboxReadyUsesLocalStateNotification(t *testing.T) {

@@ -5,18 +5,18 @@ package main
 import (
 	"context"
 	"encoding/json"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
 	boxliteserver "fast-sandbox/internal/runtime/boxlite/server"
 	boxlitestate "fast-sandbox/internal/runtime/boxlite/state"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestNativeResourceOptionsAndCapabilityBoundary(t *testing.T) {

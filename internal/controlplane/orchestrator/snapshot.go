@@ -5,14 +5,14 @@ import (
 	"errors"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/assignment"
 	"fast-sandbox/internal/controlplane/placement"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
 )
 
 // ProjectSnapshotStatus is the pure projection from a Fastlet snapshot
@@ -141,7 +141,7 @@ func (o *Orchestrator) CreateSnapshot(ctx context.Context, snapshot *apiv1alpha2
 	} else {
 		var failure *fastletapi.FastletError
 		if !errors.As(callErr, &failure) {
-			callErr = fmt.Errorf("%w: %v", ErrUnknownFastletOutcome, callErr)
+			callErr = fmt.Errorf("%w: %w", ErrUnknownFastletOutcome, callErr)
 		}
 	}
 	return response.Snapshot, callErr

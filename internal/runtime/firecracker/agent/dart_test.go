@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	runtimecontract "fast-sandbox/internal/runtime/contract"
-
 	"github.com/stretchr/testify/require"
+
+	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 // fakeDART stands in for a node-local DART instance: it accepts prefix-mode

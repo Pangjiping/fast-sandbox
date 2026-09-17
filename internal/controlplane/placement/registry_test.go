@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/testutil"
-
-	"github.com/stretchr/testify/require"
 )
 
 var registryNow = time.Unix(1000, 0)

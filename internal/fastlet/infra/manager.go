@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"sync"
 
+	"k8s.io/klog/v2"
+
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-
-	"k8s.io/klog/v2"
 )
 
 type PreparedMapping struct {

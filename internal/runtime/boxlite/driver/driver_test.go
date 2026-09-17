@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -12,12 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestDriverSidecarContract(t *testing.T) {

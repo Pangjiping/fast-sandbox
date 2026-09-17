@@ -14,9 +14,9 @@ import (
 	"fmt"
 	"time"
 
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"k8s.io/klog/v2"
+
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 const (
@@ -80,20 +80,20 @@ func (m *SandboxManager) parkForImageDelivery(req *fastletapi.CreateSandboxReque
 		m.mu.Unlock()
 		return createFailure(fastletError(fastletapi.ErrorConflict, "Sandbox changed before image delivery parked", true), admission)
 	}
-	if placeholder.Phase == "terminating" {
+	if placeholder.Phase == sandboxStateTerminating {
 		admission := m.admissionStatusLocked()
 		go m.asyncDelete(sandboxUID, placeholder)
 		m.mu.Unlock()
 		return createFailure(fastletError(fastletapi.ErrorConflict, "Sandbox was deleted while image delivery was starting", false), admission)
 	}
-	placeholder.Phase = "image-pending"
+	placeholder.Phase = sandboxStateImagePending
 	m.runtimeMessages[sandboxUID] = message
 	status := m.sandboxStatusLocked(placeholder)
 	admission := m.admissionStatusLocked()
 	m.mu.Unlock()
 
 	m.startImageBootWorker(placeholder, req, input, started)
-	m.recordDiagnostic(sandboxUID, "info", "runtime", "image-pending", message)
+	m.recordDiagnostic(sandboxUID, "info", "runtime", sandboxStateImagePending, message)
 	klog.InfoS("sandbox parked for async image delivery", "sandboxID", sandboxUID, "image", input.Sandbox.Spec.Image)
 	return &fastletapi.CreateSandboxResponse{
 		Disposition: fastletapi.CreateDispositionCreated,
@@ -129,7 +129,7 @@ func (m *SandboxManager) startImageBootWorker(metadata *SandboxMetadata, req *fa
 // runImageBootWorker polls the async image delivery until it commits, boots
 // the runtime, and hands over to the data-plane lifecycle. It owns the
 // cleanup of a parked Sandbox that is deleted while the worker is alive.
-func (m *SandboxManager) runImageBootWorker(ctx context.Context, metadata *SandboxMetadata, req *fastletapi.CreateSandboxRequest, input *fastletapi.EnsureSandboxInput, started time.Time) {
+func (m *SandboxManager) runImageBootWorker(ctx context.Context, metadata *SandboxMetadata, req *fastletapi.CreateSandboxRequest, input *fastletapi.EnsureSandboxInput, started time.Time) { //nolint:gocognit // pre-existing polling state machine; refactor tracked separately
 	uid := metadata.Config.Identity.SandboxUID
 	deliver, ok := m.deliveryForCreate(input)
 	if !ok {
@@ -141,7 +141,7 @@ func (m *SandboxManager) runImageBootWorker(ctx context.Context, metadata *Sandb
 		if worker, found := m.imageBootWorkers[uid]; found && worker.metadata == metadata {
 			delete(m.imageBootWorkers, uid)
 		}
-		terminating := m.sandboxes[uid] == metadata && metadata.Phase == "terminating"
+		terminating := m.sandboxes[uid] == metadata && metadata.Phase == sandboxStateTerminating
 		m.mu.Unlock()
 		if terminating {
 			go m.asyncDelete(uid, metadata)
@@ -156,7 +156,7 @@ func (m *SandboxManager) runImageBootWorker(ctx context.Context, metadata *Sandb
 		}
 		m.mu.Lock()
 		current := m.sandboxes[uid]
-		if current != metadata || metadata.Phase != "image-pending" {
+		if current != metadata || metadata.Phase != sandboxStateImagePending {
 			m.mu.Unlock()
 			return
 		}
@@ -203,9 +203,9 @@ func (m *SandboxManager) runImageBootWorker(ctx context.Context, metadata *Sandb
 			return
 		}
 		m.mu.Lock()
-		stillPending := m.sandboxes[uid] == metadata && metadata.Phase == "image-pending"
+		stillPending := m.sandboxes[uid] == metadata && metadata.Phase == sandboxStateImagePending
 		if stillPending {
-			metadata.Phase = "creating"
+			metadata.Phase = sandboxStateCreating
 		}
 		m.mu.Unlock()
 		if !stillPending {
@@ -232,13 +232,13 @@ func (m *SandboxManager) markCreateFailed(metadata *SandboxMetadata, cause error
 	if m.sandboxes[uid] != metadata {
 		return
 	}
-	if metadata.Phase == "terminating" || metadata.Phase == "deleting" {
+	if metadata.Phase == sandboxStateTerminating || metadata.Phase == sandboxStateDeleting {
 		return
 	}
-	metadata.Phase = "create-failed"
+	metadata.Phase = sandboxStateCreateFailed
 	m.runtimeMessages[uid] = cause.Error()
 	m.cacheProtection.ProtectHotUntil(metadata.Config.Spec.Image, m.clock.Now().Add(time.Hour))
-	m.recordDiagnosticLocked(uid, "error", "runtime", "create-failed", cause.Error())
+	m.recordDiagnosticLocked(uid, "error", "runtime", sandboxStateCreateFailed, cause.Error())
 	klog.ErrorS(cause, "cold Sandbox create failed", "sandboxID", uid, "image", metadata.Config.Spec.Image)
 }
 

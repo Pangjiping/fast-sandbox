@@ -45,7 +45,7 @@ func (f *Factory) CreateProfile(ctx context.Context, profile runtimecatalog.Runt
 		report.Reason = "RuntimeDriverInitializeFailed"
 		report.Message = err.Error()
 		_ = driver.Close()
-		return nil, report, fmt.Errorf("%w: %v", ErrRuntimeCapabilityUnavailable, err)
+		return nil, report, fmt.Errorf("%w: %w", ErrRuntimeCapabilityUnavailable, err)
 	}
 	report = driver.ProbeCapabilities(ctx)
 	if !report.Ready() {

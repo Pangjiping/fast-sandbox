@@ -172,7 +172,7 @@ func (s *ArtifactStore) StageTree(
 			return PreparedSource{}, fmt.Errorf("%w: expected %s, got %s", ErrDigestMismatch, digest, actual)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(temporary, ".complete"), []byte(digest+"\n"), 0444); err != nil {
+	if err := os.WriteFile(filepath.Join(temporary, ".complete"), []byte(digest+"\n"), 0444); err != nil { //nolint:gosec // write-once completion marker, intentionally read-only
 		return PreparedSource{}, err
 	}
 	if err := os.Rename(temporary, base); err != nil {
@@ -223,7 +223,7 @@ func (s *ArtifactStore) preparedSource(hexDigest string, cacheHit bool) Prepared
 	}
 }
 
-func extractTarSafely(ctx context.Context, reader *tar.Reader, root string, maxBytes int64) error {
+func extractTarSafely(ctx context.Context, reader *tar.Reader, root string, maxBytes int64) error { //nolint:gocognit // security-critical tar extraction; explicit steps kept sequential
 	var extracted int64
 	for {
 		if err := ctx.Err(); err != nil {

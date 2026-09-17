@@ -5,18 +5,32 @@ import (
 	"errors"
 	"time"
 
-	"fast-sandbox/internal/observability"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"fast-sandbox/internal/observability"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
+)
+
+const (
+	// metricLabelRuntime partitions latency and observation metrics by runtime name.
+	metricLabelRuntime = "runtime"
+	// metricLabelInfraRevision partitions data-plane metrics by Infra revision.
+	metricLabelInfraRevision = "infra_revision"
+	// metricLabelResult bounds the result label across metrics.
+	metricLabelResult = "result"
+	// metricResultError is the failure value of bounded result labels.
+	metricResultError = "error"
+	// metricValueUnknown is the fallback value for unknown runtime names,
+	// infra revisions, and admission reasons.
+	metricValueUnknown = "unknown"
 )
 
 var (
 	fastletAdmissionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "fast_sandbox_fastlet_admission_total",
 		Help: "Fastlet admission operations partitioned by bounded result and reason enums.",
-	}, []string{"operation", "result", "reason"})
+	}, []string{"operation", metricLabelResult, "reason"})
 	fastletAdmissionSlots = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "fast_sandbox_fastlet_admission_slots",
 		Help: "Current Fastlet slot accounting by state.",
@@ -25,36 +39,36 @@ var (
 		Name:    "fast_sandbox_runtime_create_latency_seconds",
 		Help:    "Runtime Ensure latency from the Fastlet process boundary.",
 		Buckets: prometheus.ExponentialBuckets(0.005, 2, 13),
-	}, []string{"runtime", "cache_hit", "result"})
+	}, []string{metricLabelRuntime, "cache_hit", metricLabelResult})
 	dataPlaneReadyLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "fast_sandbox_data_plane_ready_latency_seconds",
 		Help:    "Latency from runtime creation start until asynchronous Infra readiness and route publication complete.",
 		Buckets: prometheus.ExponentialBuckets(0.005, 2, 14),
-	}, []string{"runtime", "infra_revision", "result"})
+	}, []string{metricLabelRuntime, metricLabelInfraRevision, metricLabelResult})
 	userProcessStartLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "fast_sandbox_user_process_start_latency_seconds",
 		Help:    "Ensure latency until a runtime adapter can prove the user process started.",
 		Buckets: prometheus.ExponentialBuckets(0.005, 2, 14),
-	}, []string{"runtime", "infra_revision", "source"})
+	}, []string{metricLabelRuntime, metricLabelInfraRevision, "source"})
 	userProcessStartObservationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "fast_sandbox_user_process_start_observation_total",
 		Help: "Availability of a trustworthy user-process-start observation.",
-	}, []string{"runtime", "infra_revision", "source", "result"})
+	}, []string{metricLabelRuntime, metricLabelInfraRevision, "source", metricLabelResult})
 	warmImagePullTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "fast_sandbox_warm_image_pull_total",
 		Help: "Pool warm image preparation attempts by bounded result; image references are intentionally not labels.",
-	}, []string{"result"})
+	}, []string{metricLabelResult})
 	fastletCreateStageLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "fast_sandbox_fastlet_create_stage_latency_seconds",
 		Help:    "Latency of bounded synchronous Fastlet admission stages before and around RuntimeDriver Ensure.",
 		Buckets: prometheus.ExponentialBuckets(.00025, 2, 15),
-	}, []string{"runtime", "stage", "result"})
+	}, []string{metricLabelRuntime, "stage", metricLabelResult})
 )
 
 func recordAdmission(operation string, err error) {
 	result, reason := "accepted", "none"
 	if err != nil {
-		result, reason = "error", "unknown"
+		result, reason = metricResultError, metricValueUnknown
 		var failure *fastletapi.FastletError
 		if errors.As(err, &failure) {
 			result, reason = "rejected", string(failure.Code)
@@ -75,7 +89,7 @@ func metricResult(err error) string {
 	if err == nil {
 		return "success"
 	}
-	return "error"
+	return metricResultError
 }
 
 func recordWarmImagePull(err error) {
@@ -84,16 +98,16 @@ func recordWarmImagePull(err error) {
 
 func observeRuntimeCreate(runtimeName string, started time.Time, err error) {
 	if runtimeName == "" {
-		runtimeName = "unknown"
+		runtimeName = metricValueUnknown
 	}
 	// RuntimeDriver does not yet expose a trustworthy per-create cache-hit bit.
 	// Keep the bounded label explicit instead of inferring from a stale inventory.
-	runtimeCreateLatency.WithLabelValues(runtimeName, "unknown", metricResult(err)).Observe(time.Since(started).Seconds())
+	runtimeCreateLatency.WithLabelValues(runtimeName, metricValueUnknown, metricResult(err)).Observe(time.Since(started).Seconds())
 }
 
 func startFastletCreateStage(ctx context.Context, runtimeName, stage string) (context.Context, func(error)) {
 	if runtimeName == "" {
-		runtimeName = "unknown"
+		runtimeName = metricValueUnknown
 	}
 	started := time.Now()
 	stageContext, span := observability.Start(ctx, "fastlet.create."+stage)
@@ -105,20 +119,20 @@ func startFastletCreateStage(ctx context.Context, runtimeName, stage string) (co
 
 func observeDataPlaneReady(runtimeName, infraRevision string, started time.Time, err error) {
 	if runtimeName == "" {
-		runtimeName = "unknown"
+		runtimeName = metricValueUnknown
 	}
 	if infraRevision == "" {
-		infraRevision = "unknown"
+		infraRevision = metricValueUnknown
 	}
 	dataPlaneReadyLatency.WithLabelValues(runtimeName, infraRevision, metricResult(err)).Observe(time.Since(started).Seconds())
 }
 
 func observeUserProcessStart(runtimeName, infraRevision string, ensureStarted time.Time, metadata *SandboxMetadata) {
 	if runtimeName == "" {
-		runtimeName = "unknown"
+		runtimeName = metricValueUnknown
 	}
 	if infraRevision == "" {
-		infraRevision = "unknown"
+		infraRevision = metricValueUnknown
 	}
 	source := fastletapi.UserProcessStartUnknown
 	if metadata != nil {

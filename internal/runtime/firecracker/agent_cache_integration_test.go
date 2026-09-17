@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"fast-sandbox/internal/registryconfig"
 	"fast-sandbox/internal/runtime/firecracker/agent"
-
-	"github.com/stretchr/testify/require"
 )
 
 // TestAgentPullFeedsDriverCache wires the runtime-agent pull layer to the

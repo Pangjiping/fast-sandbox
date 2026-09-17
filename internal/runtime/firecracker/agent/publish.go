@@ -27,7 +27,7 @@ import (
 
 // publishArtifacts are the artifact files of a native (non-overlaybd) set,
 // uploaded in this order before the manifest.
-var publishArtifacts = []string{"rootfs.ext4", "vmstate.snap", "memory.snap"}
+var publishArtifacts = []string{"rootfs.ext4", manifestVMStateName, manifestMemoryName}
 
 // publishManifestName is the commit-point document of the artifact set.
 const publishManifestName = "manifest.json"

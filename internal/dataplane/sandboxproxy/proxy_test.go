@@ -3,7 +3,6 @@ package sandboxproxy
 import (
 	"context"
 	"crypto/ed25519"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	routeauth "fast-sandbox/internal/dataplane/auth"
-	"fast-sandbox/internal/dataplane/fastletproxy"
-
 	"github.com/stretchr/testify/require"
+
+	routeauth "fast-sandbox/internal/dataplane/auth"
+	dataplane "fast-sandbox/internal/dataplane/contract"
+	"fast-sandbox/internal/dataplane/fastletproxy"
 )
 
 type fakeResolver struct {

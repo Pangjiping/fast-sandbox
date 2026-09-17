@@ -7,9 +7,9 @@ import (
 	"io"
 	"testing"
 
-	infracatalog "fast-sandbox/internal/catalog/infra"
-
 	"github.com/stretchr/testify/require"
+
+	infracatalog "fast-sandbox/internal/catalog/infra"
 )
 
 type fakeOCIOpener struct {

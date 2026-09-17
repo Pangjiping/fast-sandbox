@@ -4,13 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1"
@@ -19,8 +18,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
-
 	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 // linuxAMD64 is the fixed target platform of the build (oci2rootfs converts
@@ -101,7 +101,7 @@ func writeOCILayout(image v1.Image, workdir string) error {
 // (/execd, /bootstrap.sh, /prepare.sh, /usr/local/bin/bwrap) into a local
 // directory for injection. Files are first collected in memory so symlinked
 // entries (e.g. bwrap -> execd) can be resolved across the layer.
-func extractExecd(ctx context.Context, image, destination string) error {
+func extractExecd(ctx context.Context, image, destination string) error { //nolint:gocognit // single-pass tar walk; splitting would obscure symlink resolution
 	reference, err := name.ParseReference(image)
 	if err != nil {
 		return err
@@ -115,9 +115,9 @@ func extractExecd(ctx context.Context, image, destination string) error {
 		return err
 	}
 	want := map[string]string{
-		"execd":               "execd",
-		"bootstrap.sh":        "bootstrap.sh",
-		"prepare.sh":          "prepare.sh",
+		execdAssetName:        execdAssetName,
+		bootstrapScriptName:   bootstrapScriptName,
+		prepareScriptName:     prepareScriptName,
 		"usr/local/bin/bwrap": "bwrap",
 	}
 	files := map[string][]byte{}
@@ -130,7 +130,7 @@ func extractExecd(ctx context.Context, image, destination string) error {
 		tarReader := tar.NewReader(reader)
 		for {
 			header, err := tarReader.Next()
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {

@@ -12,19 +12,29 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	infracontract "fast-sandbox/internal/infra/contract"
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/sandbox/supervisor"
-
-	"k8s.io/klog/v2"
 )
 
 const (
 	SandboxInitContainerPath   = "/.fast/bin/sandbox-init"
 	SandboxTunnelContainerPath = "/.fast/bin/sandbox-tunnel"
 	InstanceConfigPath         = "/.fast/run/infra.json"
+)
+
+// Shared mount(8) options of the guest component bind mounts.
+const (
+	// mountOptionRBind performs a recursive bind mount.
+	mountOptionRBind = "rbind"
+	// mountOptionNoDev forbids device access from the mount.
+	mountOptionNoDev = "nodev"
+	// mountOptionNoSuid ignores set-user-ID bits from the mount.
+	mountOptionNoSuid = "nosuid"
 )
 
 type Mount struct {
@@ -85,7 +95,7 @@ func (m *Manager) PrepareInstance(ctx context.Context, config *fastletapi.Runtim
 	if plan.Tunnel != nil {
 		result.Mounts = append(result.Mounts, Mount{
 			Source: plan.Tunnel.HostPath, GuestSource: plan.Tunnel.PodPath,
-			Destination: SandboxTunnelContainerPath, Options: []string{"ro", "nosuid", "nodev"},
+			Destination: SandboxTunnelContainerPath, Options: []string{"ro", mountOptionNoSuid, mountOptionNoDev},
 		})
 	}
 	if len(plan.Components) == 0 {
@@ -105,7 +115,7 @@ func (m *Manager) PrepareInstance(ctx context.Context, config *fastletapi.Runtim
 		result.WrapperRequired = true
 		result.Mounts = append(result.Mounts, Mount{
 			Source: plan.Supervisor.HostPath, GuestSource: plan.Supervisor.PodPath,
-			Destination: SandboxInitContainerPath, Options: []string{"ro", "rbind", "nosuid", "nodev"},
+			Destination: SandboxInitContainerPath, Options: []string{"ro", mountOptionRBind, mountOptionNoSuid, mountOptionNoDev},
 		})
 	}
 
@@ -126,7 +136,7 @@ func (m *Manager) PrepareInstance(ctx context.Context, config *fastletapi.Runtim
 		for _, mapping := range prepared.Mappings {
 			result.Mounts = append(result.Mounts, Mount{
 				Source: mapping.HostPath, GuestSource: mapping.PodPath,
-				Destination: mapping.TargetPath, Options: []string{"ro", "rbind", "nosuid", "nodev"},
+				Destination: mapping.TargetPath, Options: []string{"ro", mountOptionRBind, mountOptionNoSuid, mountOptionNoDev},
 			})
 		}
 		environment := map[string]string{
@@ -173,7 +183,7 @@ func (m *Manager) PrepareInstance(ctx context.Context, config *fastletapi.Runtim
 		// empty Mounts set and skip the guest-side copy entirely.
 		result.Mounts = append(result.Mounts, Mount{
 			Source: hostPath, GuestSource: podPath, Destination: InstanceConfigPath,
-			Options: []string{"ro", "rbind", "nosuid", "nodev", "noexec"},
+			Options: []string{"ro", mountOptionRBind, mountOptionNoSuid, mountOptionNoDev, "noexec"},
 		})
 	}
 	persisted.Prepared = result

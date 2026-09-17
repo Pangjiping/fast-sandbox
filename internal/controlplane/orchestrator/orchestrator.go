@@ -7,14 +7,6 @@ import (
 	"strings"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	infracatalog "fast-sandbox/internal/catalog/infra"
-	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-	"fast-sandbox/internal/controlplane/assignment"
-	"fast-sandbox/internal/controlplane/placement"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-	"fast-sandbox/pkg/util/idgen"
-
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -23,6 +15,14 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	infracatalog "fast-sandbox/internal/catalog/infra"
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+	"fast-sandbox/internal/controlplane/assignment"
+	"fast-sandbox/internal/controlplane/placement"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/pkg/util/idgen"
 )
 
 var (
@@ -396,7 +396,7 @@ func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1
 	} else {
 		var failure *fastletapi.FastletError
 		if !errors.As(createErr, &failure) {
-			createErr = fmt.Errorf("%w: %v", ErrUnknownFastletOutcome, createErr)
+			createErr = fmt.Errorf("%w: %w", ErrUnknownFastletOutcome, createErr)
 		}
 	}
 	o.recordFeedback(fastlet.ID, createErr)
@@ -425,14 +425,14 @@ func (o *Orchestrator) ReconcileBindings(ctx context.Context, sandbox *apiv1alph
 		return nil, fmt.Errorf("get SandboxPool for Actions: %w", err)
 	}
 	if err := pool.Spec.ValidateActionHandlers(); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidActionDesiredState, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidActionDesiredState, err)
 	}
 	if err := sandbox.Spec.ValidateActionBindings(pool.Spec.ActionHandlers); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidActionDesiredState, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidActionDesiredState, err)
 	}
 	inputs, err := compileActionBindings(sandbox.Spec.ActionBindings)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidActionDesiredState, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidActionDesiredState, err)
 	}
 	fastlet, _, identity, err := o.assignedTarget(sandbox)
 	if err != nil {
@@ -567,7 +567,7 @@ func (o *Orchestrator) clearAssignmentProjection(ctx context.Context, sandbox *a
 
 // ProjectObservedStatus is a pure projection used by SandboxReconciler while
 // it owns the single business-status write for one reconcile pass.
-func ProjectObservedStatus(status *apiv1alpha2.SandboxStatus, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) {
+func ProjectObservedStatus(status *apiv1alpha2.SandboxStatus, sandbox *apiv1alpha2.Sandbox, observed *fastletapi.SandboxStatus) { //nolint:gocognit // pre-existing status projection logic; refactor tracked separately
 	if status == nil || observed == nil {
 		return
 	}

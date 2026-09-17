@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fast-sandbox/internal/observability"
-
 	"k8s.io/klog/v2"
+
+	"fast-sandbox/internal/observability"
 )
 
 const currentSlotVersion = 1
@@ -150,10 +150,10 @@ func (m *Manager) Initialize(ctx context.Context) error {
 		}
 		if err := m.driver.Validate(ctx, slot); err != nil {
 			if slot.Phase == SlotPhaseBound {
-				return fmt.Errorf("%w: bound slot %s failed validation: %v", ErrStateInconsistent, slot.ID, err)
+				return fmt.Errorf("%w: bound slot %s failed validation: %w", ErrStateInconsistent, slot.ID, err)
 			}
 			if destroyErr := m.markAndDestroy(ctx, slot.ID); destroyErr != nil {
-				return fmt.Errorf("invalid clean slot %s: %v; destroy: %w", slot.ID, err, destroyErr)
+				return fmt.Errorf("invalid clean slot %s: %w; destroy: %w", slot.ID, err, destroyErr)
 			}
 		}
 	}
@@ -181,8 +181,8 @@ func (m *Manager) Reconcile(ctx context.Context, runtimeOwners []Owner) error {
 	bound := make([]*Slot, 0)
 	for _, slot := range m.slots {
 		if slot.Phase == SlotPhaseBound {
-			copy := *slot
-			bound = append(bound, &copy)
+			copied := *slot
+			bound = append(bound, &copied)
 		}
 	}
 	m.mu.RUnlock()
@@ -619,12 +619,12 @@ func cloneSlot(slot *Slot) *Slot {
 	if slot == nil {
 		return nil
 	}
-	copy := *slot
+	copied := *slot
 	if slot.BoundAt != nil {
 		boundAt := *slot.BoundAt
-		copy.BoundAt = &boundAt
+		copied.BoundAt = &boundAt
 	}
-	return &copy
+	return &copied
 }
 
 func randomID() (string, error) {

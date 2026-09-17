@@ -54,7 +54,7 @@ func DetectCIDROverlap(ctx context.Context, cidr, bridgeDevice string, runner Co
 // absent).
 func routeDevice(fields []string) string {
 	for index := 0; index+1 < len(fields); index++ {
-		if fields[index] == "dev" {
+		if fields[index] == netDevFlag {
 			return fields[index+1]
 		}
 	}

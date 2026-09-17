@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 type fakeFastPath struct {

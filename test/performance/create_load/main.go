@@ -19,13 +19,13 @@ import (
 	"syscall"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-	"fast-sandbox/internal/observability"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	"fast-sandbox/internal/observability"
 )
 
 const reportSchemaVersion = "fast-sandbox-create-load/v1"
@@ -357,7 +357,7 @@ func validateConfig(cfg config) error {
 	return nil
 }
 
-func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
+func runLoad(ctx context.Context, client fastPathClient, cfg config) report { //nolint:gocognit // inline worker/throttle/report flow; splitting would obscure the load loop
 	started := time.Now()
 	jobs := make(chan int)
 	outcomes := make(chan outcome, cfg.Requests)
@@ -374,7 +374,7 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 	}
 
 	var workers sync.WaitGroup
-	for worker := 0; worker < cfg.Concurrency; worker++ {
+	for range cfg.Concurrency {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -409,7 +409,7 @@ func runLoad(ctx context.Context, client fastPathClient, cfg config) report {
 			}
 		}()
 	}
-	for index := 0; index < cfg.Requests; index++ {
+	for index := range cfg.Requests {
 		jobs <- index
 	}
 	close(jobs)

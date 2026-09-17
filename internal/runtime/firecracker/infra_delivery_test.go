@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	fastletinfra "fast-sandbox/internal/fastlet/infra"
-
 	"github.com/stretchr/testify/require"
+
+	fastletinfra "fast-sandbox/internal/fastlet/infra"
 )
 
 // infraRunner records commands and can fail a specific command.

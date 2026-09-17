@@ -1,11 +1,12 @@
 package fastletproxy
 
 import (
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 func testRoute(generation int64) Route {

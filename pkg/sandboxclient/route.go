@@ -12,9 +12,9 @@ import (
 	"net/url"
 	"strings"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"google.golang.org/grpc"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 // EndpointControl is the small FastPath surface needed by data-plane

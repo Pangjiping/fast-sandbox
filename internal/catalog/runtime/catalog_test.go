@@ -5,10 +5,10 @@ import (
 	"sort"
 	"testing"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 func TestBuiltinCatalogProfiles(t *testing.T) {

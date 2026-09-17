@@ -10,10 +10,13 @@ import (
 	"strings"
 	"time"
 
-	boxlitestate "fast-sandbox/internal/runtime/boxlite/state"
-
 	"golang.org/x/sys/unix"
+
+	boxlitestate "fast-sandbox/internal/runtime/boxlite/state"
 )
+
+// boxLiteRecordFileSuffix is the file name suffix of persisted BoxLite Sandbox records.
+const boxLiteRecordFileSuffix = ".json"
 
 type BoxLiteBackend struct {
 	stateRoot string
@@ -61,7 +64,7 @@ func (b *BoxLiteBackend) Scan(ctx context.Context) ([]ResourceIdentity, error) {
 		}
 		found := false
 		for _, item := range metadata {
-			if item.IsDir() || filepath.Ext(item.Name()) != ".json" {
+			if item.IsDir() || filepath.Ext(item.Name()) != boxLiteRecordFileSuffix {
 				continue
 			}
 			record, err := readBoxLiteRecord(filepath.Join(metadataRoot, item.Name()))
@@ -218,7 +221,7 @@ func parseBoxLiteResourceID(resourceID string) (string, string, error) {
 	if len(parts) < 1 || len(parts) > 2 || parts[0] == "" {
 		return "", "", errors.New("invalid BoxLite resource ID")
 	}
-	if len(parts) == 2 && (parts[1] == "" || filepath.Ext(parts[1]) != ".json") {
+	if len(parts) == 2 && (parts[1] == "" || filepath.Ext(parts[1]) != boxLiteRecordFileSuffix) {
 		return "", "", errors.New("invalid BoxLite record resource ID")
 	}
 	record := ""
@@ -237,7 +240,7 @@ func hasBoxLiteRecords(metadataRoot string) (bool, error) {
 		return false, err
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == boxLiteRecordFileSuffix {
 			return true, nil
 		}
 	}

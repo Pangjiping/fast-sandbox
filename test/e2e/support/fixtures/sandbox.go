@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 const defaultPollInterval = 100 * time.Millisecond

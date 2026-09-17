@@ -5,12 +5,12 @@ import (
 	"errors"
 	"testing"
 
-	fsbtest "fast-sandbox/internal/testutil"
-
 	containerdclient "github.com/containerd/containerd/v2/client"
 	containerdcontainers "github.com/containerd/containerd/v2/core/containers"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+
+	fsbtest "fast-sandbox/internal/testutil"
 )
 
 func TestContainerdCreateStageMetricIsCollectable(t *testing.T) {

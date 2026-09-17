@@ -3,15 +3,16 @@ package fastletproxy
 import (
 	"context"
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
-const localForwardPreambleSize = dataplane.LocalForwardPreambleSize
+const localForwardPreambleSize = dataplane.LocalForwardPreambleSize //nolint:unused // used by local_forward tests
 
 type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 

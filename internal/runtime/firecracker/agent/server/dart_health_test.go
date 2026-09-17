@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
-
 	"github.com/stretchr/testify/require"
+
+	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
 )
 
 // TestServiceHealthDartProbe wires the node-local DART state into Health:

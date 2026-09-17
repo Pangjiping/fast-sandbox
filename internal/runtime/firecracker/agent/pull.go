@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
-
-	"k8s.io/klog/v2"
 )
 
 // Client pulls published Firecracker artifacts for an image reference into

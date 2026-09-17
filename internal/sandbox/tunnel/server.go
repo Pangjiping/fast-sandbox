@@ -3,7 +3,6 @@ package tunnel
 import (
 	"context"
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 const DefaultHandshakeTimeout = 5 * time.Second

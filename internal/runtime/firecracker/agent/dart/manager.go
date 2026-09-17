@@ -155,7 +155,7 @@ func (m *Manager) Healthy() bool {
 func (m *Manager) Run(ctx context.Context) error {
 	for {
 		if ctx.Err() != nil {
-			return nil
+			return nil //nolint:nilerr // cancellation is a clean stop; Run documents returning nil
 		}
 		cmd, waitCh, err := m.start(ctx)
 		if err != nil {
@@ -169,7 +169,7 @@ func (m *Manager) Run(ctx context.Context) error {
 		}
 		m.runProbes(ctx, cmd, waitCh)
 		if ctx.Err() != nil {
-			return nil
+			return nil //nolint:nilerr // cancellation is a clean stop; Run documents returning nil
 		}
 		if !m.backoffDelay(ctx) {
 			return nil

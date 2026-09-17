@@ -9,9 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 // stageBootAndSnapshot delegates to the builder image's snapshot stage

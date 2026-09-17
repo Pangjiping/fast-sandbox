@@ -7,12 +7,6 @@ import (
 	"reflect"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/assignment"
-	orchestration "fast-sandbox/internal/controlplane/orchestrator"
-	"fast-sandbox/internal/observability"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -26,6 +20,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
+	orchestration "fast-sandbox/internal/controlplane/orchestrator"
+	"fast-sandbox/internal/observability"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 const (
@@ -102,7 +102,7 @@ func sandboxObservabilityIdentity(sandbox *apiv1alpha2.Sandbox) observability.Id
 	return identity
 }
 
-func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox) (ctrl.Result, error) {
+func (r *SandboxReconciler) reconcileEnsure(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox) (ctrl.Result, error) { //nolint:gocognit // pre-existing reconcile state machine; refactor tracked separately
 	if sandbox.Status.Placement.FastletName != "" {
 		lost, err := r.assignedPodLost(ctx, sandbox)
 		if err != nil {

@@ -305,7 +305,8 @@ func (e *CreateCallError) Unwrap() error {
 
 func CreateDispositionFromError(err error) CreateDisposition {
 	for current := err; current != nil; current = errors.Unwrap(current) {
-		if failure, ok := current.(*CreateCallError); ok {
+		failure := &CreateCallError{}
+		if errors.As(current, &failure) {
 			return failure.Disposition
 		}
 	}

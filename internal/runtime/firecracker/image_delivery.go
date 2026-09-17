@@ -24,11 +24,11 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	"fast-sandbox/internal/artifacts"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
-
-	"k8s.io/klog/v2"
 )
 
 // Driver implements the optional artifact-delivery extensions.

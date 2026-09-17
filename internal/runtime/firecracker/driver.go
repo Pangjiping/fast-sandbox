@@ -13,6 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/klog/v2"
+
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	dataplane "fast-sandbox/internal/dataplane/contract"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
@@ -22,9 +25,6 @@ import (
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
-
-	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/klog/v2"
 )
 
 // bootPollInterval is the VM state polling interval after start/resume.
@@ -361,7 +361,7 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 // snapshot set (an instance checkpoint when the request carries a resume
 // reference). The call is idempotent and emits an OTel span tree correlated
 // by the Sandbox identity.
-func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput) (_ *SandboxMetadata, resultErr error) {
+func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSandboxInput) (_ *SandboxMetadata, resultErr error) { //nolint:gocognit,gocyclo,maintidx // pre-existing create/resume state machine; refactor tracked separately
 	if input == nil {
 		return nil, fmt.Errorf("%w: Firecracker Sandbox input is required", ErrInvalidConfig)
 	}
@@ -463,7 +463,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			"generation", identity.InstanceGeneration, "attempt", identity.AssignmentAttempt,
 			"capacity", snapshot.Capacity, "clean", snapshot.Clean,
 			"bound", snapshot.Bound, "destroying", snapshot.Destroying)
-		return nil, fmt.Errorf("%w: acquire Firecracker network slot: %v", ErrNetworkUnavailable, err)
+		return nil, fmt.Errorf("%w: acquire Firecracker network slot: %w", ErrNetworkUnavailable, err)
 	}
 	acquireDur := time.Since(createStarted)
 	releaseSlot := func() {
@@ -491,7 +491,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	}
 	if err := manager.ApplyGuest(ctx, owner, guestIP); err != nil {
 		releaseSlot()
-		return nil, fmt.Errorf("%w: apply Firecracker guest data plane: %v", ErrNetworkUnavailable, err)
+		return nil, fmt.Errorf("%w: apply Firecracker guest data plane: %w", ErrNetworkUnavailable, err)
 	}
 
 	rootfsStarted := time.Now()
@@ -556,7 +556,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 				klog.V(2).InfoS("infra instance removal on failed prepare leaked resources", "sandboxID", identity.SandboxUID, "err", removeErr)
 			}
 			releaseSlot()
-			return nil, fmt.Errorf("%w: prepare Infra Components: %v", ErrInfraUnavailable, prepareErr)
+			return nil, fmt.Errorf("%w: prepare Infra Components: %w", ErrInfraUnavailable, prepareErr)
 		}
 		// Infra delivery is the only per-instance rootfs mutation left:
 		// the guest DNS resolver is no longer injected here — the template
@@ -619,7 +619,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			d.killAndForget(identity.SandboxUID, process.PID())
 			releaseSlot()
 			observability.End(launchSpan, err)
-			return nil, fmt.Errorf("%w: firecracker API socket did not appear: %v%s", ErrRuntimeNotInitialized, err, detail)
+			return nil, fmt.Errorf("%w: firecracker API socket did not appear: %w%s", ErrRuntimeNotInitialized, err, detail)
 		}
 	}
 	observability.End(launchSpan, err)
@@ -867,7 +867,7 @@ func (d *Driver) GetAccessDescriptor(sandboxID string) (dataplane.AccessDescript
 		return dataplane.AccessDescriptor{}, ErrSandboxNotFound
 	}
 	if err := slot.Access.Validate(); err != nil {
-		return dataplane.AccessDescriptor{}, fmt.Errorf("%w: %v", ErrNetworkUnavailable, err)
+		return dataplane.AccessDescriptor{}, fmt.Errorf("%w: %w", ErrNetworkUnavailable, err)
 	}
 	return slot.Access, nil
 }
@@ -945,7 +945,7 @@ func (d *Driver) launchVM(ctx context.Context, plan launchConfig, slot *fastletn
 func validateManifestGuestNetwork(slot *fastletnetwork.Slot, network manifestGuestNetwork) error {
 	prefix, err := netip.ParsePrefix(slot.PrivateCIDR)
 	if err != nil {
-		return fmt.Errorf("%w: parse slot private CIDR %q: %v", ErrInvalidConfig, slot.PrivateCIDR, err)
+		return fmt.Errorf("%w: parse slot private CIDR %q: %w", ErrInvalidConfig, slot.PrivateCIDR, err)
 	}
 	address, err := netip.ParseAddr(network.IP)
 	if err != nil || !address.Is4() {
@@ -958,7 +958,7 @@ func validateManifestGuestNetwork(slot *fastletnetwork.Slot, network manifestGue
 	// address can be handed to another slot and shadowed by its netns.
 	conventional, err := fastletnetwork.BakedGuestIP(slot)
 	if err != nil {
-		return fmt.Errorf("%w: derive reserved guest address: %v", ErrInvalidConfig, err)
+		return fmt.Errorf("%w: derive reserved guest address: %w", ErrInvalidConfig, err)
 	}
 	if network.IP != conventional {
 		return fmt.Errorf("%w: baked guest IP %s does not match the reserved address %s (gateway + 2); rebuild the template or align FAST_SANDBOX_NETWORK_CIDR", ErrInvalidConfig, network.IP, conventional)
@@ -1000,7 +1000,7 @@ func netmaskBits(mask string) (int, bool) {
 // MTU and are inherently derived from the runtime CIDR).
 func resolveBakedGuestIP(stateRoot, image string, slot *fastletnetwork.Slot) (string, int, error) {
 	if guestNetwork, ok, err := readCachedManifestGuestNetwork(stateRoot, image); err != nil {
-		return "", 0, fmt.Errorf("%w: read cached manifest guest network: %v", ErrImageNotReady, err)
+		return "", 0, fmt.Errorf("%w: read cached manifest guest network: %w", ErrImageNotReady, err)
 	} else if ok {
 		if err := validateManifestGuestNetwork(slot, guestNetwork); err != nil {
 			return "", 0, err
@@ -1009,7 +1009,7 @@ func resolveBakedGuestIP(stateRoot, image string, slot *fastletnetwork.Slot) (st
 	}
 	guestIP, err := fastletnetwork.BakedGuestIP(slot)
 	if err != nil {
-		return "", 0, fmt.Errorf("%w: derive baked guest IP: %v", ErrInvalidConfig, err)
+		return "", 0, fmt.Errorf("%w: derive baked guest IP: %w", ErrInvalidConfig, err)
 	}
 	return guestIP, 0, nil
 }

@@ -10,6 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/klog/v2"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletaction "fast-sandbox/internal/fastlet/action"
 	fastletcache "fast-sandbox/internal/fastlet/cache"
@@ -17,9 +20,6 @@ import (
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
 	"fast-sandbox/pkg/util/idgen"
-
-	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/klog/v2"
 )
 
 type SandboxManagerConfig struct {
@@ -115,9 +115,9 @@ func NewSandboxManagerWithConfig(runtime RuntimeDriver, config SandboxManagerCon
 		if err := apiv1alpha2.ValidateSandboxResourceProfile(*config.ResourceProfile); err != nil {
 			return nil, err
 		}
-		copy := *config.ResourceProfile
-		profile = &copy
-		resourceHash = copy.Hash()
+		copied := *config.ResourceProfile
+		profile = &copied
+		resourceHash = copied.Hash()
 	}
 	var cacheSource fastletcache.ImageSource
 	if source, ok := runtime.(RuntimeArtifactCache); ok {
@@ -185,7 +185,7 @@ func (m *SandboxManager) WarmCache(ctx context.Context) error {
 	var mu sync.Mutex
 	var result error
 	for _, image := range m.warmImages {
-		image := image
+
 		group.Add(1)
 		go func() {
 			defer group.Done()
@@ -366,8 +366,8 @@ func (m *SandboxManager) asyncDelete(sandboxID string, expected *SandboxMetadata
 	if err := m.removeRoute(ctx, expected); err != nil {
 		m.mu.Lock()
 		if m.sandboxes[sandboxID] == expected {
-			expected.Phase = "delete-failed"
-			m.recordDiagnosticLocked(sandboxID, "error", "route", "delete-failed", err.Error())
+			expected.Phase = sandboxStateDeleteFailed
+			m.recordDiagnosticLocked(sandboxID, "error", "route", sandboxStateDeleteFailed, err.Error())
 		}
 		m.mu.Unlock()
 		klog.ErrorS(err, "Fastlet Proxy route removal failed; runtime retained", "sandboxID", sandboxID)
@@ -378,8 +378,8 @@ func (m *SandboxManager) asyncDelete(sandboxID string, expected *SandboxMetadata
 	defer m.mu.Unlock()
 	if err != nil {
 		if m.sandboxes[sandboxID] == expected {
-			expected.Phase = "delete-failed"
-			m.recordDiagnosticLocked(sandboxID, "error", "runtime", "delete-failed", err.Error())
+			expected.Phase = sandboxStateDeleteFailed
+			m.recordDiagnosticLocked(sandboxID, "error", "runtime", sandboxStateDeleteFailed, err.Error())
 		}
 		klog.ErrorS(err, "Runtime deletion failed; retaining admission capacity for retry", "sandboxID", sandboxID)
 		return
@@ -420,7 +420,7 @@ func (m *SandboxManager) GetSandboxStatuses(ctx context.Context) []fastletapi.Sa
 	messages := make(map[string]string, len(m.sandboxes))
 	for sandboxID, metadata := range m.sandboxes {
 		snapshots[sandboxID] = *metadata
-		if message := m.runtimeMessages[sandboxID]; message != "" && metadata.Phase != "running" {
+		if message := m.runtimeMessages[sandboxID]; message != "" && metadata.Phase != sandboxStateRunning {
 			messages[sandboxID] = message
 		}
 	}
@@ -462,7 +462,7 @@ func (m *SandboxManager) RuntimeDiagnostics(ctx context.Context) fastletapi.Runt
 	infraRevision, infraReady, _, infraMessage := m.InfraStatus()
 	infraState := "Preparing"
 	if infraReady {
-		infraState = "Ready"
+		infraState = string(apiv1alpha2.InfraComponentReady)
 	}
 	return fastletapi.RuntimeDiagnostics{
 		RuntimeProfileHash: m.runtimeProfileHash,

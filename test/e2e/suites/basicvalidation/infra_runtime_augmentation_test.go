@@ -12,13 +12,6 @@ import (
 	"testing"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/pkg/sandboxclient"
-	e2eenv "fast-sandbox/test/e2e/env"
-	"fast-sandbox/test/e2e/support/fixtures"
-	"fast-sandbox/test/e2e/support/suiteenv"
-
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -27,6 +20,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/pkg/sandboxclient"
+	e2eenv "fast-sandbox/test/e2e/env"
+	"fast-sandbox/test/e2e/support/fixtures"
+	"fast-sandbox/test/e2e/support/suiteenv"
 )
 
 func TestSDKAdapterDataPlane(t *testing.T) {

@@ -9,10 +9,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestServerLifecycleAndStrictContract(t *testing.T) {

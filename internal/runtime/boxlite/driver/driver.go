@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
@@ -156,7 +156,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if infraManager != nil {
 		instance, err := infraManager.PrepareInstance(ctx, config)
 		if err != nil {
-			return nil, fmt.Errorf("%w: prepare BoxLite Infra Component instance: %v", ErrInfraUnavailable, err)
+			return nil, fmt.Errorf("%w: prepare BoxLite Infra Component instance: %w", ErrInfraUnavailable, err)
 		}
 		for _, mount := range instance.Mounts {
 			source := mount.GuestSource
@@ -266,7 +266,7 @@ func (d *Driver) GetAccessDescriptor(sandboxID string) (dataplane.AccessDescript
 		return dataplane.AccessDescriptor{}, fmt.Errorf("%w: invalid BoxLite LocalForward descriptor", ErrNetworkUnavailable)
 	}
 	if err := access.Validate(); err != nil {
-		return dataplane.AccessDescriptor{}, fmt.Errorf("%w: %v", ErrNetworkUnavailable, err)
+		return dataplane.AccessDescriptor{}, fmt.Errorf("%w: %w", ErrNetworkUnavailable, err)
 	}
 	return access, nil
 }
@@ -306,7 +306,7 @@ func (d *Driver) metadataFromBox(box boxLiteBox) (*SandboxMetadata, error) {
 		return nil, fmt.Errorf("%w: BoxLite sidecar did not return a LocalForward endpoint", ErrNetworkUnavailable)
 	}
 	if err := box.Access.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: invalid BoxLite LocalForward endpoint: %v", ErrNetworkUnavailable, err)
+		return nil, fmt.Errorf("%w: invalid BoxLite LocalForward endpoint: %w", ErrNetworkUnavailable, err)
 	}
 	return &SandboxMetadata{
 		Config: box.Config, Allocation: box.Allocation, ContainerID: box.BoxID, PID: box.PID, Phase: box.Phase, CreatedAt: box.CreatedAt,

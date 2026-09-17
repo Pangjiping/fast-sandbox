@@ -83,7 +83,7 @@ func (d *Driver) warmPullRequestID(image string) string {
 }
 
 // rememberLease records the runtime-agent lease of a Sandbox.
-func (d *Driver) rememberLease(sandboxID, leaseID string) {
+func (d *Driver) rememberLease(sandboxID, leaseID string) { //nolint:unused // used by wiring tests
 	d.mu.Lock()
 	if d.sandboxLeases == nil {
 		d.sandboxLeases = make(map[string]string)

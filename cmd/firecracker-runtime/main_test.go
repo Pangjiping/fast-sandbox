@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"fast-sandbox/internal/artifactstore"
 	"fast-sandbox/internal/registryconfig"
-
-	"github.com/stretchr/testify/require"
 )
 
 // fakeProvider mocks the registryconfig.Provider interface.

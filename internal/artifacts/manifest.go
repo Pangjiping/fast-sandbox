@@ -57,6 +57,11 @@ func FileEntry(path string, cache map[string]string) (map[string]any, error) {
 // SHA256SUMSName is the checksum manifest file of an artifact set.
 const SHA256SUMSName = "SHA256SUMS"
 
+// unknownProvenanceValue is the placeholder manifest value for host
+// metadata fields (firecracker version, kernel release, CPU model) that
+// cannot be detected when the artifact set is produced.
+const unknownProvenanceValue = "unknown"
+
 // WriteSHA256SUMS writes SHA256SUMS covering the given artifact set
 // (relative names), reusing the memoized checksums already computed for the
 // manifest. Lines are "<sha256>  <relative-path>" joined with newlines plus
@@ -70,7 +75,7 @@ func WriteSHA256SUMS(workdir string, artifacts []string, cache map[string]string
 		}
 		lines = append(lines, sum+"  "+relative)
 	}
-	return os.WriteFile(filepath.Join(workdir, SHA256SUMSName), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	return os.WriteFile(filepath.Join(workdir, SHA256SUMSName), []byte(strings.Join(lines, "\n")+"\n"), 0o644) //nolint:gosec // published artifact-set member; kept world-readable like every other staged artifact file
 }
 
 // SHA256FileCached returns the checksum of path, memoized in cache.
@@ -132,7 +137,7 @@ func ImageIndexPayload(image, manifestURI, artifactDigest string, now time.Time)
 func FirecrackerVersion(binary string) string {
 	output, err := exec.Command(binary, "--version").CombinedOutput()
 	if err != nil {
-		return "unknown"
+		return unknownProvenanceValue
 	}
 	fields := strings.Fields(string(output))
 	for index, field := range fields {
@@ -140,14 +145,14 @@ func FirecrackerVersion(binary string) string {
 			return strings.TrimPrefix(fields[index+1], "v")
 		}
 	}
-	return "unknown"
+	return unknownProvenanceValue
 }
 
 // HostKernelRelease returns the host kernel release (uname -r).
 func HostKernelRelease() string {
 	output, err := os.ReadFile("/proc/sys/kernel/osrelease")
 	if err != nil {
-		return "unknown"
+		return unknownProvenanceValue
 	}
 	return strings.TrimSpace(string(output))
 }
@@ -156,7 +161,7 @@ func HostKernelRelease() string {
 func HostCPUModel() string {
 	payload, err := os.ReadFile("/proc/cpuinfo")
 	if err != nil {
-		return "unknown"
+		return unknownProvenanceValue
 	}
 	for _, line := range strings.Split(string(payload), "\n") {
 		if strings.HasPrefix(line, "model name") {
@@ -166,7 +171,7 @@ func HostCPUModel() string {
 			}
 		}
 	}
-	return "unknown"
+	return unknownProvenanceValue
 }
 
 // SizeGiB rounds a byte size up to whole GiB, minimum one. It matches the

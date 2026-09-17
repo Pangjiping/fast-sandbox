@@ -5,11 +5,11 @@ import (
 	"sync"
 	"time"
 
-	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 )
 
 const defaultOrphanTimeout = 30 * time.Second

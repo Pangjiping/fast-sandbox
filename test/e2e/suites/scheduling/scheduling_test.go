@@ -6,16 +6,16 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/test/e2e/support/fixtures"
-	"fast-sandbox/test/e2e/support/suiteenv"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/test/e2e/support/fixtures"
+	"fast-sandbox/test/e2e/support/suiteenv"
 )
 
 func TestResourceSlotCapacity(t *testing.T) {

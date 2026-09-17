@@ -6,13 +6,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	e2eenv "fast-sandbox/test/e2e/env"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -23,6 +21,9 @@ import (
 	"sigs.k8s.io/e2e-framework/klient/conf"
 	envpkg "sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	e2eenv "fast-sandbox/test/e2e/env"
 )
 
 const (
@@ -273,5 +274,5 @@ func newRunID() string {
 	if _, err := rand.Read(value[:]); err == nil {
 		return hex.EncodeToString(value[:])
 	}
-	return fmt.Sprintf("%x", uint64(time.Now().UnixNano())&0xffffffff)
+	return strconv.FormatUint(uint64(time.Now().UnixNano())&0xffffffff, 16)
 }

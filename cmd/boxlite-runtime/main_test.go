@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
 	boxliteserver "fast-sandbox/internal/runtime/boxlite/server"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestProbeCapabilitiesRequiresReadyCompleteBackend(t *testing.T) {

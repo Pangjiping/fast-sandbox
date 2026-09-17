@@ -80,7 +80,7 @@ func startServicePortForward(ctx context.Context, namespace, service string, rem
 	return endpoint, managed, nil
 }
 
-func controllerPortForwardArgs(namespace string, localPort int) []string {
+func controllerPortForwardArgs(namespace string, localPort int) []string { //nolint:unused // exercised by portforward_test.go; linter skips test files (run.tests=false)
 	return servicePortForwardArgs(namespace, "fast-sandbox-fastpath", localPort, 9090)
 }
 
@@ -95,7 +95,7 @@ func servicePortForwardArgs(namespace, service string, localPort, remotePort int
 }
 
 func reserveLocalPort() (int, error) {
-	listener, err := net.Listen("tcp", ":0")
+	listener, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return 0, fmt.Errorf("reserve local port: %w", err)
 	}

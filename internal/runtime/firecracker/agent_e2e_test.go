@@ -20,12 +20,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"fast-sandbox/internal/registryconfig"
 	agentpull "fast-sandbox/internal/runtime/firecracker/agent"
 	agentserver "fast-sandbox/internal/runtime/firecracker/agent/server"
 	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
-
-	"github.com/stretchr/testify/require"
 )
 
 const e2eImage = "registry.example.com/sandbox:v1.0.21"

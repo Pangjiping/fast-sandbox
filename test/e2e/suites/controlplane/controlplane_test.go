@@ -9,11 +9,6 @@ import (
 	"testing"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	e2eenv "fast-sandbox/test/e2e/env"
-	"fast-sandbox/test/e2e/support/suiteenv"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -27,6 +22,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	e2eenv "fast-sandbox/test/e2e/env"
+	"fast-sandbox/test/e2e/support/suiteenv"
 )
 
 const leaderLeaseName = "fast-sandbox-reconciler.sandbox.fast.io"

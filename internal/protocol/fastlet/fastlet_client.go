@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -249,7 +250,7 @@ func responseFastletError(response any) *FastletError {
 }
 
 func (c *FastletClient) endpoint(fastletIP, path string) string {
-	return fmt.Sprintf("http://%s:%d%s", fastletIP, c.fastletPort, path)
+	return "http://" + net.JoinHostPort(fastletIP, strconv.Itoa(c.fastletPort)) + path
 }
 
 func (c *FastletClient) requestContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {

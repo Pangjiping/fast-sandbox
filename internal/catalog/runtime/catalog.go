@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"sort"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	corev1 "k8s.io/api/core/v1"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 type DriverKind string
@@ -189,7 +189,7 @@ type Catalog struct {
 // Controllers and Fastlets.
 var builtinExtensions = make(map[apiv1alpha2.RuntimeName]RuntimeDefinition)
 
-func registerBuiltinDefinition(definition RuntimeDefinition) {
+func registerBuiltinDefinition(definition RuntimeDefinition) { //nolint:unused // used by catalog tests
 	if definition.Name == "" {
 		panic("runtime extension name is required")
 	}

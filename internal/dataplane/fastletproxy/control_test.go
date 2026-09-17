@@ -3,12 +3,13 @@ package fastletproxy
 import (
 	"context"
 	"encoding/json"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 func TestUnixControlApplySnapshotWatchAndDelete(t *testing.T) {

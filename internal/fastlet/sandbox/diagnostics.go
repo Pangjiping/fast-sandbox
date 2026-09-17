@@ -11,6 +11,8 @@ const (
 	maxDiagnosticSandboxes = 1024
 	maxDiagnosticEvents    = 128
 	defaultDiagnosticLimit = 50
+	// diagnosticLevelError marks a diagnostic event that reports a failure.
+	diagnosticLevelError = "error"
 )
 
 func (m *SandboxManager) recordDiagnostic(sandboxID, level, source, phase, message string) {
@@ -80,7 +82,7 @@ func (m *SandboxManager) waitUntilSandboxReady(ctx context.Context, identity fas
 			return &status, nil
 		}
 		switch metadata.Phase {
-		case "terminating", "deleting", "delete-failed", "create-cleanup", "create-cleanup-failed":
+		case sandboxStateTerminating, sandboxStateDeleting, sandboxStateDeleteFailed, sandboxStateCreateCleanup, sandboxStateCreateCleanupFailed:
 			m.mu.Unlock()
 			failure := fastletError(fastletapi.ErrorConflict, "Sandbox stopped before overall Ready", false)
 			return &status, failure
@@ -101,7 +103,7 @@ func (m *SandboxManager) waitUntilSandboxReady(ctx context.Context, identity fas
 }
 
 func sandboxObservationReady(status *fastletapi.SandboxStatus, metadata *SandboxMetadata, expectedGeneration int64, routeReady bool) bool {
-	if status == nil || metadata == nil || metadata.Phase != "running" || !routeReady || status.AppliedGeneration < expectedGeneration {
+	if status == nil || metadata == nil || metadata.Phase != sandboxStateRunning || !routeReady || status.AppliedGeneration < expectedGeneration {
 		return false
 	}
 	for _, component := range status.InfraComponents {
