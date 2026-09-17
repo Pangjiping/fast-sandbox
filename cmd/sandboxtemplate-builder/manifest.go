@@ -9,6 +9,24 @@ import (
 	"fast-sandbox/internal/artifacts"
 )
 
+// Published artifact and execd asset names shared by the build stages.
+const (
+	// rootfsDirName is the rootfs drive id and the OverlayBD layer directory.
+	rootfsDirName = "rootfs"
+	// rootfsImageName is the rootfs image file staged in the workdir.
+	rootfsImageName = "rootfs.ext4"
+	// vmstateFileName is the Firecracker VM state file of the snapshot.
+	vmstateFileName = "vmstate.snap"
+	// memoryFileName is the guest memory image of the snapshot.
+	memoryFileName = "memory.snap"
+	// execdAssetName is the execd binary carried by the execd image.
+	execdAssetName = "execd"
+	// bootstrapScriptName is the runtime bootstrap script beside execd.
+	bootstrapScriptName = "bootstrap.sh"
+	// prepareScriptName is the runtime prepare script beside execd.
+	prepareScriptName = "prepare.sh"
+)
+
 // stageManifest assembles manifest.json (content-addressed, design schema)
 // and SHA256SUMS in the workdir. Checksums are computed once and shared
 // between the two outputs via the cache. The serialization and checksum
@@ -28,7 +46,7 @@ func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(workdir, "manifest.json"), manifestBytes, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workdir, "manifest.json"), manifestBytes, 0o644); err != nil { //nolint:gosec // published artifact manifest, world-readable by design
 		return nil, err
 	}
 	if err := writeChecksums(workdir, cache); err != nil {
@@ -46,9 +64,9 @@ func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, layers []string, cache map[string]string, rootfsGiB int) (map[string]any, error) {
 	files := map[string]any{}
 	staged := []struct{ name, path string }{
-		{"rootfs.ext4", rootfs},
-		{"vmstate.snap", vmstate},
-		{"memory.snap", memory},
+		{rootfsImageName, rootfs},
+		{vmstateFileName, vmstate},
+		{memoryFileName, memory},
 	}
 	if len(layers) > 0 {
 		staged = append(staged,
@@ -73,9 +91,9 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 		"schemaVersion": 1,
 		"runtime":       "firecracker",
 		"lineage": map[string]any{
-			"image":       spec.Image,
-			"imageDigest": sourceDigest,
-			"execd":       spec.Execd,
+			"image":        spec.Image,
+			"imageDigest":  sourceDigest,
+			execdAssetName: spec.Execd,
 			"kernel": map[string]any{
 				"name":   filepath.Base(kernel),
 				"digest": kernelDigest,
@@ -99,7 +117,7 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 			"memory": spec.Machine.Memory,
 			// The actual rootfs size (rounded up from the declared minimum
 			// to whole GiB), matching files['rootfs.ext4'].sizeBytes.
-			"rootfs": fmt.Sprintf("%dGi", rootfsGiB),
+			rootfsDirName: fmt.Sprintf("%dGi", rootfsGiB),
 		},
 		// The guest network baked into the snapshot (clone networking
 		// model): the restored guest owns a static eth0 address/MAC; the
@@ -127,7 +145,7 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 // the manifest. Intermediate build files (OCI layout, console logs, etc.) are
 // deliberately excluded.
 func writeChecksums(workdir string, cache map[string]string) error {
-	files := []string{"rootfs.ext4", "vmstate.snap", "memory.snap"}
+	files := []string{rootfsImageName, vmstateFileName, memoryFileName}
 	layers, err := filepath.Glob(filepath.Join(workdir, "overlaybd", "*", "layer.lsmt"))
 	if err != nil {
 		return fmt.Errorf("glob overlaybd layers: %w", err)

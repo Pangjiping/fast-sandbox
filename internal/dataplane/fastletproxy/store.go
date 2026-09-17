@@ -2,11 +2,12 @@ package fastletproxy
 
 import (
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fmt"
 	"reflect"
 	"sort"
 	"sync"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 type RouteState string
@@ -52,7 +53,7 @@ func (r Route) validate() error {
 		return fmt.Errorf("%w: incomplete route identity", ErrRouteConflict)
 	}
 	if err := r.Access.Validate(); err != nil {
-		return fmt.Errorf("%w: %v", ErrRouteConflict, err)
+		return fmt.Errorf("%w: %w", ErrRouteConflict, err)
 	}
 	if r.State == "" {
 		r.State = RouteReady

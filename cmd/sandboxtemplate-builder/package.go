@@ -14,7 +14,7 @@ import (
 func stagePackage(workdir, rootfs, memory string) ([]string, int64, int64, error) {
 	var layers []string
 	var importRootfsMs, importMemoryMs int64
-	for _, entry := range []struct{ name, source string }{{"rootfs", rootfs}, {"memory", memory}} {
+	for _, entry := range []struct{ name, source string }{{rootfsDirName, rootfs}, {"memory", memory}} {
 		started := time.Now()
 		destination := filepath.Join(workdir, "overlaybd", entry.name)
 		if err := os.MkdirAll(destination, 0o755); err != nil {
@@ -30,7 +30,7 @@ func stagePackage(workdir, rootfs, memory string) ([]string, int64, int64, error
 			return nil, 0, 0, fmt.Errorf("overlaybd import %s: %w: %s", entry.name, err, output)
 		}
 		elapsed := time.Since(started).Milliseconds()
-		if entry.name == "rootfs" {
+		if entry.name == rootfsDirName {
 			importRootfsMs = elapsed
 		} else {
 			importMemoryMs = elapsed

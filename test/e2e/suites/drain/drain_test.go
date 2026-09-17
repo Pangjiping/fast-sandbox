@@ -6,11 +6,6 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/placement"
-	"fast-sandbox/test/e2e/support/fixtures"
-	"fast-sandbox/test/e2e/support/suiteenv"
-
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,6 +15,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/placement"
+	"fast-sandbox/test/e2e/support/fixtures"
+	"fast-sandbox/test/e2e/support/suiteenv"
 )
 
 func TestPoolScaleDownUsesDurableDrain(t *testing.T) {

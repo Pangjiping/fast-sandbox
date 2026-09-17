@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentpull "fast-sandbox/internal/runtime/firecracker/agent"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
 	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
-
-	"github.com/stretchr/testify/require"
 )
 
 const (

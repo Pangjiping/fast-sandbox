@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
-
 	"github.com/stretchr/testify/require"
+
+	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
 )
 
 var fixedTime = time.Unix(1720000000, 0)

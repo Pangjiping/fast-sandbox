@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	infracatalog "fast-sandbox/internal/catalog/infra"
-
 	"github.com/stretchr/testify/require"
+
+	infracatalog "fast-sandbox/internal/catalog/infra"
 )
 
 func TestSupervisorPreservesUserExitCodeAndStartsComponentConcurrently(t *testing.T) {

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
-
-	"github.com/stretchr/testify/require"
 )
 
 type recordingNetworkDriver struct {

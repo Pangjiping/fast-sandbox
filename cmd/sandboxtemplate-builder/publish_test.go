@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fast-sandbox/internal/artifacts"
-
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fast-sandbox/internal/artifacts"
 )
 
 // TestImageIndexKeyMatchesConsumerCacheKey verifies the index key derivation

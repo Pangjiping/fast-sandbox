@@ -7,12 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
-
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 // resolveKernel maps the spec kernel name to the embedded file in the
@@ -57,7 +58,7 @@ func ensureLoopDevices() error {
 		// mknod must not fail the build on read-only /dev: the mount below
 		// reports the authoritative error if a loop device is missing.
 		_ = exec.Command("mknod", device.path, device.kind,
-			fmt.Sprintf("%d", device.major), fmt.Sprintf("%d", device.minor)).Run()
+			strconv.Itoa(device.major), strconv.Itoa(device.minor)).Run()
 	}
 	return nil
 }
@@ -65,7 +66,7 @@ func ensureLoopDevices() error {
 // stageConvert materializes the OCI layout into a sparse ext4 rootfs and
 // injects execd, the optional guest init, envs, and /etc/hosts.
 func stageConvert(spec apiv1alpha2.SandboxTemplateSpec, workdir string) (string, error) {
-	rootfs := filepath.Join(workdir, "rootfs.ext4")
+	rootfs := filepath.Join(workdir, rootfsImageName)
 	layoutDir := filepath.Join(workdir, "oci-layout")
 	sizeGiB, err := sizeGiB(spec.Output.RootfsSize)
 	if err != nil {
@@ -126,20 +127,20 @@ func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint str
 		return err
 	}
 	execdRoot := filepath.Join(workdir, "execd-root")
-	for _, name := range []string{"execd", "bootstrap.sh", "prepare.sh", "bwrap"} {
+	for _, name := range []string{execdAssetName, bootstrapScriptName, prepareScriptName, "bwrap"} {
 		source := filepath.Join(execdRoot, name)
 		if info, err := os.Stat(source); err == nil && info.Mode().IsRegular() {
 			payload, err := os.ReadFile(source)
 			if err != nil {
 				return err
 			}
-			if err := os.WriteFile(filepath.Join(opt, name), payload, 0o755); err != nil {
+			if err := os.WriteFile(filepath.Join(opt, name), payload, 0o755); err != nil { //nolint:gosec // executable file mode inside the built rootfs image
 				return err
 			}
 		} else if spec.Execd != "" {
 			// execd is requested but this file is missing from the image:
 			// warn instead of failing silently.
-			klog.V(2).InfoS("execd file missing from execd image", "file", name, "execd", spec.Execd)
+			klog.V(2).InfoS("execd file missing from execd image", "file", name, execdAssetName, spec.Execd)
 		}
 	}
 
@@ -157,7 +158,7 @@ func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint str
 	if err := os.MkdirAll(filepath.Dir(guestInit), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(guestInit, []byte(renderGuestInit(spec)), 0o755); err != nil {
+	if err := os.WriteFile(guestInit, []byte(renderGuestInit(spec)), 0o755); err != nil { //nolint:gosec // executable guest init inside the built rootfs image
 		return err
 	}
 
@@ -180,7 +181,7 @@ func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint str
 
 	hosts := filepath.Join(mountPoint, "etc", "hosts")
 	if _, err := os.Stat(hosts); err != nil {
-		if err := os.WriteFile(hosts, []byte("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"), 0o644); err != nil {
+		if err := os.WriteFile(hosts, []byte("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"), 0o644); err != nil { //nolint:gosec // guest /etc/hosts, world-readable by design
 			return err
 		}
 	}
@@ -189,7 +190,7 @@ func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint str
 	// egress DNS proxy — so the resolver is baked alongside the gateway it
 	// points at (deterministic; no per-instance rootfs mutation at Create
 	// time, which previously corrupted the image on the loop-mount write).
-	if err := os.WriteFile(filepath.Join(mountPoint, "etc", "resolv.conf"),
+	if err := os.WriteFile(filepath.Join(mountPoint, "etc", "resolv.conf"), //nolint:gosec // guest resolv.conf, world-readable by design
 		[]byte("nameserver "+bakedGuestGateway+"\n"), 0o644); err != nil {
 		return err
 	}

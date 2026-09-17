@@ -17,16 +17,16 @@ import (
 	"fmt"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/assignment"
-	orchestration "fast-sandbox/internal/controlplane/orchestrator"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
+	orchestration "fast-sandbox/internal/controlplane/orchestrator"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 // PauseRetryInterval back off a pause attempt that failed transiently

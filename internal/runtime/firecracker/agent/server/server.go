@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	"fast-sandbox/internal/observability"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
 	agentstate "fast-sandbox/internal/runtime/firecracker/agent/state"
-
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -114,7 +114,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // ServeHTTP routes the versioned RPCs. Every request carries the caller
 // identity in its body; an empty PodUID is rejected (403).
-func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) { //nolint:gocognit // explicit versioned RPC routing table; refactor tracked separately
 	request, span := observability.StartHTTPServer(request, "runtime-agent")
 	recorder := &statusRecorder{ResponseWriter: writer, status: http.StatusOK}
 	defer func() { observability.End(span, recorder.err()) }()

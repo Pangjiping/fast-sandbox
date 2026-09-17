@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
+	"sigs.k8s.io/yaml"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-
-	"sigs.k8s.io/yaml"
 )
 
 var containerdNamespacePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -35,7 +35,7 @@ func Parse(raw []byte) (Config, error) {
 	return config, nil
 }
 
-func (c Config) Validate() error {
+func (c Config) Validate() error { //nolint:gocognit // pre-existing sequential field validation; refactor tracked separately
 	if c.Version != ConfigVersion {
 		return fmt.Errorf("unsupported runtime environment config version %q; expected %q", c.Version, ConfigVersion)
 	}

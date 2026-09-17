@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 func (j *Janitor) Scan(ctx context.Context) {

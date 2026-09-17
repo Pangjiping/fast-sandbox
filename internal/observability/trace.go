@@ -49,15 +49,16 @@ func StartServer(ctx context.Context, name string, attributes ...attribute.KeyVa
 	return start(ctx, name, trace.SpanKindServer, attributes...)
 }
 
-func start(ctx context.Context, name string, kind trace.SpanKind, attributes ...attribute.KeyValue) (context.Context, trace.Span) {
+func start(ctx context.Context, name string, kind trace.SpanKind, attributes ...attribute.KeyValue) (context.Context, trace.Span) { //nolint:spancheck // start helpers return the span; callers end it via observability.End
 	if identity, ok := ctx.Value(identityContextKey{}).(Identity); ok {
 		identityAttributes, _ := identityFields(identity)
 		attributes = append(attributes, identityAttributes...)
 	}
-	return otel.Tracer(instrumentationName).Start(ctx, name,
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, name, //nolint:spancheck // start helpers return the span; callers end it via observability.End
 		trace.WithSpanKind(kind),
 		trace.WithAttributes(attributes...),
 	)
+	return ctx, span //nolint:spancheck // callers end the span via observability.End
 }
 
 func End(span trace.Span, err error) {

@@ -52,8 +52,10 @@ PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.6.0
 CONTROLLER_GEN_VERSION := v0.20.1
 CONTROLLER_GEN := $(TOOLS_BIN)/controller-gen
+GOLANGCI_LINT_VERSION := v2.13.2
+GOLANGCI_LINT := $(TOOLS_BIN)/golangci-lint
 
-.PHONY: help build images generate verify test e2e env quickstart quickstart-forward tidy
+.PHONY: help build images generate verify test e2e env quickstart quickstart-forward tidy lint
 .PHONY: _network-test
 
 help:
@@ -69,7 +71,7 @@ help:
 	@echo "      Regenerate Go/Python protobuf, deepcopy, and CRD output."
 	@echo ""
 	@echo "  make verify"
-	@echo "      Verify generated output and run unit tests."
+	@echo "      Verify generated output, run golangci-lint, and run unit tests."
 	@echo ""
 	@echo "  make test [SCOPE=unit|python|race|network]"
 	@echo "      Run one local or Linux integration test scope."
@@ -86,6 +88,9 @@ help:
 	@echo ""
 	@echo "  make quickstart-forward"
 	@echo "      Forward Fast-Path and Sandbox Proxy until Ctrl-C."
+	@echo ""
+	@echo "  make lint"
+	@echo "      Run gofmt/gci checks and golangci-lint (execd rule set)."
 	@echo ""
 	@echo "  make tidy"
 	@echo "      Run go mod tidy."
@@ -164,6 +169,14 @@ $(CONTROLLER_GEN):
 	@mkdir -p $(TOOLS_BIN)
 	@GOBIN=$(TOOLS_BIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
+$(GOLANGCI_LINT):
+	@mkdir -p $(TOOLS_BIN)
+	@GOBIN=$(TOOLS_BIN) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+lint: $(GOLANGCI_LINT)
+	@$(GOLANGCI_LINT) fmt --diff
+	@$(GOLANGCI_LINT) run ./...
+
 generate: $(PROTOC) $(TOOLS_BIN)/protoc-gen-go $(TOOLS_BIN)/protoc-gen-go-grpc $(CONTROLLER_GEN)
 	@PATH=$(TOOLS_BIN):$$PATH $(PROTOC) -I . \
 		--go_out=. --go_opt=paths=source_relative \
@@ -173,7 +186,7 @@ generate: $(PROTOC) $(TOOLS_BIN)/protoc-gen-go $(TOOLS_BIN)/protoc-gen-go-grpc $
 	@$(CONTROLLER_GEN) object paths=./api/v1alpha2/...
 	@$(CONTROLLER_GEN) crd paths=./api/v1alpha2/... output:crd:artifacts:config=config/crd
 
-verify: generate
+verify: generate lint
 	@git diff --exit-code -- \
 		api/proto/v2 \
 		api/v1alpha2/zz_generated.deepcopy.go \

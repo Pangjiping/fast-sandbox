@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"fast-sandbox/internal/registryconfig"
-
 	"k8s.io/klog/v2"
+
+	"fast-sandbox/internal/registryconfig"
 )
 
 // ErrObjectNotFound reports that the requested object does not exist in the
@@ -423,8 +423,8 @@ func (c *s3Client) sign(request *http.Request) {
 	amzDate := now.Format("20060102T150405Z")
 	date := now.Format("20060102")
 
-	request.Header.Set("x-amz-date", amzDate)
-	request.Header.Set("x-amz-content-sha256", emptyPayloadHash)
+	request.Header.Set("X-Amz-Date", amzDate)
+	request.Header.Set("X-Amz-Content-Sha256", emptyPayloadHash)
 
 	canonicalURI := request.URL.EscapedPath()
 	if canonicalURI == "" {
@@ -469,8 +469,8 @@ func (c *s3Client) signWrite(request *http.Request) {
 	amzDate := now.Format("20060102T150405Z")
 	date := now.Format("20060102")
 
-	request.Header.Set("x-amz-date", amzDate)
-	request.Header.Set("x-amz-content-sha256", unsignedPayload)
+	request.Header.Set("X-Amz-Date", amzDate)
+	request.Header.Set("X-Amz-Content-Sha256", unsignedPayload)
 
 	canonicalURI := request.URL.EscapedPath()
 	if canonicalURI == "" {

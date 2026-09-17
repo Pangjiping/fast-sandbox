@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	"fast-sandbox/pkg/util/idgen"
-
-	"k8s.io/klog/v2"
 )
 
 // snapshotWorkerTimeout bounds one dump+publish run. The pause window itself
@@ -106,7 +106,7 @@ func (m *SandboxManager) CreateSnapshot(_ context.Context, req *fastletapi.Creat
 		m.mu.Unlock()
 		return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, failure)
 	}
-	if metadata.Phase != "running" {
+	if metadata.Phase != sandboxStateRunning {
 		m.mu.Unlock()
 		return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, fastletError(fastletapi.ErrorRuntimeUnavailable,
 			fmt.Sprintf("target Sandbox runtime is %q, not running", metadata.Phase), true))
@@ -213,7 +213,7 @@ func (m *SandboxManager) runSnapshotWorker(snapshotter RuntimeSnapshotter, task 
 
 	m.mu.RLock()
 	metadata, found := m.sandboxes[sandboxUID]
-	runnable := found && metadata.Phase == "running"
+	runnable := found && metadata.Phase == sandboxStateRunning
 	m.mu.RUnlock()
 	if !runnable {
 		m.finishSnapshotTask(task, fastletapi.SnapshotPhaseFailed, "target Sandbox is no longer running on this Fastlet")
@@ -303,7 +303,7 @@ func (m *SandboxManager) finishSnapshotTaskWithReason(task *snapshotTask, phase 
 	m.mu.Unlock()
 	level := "info"
 	if phase == fastletapi.SnapshotPhaseFailed {
-		level = "error"
+		level = diagnosticLevelError
 	}
 	m.recordDiagnostic(task.identity.Sandbox.SandboxUID, level, "snapshot", string(phase), message)
 }

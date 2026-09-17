@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 // snapshotPhaseTimings records the sub-phase durations of the snapshot stage
@@ -182,7 +182,7 @@ func runSnapshotStage(args []string) error {
 		RestoreToHeartbeatMs: restoreToHeartbeatMs,
 	}
 	if payload, err := json.Marshal(phases); err == nil {
-		_ = os.WriteFile(filepath.Join(workdir, "snapshot-phases.json"), payload, 0o644)
+		_ = os.WriteFile(filepath.Join(workdir, "snapshot-phases.json"), payload, 0o644) //nolint:gosec // diagnostic timing report, non-sensitive
 	}
 	klog.InfoS("snapshot stage phases",
 		"format", spec.Output.Format,
@@ -335,7 +335,7 @@ func configureVM(vm *vmm, kernel, rootfs, bootArgs string, spec apiv1alpha2.Sand
 		return err
 	}
 	if err := api(vm.socket, "PUT", "/drives/rootfs", map[string]any{
-		"drive_id":       "rootfs",
+		"drive_id":       rootfsDirName,
 		"path_on_host":   snapshotDriveName,
 		"is_root_device": true,
 		"is_read_only":   false,

@@ -19,6 +19,9 @@ import (
 
 const DefaultControlSocket = "/run/fast-sandbox/proxy/control.sock"
 
+// revisionField is the JSON field carrying the store revision in responses.
+const revisionField = "revision"
+
 type ControlServer struct {
 	Store      *Store
 	SocketPath string
@@ -103,7 +106,7 @@ func (s *ControlServer) applyRoute(writer http.ResponseWriter, request *http.Req
 		writeControlError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]uint64{"revision": revision})
+	writeJSON(writer, http.StatusOK, map[string]uint64{revisionField: revision})
 }
 
 func (s *ControlServer) deleteRoute(writer http.ResponseWriter, request *http.Request) {
@@ -117,7 +120,7 @@ func (s *ControlServer) deleteRoute(writer http.ResponseWriter, request *http.Re
 		writeControlError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]uint64{"revision": revision})
+	writeJSON(writer, http.StatusOK, map[string]uint64{revisionField: revision})
 }
 
 func (s *ControlServer) markDraining(writer http.ResponseWriter, request *http.Request) {
@@ -131,7 +134,7 @@ func (s *ControlServer) markDraining(writer http.ResponseWriter, request *http.R
 		writeControlError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]uint64{"revision": revision})
+	writeJSON(writer, http.StatusOK, map[string]uint64{revisionField: revision})
 }
 
 func (s *ControlServer) snapshotRoutes(writer http.ResponseWriter, _ *http.Request) {

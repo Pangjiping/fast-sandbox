@@ -212,7 +212,7 @@ func (c *agentHTTPClient) doJSON(ctx context.Context, path string, input, output
 	observability.InjectHTTP(ctx, request.Header)
 	response, err := c.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errAgentUnreachable, err)
+		return fmt.Errorf("%w: %w", errAgentUnreachable, err)
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, maxAgentResponseBytes)

@@ -2,7 +2,6 @@ package fastletproxy
 
 import (
 	"crypto/ed25519"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +11,10 @@ import (
 	"testing"
 	"time"
 
-	routeauth "fast-sandbox/internal/dataplane/auth"
-
 	"github.com/stretchr/testify/require"
+
+	routeauth "fast-sandbox/internal/dataplane/auth"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 func TestProxyForwardsArbitraryPortPreservesApplicationAuthorizationAndStripsRouteAuthority(t *testing.T) {

@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 type fakeEndpointControl struct {

@@ -33,9 +33,9 @@ import (
 	"path/filepath"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 const (

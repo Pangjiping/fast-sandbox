@@ -14,7 +14,7 @@ func cacheBytes(stateRoot string) int64 {
 	root := filepath.Join(stateRoot, "images")
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
-			return nil
+			return nil //nolint:nilerr // walk failures just skip entries; the health metric is best effort
 		}
 		info, err := os.Stat(path)
 		if err == nil {

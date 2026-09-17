@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/stretchr/testify/require"
+
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 type imageSource struct{ images []string }

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/stretchr/testify/require"
+
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 func TestEnsureRequestSerializesExplicitRuntimeBoundaries(t *testing.T) {

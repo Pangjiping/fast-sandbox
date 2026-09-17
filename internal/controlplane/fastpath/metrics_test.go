@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	fsbtest "fast-sandbox/internal/testutil"
-
 	"github.com/stretchr/testify/require"
 	controllermetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	fsbtest "fast-sandbox/internal/testutil"
 )
 
 func TestCreateStageMetricIsCollectable(t *testing.T) {

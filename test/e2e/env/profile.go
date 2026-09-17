@@ -24,6 +24,12 @@ const (
 	RuntimeKataDragonball RuntimeKind = "kata-dragonball"
 )
 
+const (
+	kindNodeImage      = "kindest/node:v1.31.0"
+	kataClusterName    = "fsb-e2e-kata"
+	kataKindConfigPath = "test/e2e/manifests/kind/kata.yaml"
+)
+
 type ProfileSettings struct {
 	ClusterName string
 	KindConfig  string
@@ -43,35 +49,35 @@ func (p Profile) Settings() (ProfileSettings, error) {
 		return ProfileSettings{
 			ClusterName: "fsb-e2e-gvisor",
 			KindConfig:  "test/e2e/manifests/kind/gvisor.yaml",
-			KindImage:   "kindest/node:v1.31.0",
+			KindImage:   kindNodeImage,
 			Runtime:     RuntimeGVisor,
 		}, nil
 	case ProfileKataQemu:
 		return ProfileSettings{
-			ClusterName: "fsb-e2e-kata",
-			KindConfig:  "test/e2e/manifests/kind/kata.yaml",
-			KindImage:   "kindest/node:v1.31.0",
+			ClusterName: kataClusterName,
+			KindConfig:  kataKindConfigPath,
+			KindImage:   kindNodeImage,
 			Runtime:     RuntimeKataQemu,
 		}, nil
 	case ProfileKataClh:
 		return ProfileSettings{
-			ClusterName: "fsb-e2e-kata",
-			KindConfig:  "test/e2e/manifests/kind/kata.yaml",
-			KindImage:   "kindest/node:v1.31.0",
+			ClusterName: kataClusterName,
+			KindConfig:  kataKindConfigPath,
+			KindImage:   kindNodeImage,
 			Runtime:     RuntimeKataClh,
 		}, nil
 	case ProfileKataFc:
 		return ProfileSettings{
-			ClusterName: "fsb-e2e-kata",
-			KindConfig:  "test/e2e/manifests/kind/kata.yaml",
-			KindImage:   "kindest/node:v1.31.0",
+			ClusterName: kataClusterName,
+			KindConfig:  kataKindConfigPath,
+			KindImage:   kindNodeImage,
 			Runtime:     RuntimeKataFc,
 		}, nil
 	case ProfileKataDragonball:
 		return ProfileSettings{
-			ClusterName: "fsb-e2e-kata",
-			KindConfig:  "test/e2e/manifests/kind/kata.yaml",
-			KindImage:   "kindest/node:v1.31.0",
+			ClusterName: kataClusterName,
+			KindConfig:  kataKindConfigPath,
+			KindImage:   kindNodeImage,
 			Runtime:     RuntimeKataDragonball,
 		}, nil
 	default:

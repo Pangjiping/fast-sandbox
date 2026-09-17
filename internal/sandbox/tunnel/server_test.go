@@ -2,7 +2,6 @@ package tunnel
 
 import (
 	"context"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"io"
 	"net"
 	"strconv"
@@ -10,6 +9,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 func TestServerRelaysToSignedTargetPort(t *testing.T) {

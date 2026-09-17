@@ -9,15 +9,14 @@ package fastpath
 import (
 	"context"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 func (s *Server) PauseSandbox(ctx context.Context, request *fastpathv2.PauseSandboxRequest) (*fastpathv2.PauseSandboxResponse, error) {

@@ -1,6 +1,7 @@
 package env
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"gopkg.in/yaml.v3"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 type FastctlConfig struct {
@@ -160,7 +161,7 @@ func (c *Fastctl) runWhenCapacityAvailable(ctx context.Context, name string, con
 	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("wait for FastPath capacity for Sandbox %s: %w; last run error: %v", name, err, lastErr)
+			return nil, fmt.Errorf("wait for FastPath capacity for Sandbox %s: %w; last run error: %w", name, err, lastErr)
 		}
 		output, err := c.Run(ctx, name, config)
 		if err == nil || !strings.Contains(err.Error(), noEligibleFastletMessage) {
@@ -172,7 +173,7 @@ func (c *Fastctl) runWhenCapacityAvailable(ctx context.Context, name string, con
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, fmt.Errorf("wait for FastPath capacity for Sandbox %s: %w; last run error: %v", name, ctx.Err(), lastErr)
+			return nil, fmt.Errorf("wait for FastPath capacity for Sandbox %s: %w; last run error: %w", name, ctx.Err(), lastErr)
 		case <-timer.C:
 		}
 	}
@@ -225,7 +226,7 @@ func (c *Fastctl) WaitRunning(ctx context.Context, name string) (*fastpathv2.Get
 		select {
 		case <-ctx.Done():
 			if err != nil {
-				return nil, fmt.Errorf("wait for sandbox %s running: %w; last get error: %v", name, ctx.Err(), err)
+				return nil, fmt.Errorf("wait for sandbox %s running: %w; last get error: %w", name, ctx.Err(), err)
 			}
 			return nil, fmt.Errorf("wait for sandbox %s running: %w", name, ctx.Err())
 		case <-ticker.C:
@@ -253,7 +254,7 @@ func (c *Fastctl) run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 func jsonPayload(output []byte) []byte {
-	index := strings.IndexByte(string(output), '{')
+	index := bytes.IndexByte(output, '{')
 	if index == -1 {
 		return output
 	}

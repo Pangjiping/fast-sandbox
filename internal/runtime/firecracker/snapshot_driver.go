@@ -20,12 +20,12 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	"fast-sandbox/internal/artifacts"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
-
-	"k8s.io/klog/v2"
 )
 
 // snapshotStagingDir holds per-snapshot staging directories:
@@ -297,7 +297,7 @@ func (d *Driver) ensureDumpCapacity(plan dumpPlan) error {
 	if err != nil {
 		// The dump itself will report a precise error; do not block on
 		// unmeasurable inputs (e.g. a vanished state directory).
-		return nil
+		return nil //nolint:nilerr // unmeasurable footprint must not block the dump; the dump itself reports the precise error
 	}
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
@@ -442,7 +442,7 @@ func (d *Driver) spillDirFor(snapshotID, memoryQuantity string) string {
 // window pays the spill area's bandwidth (tmpfs/local NVMe) instead of the
 // StateRoot filesystem. The Sandbox keeps running on every failure path,
 // with a failed resume joined after (and never masking) the dump error.
-func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
+func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error { //nolint:gocognit // pre-existing pause/dump/resume window; refactor tracked separately
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
 
@@ -709,7 +709,7 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir, firecrackerBinary 
 	if err != nil {
 		return 0, err
 	}
-	if err := os.WriteFile(filepath.Join(staging, snapshotManifestName), manifestBytes, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(staging, snapshotManifestName), manifestBytes, 0o644); err != nil { //nolint:gosec // published snapshot manifest, world-readable by design
 		return 0, err
 	}
 	return sizeBytes, nil

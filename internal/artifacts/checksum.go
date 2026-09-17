@@ -9,6 +9,7 @@ package artifacts
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"syscall"
@@ -17,7 +18,7 @@ import (
 // SHA256File hashes a file, skipping sparse holes by feeding zero bytes for
 // them (holes are semantically zero), so multi-GiB sparse roots are not read
 // in full. Dense files fall back to a plain full read.
-func SHA256File(path string) (string, error) {
+func SHA256File(path string) (string, error) { //nolint:gocognit // pre-existing sparse-hash state machine; refactor tracked separately
 	handle, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -55,11 +56,10 @@ func SHA256File(path string) (string, error) {
 		dataStart, dataErr := seekData(handle, consumed)
 		if dataErr != nil {
 			// ENXIO: no data until EOF — hash the rest as zeros.
-			if dataErr == syscall.ENXIO {
+			if errors.Is(dataErr, syscall.ENXIO) {
 				if err := feedZeros(digest, size-consumed, zeros); err != nil {
 					return "", err
 				}
-				consumed = size
 				break
 			}
 			// Filesystem without SEEK_DATA support (or a state change
@@ -79,7 +79,6 @@ func SHA256File(path string) (string, error) {
 			if err := feedZeros(digest, dataStart-consumed, zeros); err != nil {
 				return "", err
 			}
-			consumed = dataStart
 		}
 		// Locate the end of this data extent, then read it from the start:
 		// seekHole moves the file offset, so seek back before hashing.
@@ -110,7 +109,7 @@ func scanSparse(file *os.File, size int64) (dataBytes int64, segments int, err e
 	for offset < size {
 		dataStart, err := seekData(file, offset)
 		if err != nil {
-			if err == syscall.ENXIO {
+			if errors.Is(err, syscall.ENXIO) {
 				break
 			}
 			return dataBytes, segments, err

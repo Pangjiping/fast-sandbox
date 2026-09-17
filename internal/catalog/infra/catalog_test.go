@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestCompileEmptyPlanPreservesCanonicalRevisionAcrossJSON(t *testing.T) {

@@ -15,6 +15,9 @@ import (
 	"github.com/containerd/errdefs"
 )
 
+// containerdK8sNamespace is the default containerd namespace of Kubernetes-managed containers.
+const containerdK8sNamespace = "k8s.io"
+
 type ContainerdBackend struct {
 	client     *containerd.Client
 	fifoDir    string
@@ -59,7 +62,7 @@ func (b *ContainerdBackend) Cleanup(ctx context.Context, expected ResourceIdenti
 	}
 	runtimeNamespace := expected.ContainerdNamespace
 	if runtimeNamespace == "" {
-		runtimeNamespace = "k8s.io"
+		runtimeNamespace = containerdK8sNamespace
 	}
 	ctx = namespaces.WithNamespace(ctx, runtimeNamespace)
 	container, err := b.client.LoadContainer(ctx, expected.ResourceID)
@@ -163,7 +166,7 @@ func sameResourceFence(expected, current ResourceIdentity) bool {
 
 func normalizedContainerdNamespaces(values []string) []string {
 	if len(values) == 0 {
-		return []string{"k8s.io"}
+		return []string{containerdK8sNamespace}
 	}
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
@@ -178,7 +181,7 @@ func normalizedContainerdNamespaces(values []string) []string {
 		result = append(result, value)
 	}
 	if len(result) == 0 {
-		return []string{"k8s.io"}
+		return []string{containerdK8sNamespace}
 	}
 	return result
 }

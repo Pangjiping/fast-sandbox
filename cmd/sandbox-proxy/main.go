@@ -11,11 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	routeauth "fast-sandbox/internal/dataplane/auth"
-	"fast-sandbox/internal/dataplane/sandboxproxy"
-	"fast-sandbox/internal/observability"
-
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -27,6 +22,11 @@ import (
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	routeauth "fast-sandbox/internal/dataplane/auth"
+	"fast-sandbox/internal/dataplane/sandboxproxy"
+	"fast-sandbox/internal/observability"
 )
 
 func main() {

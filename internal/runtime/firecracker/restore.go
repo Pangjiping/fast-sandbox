@@ -20,12 +20,12 @@ import (
 	"os"
 	"path/filepath"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"fast-sandbox/internal/artifacts"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // cachedManifestPath returns the commit-point manifest of a pulled image.

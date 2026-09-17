@@ -7,11 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
-
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/artifactstore"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -27,6 +25,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/artifactstore"
 )
 
 const (
@@ -111,7 +112,7 @@ type SandboxTemplateReconciler struct {
 }
 
 // Reconcile drives one SandboxTemplate towards its desired build state.
-func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) { //nolint:gocognit,maintidx // pre-existing reconcile state machine; refactor tracked separately
 	logger := klog.FromContext(ctx)
 	var template apiv1alpha2.SandboxTemplate
 	if err := r.Get(ctx, request.NamespacedName, &template); err != nil {
@@ -340,7 +341,7 @@ func (r *SandboxTemplateReconciler) findBuildPod(ctx context.Context, template *
 	}); err != nil {
 		return nil, err
 	}
-	generation := fmt.Sprintf("%d", template.Generation)
+	generation := strconv.FormatInt(template.Generation, 10)
 	var oldest *corev1.Pod
 	for index := range pods.Items {
 		pod := &pods.Items[index]
@@ -401,7 +402,7 @@ func (r *SandboxTemplateReconciler) cleanupStalePods(ctx context.Context, templa
 	if err != nil {
 		return err
 	}
-	generation := fmt.Sprintf("%d", template.Generation)
+	generation := strconv.FormatInt(template.Generation, 10)
 	for index := range pods.Items {
 		pod := &pods.Items[index]
 		if !ownedByTemplate(pod, template) {
@@ -531,7 +532,7 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 	}, {
 		Name: workdirEnvName, Value: sandboxTemplateBuildDir,
 	}, {
-		Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
+		Name: envPodName, ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 		},
 	}, {
@@ -619,7 +620,7 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 			Labels: map[string]string{
 				sandboxTemplateBuildLabel:      templateLabelValue(template.Name),
 				sandboxTemplateNamespaceLabel:  template.Namespace,
-				sandboxTemplateGenerationLabel: fmt.Sprintf("%d", template.Generation),
+				sandboxTemplateGenerationLabel: strconv.FormatInt(template.Generation, 10),
 			},
 		},
 		Spec: corev1.PodSpec{

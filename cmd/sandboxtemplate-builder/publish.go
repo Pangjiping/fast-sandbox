@@ -35,9 +35,9 @@ func publish(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir 
 	}
 	base := strings.TrimRight(spec.Output.Publish, "/") + "/" + sha256Of(manifestBytes)[:16]
 	entries := []struct{ local, key string }{
-		{filepath.Join(workdir, "rootfs.ext4"), "rootfs.ext4"},
-		{filepath.Join(workdir, "vmstate.snap"), "vmstate.snap"},
-		{filepath.Join(workdir, "memory.snap"), "memory.snap"},
+		{filepath.Join(workdir, rootfsImageName), rootfsImageName},
+		{filepath.Join(workdir, vmstateFileName), vmstateFileName},
+		{filepath.Join(workdir, memoryFileName), memoryFileName},
 		// SHA256SUMS covers only the published artifact set; it belongs to
 		// the immutable build directory and goes up with the artifacts.
 		{filepath.Join(workdir, "SHA256SUMS"), "SHA256SUMS"},

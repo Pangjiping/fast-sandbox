@@ -5,22 +5,21 @@ import (
 	"errors"
 	"testing"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/assignment"
-	orchestration "fast-sandbox/internal/controlplane/orchestrator"
-	"fast-sandbox/internal/controlplane/placement"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	fastpathv2 "fast-sandbox/api/proto/v2"
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
+	orchestration "fast-sandbox/internal/controlplane/orchestrator"
+	"fast-sandbox/internal/controlplane/placement"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 // newSnapshotServer builds a Server whose default namespace holds one

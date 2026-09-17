@@ -1,13 +1,32 @@
 package runtime
 
 import (
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 const builtinProfileVersion = "v1"
+
+const (
+	// runscContainerdConfigPath is the host containerd config fragment of the gVisor runsc handler.
+	runscContainerdConfigPath = "/etc/containerd/runsc.toml"
+	// kvmDevicePath is the host KVM character device required by VM runtimes.
+	kvmDevicePath = "/dev/kvm"
+	// boxliteStateRootDir is the host state root directory of the BoxLite runtime.
+	boxliteStateRootDir = "/var/lib/fast-sandbox/boxlite"
+	// firecrackerVmlinuxPath is the host kernel image of the Firecracker runtime.
+	firecrackerVmlinuxPath = "/opt/fast-sandbox/firecracker/vmlinux.bin"
+	// firecrackerStateRootDir is the host state root directory of the Firecracker runtime.
+	firecrackerStateRootDir = "/var/lib/fast-sandbox/firecracker"
+	// firecrackerBinaryPath is the host Firecracker binary installed by hostready.
+	firecrackerBinaryPath = "/usr/local/bin/firecracker"
+	// firecrackerRootfsDir is the host rootfs directory of the Firecracker runtime.
+	firecrackerRootfsDir = firecrackerStateRootDir + "/rootfs"
+	// kvmDeviceRequirementName is the host-path requirement name of the KVM device.
+	kvmDeviceRequirementName = "dev-kvm"
+)
 
 func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 	linuxNetworkPaths := []HostPathRequirement{
@@ -19,11 +38,11 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 	gvisorPaths = append(gvisorPaths,
 		HostPathRequirement{Name: "gvisor-runsc", HostPath: "/usr/local/bin/runsc", MountPath: "/usr/local/bin/runsc", Type: corev1.HostPathFile, ReadOnly: true},
 		HostPathRequirement{Name: "gvisor-shim", HostPath: "/usr/local/bin/containerd-shim-runsc-v1", MountPath: "/usr/local/bin/containerd-shim-runsc-v1", Type: corev1.HostPathFile, ReadOnly: true},
-		HostPathRequirement{Name: "gvisor-config", HostPath: "/etc/containerd/runsc.toml", MountPath: "/etc/containerd/runsc.toml", Type: corev1.HostPathFile, ReadOnly: true},
+		HostPathRequirement{Name: "gvisor-config", HostPath: runscContainerdConfigPath, MountPath: runscContainerdConfigPath, Type: corev1.HostPathFile, ReadOnly: true},
 	)
 	kataPaths := append([]HostPathRequirement{}, linuxNetworkPaths...)
 	kataPaths = append(kataPaths,
-		HostPathRequirement{Name: "dev-kvm", HostPath: "/dev/kvm", MountPath: "/dev/kvm", Type: corev1.HostPathCharDev},
+		HostPathRequirement{Name: kvmDeviceRequirementName, HostPath: kvmDevicePath, MountPath: kvmDevicePath, Type: corev1.HostPathCharDev},
 		HostPathRequirement{Name: "kata-runtime", HostPath: "/opt/kata", MountPath: "/opt/kata", Type: corev1.HostPathDirectory, ReadOnly: true},
 	)
 
@@ -38,7 +57,7 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 		},
 		apiv1alpha2.RuntimeGVisor: {
 			Name: apiv1alpha2.RuntimeGVisor, Version: builtinProfileVersion, Driver: DriverKindContainerd,
-			Containerd:         &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.runsc.v1", ConfigPath: "/etc/containerd/runsc.toml", OptionsType: "io.containerd.runsc.v1.options", NeedsTTY: true},
+			Containerd:         &ContainerdConfig{Namespace: DefaultContainerdNamespace, Handler: "io.containerd.runsc.v1", ConfigPath: runscContainerdConfigPath, OptionsType: "io.containerd.runsc.v1.options", NeedsTTY: true},
 			Deployment:         DeploymentRequirements{Privileged: true, HostPaths: gvisorPaths, Overhead: overhead("200m", "256Mi")},
 			Capabilities:       Capabilities{DefaultState: CapabilityConfigured, SupportsNetwork: true, SupportsCache: true, SupportsRecovery: true},
 			NetworkMode:        NetworkModeLinuxNetNS,
@@ -58,15 +77,15 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 		apiv1alpha2.RuntimeBoxLite: {
 			Name: apiv1alpha2.RuntimeBoxLite, Version: builtinProfileVersion, Driver: DriverKindBoxLite,
 			BoxLite: &BoxLiteConfig{
-				StateRoot: "/var/lib/fast-sandbox/boxlite", BinaryPath: "/usr/local/bin/boxlite", ProxyBinary: "gvproxy",
+				StateRoot: boxliteStateRootDir, BinaryPath: "/usr/local/bin/boxlite", ProxyBinary: "gvproxy",
 				ControlSocket: "/run/fast-sandbox/boxlite/runtime.sock", ProtocolVersion: "v1", TunnelGuestPort: 19090,
 				DefaultVCPUs: 1, DefaultMemory: "1Gi",
 			},
 			Deployment: DeploymentRequirements{
 				Privileged: true, RequiresKVM: true, Sidecar: "boxlite-runtime", ResourceOwner: "boxlite-runtime", Overhead: overhead("200m", "256Mi"),
 				HostPaths: []HostPathRequirement{
-					{Name: "dev-kvm", HostPath: "/dev/kvm", MountPath: "/dev/kvm", Type: corev1.HostPathCharDev},
-					{Name: "boxlite-state", HostPath: "/var/lib/fast-sandbox/boxlite", MountPath: "/var/lib/fast-sandbox/boxlite", Type: corev1.HostPathDirectoryOrCreate},
+					{Name: "dev-kvm", HostPath: kvmDevicePath, MountPath: kvmDevicePath, Type: corev1.HostPathCharDev},
+					{Name: "boxlite-state", HostPath: boxliteStateRootDir, MountPath: boxliteStateRootDir, Type: corev1.HostPathDirectoryOrCreate},
 				},
 			},
 			Capabilities:       Capabilities{DefaultState: CapabilityUnsupported, SupportsNetwork: true, SupportsRecovery: true, Reason: "BoxLiteResourceEnforcementIncomplete"},
@@ -77,19 +96,19 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 			RuntimeProfile{
 				Name: apiv1alpha2.RuntimeFirecracker, Version: builtinProfileVersion, Driver: DriverKindFirecracker,
 				Firecracker: &FirecrackerConfig{
-					BinaryPath: "/usr/local/bin/firecracker", KernelPath: "/opt/fast-sandbox/firecracker/vmlinux.bin",
-					RootfsPath: "/var/lib/fast-sandbox/firecracker/rootfs", StateRoot: "/var/lib/fast-sandbox/firecracker",
+					BinaryPath: firecrackerBinaryPath, KernelPath: firecrackerVmlinuxPath,
+					RootfsPath: firecrackerRootfsDir, StateRoot: firecrackerStateRootDir,
 					DefaultVCPUs: 1, DefaultMemory: "512Mi", BootTimeoutSeconds: 30,
 				},
 				Deployment: DeploymentRequirements{
 					Privileged: true, RequiresKVM: true, Overhead: overhead("250m", "256Mi"),
 					HostPaths: append([]HostPathRequirement{
-						{Name: "dev-kvm", HostPath: "/dev/kvm", MountPath: "/dev/kvm", Type: corev1.HostPathCharDev},
+						{Name: "dev-kvm", HostPath: kvmDevicePath, MountPath: kvmDevicePath, Type: corev1.HostPathCharDev},
 						{Name: "dev-net-tun", HostPath: "/dev/net/tun", MountPath: "/dev/net/tun", Type: corev1.HostPathCharDev},
-						{Name: "firecracker-bin", HostPath: "/usr/local/bin/firecracker", MountPath: "/usr/local/bin/firecracker", Type: corev1.HostPathFile, ReadOnly: true},
-						{Name: "firecracker-kernel", HostPath: "/opt/fast-sandbox/firecracker/vmlinux.bin", MountPath: "/opt/fast-sandbox/firecracker/vmlinux.bin", Type: corev1.HostPathFile, ReadOnly: true},
-						{Name: "firecracker-rootfs", HostPath: "/var/lib/fast-sandbox/firecracker/rootfs", MountPath: "/var/lib/fast-sandbox/firecracker/rootfs", Type: corev1.HostPathDirectoryOrCreate},
-						{Name: "firecracker-state", HostPath: "/var/lib/fast-sandbox/firecracker", MountPath: "/var/lib/fast-sandbox/firecracker", Type: corev1.HostPathDirectoryOrCreate},
+						{Name: "firecracker-bin", HostPath: firecrackerBinaryPath, MountPath: firecrackerBinaryPath, Type: corev1.HostPathFile, ReadOnly: true},
+						{Name: "firecracker-kernel", HostPath: firecrackerVmlinuxPath, MountPath: firecrackerVmlinuxPath, Type: corev1.HostPathFile, ReadOnly: true},
+						{Name: "firecracker-rootfs", HostPath: firecrackerRootfsDir, MountPath: firecrackerRootfsDir, Type: corev1.HostPathDirectoryOrCreate},
+						{Name: "firecracker-state", HostPath: firecrackerStateRootDir, MountPath: firecrackerStateRootDir, Type: corev1.HostPathDirectoryOrCreate},
 					}, linuxNetworkPaths...),
 				},
 				// The on-demand loading chain is implemented and E2E-verified

@@ -5,13 +5,13 @@ import (
 	"strings"
 	"time"
 
-	"fast-sandbox/internal/observability"
-
 	containerdclient "github.com/containerd/containerd/v2/client"
 	containerdcontainers "github.com/containerd/containerd/v2/core/containers"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/grpc"
+
+	"fast-sandbox/internal/observability"
 )
 
 var createStageLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{

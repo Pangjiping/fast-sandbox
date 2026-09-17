@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"github.com/stretchr/testify/require"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 func TestValidateRequestID(t *testing.T) {

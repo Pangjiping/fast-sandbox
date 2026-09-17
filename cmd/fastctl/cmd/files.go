@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"fast-sandbox/pkg/sandboxclient"
-
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/spf13/cobra"
+
+	"fast-sandbox/pkg/sandboxclient"
 )
 
 var filesCmd = &cobra.Command{Use: "files", Short: "Manage files with the official OpenSandbox Execd SDK"}

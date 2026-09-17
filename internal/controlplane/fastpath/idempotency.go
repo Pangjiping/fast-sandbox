@@ -5,10 +5,10 @@ import (
 	"encoding/hex"
 	"errors"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/util/validation"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 // ValidateRequestID validates the single create identity. request_id is also

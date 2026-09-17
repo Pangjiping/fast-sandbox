@@ -24,9 +24,9 @@ import (
 	"sync"
 	"time"
 
-	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
-
 	"k8s.io/klog/v2"
+
+	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
 )
 
 // Op identifies a journaled mutating RPC.

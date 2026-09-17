@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 func (f *FixtureClient) CreateSandboxPool(ctx context.Context, namespace string, pool *apiv1alpha2.SandboxPool) (*apiv1alpha2.SandboxPool, error) {

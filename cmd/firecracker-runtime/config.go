@@ -19,10 +19,10 @@ import (
 	"fmt"
 	"os"
 
+	"gopkg.in/yaml.v3"
+
 	"fast-sandbox/internal/registryconfig"
 	agenthostready "fast-sandbox/internal/runtime/firecracker/agent/hostready"
-
-	"gopkg.in/yaml.v3"
 )
 
 // defaultConfigPath is where the DaemonSet mounts the config ConfigMap.

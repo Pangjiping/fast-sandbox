@@ -7,11 +7,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// resultLabel distinguishes acquire/persist outcomes on the slot metrics.
+const resultLabel = "result"
+
 var (
 	networkSlotAcquireTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "fastlet_network_slot_acquire_total",
 		Help: "Number of Fastlet network slot acquisitions by warm-pool result.",
-	}, []string{"result"})
+	}, []string{resultLabel})
 	networkSlots = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "fastlet_network_slots",
 		Help: "Current Fastlet network slots by durable phase.",
@@ -28,12 +31,12 @@ var (
 		Name:    "fast_sandbox_network_slot_acquire_latency_seconds",
 		Help:    "Latency to resolve or durably bind a pre-created network slot.",
 		Buckets: prometheus.ExponentialBuckets(.00025, 2, 15),
-	}, []string{"result"})
+	}, []string{resultLabel})
 	networkSlotPersistLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "fast_sandbox_network_slot_persist_latency_seconds",
 		Help:    "Latency of the durable state write performed when a clean network slot is bound.",
 		Buckets: prometheus.ExponentialBuckets(.00025, 2, 15),
-	}, []string{"result"})
+	}, []string{resultLabel})
 )
 
 func recordSlotAcquire(result string) {

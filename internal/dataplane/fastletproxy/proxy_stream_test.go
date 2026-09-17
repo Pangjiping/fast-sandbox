@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"io"
 	"net"
 	"net/http"
@@ -15,9 +14,10 @@ import (
 	"testing"
 	"time"
 
-	routeauth "fast-sandbox/internal/dataplane/auth"
-
 	"github.com/stretchr/testify/require"
+
+	routeauth "fast-sandbox/internal/dataplane/auth"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 type proxyHarness struct {

@@ -6,10 +6,21 @@ import (
 	"flag"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"sync/atomic"
 	"time"
+
+	"google.golang.org/grpc"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/klog/v2"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	_ "net/http/pprof" //nolint:gosec // pprof is intentionally exposed on localhost:6060 for troubleshooting
 
 	fastpathv2 "fast-sandbox/api/proto/v2"
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
@@ -25,16 +36,6 @@ import (
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/runtimeenv"
-
-	"google.golang.org/grpc"
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/klog/v2"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 var scheme = runtime.NewScheme()
@@ -44,7 +45,7 @@ func init() {
 	utilruntime.Must(apiv1alpha2.AddToScheme(scheme))
 }
 
-func main() {
+func main() { //nolint:gocognit,maintidx // pre-existing flag wiring and role bootstrap; refactor tracked separately
 	var roleValue string
 	var metricsAddress string
 	var probeAddress string

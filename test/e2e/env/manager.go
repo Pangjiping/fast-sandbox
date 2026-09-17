@@ -19,6 +19,21 @@ import (
 const (
 	minInotifyInstances        = 256
 	fastSandboxSystemNamespace = "fast-sandbox-system"
+	kindCommand                = "kind"
+	kindLoadImageArg           = "docker-image"
+	flagName                   = "--name"
+	kubectlApplyVerb           = "apply"
+	kubectlWaitTimeoutFlag     = "--timeout=120s"
+	// kubectlCommand is the kubectl binary used for all cluster operations.
+	kubectlCommand = "kubectl"
+	// kubectlRolloutSubcommand is the kubectl rollout subcommand.
+	kubectlRolloutSubcommand = "rollout"
+	// kubectlStatusSubcommand is the kubectl rollout status subcommand.
+	kubectlStatusSubcommand = "status"
+	// makeCommand is the local make binary driving the dev images.
+	makeCommand = "make"
+	// kindLoadSubcommand is the kind subcommand that loads an image.
+	kindLoadSubcommand = "load"
 )
 
 type Runner interface {
@@ -157,7 +172,7 @@ func (m *Manager) BuildFastctl(ctx context.Context) (string, error) {
 }
 
 func (m *Manager) preflight(ctx context.Context) error {
-	for _, command := range []string{"docker", "kind", "kubectl", "make", "go"} {
+	for _, command := range []string{"docker", kindCommand, kubectlCommand, makeCommand, "go"} {
 		if _, err := m.run(ctx, "sh", "-c", "command -v "+command); err != nil {
 			return fmt.Errorf("missing required command %q: %w", command, err)
 		}
@@ -239,7 +254,7 @@ func (m *Manager) preflightRuntime(ctx context.Context) error {
 func (m *Manager) preflightInotify(ctx context.Context) error {
 	output, err := m.run(ctx, "cat", "/proc/sys/fs/inotify/max_user_instances")
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr // best-effort guard: skip the check when the sysctl is unreadable
 	}
 	value := strings.TrimSpace(string(output))
 	if value == "" {
@@ -247,7 +262,7 @@ func (m *Manager) preflightInotify(ctx context.Context) error {
 	}
 	limit, err := strconv.Atoi(value)
 	if err != nil {
-		return nil
+		return nil //nolint:nilerr // best-effort guard: skip the check when the value is not numeric
 	}
 	if limit < minInotifyInstances {
 		return fmt.Errorf("fs.inotify.max_user_instances=%d is too low for kind-based e2e; set it to at least %d, for example: sudo sysctl -w fs.inotify.max_user_instances=%d", limit, minInotifyInstances, minInotifyInstances)
@@ -256,13 +271,13 @@ func (m *Manager) preflightInotify(ctx context.Context) error {
 }
 
 func (m *Manager) ensureKindCluster(ctx context.Context) error {
-	output, err := m.run(ctx, "kind", "get", "clusters")
+	output, err := m.run(ctx, kindCommand, "get", "clusters")
 	if err != nil {
 		return err
 	}
 
 	if !hasLine(string(output), m.settings.ClusterName) {
-		args := []string{"create", "cluster", "--name", m.settings.ClusterName, "--image", m.settings.KindImage}
+		args := []string{"create", "cluster", flagName, m.settings.ClusterName, "--image", m.settings.KindImage}
 		configPath, err := m.kindConfigForCreate()
 		if err != nil {
 			return err
@@ -270,12 +285,12 @@ func (m *Manager) ensureKindCluster(ctx context.Context) error {
 		if configPath != "" {
 			args = append(args, "--config", configPath)
 		}
-		if _, err := m.runLive(ctx, "kind", args...); err != nil {
+		if _, err := m.runLive(ctx, kindCommand, args...); err != nil {
 			return err
 		}
 	}
 
-	_, err = m.run(ctx, "kubectl", "config", "use-context", "kind-"+m.settings.ClusterName)
+	_, err = m.run(ctx, kubectlCommand, "config", "use-context", kindCommand+"-"+m.settings.ClusterName)
 	return err
 }
 
@@ -285,7 +300,7 @@ func (m *Manager) ensureBaseImages(ctx context.Context) error {
 			return err
 		}
 	}
-	_, err := m.runLive(ctx, "kind", "load", "docker-image", "alpine:latest", "--name", m.settings.ClusterName)
+	_, err := m.runLive(ctx, kindCommand, kindLoadSubcommand, kindLoadImageArg, "alpine:latest", flagName, m.settings.ClusterName)
 	return err
 }
 
@@ -324,7 +339,7 @@ func (m *Manager) kindConfigForCreate() (string, error) {
 			return os.Getenv(key)
 		}
 	})
-	if err := os.WriteFile(renderedPath, []byte(rendered), 0644); err != nil {
+	if err := os.WriteFile(renderedPath, []byte(rendered), 0600); err != nil {
 		return "", fmt.Errorf("write rendered kind config: %w", err)
 	}
 	return renderedPath, nil
@@ -332,11 +347,11 @@ func (m *Manager) kindConfigForCreate() (string, error) {
 
 func (m *Manager) ensureKubeSystemReady(ctx context.Context) error {
 	steps := [][]string{
-		{"rollout", "status", "ds/kube-proxy", "-n", "kube-system", "--timeout=120s"},
-		{"rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=120s"},
+		{kubectlRolloutSubcommand, kubectlStatusSubcommand, "ds/kube-proxy", "-n", "kube-system", kubectlWaitTimeoutFlag},
+		{kubectlRolloutSubcommand, kubectlStatusSubcommand, "deployment/coredns", "-n", "kube-system", kubectlWaitTimeoutFlag},
 	}
 	for _, args := range steps {
-		if _, err := m.runLive(ctx, "kubectl", args...); err != nil {
+		if _, err := m.runLive(ctx, kubectlCommand, args...); err != nil {
 			return fmt.Errorf("kube-system is not healthy: %w\n%s", err, m.kubeSystemDiagnostics(ctx))
 		}
 	}
@@ -379,7 +394,7 @@ func (m *Manager) ensureGVisorRuntime(ctx context.Context) error {
 	if _, err := m.run(ctx, "sh", "-c", kubeSystemDeploymentsAvailableScript()); err != nil {
 		return fmt.Errorf("kube-system deployments did not recover after configuring gVisor: %w", err)
 	}
-	_, err = m.run(ctx, "kubectl", "apply", "-f", "test/e2e/manifests/runtimeclass/gvisor.yaml")
+	_, err = m.run(ctx, kubectlCommand, kubectlApplyVerb, "-f", "test/e2e/manifests/runtimeclass/gvisor.yaml")
 	return err
 }
 
@@ -423,7 +438,7 @@ func (m *Manager) ensureKataRuntime(ctx context.Context) error {
 			return fmt.Errorf("kube-system deployments did not recover after configuring Kata: %w", err)
 		}
 	}
-	_, err = m.run(ctx, "kubectl", "apply", "-f", "test/e2e/manifests/runtimeclass/kata.yaml")
+	_, err = m.run(ctx, kubectlCommand, kubectlApplyVerb, "-f", "test/e2e/manifests/runtimeclass/kata.yaml")
 	return err
 }
 
@@ -461,7 +476,7 @@ func (m *Manager) ensureKataArtifactContainer(ctx context.Context) error {
 	if _, err := m.runLive(ctx, "docker", "pull", kataDeployImage()); err != nil {
 		return err
 	}
-	_, err := m.run(ctx, "docker", "create", "--name", name, kataDeployImage())
+	_, err := m.run(ctx, "docker", "create", flagName, name, kataDeployImage())
 	return err
 }
 
@@ -599,14 +614,16 @@ ctr plugins ls | grep -E 'snapshotter.v1[[:space:]]+blockfile[[:space:]].*[[:spa
 func kataConfigureContainerdScript(runtime RuntimeKind) string {
 	script := `set -e
 cp /etc/containerd/config.toml /etc/containerd/config.toml.bak 2>/dev/null || true`
+	var scriptSb602 strings.Builder
 	for _, runtimeName := range []RuntimeKind{RuntimeKataClh, RuntimeKataQemu, RuntimeKataFc, RuntimeKataDragonball} {
-		script += `
+		scriptSb602.WriteString(`
 if ! grep -q 'runtimes.` + string(runtimeName) + `' /etc/containerd/config.toml; then
   cat >> /etc/containerd/config.toml <<'EOF'
 ` + kataRuntimeContainerdConfig(runtimeName) + `
 EOF
-fi`
+fi`)
 	}
+	script += scriptSb602.String()
 	if runtime == RuntimeKataFc {
 		script += `
 if ! grep -A10 'runtimes.kata-fc]$' /etc/containerd/config.toml | grep -q 'snapshotter = "blockfile"'; then
@@ -626,7 +643,7 @@ sed -i 's#ConfigPath = "/opt/kata/share/defaults/kata-containers/runtime-rs/conf
 	return script
 }
 
-func kataContainerdConfig() string {
+func kataContainerdConfig() string { //nolint:unused // exercised by manager_test.go; linter skips test files (run.tests=false)
 	return "\n# Kata Containers runtime configurations\n" +
 		kataRuntimeContainerdConfig(RuntimeKataClh) + "\n" +
 		kataRuntimeContainerdConfig(RuntimeKataQemu) + "\n" +
@@ -733,11 +750,11 @@ func homeDir() string {
 
 func (m *Manager) kubeSystemDiagnostics(ctx context.Context) string {
 	var b strings.Builder
-	if output, err := m.runner.Run(ctx, m.rootDir, "kubectl", "get", "pods", "-n", "kube-system", "-o", "wide"); err == nil {
+	if output, err := m.runner.Run(ctx, m.rootDir, kubectlCommand, "get", "pods", "-n", "kube-system", "-o", "wide"); err == nil {
 		b.WriteString("kube-system pods:\n")
 		b.Write(output)
 	}
-	if output, err := m.runner.Run(ctx, m.rootDir, "kubectl", "logs", "ds/kube-proxy", "-n", "kube-system", "--tail=80"); err == nil {
+	if output, err := m.runner.Run(ctx, m.rootDir, kubectlCommand, "logs", "ds/kube-proxy", "-n", "kube-system", "--tail=80"); err == nil {
 		b.WriteString("\nkube-proxy logs:\n")
 		b.Write(output)
 	}
@@ -751,41 +768,41 @@ func (m *Manager) deployFastSandbox(ctx context.Context) error {
 		args   []string
 		action func(context.Context) error
 	}{
-		{label: "Building core development images", name: "make", args: []string{"images", "COMPONENT=core"}},
-		{label: "Building Sandbox Action fixture image", name: "make", args: []string{"images", "COMPONENT=sandbox-action-fixture"}},
-		{label: "Loading controller image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/controller:dev", "--name", m.settings.ClusterName}},
-		{label: "Loading Fastlet image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/fastlet:dev", "--name", m.settings.ClusterName}},
-		{label: "Loading Fastlet Proxy image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/fastlet-proxy:dev", "--name", m.settings.ClusterName}},
-		{label: "Loading Sandbox Proxy image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/sandbox-proxy:dev", "--name", m.settings.ClusterName}},
-		{label: "Loading NodeJanitor image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/janitor:dev", "--name", m.settings.ClusterName}},
-		{label: "Loading Sandbox Action fixture image into kind", name: "kind", args: []string{"load", "docker-image", "fast-sandbox/sandbox-action-fixture:dev", "--name", m.settings.ClusterName}},
-		{label: "Applying Fast Sandbox namespaces", name: "kubectl", args: []string{"apply", "-k", "config/namespaces"}},
+		{label: "Building core development images", name: makeCommand, args: []string{"images", "COMPONENT=core"}},
+		{label: "Building Sandbox Action fixture image", name: makeCommand, args: []string{"images", "COMPONENT=sandbox-action-fixture"}},
+		{label: "Loading controller image into kind", name: kindCommand, args: []string{kindLoadSubcommand, kindLoadImageArg, "fast-sandbox/controller:dev", flagName, m.settings.ClusterName}},
+		{label: "Loading Fastlet image into kind", name: kindCommand, args: []string{kindLoadSubcommand, kindLoadImageArg, "fast-sandbox/fastlet:dev", flagName, m.settings.ClusterName}},
+		{label: "Loading Fastlet Proxy image into kind", name: kindCommand, args: []string{kindLoadSubcommand, kindLoadImageArg, "fast-sandbox/fastlet-proxy:dev", flagName, m.settings.ClusterName}},
+		{label: "Loading Sandbox Proxy image into kind", name: kindCommand, args: []string{kindLoadSubcommand, kindLoadImageArg, "fast-sandbox/sandbox-proxy:dev", flagName, m.settings.ClusterName}},
+		{label: "Loading NodeJanitor image into kind", name: kindCommand, args: []string{kindLoadSubcommand, kindLoadImageArg, "fast-sandbox/janitor:dev", flagName, m.settings.ClusterName}},
+		{label: "Loading Sandbox Action fixture image into kind", name: kindCommand, args: []string{kindLoadSubcommand, kindLoadImageArg, "fast-sandbox/sandbox-action-fixture:dev", flagName, m.settings.ClusterName}},
+		{label: "Applying Fast Sandbox namespaces", name: kubectlCommand, args: []string{kubectlApplyVerb, "-k", "config/namespaces"}},
 		{label: "Removing legacy default-namespace components", action: m.removeLegacyDefaultComponents},
 		{label: "Checking alpha CRD compatibility", action: m.resetIncompatibleAlphaCRDs},
-		{label: "Applying CRDs", name: "kubectl", args: []string{"apply", "-k", "config/crd"}},
-		{label: "Waiting for Sandbox CRD", name: "kubectl", args: []string{"wait", "--for=condition=Established", "crd/sandboxes.sandbox.fast.io", "--timeout=30s"}},
-		{label: "Waiting for SandboxPool CRD", name: "kubectl", args: []string{"wait", "--for=condition=Established", "crd/sandboxpools.sandbox.fast.io", "--timeout=30s"}},
-		{label: "Applying RBAC", name: "kubectl", args: []string{"apply", "-f", "config/rbac/base.yaml"}},
-		{label: "Applying runtime environments", name: "kubectl", args: []string{"apply", "-k", "config/runtime-environments"}},
-		{label: "Applying development route keys", name: "kubectl", args: []string{"apply", "-f", "config/dev/route-keys.yaml"}},
-		{label: "Applying control-plane workloads", name: "kubectl", args: []string{"apply", "-f", "config/manager/controller.yaml"}},
+		{label: "Applying CRDs", name: kubectlCommand, args: []string{kubectlApplyVerb, "-k", "config/crd"}},
+		{label: "Waiting for Sandbox CRD", name: kubectlCommand, args: []string{"wait", "--for=condition=Established", "crd/sandboxes.sandbox.fast.io", "--timeout=30s"}},
+		{label: "Waiting for SandboxPool CRD", name: kubectlCommand, args: []string{"wait", "--for=condition=Established", "crd/sandboxpools.sandbox.fast.io", "--timeout=30s"}},
+		{label: "Applying RBAC", name: kubectlCommand, args: []string{kubectlApplyVerb, "-f", "config/rbac/base.yaml"}},
+		{label: "Applying runtime environments", name: kubectlCommand, args: []string{kubectlApplyVerb, "-k", "config/runtime-environments"}},
+		{label: "Applying development route keys", name: kubectlCommand, args: []string{kubectlApplyVerb, "-f", "config/dev/route-keys.yaml"}},
+		{label: "Applying control-plane workloads", name: kubectlCommand, args: []string{kubectlApplyVerb, "-f", "config/manager/controller.yaml"}},
 		{label: "Restarting Reconcilers", action: func(ctx context.Context) error {
 			return m.rolloutRestart(ctx, "deployment/fast-sandbox-controller")
 		}},
-		{label: "Waiting for Reconcilers", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-controller", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
+		{label: "Waiting for Reconcilers", name: kubectlCommand, args: []string{kubectlRolloutSubcommand, kubectlStatusSubcommand, "deployment/fast-sandbox-controller", "-n", fastSandboxSystemNamespace, kubectlWaitTimeoutFlag}},
 		{label: "Restarting Fast-Path servers", action: func(ctx context.Context) error {
 			return m.rolloutRestart(ctx, "deployment/fast-sandbox-fastpath")
 		}},
-		{label: "Waiting for Fast-Path servers", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-fastpath", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
+		{label: "Waiting for Fast-Path servers", name: kubectlCommand, args: []string{kubectlRolloutSubcommand, kubectlStatusSubcommand, "deployment/fast-sandbox-fastpath", "-n", fastSandboxSystemNamespace, kubectlWaitTimeoutFlag}},
 		{label: "Restarting Sandbox Proxy", action: func(ctx context.Context) error {
 			return m.rolloutRestart(ctx, "deployment/fast-sandbox-proxy")
 		}},
-		{label: "Waiting for Sandbox Proxy", name: "kubectl", args: []string{"rollout", "status", "deployment/fast-sandbox-proxy", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
-		{label: "Applying NodeJanitor", name: "kubectl", args: []string{"apply", "-f", "config/janitor/janitor.yaml"}},
+		{label: "Waiting for Sandbox Proxy", name: kubectlCommand, args: []string{kubectlRolloutSubcommand, kubectlStatusSubcommand, "deployment/fast-sandbox-proxy", "-n", fastSandboxSystemNamespace, kubectlWaitTimeoutFlag}},
+		{label: "Applying NodeJanitor", name: kubectlCommand, args: []string{kubectlApplyVerb, "-f", "config/janitor/janitor.yaml"}},
 		{label: "Restarting NodeJanitor", action: func(ctx context.Context) error {
 			return m.rolloutRestart(ctx, "ds/fast-sandbox-janitor")
 		}},
-		{label: "Waiting for NodeJanitor", name: "kubectl", args: []string{"rollout", "status", "ds/fast-sandbox-janitor", "-n", fastSandboxSystemNamespace, "--timeout=120s"}},
+		{label: "Waiting for NodeJanitor", name: kubectlCommand, args: []string{kubectlRolloutSubcommand, kubectlStatusSubcommand, "ds/fast-sandbox-janitor", "-n", fastSandboxSystemNamespace, kubectlWaitTimeoutFlag}},
 	}
 
 	for index, step := range steps {
@@ -818,7 +835,7 @@ func (m *Manager) removeLegacyDefaultComponents(ctx context.Context) error {
 	}
 	args := append([]string{"delete"}, resources...)
 	args = append(args, "-n", "default", "--ignore-not-found=true", "--wait=true")
-	_, err := m.runLive(ctx, "kubectl", args...)
+	_, err := m.runLive(ctx, kubectlCommand, args...)
 	return err
 }
 
@@ -827,7 +844,7 @@ func (m *Manager) rolloutRestart(ctx context.Context, resource string) error {
 	for attempt := 1; attempt <= attempts; attempt++ {
 		_, err := m.runLive(
 			ctx,
-			"kubectl", "rollout", "restart", resource, "-n", fastSandboxSystemNamespace,
+			kubectlCommand, kubectlRolloutSubcommand, "restart", resource, "-n", fastSandboxSystemNamespace,
 		)
 		if err == nil {
 			return nil
@@ -857,7 +874,7 @@ func (m *Manager) resetIncompatibleAlphaCRDs(ctx context.Context) error {
 		"sandboxes.sandbox.fast.io",
 		"sandboxpools.sandbox.fast.io",
 	} {
-		output, err := m.run(ctx, "kubectl", "get", "crd", name, "-o", "jsonpath={.status.storedVersions}")
+		output, err := m.run(ctx, kubectlCommand, "get", "crd", name, "-o", "jsonpath={.status.storedVersions}")
 		if err != nil {
 			if strings.Contains(err.Error(), "NotFound") {
 				continue
@@ -868,7 +885,7 @@ func (m *Manager) resetIncompatibleAlphaCRDs(ctx context.Context) error {
 			continue
 		}
 		m.progressf("    removing incompatible %s (development cluster only)\n", name)
-		if _, err := m.runLive(ctx, "kubectl", "delete", "crd", name, "--wait=true"); err != nil {
+		if _, err := m.runLive(ctx, kubectlCommand, "delete", "crd", name, "--wait=true"); err != nil {
 			return err
 		}
 	}

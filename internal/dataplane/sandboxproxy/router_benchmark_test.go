@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 func BenchmarkIndexResolveParallel(b *testing.B) {

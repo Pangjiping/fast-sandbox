@@ -15,6 +15,7 @@ package hostready
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -54,7 +55,7 @@ type Report struct {
 // String renders the report as a multi-line log blob.
 func (r Report) String() string {
 	lines := make([]string, 0, len(r.Checks)+1)
-	lines = append(lines, "host ready="+fmt.Sprintf("%v", r.Ready)+" ("+r.Summary+")")
+	lines = append(lines, "host ready="+strconv.FormatBool(r.Ready)+" ("+r.Summary+")")
 	for _, check := range r.Checks {
 		lines = append(lines, fmt.Sprintf("  %-4s %-22s %s", check.Status, check.Name, check.Detail))
 	}

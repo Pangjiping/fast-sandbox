@@ -78,7 +78,7 @@ func CachedManifestDigest(stateRoot, image string) (string, bool, error) {
 		return "", false, err
 	}
 	if _, err := parseManifest(payload); err != nil {
-		return "", false, nil
+		return "", false, nil //nolint:nilerr // a corrupt cached manifest means no committed pull; treat as not ready
 	}
 	return sha256Hex(payload), true, nil
 }
@@ -97,16 +97,16 @@ func cacheComplete(dir string) (bool, error) {
 	}
 	document, err := parseManifest(payload)
 	if err != nil {
-		return false, nil
+		return false, nil //nolint:nilerr // a corrupt cached manifest means the pull is not complete
 	}
 	files, err := document.nativeFiles()
 	if err != nil {
-		return false, nil
+		return false, nil //nolint:nilerr // an incomplete native file set means the pull is not complete
 	}
 	for _, file := range files {
 		match, err := fileMatches(filepath.Join(dir, file.cache), file)
 		if err != nil || !match {
-			return false, nil
+			return false, nil //nolint:nilerr // any mismatch or read failure means the pull is not complete; the next pull redoes it
 		}
 	}
 	return true, nil

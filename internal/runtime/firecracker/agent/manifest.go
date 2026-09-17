@@ -43,6 +43,14 @@ type nativeFile struct {
 	sizeBytes int64
 }
 
+// manifestVMStateName and manifestMemoryName are the published artifact
+// names of the guest memory snapshots; they double as the local cache names
+// and are shared with the publish list.
+const (
+	manifestVMStateName = "vmstate.snap"
+	manifestMemoryName  = "memory.snap"
+)
+
 // nativeArtifactNames maps published artifact names to the local cache
 // names. rootfs.ext4 is renamed to rootfs.img so
 // the existing resolveRootfsImage consumer needs no change; the rest keep
@@ -50,8 +58,8 @@ type nativeFile struct {
 // arrive with the overlaybd stage.
 var nativeArtifactNames = []struct{ publish, cache string }{
 	{"rootfs.ext4", nativeRootfsCacheName},
-	{"vmstate.snap", "vmstate.snap"},
-	{"memory.snap", "memory.snap"},
+	{manifestVMStateName, manifestVMStateName},
+	{manifestMemoryName, manifestMemoryName},
 }
 
 // nativeFiles validates that the manifest carries the complete native

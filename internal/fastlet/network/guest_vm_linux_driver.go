@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"time"
 )
 
@@ -51,15 +52,15 @@ func (d *GuestVMNetNSDriver) Prepare(ctx context.Context, slot *Slot) error {
 		slot.GuestTap = guestVMDefaultTapName
 	}
 	nsTap := func(arguments ...string) []string {
-		return append([]string{"netns", "exec", slot.NetNSName, d.ipCommand}, arguments...)
+		return append([]string{ipObjectNetns, execSubcommand, slot.NetNSName, d.ipCommand}, arguments...)
 	}
 	nsIPTables := func(arguments ...string) []string {
-		return append([]string{"netns", "exec", slot.NetNSName, d.iptablesCommand}, arguments...)
+		return append([]string{ipObjectNetns, execSubcommand, slot.NetNSName, d.iptablesCommand}, arguments...)
 	}
 	commands := [][]string{
-		nsTap("tuntap", "add", "dev", guestVMDefaultTapName, "mode", "tap"),
-		nsTap("link", "set", guestVMDefaultTapName, "mtu", fmt.Sprint(slot.MTU)),
-		nsTap("link", "set", guestVMDefaultTapName, "up"),
+		nsTap("tuntap", "add", netDevFlag, guestVMDefaultTapName, "mode", "tap"),
+		nsTap(linkSubcommand, ipSetSubcommand, guestVMDefaultTapName, "mtu", strconv.Itoa(slot.MTU)),
+		nsTap(linkSubcommand, ipSetSubcommand, guestVMDefaultTapName, "up"),
 		// Proxy ARP on the TAP only, so the guest can resolve its baked
 		// gateway (the host bridge address, absent on the tap segment).
 		// The all-interfaces knob MUST NOT be set: it would make eth0
@@ -67,14 +68,14 @@ func (d *GuestVMNetNSDriver) Prepare(ctx context.Context, slot *Slot) error {
 		// the host's ARP for every slot IP with its own veth MAC — the host
 		// neighbour cache then points slot IPs at random netns and packets
 		// never reach the right one.
-		{"netns", "exec", slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.conf." + guestVMDefaultTapName + ".proxy_arp=1"},
+		{ipObjectNetns, execSubcommand, slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.conf." + guestVMDefaultTapName + ".proxy_arp=1"},
 		// The kernel queues proxy ARP replies for proxy_delay (default 80
 		// ticks = 800ms) so a real owner could answer first; on this tap the
 		// proxy IS the only answer for the baked gateway, and the guest's
 		// first egress packet (SYN-ACK!) blocks on it — the entire
 		// first-request stall after restore (measured 792ms on vmtap0).
-		{"netns", "exec", slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.neigh." + guestVMDefaultTapName + ".proxy_delay=0"},
-		{"netns", "exec", slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.ip_forward=1"},
+		{ipObjectNetns, execSubcommand, slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.neigh." + guestVMDefaultTapName + ".proxy_delay=0"},
+		{ipObjectNetns, execSubcommand, slot.NetNSName, d.sysctlCommand, "-w", "net.ipv4.ip_forward=1"},
 	}
 	for _, arguments := range commands {
 		if _, err := d.runner.Run(ctx, d.ipCommand, arguments...); err != nil {
@@ -85,8 +86,8 @@ func (d *GuestVMNetNSDriver) Prepare(ctx context.Context, slot *Slot) error {
 	// proxy-ARP tap, host gateway via eth0); the default 1 s retransmit
 	// stalls the first guest packets after every restore. Best-effort: the
 	// tuning is a latency optimization and must never fail preparation.
-	for _, device := range []string{guestVMDefaultTapName, "eth0"} {
-		_, _ = d.runner.Run(ctx, d.ipCommand, "netns", "exec", slot.NetNSName,
+	for _, device := range []string{guestVMDefaultTapName, eth0Name} {
+		_, _ = d.runner.Run(ctx, d.ipCommand, ipObjectNetns, execSubcommand, slot.NetNSName,
 			d.sysctlCommand, "-w", "net.ipv4.neigh."+device+".retrans_time_ms=100")
 	}
 	rules := [][]string{
@@ -97,11 +98,11 @@ func (d *GuestVMNetNSDriver) Prepare(ctx context.Context, slot *Slot) error {
 		// Sibling isolation: only traffic ORIGINATING from the guest and
 		// destined to the private CIDR is rejected. Ingress and reply
 		// packets arrive from eth0 (out vmtap0) and are not affected.
-		nsIPTables("-A", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-d", slot.PrivateCIDR, "-j", "REJECT"),
+		nsIPTables("-A", "FORWARD", "-i", guestVMDefaultTapName, "-o", eth0Name, "-d", slot.PrivateCIDR, "-j", "REJECT"),
 		// Guest egress through the namespace veth.
-		nsIPTables("-A", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-j", "ACCEPT"),
+		nsIPTables("-A", "FORWARD", "-i", guestVMDefaultTapName, "-o", eth0Name, "-j", "ACCEPT"),
 		// Ingress and replies (DNATed or direct guest address).
-		nsIPTables("-A", "FORWARD", "-i", "eth0", "-o", guestVMDefaultTapName, "-j", "ACCEPT"),
+		nsIPTables("-A", "FORWARD", "-i", eth0Name, "-o", guestVMDefaultTapName, "-j", "ACCEPT"),
 		// Established connections (reply path).
 		nsIPTables("-A", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
 	}
@@ -136,16 +137,16 @@ func (d *GuestVMNetNSDriver) ApplyGuest(ctx context.Context, slot *Slot, guestIP
 	}
 	slot.GuestIP = guestIP
 	nsTap := func(arguments ...string) []string {
-		return append([]string{"netns", "exec", slot.NetNSName, d.ipCommand}, arguments...)
+		return append([]string{ipObjectNetns, execSubcommand, slot.NetNSName, d.ipCommand}, arguments...)
 	}
 	nsIPTables := func(arguments ...string) []string {
-		return append([]string{"netns", "exec", slot.NetNSName, d.iptablesCommand}, arguments...)
+		return append([]string{ipObjectNetns, execSubcommand, slot.NetNSName, d.iptablesCommand}, arguments...)
 	}
 	// Ingress delivery: the baked guest address is routed via the tap. The
 	// address is deliberately NOT assigned to the tap: a local address
 	// would shadow the guest (the netns kernel would answer for the guest
 	// IP itself and refuse TCP with no listener).
-	if _, err := d.runner.Run(ctx, d.ipCommand, nsTap("route", "replace", guestIP+"/32", "dev", guestVMDefaultTapName)...); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, nsTap("route", "replace", guestIP+"/32", netDevFlag, guestVMDefaultTapName)...); err != nil {
 		return fmt.Errorf("apply guest delivery route: %w", err)
 	}
 	rules := [][]string{
@@ -201,7 +202,7 @@ func (d *GuestVMNetNSDriver) Validate(ctx context.Context, slot *Slot) error {
 	if slot.GuestTap == "" {
 		return fmt.Errorf("guest-VM slot has no tap name")
 	}
-	if _, err := d.runner.Run(ctx, d.ipCommand, "-n", slot.NetNSName, "link", "show", "dev", guestVMDefaultTapName); err != nil {
+	if _, err := d.runner.Run(ctx, d.ipCommand, "-n", slot.NetNSName, linkSubcommand, "show", netDevFlag, guestVMDefaultTapName); err != nil {
 		return fmt.Errorf("guest tap %s: %w", guestVMDefaultTapName, err)
 	}
 	return nil
@@ -218,7 +219,7 @@ func (d *GuestVMNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 	var result error
 	if slot.NetNSName != "" {
 		nsIPTables := func(arguments ...string) []string {
-			return append([]string{"netns", "exec", slot.NetNSName, d.iptablesCommand}, arguments...)
+			return append([]string{ipObjectNetns, execSubcommand, slot.NetNSName, d.iptablesCommand}, arguments...)
 		}
 		var rules [][]string
 		if slot.GuestIP != "" {
@@ -229,9 +230,9 @@ func (d *GuestVMNetNSDriver) Destroy(ctx context.Context, slot *Slot) error {
 		}
 		rules = append(rules,
 			nsIPTables("-D", "FORWARD", "-d", slot.Gateway+"/32", "-j", "ACCEPT"),
-			nsIPTables("-D", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-d", slot.PrivateCIDR, "-j", "REJECT"),
-			nsIPTables("-D", "FORWARD", "-i", guestVMDefaultTapName, "-o", "eth0", "-j", "ACCEPT"),
-			nsIPTables("-D", "FORWARD", "-i", "eth0", "-o", guestVMDefaultTapName, "-j", "ACCEPT"),
+			nsIPTables("-D", "FORWARD", "-i", guestVMDefaultTapName, "-o", eth0Name, "-d", slot.PrivateCIDR, "-j", "REJECT"),
+			nsIPTables("-D", "FORWARD", "-i", guestVMDefaultTapName, "-o", eth0Name, "-j", "ACCEPT"),
+			nsIPTables("-D", "FORWARD", "-i", eth0Name, "-o", guestVMDefaultTapName, "-j", "ACCEPT"),
 			nsIPTables("-D", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
 		)
 		for _, arguments := range rules {
@@ -289,5 +290,5 @@ func errorsJoin(left, right error) error {
 	if right == nil {
 		return left
 	}
-	return fmt.Errorf("%v; %v", left, right)
+	return fmt.Errorf("%w; %w", left, right)
 }

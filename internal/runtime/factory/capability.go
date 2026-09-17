@@ -23,7 +23,7 @@ func NewHostCapabilityProber() *HostCapabilityProber {
 	return &HostCapabilityProber{stat: os.Stat, lookPath: exec.LookPath, readFile: os.ReadFile}
 }
 
-func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.RuntimeProfile, socketPath string) CapabilityReport {
+func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.RuntimeProfile, socketPath string) CapabilityReport { //nolint:gocognit // pre-existing per-runtime dependency checks; refactor tracked separately
 	report := CapabilityReport{
 		Runtime: profile.Name, ProfileHash: profile.ProfileHash,
 		State: runtimecatalog.CapabilityAvailable,

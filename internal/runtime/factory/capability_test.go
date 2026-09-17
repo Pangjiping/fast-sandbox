@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	boxlitedriver "fast-sandbox/internal/runtime/boxlite/driver"
 	"fast-sandbox/internal/runtime/containerd"
 	firecrackerdriver "fast-sandbox/internal/runtime/firecracker"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestHostCapabilityProberContainerAvailable(t *testing.T) {

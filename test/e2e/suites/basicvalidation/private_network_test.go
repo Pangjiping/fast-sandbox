@@ -11,10 +11,6 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/test/e2e/support/fixtures"
-	"fast-sandbox/test/e2e/support/suiteenv"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +18,10 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/test/e2e/support/fixtures"
+	"fast-sandbox/test/e2e/support/suiteenv"
 )
 
 type networkSlotState struct {

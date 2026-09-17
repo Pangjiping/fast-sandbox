@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"fast-sandbox/internal/observability"
-
 	"github.com/stretchr/testify/require"
+
+	"fast-sandbox/internal/observability"
 )
 
 func testFastletClient(t *testing.T, handler http.Handler) (*FastletClient, string) {

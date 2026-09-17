@@ -10,12 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/klog/v2"
+
 	routeauth "fast-sandbox/internal/dataplane/auth"
 	"fast-sandbox/internal/dataplane/fastletproxy"
 	"fast-sandbox/internal/observability"
-
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8s.io/klog/v2"
 )
 
 func main() {

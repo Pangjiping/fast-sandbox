@@ -7,12 +7,6 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/assignment"
-	orchestration "fast-sandbox/internal/controlplane/orchestrator"
-	"fast-sandbox/internal/controlplane/placement"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -23,6 +17,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
+	orchestration "fast-sandbox/internal/controlplane/orchestrator"
+	"fast-sandbox/internal/controlplane/placement"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 type controllerRegistry struct {

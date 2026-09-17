@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	routeauth "fast-sandbox/internal/dataplane/auth"
 	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fast-sandbox/internal/observability"
-
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const DefaultAddress = ":8080"

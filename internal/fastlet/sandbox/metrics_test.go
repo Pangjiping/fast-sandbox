@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 func TestAdmissionMetricsUseBoundedOutcomeLabels(t *testing.T) {

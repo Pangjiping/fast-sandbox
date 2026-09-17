@@ -11,12 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	fastletnetwork "fast-sandbox/internal/fastlet/network"
-	"fast-sandbox/internal/janitor"
-	"fast-sandbox/internal/nodecleanup"
-	"fast-sandbox/internal/runtimeenv"
-
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +20,12 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	fastletnetwork "fast-sandbox/internal/fastlet/network"
+	"fast-sandbox/internal/janitor"
+	"fast-sandbox/internal/nodecleanup"
+	"fast-sandbox/internal/runtimeenv"
 )
 
 func main() {

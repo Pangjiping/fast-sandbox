@@ -218,7 +218,7 @@ func extractTarball(tarball, dest, arch string) error {
 		if err != nil {
 			return fmt.Errorf("extract %s: %w", name, err)
 		}
-		if err := os.WriteFile(filepath.Join(dest, base), payload, 0o755); err != nil {
+		if err := os.WriteFile(filepath.Join(dest, base), payload, 0o755); err != nil { //nolint:gosec // installing executable host binaries
 			return err
 		}
 	}

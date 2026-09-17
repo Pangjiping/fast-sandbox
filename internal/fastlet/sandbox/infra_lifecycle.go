@@ -3,16 +3,17 @@ package sandbox
 import (
 	"context"
 	"errors"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fmt"
 	"net"
 	"time"
 
+	"k8s.io/klog/v2"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	actionapi "fast-sandbox/internal/protocol/action"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"k8s.io/klog/v2"
 )
 
 type dataPlaneWorker struct {
@@ -70,7 +71,7 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 	}
 	m.mu.Lock()
 	current := m.sandboxes[identity.SandboxUID]
-	if current != metadata || metadata.Phase == "terminating" || metadata.Phase == "deleting" {
+	if current != metadata || metadata.Phase == sandboxStateTerminating || metadata.Phase == sandboxStateDeleting {
 		m.mu.Unlock()
 		return errors.New("Sandbox changed while Infra Components were initializing")
 	}
@@ -78,7 +79,7 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 	metadata.InfraDiagnostics = append(metadata.InfraDiagnostics[:0], instance.Diagnostics...)
 	m.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInfraUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrInfraUnavailable, err)
 	}
 	return nil
 }
@@ -87,11 +88,11 @@ func (m *SandboxManager) initializeInfraInstance(ctx context.Context, metadata *
 // the Create RPC. Capacity bounds the number of workers, and the metadata
 // pointer plus instance fencing prevents an old worker from mutating a newer
 // generation.
-func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, started time.Time) {
+func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, started time.Time) { //nolint:gocognit // pre-existing worker lifecycle; refactor tracked separately
 	sandboxUID := metadata.Config.Identity.SandboxUID
 	m.mu.Lock()
 	if m.sandboxes[sandboxUID] != metadata ||
-		(!dataPlaneWorkPending(metadata.Phase) && !(metadata.Phase == "running" && m.infraManager != nil)) {
+		(!dataPlaneWorkPending(metadata.Phase) && !(metadata.Phase == sandboxStateRunning && m.infraManager != nil)) {
 		m.mu.Unlock()
 		return
 	}
@@ -121,7 +122,7 @@ func (m *SandboxManager) startDataPlaneReconcile(metadata *SandboxMetadata, star
 			ready, err := m.reconcileDataPlaneOnce(ctx, metadata)
 			if ready {
 				m.mu.RLock()
-				completed := m.sandboxes[sandboxUID] == metadata && metadata.Phase == "running"
+				completed := m.sandboxes[sandboxUID] == metadata && metadata.Phase == sandboxStateRunning
 				m.mu.RUnlock()
 				if err == nil && completed {
 					if !readyObserved {
@@ -186,16 +187,16 @@ func (m *SandboxManager) monitorDataPlaneHealth(ctx context.Context, metadata *S
 func (m *SandboxManager) markDataPlaneUnhealthy(metadata *SandboxMetadata, healthErr error) {
 	sandboxUID := metadata.Config.Identity.SandboxUID
 	m.mu.Lock()
-	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != "running" {
+	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != sandboxStateRunning {
 		m.mu.Unlock()
 		return
 	}
-	metadata.Phase = "infra-unavailable"
+	metadata.Phase = sandboxStateInfraUnavailable
 	m.recordDiagnosticLocked(
 		sandboxUID,
 		"error",
 		"infra",
-		"infra-unavailable",
+		sandboxStateInfraUnavailable,
 		fmt.Sprintf("Infra Component health changed after readiness: %v", healthErr),
 	)
 	m.mu.Unlock()
@@ -212,7 +213,7 @@ func (m *SandboxManager) markDataPlaneUnhealthy(metadata *SandboxMetadata, healt
 
 func dataPlaneWorkPending(phase string) bool {
 	switch phase {
-	case "infra-pending", "initializing-infra", "infra-unavailable", "route-pending", "publishing-route", "route-unavailable":
+	case sandboxStateInfraPending, sandboxStateInitializingInfra, sandboxStateInfraUnavailable, sandboxStateRoutePending, sandboxStatePublishingRoute, sandboxStateRouteUnavailable:
 		return true
 	default:
 		return false
@@ -240,22 +241,22 @@ func (m *SandboxManager) reconcileDataPlaneOnce(ctx context.Context, metadata *S
 		return true, nil
 	}
 	switch metadata.Phase {
-	case "running":
+	case sandboxStateRunning:
 		m.mu.Unlock()
 		return true, nil
-	case "infra-pending", "infra-unavailable":
-		metadata.Phase = "initializing-infra"
+	case sandboxStateInfraPending, sandboxStateInfraUnavailable:
+		metadata.Phase = sandboxStateInitializingInfra
 		m.mu.Unlock()
-	case "route-pending", "route-unavailable":
+	case sandboxStateRoutePending, sandboxStateRouteUnavailable:
 		m.mu.Unlock()
 		return m.publishDataPlaneRoute(ctx, metadata)
-	case "action-pending", "action-unavailable":
+	case sandboxStateActionPending, sandboxStateActionUnavailable:
 		m.mu.Unlock()
 		return true, nil
-	case "terminating", "deleting", "delete-failed", "create-cleanup", "create-cleanup-failed":
+	case sandboxStateTerminating, sandboxStateDeleting, sandboxStateDeleteFailed, sandboxStateCreateCleanup, sandboxStateCreateCleanupFailed:
 		m.mu.Unlock()
 		return true, ctx.Err()
-	case "initializing-infra", "publishing-route":
+	case sandboxStateInitializingInfra, sandboxStatePublishingRoute:
 		// Another recovery/reconnect path owns the transition.
 		m.mu.Unlock()
 		return false, nil
@@ -267,18 +268,18 @@ func (m *SandboxManager) reconcileDataPlaneOnce(ctx context.Context, metadata *S
 
 	infraErr := m.initializeInfraInstance(ctx, metadata)
 	m.mu.Lock()
-	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != "initializing-infra" {
+	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != sandboxStateInitializingInfra {
 		m.mu.Unlock()
 		return true, nil
 	}
 	if infraErr != nil {
-		metadata.Phase = "infra-unavailable"
-		m.recordDiagnosticLocked(sandboxUID, "error", "infra", "infra-unavailable", infraErr.Error())
+		metadata.Phase = sandboxStateInfraUnavailable
+		m.recordDiagnosticLocked(sandboxUID, "error", "infra", sandboxStateInfraUnavailable, infraErr.Error())
 		m.mu.Unlock()
 		return false, infraErr
 	}
-	metadata.Phase = "route-pending"
-	m.recordDiagnosticLocked(sandboxUID, "info", "infra", "route-pending", "required Infra Components are ready; proxy route publication continues asynchronously")
+	metadata.Phase = sandboxStateRoutePending
+	m.recordDiagnosticLocked(sandboxUID, "info", "infra", sandboxStateRoutePending, "required Infra Components are ready; proxy route publication continues asynchronously")
 	m.mu.Unlock()
 	return m.publishDataPlaneRoute(ctx, metadata)
 }
@@ -290,12 +291,12 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 		m.mu.Unlock()
 		return true, nil
 	}
-	if metadata.Phase != "route-pending" && metadata.Phase != "route-unavailable" {
+	if metadata.Phase != sandboxStateRoutePending && metadata.Phase != sandboxStateRouteUnavailable {
 		done := !dataPlaneWorkPending(metadata.Phase)
 		m.mu.Unlock()
 		return done, nil
 	}
-	metadata.Phase = "publishing-route"
+	metadata.Phase = sandboxStatePublishingRoute
 	m.mu.Unlock()
 
 	publishErr := m.publishRoute(ctx, metadata)
@@ -309,7 +310,7 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 		}
 	}
 	m.mu.Lock()
-	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != "publishing-route" {
+	if m.sandboxes[sandboxUID] != metadata || metadata.Phase != sandboxStatePublishingRoute {
 		m.mu.Unlock()
 		if routeApplied {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -321,17 +322,17 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 		return true, nil
 	}
 	if publishErr != nil {
-		metadata.Phase = "route-unavailable"
-		m.recordDiagnosticLocked(sandboxUID, "error", "route", "route-unavailable", publishErr.Error())
+		metadata.Phase = sandboxStateRouteUnavailable
+		m.recordDiagnosticLocked(sandboxUID, "error", "route", sandboxStateRouteUnavailable, publishErr.Error())
 		m.mu.Unlock()
 		return false, publishErr
 	}
 	if len(metadata.ActionBindingStatuses) > 0 {
-		metadata.Phase = "action-pending"
-		m.recordDiagnosticLocked(sandboxUID, "info", "action", "action-pending", "runtime data plane is ready; subscribed lifecycle Hooks are pending")
+		metadata.Phase = sandboxStateActionPending
+		m.recordDiagnosticLocked(sandboxUID, "info", "action", sandboxStateActionPending, "runtime data plane is ready; subscribed lifecycle Hooks are pending")
 	} else {
-		metadata.Phase = "running"
-		m.recordDiagnosticLocked(sandboxUID, "info", "fastlet", "running", "runtime, private network, Infra Components, proxy route, and Sandbox Actions are ready")
+		metadata.Phase = sandboxStateRunning
+		m.recordDiagnosticLocked(sandboxUID, "info", "fastlet", sandboxStateRunning, "runtime, private network, Infra Components, proxy route, and Sandbox Actions are ready")
 		klog.InfoS("sandbox data plane ready; route published", "sandboxID", sandboxUID)
 	}
 	m.mu.Unlock()
@@ -341,7 +342,7 @@ func (m *SandboxManager) publishDataPlaneRoute(ctx context.Context, metadata *Sa
 
 func actionStatusesReady(statuses []fastletapi.ActionBindingStatus) bool {
 	for _, status := range statuses {
-		if status.State != "Ready" {
+		if status.State != string(apiv1alpha2.ActionReady) {
 			return false
 		}
 	}
@@ -372,7 +373,7 @@ func (m *SandboxManager) ReconcilePendingInfra(ctx context.Context) error {
 	m.mu.RLock()
 	running := make([]*SandboxMetadata, 0, len(m.sandboxes))
 	for _, metadata := range m.sandboxes {
-		if metadata.Phase == "running" && m.infraManager != nil {
+		if metadata.Phase == sandboxStateRunning && m.infraManager != nil {
 			running = append(running, metadata)
 		}
 	}

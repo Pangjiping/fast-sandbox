@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 func TestPauseCommandTargetsSandbox(t *testing.T) {

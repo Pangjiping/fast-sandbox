@@ -69,7 +69,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	err := s.httpServer.Serve(s.listener)
 	if ctx.Err() != nil || errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
 		<-shutdownDone
-		return nil
+		return nil //nolint:nilerr // graceful shutdown: ErrServerClosed and cancelled ctx are normal exits
 	}
 	return err
 }

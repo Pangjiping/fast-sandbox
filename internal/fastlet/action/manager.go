@@ -11,15 +11,16 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	actionapi "fast-sandbox/internal/protocol/action"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -471,7 +472,7 @@ func (m *Manager) RecordHook(sandboxUID string, attachment Attachment, hook acti
 	return nil
 }
 
-func (m *Manager) convergeLocked(ctx context.Context, state *sandboxState) error {
+func (m *Manager) convergeLocked(ctx context.Context, state *sandboxState) error { //nolint:gocognit // pre-existing convergence loop; refactor tracked separately
 	state.mu.RLock()
 	desired := appendDesired(nil, state.desired)
 	generation := state.desiredGeneration
@@ -934,8 +935,8 @@ func buildRequest(operation actionapi.Operation, invocationID string, generation
 func stableInvocationID(operation actionapi.Operation, handler, handlerInstance string, generation int64, attachment Attachment, digest, extra string) string {
 	payload := strings.Join([]string{
 		string(operation), attachment.SandboxUID, handler, handlerInstance,
-		fmt.Sprintf("%d", generation), attachment.RuntimeInstanceID, attachment.ID,
-		fmt.Sprintf("%d", attachment.RouteGeneration), digest, extra,
+		strconv.FormatInt(generation, 10), attachment.RuntimeInstanceID, attachment.ID,
+		strconv.FormatInt(attachment.RouteGeneration, 10), digest, extra,
 	}, "\x00")
 	digestBytes := sha256.Sum256([]byte(payload))
 	return "sha256:" + hex.EncodeToString(digestBytes[:])

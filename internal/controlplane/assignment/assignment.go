@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 // ProjectAssignmentToStatus copies the durable assignment annotation into the

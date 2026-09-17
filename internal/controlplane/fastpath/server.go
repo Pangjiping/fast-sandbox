@@ -8,6 +8,17 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	fastpathv2 "fast-sandbox/api/proto/v2"
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/assignment"
@@ -18,18 +29,6 @@ import (
 	"fast-sandbox/internal/observability"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/pkg/util/idgen"
-
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	apiMeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kvalidation "k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/client-go/util/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"k8s.io/klog/v2"
 )
 
 type Server struct {
@@ -321,7 +320,7 @@ func (s *Server) GetSandbox(ctx context.Context, request *fastpathv2.GetSandboxR
 	// project the durable CRD state instead of failing the read.
 	envelope, assignmentErr := assignment.EffectiveAssignment(sandbox)
 	if assignmentErr != nil || envelope == nil {
-		return &fastpathv2.GetSandboxResponse{Sandbox: sandboxInfoFromCRD(sandbox), Generation: sandbox.Generation}, nil
+		return &fastpathv2.GetSandboxResponse{Sandbox: sandboxInfoFromCRD(sandbox), Generation: sandbox.Generation}, nil //nolint:nilerr // intentional degraded read: project durable CRD state when assignment is absent or unreadable
 	}
 	info, _, _, err := s.inspectAssignedSandbox(ctx, sandbox)
 	if err != nil {
@@ -643,7 +642,7 @@ func (s *Server) GetSandboxDiagnostics(ctx context.Context, request *fastpathv2.
 	envelope, annotationErr := assignment.AssignmentFromAnnotation(&sandbox)
 	if annotationErr != nil {
 		response.AssignmentState, response.FastletError = "invalid-annotation", annotationErr.Error()
-		return response, nil
+		return response, nil //nolint:nilerr // diagnostics endpoint reports the error in the response instead of failing the call
 	}
 	if envelope == nil {
 		response.AssignmentState, response.FastletError = "unassigned", "Sandbox has no durable assignment"

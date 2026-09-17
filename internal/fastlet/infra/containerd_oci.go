@@ -12,14 +12,14 @@ import (
 	"sync"
 	"time"
 
-	infracatalog "fast-sandbox/internal/catalog/infra"
-	"fast-sandbox/internal/registryconfig"
-
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/archive"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+
+	infracatalog "fast-sandbox/internal/catalog/infra"
+	"fast-sandbox/internal/registryconfig"
 )
 
 type ContainerdOCIArtifactOpener struct {

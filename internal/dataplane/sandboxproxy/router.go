@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"sync"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/assignment"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/assignment"
 )
 
 var (
@@ -213,7 +213,7 @@ func (r *KubernetesResolver) ResolveFresh(ctx context.Context, sandboxUID string
 	}
 	var pod corev1.Pod
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: sandbox.Namespace, Name: resolved.FastletName}, &pod); err != nil {
-		return Route{}, fmt.Errorf("%w: %v", ErrFastletUnavailable, err)
+		return Route{}, fmt.Errorf("%w: %w", ErrFastletUnavailable, err)
 	}
 	if string(pod.UID) != resolved.FastletPodUID || pod.Status.PodIP == "" {
 		return Route{}, ErrFastletUnavailable

@@ -3,7 +3,6 @@ package fastletproxy
 import (
 	"bufio"
 	"crypto/ed25519"
-	dataplane "fast-sandbox/internal/dataplane/contract"
 	"fmt"
 	"io"
 	"net"
@@ -12,9 +11,10 @@ import (
 	"testing"
 	"time"
 
-	routeauth "fast-sandbox/internal/dataplane/auth"
-
 	"github.com/stretchr/testify/require"
+
+	routeauth "fast-sandbox/internal/dataplane/auth"
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 func TestEncodeLocalForwardPreamble(t *testing.T) {

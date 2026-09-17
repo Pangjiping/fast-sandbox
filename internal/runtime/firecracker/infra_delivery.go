@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
@@ -40,7 +41,7 @@ func ensureLoopDevices() error {
 		// mknod must not fail the mount on read-only /dev: the mount below
 		// reports the authoritative error if a loop device is missing.
 		_ = exec.Command("mknod", device.path, device.kind,
-			fmt.Sprintf("%d", device.major), fmt.Sprintf("%d", device.minor)).Run()
+			strconv.Itoa(device.major), strconv.Itoa(device.minor)).Run()
 	}
 	return nil
 }

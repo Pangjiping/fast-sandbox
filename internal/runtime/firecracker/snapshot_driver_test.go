@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"fast-sandbox/internal/artifacts"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
-
-	"github.com/stretchr/testify/require"
 )
 
 // seedRunningSandbox writes a durable Running Sandbox state plus its

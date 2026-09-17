@@ -1,10 +1,10 @@
 package cmd
 
 import (
+	"github.com/spf13/viper"
+
 	fastpathv2 "fast-sandbox/api/proto/v2"
 	"fast-sandbox/pkg/sandboxclient"
-
-	"github.com/spf13/viper"
 )
 
 func newOpenSandboxExecd(client fastpathv2.FastPathServiceClient) *sandboxclient.OpenSandboxExecd {

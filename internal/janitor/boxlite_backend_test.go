@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
+
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	boxliteprotocol "fast-sandbox/internal/runtime/boxlite/protocol"
 	boxlitestate "fast-sandbox/internal/runtime/boxlite/state"
-
-	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/unix"
 )
 
 func TestBoxLiteBackendScansFencedRecordsAndCleansAfterLockRelease(t *testing.T) {

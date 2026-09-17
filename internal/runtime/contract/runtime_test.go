@@ -3,9 +3,9 @@ package contract
 import (
 	"testing"
 
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	"github.com/stretchr/testify/require"
+
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
 func TestSameRuntimeIdentityIncludesEveryFence(t *testing.T) {

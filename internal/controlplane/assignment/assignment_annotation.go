@@ -6,15 +6,24 @@ import (
 	"errors"
 	"fmt"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
 const (
 	AnnotationAssignment      = "sandbox.fast.io/assignment"
 	AssignmentEnvelopeVersion = "v1"
+	// assignmentAnnotationJSONPath is AnnotationAssignment escaped for JSON
+	// Patch bodies ("~1" encodes "/").
+	assignmentAnnotationJSONPath = "/metadata/annotations/sandbox.fast.io~1assignment"
+	// jsonPatchPathField is the JSON Patch (RFC 6902) member naming an operation's target path.
+	jsonPatchPathField = "path"
+	// jsonPatchTestOp is the JSON Patch precondition operation name.
+	jsonPatchTestOp = "test"
+	// jsonPatchValueField is the JSON Patch value member name.
+	jsonPatchValueField = "value"
 )
 
 var (
@@ -133,7 +142,7 @@ func EncodeAssignment(envelope AssignmentEnvelope) (string, error) {
 
 func ParseAssignment(value string) (*AssignmentEnvelope, error) {
 	if value == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // empty annotation means no assignment exists; absence is optional, not an error
 	}
 	var envelope AssignmentEnvelope
 	if err := json.Unmarshal([]byte(value), &envelope); err != nil {
@@ -186,7 +195,7 @@ func EffectiveAssignment(sandbox *apiv1alpha2.Sandbox) (*AssignmentEnvelope, err
 		if sandbox.Status.Placement.FastletName != "" {
 			return nil, ErrAssignmentAnnotationMissing
 		}
-		return nil, nil
+		return nil, nil //nolint:nilnil // a Sandbox with no assignment annotation and empty placement is a valid unassigned state
 	}
 	if sandbox.Status.Placement.FastletName == "" {
 		return envelope, nil
@@ -235,8 +244,8 @@ func CASAssignmentAnnotation(
 	}
 	currentValue := current.Annotations[AnnotationAssignment]
 	patch, err := json.Marshal([]map[string]any{
-		{"op": "test", "path": "/metadata/annotations/sandbox.fast.io~1assignment", "value": currentValue},
-		{"op": "replace", "path": "/metadata/annotations/sandbox.fast.io~1assignment", "value": nextValue},
+		{"op": jsonPatchTestOp, jsonPatchPathField: assignmentAnnotationJSONPath, jsonPatchValueField: currentValue},
+		{"op": "replace", jsonPatchPathField: assignmentAnnotationJSONPath, jsonPatchValueField: nextValue},
 	})
 	if err != nil {
 		return nil, err
@@ -280,9 +289,9 @@ func RemoveAssignmentAnnotation(
 	}
 	currentValue := current.Annotations[AnnotationAssignment]
 	patch, err := json.Marshal([]map[string]any{
-		{"op": "test", "path": "/metadata/resourceVersion", "value": current.ResourceVersion},
-		{"op": "test", "path": "/metadata/annotations/sandbox.fast.io~1assignment", "value": currentValue},
-		{"op": "remove", "path": "/metadata/annotations/sandbox.fast.io~1assignment"},
+		{"op": jsonPatchTestOp, jsonPatchPathField: "/metadata/resourceVersion", jsonPatchValueField: current.ResourceVersion},
+		{"op": jsonPatchTestOp, jsonPatchPathField: assignmentAnnotationJSONPath, jsonPatchValueField: currentValue},
+		{"op": "remove", jsonPatchPathField: assignmentAnnotationJSONPath},
 	})
 	if err != nil {
 		return nil, false, err

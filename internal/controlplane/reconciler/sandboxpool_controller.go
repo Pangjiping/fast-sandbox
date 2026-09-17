@@ -4,25 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
-
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	infracatalog "fast-sandbox/internal/catalog/infra"
-	runtimecatalog "fast-sandbox/internal/catalog/runtime"
-	"fast-sandbox/internal/controlplane/placement"
-	"fast-sandbox/internal/fastlet/podcgroup"
-	"fast-sandbox/internal/fastletsettings"
-	"fast-sandbox/internal/nodecleanup"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-	"fast-sandbox/internal/registryconfig"
-	"fast-sandbox/internal/runtimeenv"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,6 +27,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/yaml"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	infracatalog "fast-sandbox/internal/catalog/infra"
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
+	"fast-sandbox/internal/controlplane/placement"
+	"fast-sandbox/internal/fastlet/podcgroup"
+	"fast-sandbox/internal/fastletsettings"
+	"fast-sandbox/internal/nodecleanup"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
+	"fast-sandbox/internal/runtimeenv"
 )
 
 // SandboxPoolReconciler reconciles SandboxPool resources.
@@ -64,8 +66,51 @@ const (
 	drainRequeue        = 2 * time.Second
 )
 
+const (
+	// poolLabelKey labels platform-owned Fastlet Pods and derived objects with their owning SandboxPool.
+	poolLabelKey = "fast-sandbox.io/pool"
+	// boxliteRuntimeName is the reserved name of the platform-owned BoxLite runtime sidecar.
+	boxliteRuntimeName = "boxlite-runtime"
+	// envFastletProxyControlSocket carries the fastlet-proxy control socket path into containers.
+	envFastletProxyControlSocket = "FASTLET_PROXY_CONTROL_SOCKET"
+	// envPodName projects the Fastlet Pod name into the container environment.
+	envPodName = "POD_NAME"
+	// envPodUID projects the Fastlet Pod UID into the container environment.
+	envPodUID = "POD_UID"
+	// envFastSandboxRegistryConfigPath carries the registry config file path into containers.
+	envFastSandboxRegistryConfigPath = "FAST_SANDBOX_REGISTRY_CONFIG_PATH"
+	// infraHostPath is the in-Pod directory where infra component tools are exposed.
+	infraHostPath = "/opt/fast-sandbox/infra"
+	// tmpDir is the node's /tmp shared into the Fastlet container.
+	tmpDir = "/tmp"
+	// infraToolsVolumeName is the reserved volume carrying infra component tools.
+	infraToolsVolumeName = "infra-tools"
+	// infraPlanVolumeName is the reserved volume mounting the compiled infra plan.
+	infraPlanVolumeName = "infra-plan"
+	// runtimePlanVolumeName is the reserved volume mounting the resolved runtime plan.
+	runtimePlanVolumeName = "runtime-plan"
+	// registryConfigDir is the in-Pod directory holding the compiled registry config.
+	registryConfigDir = "/etc/fast-sandbox/registry"
+	// proxyRunDir is the shared runtime directory for the fastlet-proxy control socket.
+	proxyRunDir = "/run/fast-sandbox/proxy"
+	// nodeCleanupVolumeName is the reserved volume exposing the node-cleanup socket directory.
+	nodeCleanupVolumeName = "node-cleanup"
+	// boxliteRunDir is the shared runtime directory for the BoxLite control socket.
+	boxliteRunDir = "/run/fast-sandbox/boxlite"
+	// fastletProxyContainerName is the name of the Fastlet Proxy sidecar container.
+	fastletProxyContainerName = "fastlet-proxy"
+	// tmpVolumeName is the reserved scratch volume name.
+	tmpVolumeName = "tmp"
+	// registryConfigVolumeName is the reserved volume mounting the registry config.
+	registryConfigVolumeName = "registry-config"
+	// proxyControlVolumeName is the reserved volume sharing the proxy control socket.
+	proxyControlVolumeName = "proxy-control"
+	// boxliteControlVolumeName is the reserved volume sharing the BoxLite control socket.
+	boxliteControlVolumeName = "boxlite-control"
+)
+
 // Reconcile manages the lifecycle of Fastlet Pods based on the demand from Sandboxes.
-func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) { //nolint:gocognit,gocyclo,maintidx // pre-existing reconcile state machine; refactor tracked separately
 	logger := klog.FromContext(ctx)
 
 	var pool apiv1alpha2.SandboxPool
@@ -238,7 +283,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if currentCount < desiredPods {
 		diff := desiredPods - currentCount
 		logger.Info("scaling up fastlet pool", "diff", diff)
-		for i := int32(0); i < diff; i++ {
+		for range diff {
 			pod := desiredPod.DeepCopy()
 			if err := r.Create(ctx, pod); err != nil {
 				logger.Error(err, "Failed to create fastlet pod")
@@ -416,7 +461,7 @@ func (r *SandboxPoolReconciler) runtimeCapabilityCondition(pool *apiv1alpha2.San
 	return condition, ready
 }
 
-func (r *SandboxPoolReconciler) reconcileDraining(
+func (r *SandboxPoolReconciler) reconcileDraining( //nolint:gocognit // pre-existing drain state machine; refactor tracked separately
 	ctx context.Context,
 	pool *apiv1alpha2.SandboxPool,
 	pods []corev1.Pod,
@@ -631,7 +676,7 @@ func (r *SandboxPoolReconciler) durableReader() client.Reader {
 // constructPod builds a Fastlet Pod from the template and a platform-owned
 // RuntimeProfile. RuntimeClass and backend handler overrides are never copied
 // from the Pool into the Pod.
-func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, profile runtimecatalog.RuntimeProfile) (*corev1.Pod, error) {
+func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, profile runtimecatalog.RuntimeProfile) (*corev1.Pod, error) { //nolint:unused // used by reconciler tests
 	plan, err := runtimeenv.ResolveDefault(r.Catalog, profile.Name)
 	if err != nil {
 		return nil, err
@@ -639,7 +684,7 @@ func (r *SandboxPoolReconciler) constructPod(pool *apiv1alpha2.SandboxPool, prof
 	return r.constructPodWithRuntimePlan(pool, plan)
 }
 
-func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.SandboxPool, runtimePlan runtimeenv.ResolvedRuntimePlan) (*corev1.Pod, error) {
+func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.SandboxPool, runtimePlan runtimeenv.ResolvedRuntimePlan) (*corev1.Pod, error) { //nolint:gocognit,maintidx // pre-existing pod assembly logic; refactor tracked separately
 	if err := pool.Spec.ValidateActionHandlers(); err != nil {
 		return nil, err
 	}
@@ -686,7 +731,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 		return nil, errors.New("fastletTemplate.spec.containers must contain the fastlet container")
 	}
 	for _, container := range podSpec.Containers[1:] {
-		if container.Name == "fastlet-proxy" || container.Name == "boxlite-runtime" {
+		if container.Name == fastletProxyContainerName || container.Name == boxliteRuntimeName {
 			return nil, fmt.Errorf("%s is a platform-owned sidecar name", container.Name)
 		}
 	}
@@ -711,14 +756,14 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 
 		c.Env = append(c.Env,
 			corev1.EnvVar{Name: "FASTLET_CONTROL_PORT", Value: ":5758"},
-			corev1.EnvVar{Name: "FASTLET_PROXY_CONTROL_SOCKET", Value: "/run/fast-sandbox/proxy/control.sock"},
+			corev1.EnvVar{Name: envFastletProxyControlSocket, Value: "/run/fast-sandbox/proxy/control.sock"},
 			corev1.EnvVar{Name: "FAST_SANDBOX_SETTINGS_DIR", Value: fastletsettings.MountPath},
 			corev1.EnvVar{
 				Name:      "NODE_NAME",
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}},
 			},
 			corev1.EnvVar{
-				Name:      "POD_NAME",
+				Name:      envPodName,
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}},
 			},
 			corev1.EnvVar{
@@ -726,7 +771,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}},
 			},
 			corev1.EnvVar{
-				Name:      "POD_UID",
+				Name:      envPodUID,
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}},
 			},
 			corev1.EnvVar{
@@ -743,7 +788,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			},
 			corev1.EnvVar{
 				Name:  "FASTLET_CAPACITY",
-				Value: fmt.Sprintf("%d", getFastletCapacity(pool)),
+				Value: strconv.Itoa(int(getFastletCapacity(pool))),
 			},
 			corev1.EnvVar{
 				Name:  "FAST_SANDBOX_RUNTIME",
@@ -756,20 +801,20 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			corev1.EnvVar{Name: "FAST_SANDBOX_RUNTIME_PLAN_PATH", Value: runtimeenv.PlanMountPath + "/" + runtimeenv.PlanFileName},
 			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_REVISION", Value: infraPlan.Revision},
 			corev1.EnvVar{Name: "FAST_SANDBOX_INFRA_PLAN_PATH", Value: "/etc/fast-sandbox/infra/plan.json"},
-			corev1.EnvVar{Name: "FAST_SANDBOX_REGISTRY_CONFIG_PATH", Value: registryconfig.MountPath},
-			corev1.EnvVar{Name: "INFRA_DIR_IN_POD", Value: "/opt/fast-sandbox/infra"},
+			corev1.EnvVar{Name: envFastSandboxRegistryConfigPath, Value: registryconfig.MountPath},
+			corev1.EnvVar{Name: "INFRA_DIR_IN_POD", Value: infraHostPath},
 		)
 		if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
 			c.Env = append(c.Env, corev1.EnvVar{Name: "FAST_SANDBOX_NODE_CLEANUP_SOCKET", Value: nodecleanup.DefaultSocketPath})
 		}
 		c.VolumeMounts = append(c.VolumeMounts,
-			corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"},
-			corev1.VolumeMount{Name: "infra-tools", MountPath: "/opt/fast-sandbox/infra"},
-			corev1.VolumeMount{Name: "infra-plan", MountPath: "/etc/fast-sandbox/infra", ReadOnly: true},
-			corev1.VolumeMount{Name: "runtime-plan", MountPath: runtimeenv.PlanMountPath, ReadOnly: true},
-			corev1.VolumeMount{Name: "registry-config", MountPath: "/etc/fast-sandbox/registry", ReadOnly: true},
+			corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpDir},
+			corev1.VolumeMount{Name: infraToolsVolumeName, MountPath: infraHostPath},
+			corev1.VolumeMount{Name: infraPlanVolumeName, MountPath: "/etc/fast-sandbox/infra", ReadOnly: true},
+			corev1.VolumeMount{Name: runtimePlanVolumeName, MountPath: runtimeenv.PlanMountPath, ReadOnly: true},
+			corev1.VolumeMount{Name: registryConfigVolumeName, MountPath: registryConfigDir, ReadOnly: true},
 			corev1.VolumeMount{Name: fastletsettings.VolumeName, MountPath: fastletsettings.MountPath, ReadOnly: true},
-			corev1.VolumeMount{Name: "proxy-control", MountPath: "/run/fast-sandbox/proxy"},
+			corev1.VolumeMount{Name: proxyControlVolumeName, MountPath: proxyRunDir},
 		)
 		if profile.Driver == runtimecatalog.DriverKindContainerd {
 			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
@@ -777,7 +822,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			})
 		}
 		if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
-			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "node-cleanup", MountPath: filepath.Dir(nodecleanup.DefaultSocketPath)})
+			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: nodeCleanupVolumeName, MountPath: filepath.Dir(nodecleanup.DefaultSocketPath)})
 		}
 		if runtimeResourceOwner == c.Name {
 			if err := applyFastletResources(c, profile.Deployment.Overhead, sandboxResources, getFastletCapacity(pool)); err != nil {
@@ -797,9 +842,9 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 		proxyImage = "fast-sandbox/fastlet-proxy:dev"
 	}
 	podSpec.Containers = append(podSpec.Containers, corev1.Container{
-		Name: "fastlet-proxy", Image: proxyImage, ImagePullPolicy: corev1.PullIfNotPresent,
+		Name: fastletProxyContainerName, Image: proxyImage, ImagePullPolicy: corev1.PullIfNotPresent,
 		Env: []corev1.EnvVar{
-			{Name: "FASTLET_PROXY_CONTROL_SOCKET", Value: "/run/fast-sandbox/proxy/control.sock"},
+			{Name: envFastletProxyControlSocket, Value: "/run/fast-sandbox/proxy/control.sock"},
 			{Name: "FASTLET_PROXY_DATA_ADDRESS", Value: ":5780"},
 			{Name: "FASTLET_PROXY_METRICS_ADDRESS", Value: ":9093"},
 			{Name: "FAST_SANDBOX_ROUTE_VERIFY_PUBLIC_KEY", Value: r.RouteVerifyPublicKey},
@@ -808,7 +853,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 			{Name: "data-proxy", ContainerPort: 5780, Protocol: corev1.ProtocolTCP},
 			{Name: "proxy-metrics", ContainerPort: 9093, Protocol: corev1.ProtocolTCP},
 		},
-		VolumeMounts: []corev1.VolumeMount{{Name: "proxy-control", MountPath: "/run/fast-sandbox/proxy"}},
+		VolumeMounts: []corev1.VolumeMount{{Name: proxyControlVolumeName, MountPath: proxyRunDir}},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
 				Path: "/readyz", Port: intstr.FromInt32(5780), Scheme: corev1.URISchemeHTTP,
@@ -817,14 +862,14 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 		},
 	})
 	if profile.Deployment.Sidecar != "" {
-		if profile.Deployment.Sidecar != "boxlite-runtime" || profile.BoxLite == nil {
+		if profile.Deployment.Sidecar != boxliteRuntimeName || profile.BoxLite == nil {
 			return nil, fmt.Errorf("runtime profile %q requests unknown platform sidecar %q", profile.Name, profile.Deployment.Sidecar)
 		}
 		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts,
-			corev1.VolumeMount{Name: "boxlite-control", MountPath: "/run/fast-sandbox/boxlite"},
+			corev1.VolumeMount{Name: boxliteControlVolumeName, MountPath: boxliteRunDir},
 		)
 		podSpec.Containers = append(podSpec.Containers, r.boxLiteRuntimeContainer(*profile.BoxLite))
-		if runtimeResourceOwner != "boxlite-runtime" {
+		if runtimeResourceOwner != boxliteRuntimeName {
 			return nil, fmt.Errorf("boxLite runtime resource owner must be boxlite-runtime, got %q", runtimeResourceOwner)
 		}
 		if err := applyFastletResources(&podSpec.Containers[len(podSpec.Containers)-1], profile.Deployment.Overhead, sandboxResources, getFastletCapacity(pool)); err != nil {
@@ -839,29 +884,29 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 
 	podSpec.Volumes = append(podSpec.Volumes,
 		corev1.Volume{
-			Name:         "tmp",
-			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/tmp", Type: &hostPathDirectory}},
+			Name:         tmpVolumeName,
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: tmpDir, Type: &hostPathDirectory}},
 		},
 		corev1.Volume{
-			Name: "infra-tools",
+			Name: infraToolsVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		},
 		corev1.Volume{
-			Name: "infra-plan",
+			Name: infraPlanVolumeName,
 			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: infraPlanConfigMapName(pool.Name, infraPlan.Revision)},
 			}},
 		},
 		corev1.Volume{
-			Name: "runtime-plan",
+			Name: runtimePlanVolumeName,
 			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: runtimePlanConfigMapName(pool.Name, runtimePlan.Revision)},
 			}},
 		},
 		corev1.Volume{
-			Name: "registry-config",
+			Name: registryConfigVolumeName,
 			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 				SecretName: registrySecretName(pool.Name),
 			}},
@@ -872,7 +917,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 				LocalObjectReference: corev1.LocalObjectReference{Name: settingsConfigMapName(pool.Name, settingsRevision)},
 			}},
 		},
-		corev1.Volume{Name: "proxy-control", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		corev1.Volume{Name: proxyControlVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	)
 	if profile.Driver == runtimecatalog.DriverKindContainerd {
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
@@ -885,7 +930,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 	if profile.ResidualProcess != runtimecatalog.ResidualProcessNone {
 		hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: "node-cleanup",
+			Name: nodeCleanupVolumeName,
 			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
 				Path: filepath.Dir(nodecleanup.DefaultSocketPath), Type: &hostPathDirectoryOrCreate,
 			}},
@@ -894,7 +939,7 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 	runtimeContainer := &podSpec.Containers[0]
 	if profile.Deployment.Sidecar != "" {
 		podSpec.Volumes = append(podSpec.Volumes,
-			corev1.Volume{Name: "boxlite-control", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			corev1.Volume{Name: boxliteControlVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		)
 		runtimeContainer = &podSpec.Containers[len(podSpec.Containers)-1]
 	}
@@ -941,7 +986,7 @@ func stampFastletPodTemplateHash(pod *corev1.Pod) error {
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
-	pod.Annotations[placement.AnnotationPodTemplateHash] = fmt.Sprintf("%x", digest)
+	pod.Annotations[placement.AnnotationPodTemplateHash] = hex.EncodeToString(digest[:])
 	return nil
 }
 
@@ -1012,7 +1057,7 @@ func (r *SandboxPoolReconciler) boxLiteRuntimeContainer(config runtimecatalog.Bo
 		image = "fast-sandbox/boxlite-runtime:dev"
 	}
 	return corev1.Container{
-		Name:            "boxlite-runtime",
+		Name:            boxliteRuntimeName,
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Args: []string{
@@ -1021,17 +1066,17 @@ func (r *SandboxPoolReconciler) boxLiteRuntimeContainer(config runtimecatalog.Bo
 		},
 		Env: []corev1.EnvVar{
 			{
-				Name:      "POD_UID",
+				Name:      envPodUID,
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}},
 			},
-			{Name: "FAST_SANDBOX_INFRA_STORE_ROOT", Value: "/opt/fast-sandbox/infra"},
-			{Name: "FAST_SANDBOX_REGISTRY_CONFIG_PATH", Value: registryconfig.MountPath},
+			{Name: "FAST_SANDBOX_INFRA_STORE_ROOT", Value: infraHostPath},
+			{Name: envFastSandboxRegistryConfigPath, Value: registryconfig.MountPath},
 		},
 		SecurityContext: &corev1.SecurityContext{Privileged: boolPtr(true)},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "boxlite-control", MountPath: "/run/fast-sandbox/boxlite"},
-			{Name: "infra-tools", MountPath: "/opt/fast-sandbox/infra", ReadOnly: true},
-			{Name: "registry-config", MountPath: "/etc/fast-sandbox/registry", ReadOnly: true},
+			{Name: boxliteControlVolumeName, MountPath: boxliteRunDir},
+			{Name: infraToolsVolumeName, MountPath: infraHostPath, ReadOnly: true},
+			{Name: registryConfigVolumeName, MountPath: registryConfigDir, ReadOnly: true},
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{
@@ -1044,15 +1089,15 @@ func (r *SandboxPoolReconciler) boxLiteRuntimeContainer(config runtimecatalog.Bo
 
 func validatePlatformOwnedStorage(podSpec *corev1.PodSpec) error {
 	reservedVolumes := map[string]string{
-		"tmp":                      "/tmp",
-		"infra-tools":              "/opt/fast-sandbox/infra",
-		"infra-plan":               "/etc/fast-sandbox/infra",
-		"runtime-plan":             runtimeenv.PlanMountPath,
-		"registry-config":          "/etc/fast-sandbox/registry",
+		tmpVolumeName:              tmpDir,
+		infraToolsVolumeName:       infraHostPath,
+		infraPlanVolumeName:        "/etc/fast-sandbox/infra",
+		runtimePlanVolumeName:      runtimeenv.PlanMountPath,
+		registryConfigVolumeName:   registryConfigDir,
 		fastletsettings.VolumeName: fastletsettings.MountPath,
-		"proxy-control":            "/run/fast-sandbox/proxy",
-		"node-cleanup":             filepath.Dir(nodecleanup.DefaultSocketPath),
-		"boxlite-control":          "/run/fast-sandbox/boxlite",
+		proxyControlVolumeName:     proxyRunDir,
+		nodeCleanupVolumeName:      filepath.Dir(nodecleanup.DefaultSocketPath),
+		boxliteControlVolumeName:   boxliteRunDir,
 		podcgroup.VolumeName:       podcgroup.HostRoot,
 	}
 	for _, volume := range podSpec.Volumes {
@@ -1098,8 +1143,8 @@ func uniqueWarmImages(images []string) []string {
 
 func poolLabels(poolName string) map[string]string {
 	return map[string]string{
-		"fast-sandbox.io/pool": poolName,
-		"app":                  "sandbox-fastlet",
+		poolLabelKey: poolName,
+		"app":        "sandbox-fastlet",
 	}
 }
 
@@ -1107,7 +1152,7 @@ func getFastletCapacity(pool *apiv1alpha2.SandboxPool) int32 {
 	return pool.Spec.MaxSandboxesPerPod
 }
 
-func (r *SandboxPoolReconciler) resolveRuntimeProfile(pool *apiv1alpha2.SandboxPool) (runtimecatalog.RuntimeProfile, error) {
+func (r *SandboxPoolReconciler) resolveRuntimeProfile(pool *apiv1alpha2.SandboxPool) (runtimecatalog.RuntimeProfile, error) { //nolint:unused // used by reconciler tests
 	if err := pool.Spec.ValidateRuntime(); err != nil {
 		return runtimecatalog.RuntimeProfile{}, err
 	}
@@ -1364,7 +1409,7 @@ func (r *SandboxPoolReconciler) persistRegistrySecret(
 		secret = corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: key.Name, Namespace: key.Namespace,
-				Labels: map[string]string{"fast-sandbox.io/pool": pool.Name, "fast-sandbox.io/registry-config": "compiled"},
+				Labels: map[string]string{poolLabelKey: pool.Name, "fast-sandbox.io/registry-config": "compiled"},
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: map[string][]byte{registryconfig.SecretKey: content},
@@ -1437,7 +1482,7 @@ func (r *SandboxPoolReconciler) ensureInfraPlanConfigMap(
 		ObjectMeta: metav1.ObjectMeta{
 			Name: key.Name, Namespace: key.Namespace,
 			Labels: map[string]string{
-				"fast-sandbox.io/pool":           pool.Name,
+				poolLabelKey:                     pool.Name,
 				"fast-sandbox.io/infra-revision": shortRevision(plan.Revision),
 			},
 			Annotations: map[string]string{"fast-sandbox.io/infra-revision": plan.Revision},
@@ -1480,7 +1525,7 @@ func (r *SandboxPoolReconciler) ensureRuntimePlanConfigMap(
 		ObjectMeta: metav1.ObjectMeta{
 			Name: key.Name, Namespace: key.Namespace,
 			Labels: map[string]string{
-				"fast-sandbox.io/pool":             pool.Name,
+				poolLabelKey:                       pool.Name,
 				"fast-sandbox.io/runtime-revision": shortRevision(plan.Revision),
 			},
 			Annotations: map[string]string{"fast-sandbox.io/runtime-revision": plan.Revision},
@@ -1535,7 +1580,7 @@ func (r *SandboxPoolReconciler) ensureFastletSettingsConfigMap(
 		ObjectMeta: metav1.ObjectMeta{
 			Name: key.Name, Namespace: key.Namespace,
 			Labels: map[string]string{
-				"fast-sandbox.io/pool":              pool.Name,
+				poolLabelKey:                        pool.Name,
 				"fast-sandbox.io/settings-revision": shortRevision(revision),
 			},
 			Annotations: map[string]string{"fast-sandbox.io/settings-revision": revision},
@@ -1571,15 +1616,15 @@ var runtimeOwnedEnv = map[string]struct{}{
 	"FAST_SANDBOX_RUNTIME_PLAN_PATH": {}, "FAST_SANDBOX_SNAPSHOTTER": {}, "FAST_SANDBOX_KUBELET_ROOT": {},
 	"FAST_SANDBOX_RESOURCE_CPU": {}, "FAST_SANDBOX_RESOURCE_MEMORY": {}, "FAST_SANDBOX_RESOURCE_PIDS": {},
 	"FAST_SANDBOX_INFRA_REVISION": {}, "FAST_SANDBOX_INFRA_PLAN_PATH": {}, "FASTLET_CAPACITY": {},
-	"FAST_SANDBOX_REGISTRY_CONFIG_PATH": {},
-	"RUNTIME_SOCKET":                    {}, "INFRA_DIR_IN_POD": {},
+	envFastSandboxRegistryConfigPath: {},
+	"RUNTIME_SOCKET":                 {}, "INFRA_DIR_IN_POD": {},
 	"FASTLET_CONTROL_PORT":         {},
-	"FASTLET_PROXY_CONTROL_SOCKET": {},
+	envFastletProxyControlSocket:   {},
 	"FAST_SANDBOX_WARM_IMAGES":     {},
 	"FAST_SANDBOX_ACTION_HANDLERS": {},
 	"FAST_SANDBOX_ACTIONS":         {},
 	"FAST_SANDBOX_SETTINGS_DIR":    {},
-	"NODE_NAME":                    {}, "POD_NAME": {}, "POD_IP": {}, "POD_UID": {}, "NAMESPACE": {},
+	"NODE_NAME":                    {}, envPodName: {}, "POD_IP": {}, envPodUID: {}, "NAMESPACE": {},
 }
 
 func removeRuntimeOwnedEnv(env []corev1.EnvVar) []corev1.EnvVar {
@@ -1606,7 +1651,7 @@ func mergeNodeSelector(podSpec *corev1.PodSpec, required map[string]string) erro
 	return nil
 }
 
-func applyFastletResources(container *corev1.Container, overhead corev1.ResourceList, sandbox apiv1alpha2.SandboxResourceProfile, capacity int32) error {
+func applyFastletResources(container *corev1.Container, overhead corev1.ResourceList, sandbox apiv1alpha2.SandboxResourceProfile, capacity int32) error { //nolint:gocognit // pre-existing resource-merge logic; refactor tracked separately
 	defaultAggregate := overhead.DeepCopy()
 	if defaultAggregate == nil {
 		defaultAggregate = corev1.ResourceList{}
@@ -1673,7 +1718,7 @@ func ensureBoundedPodContainers(podSpec *corev1.PodSpec, runtimeResourceOwner st
 		if container.Name == runtimeResourceOwner {
 			continue
 		}
-		if index == 0 || container.Name == "fastlet-proxy" {
+		if index == 0 || container.Name == fastletProxyContainerName {
 			applyDefaultPlatformResources(container)
 			continue
 		}

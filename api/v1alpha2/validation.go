@@ -136,7 +136,7 @@ func (s *SandboxPoolSpec) ValidateRuntime() error {
 // ValidateInfraComponents verifies the cross-field constraints that the CRD
 // structural schema cannot express, including component-scoped target paths
 // and endpoint uniqueness.
-func (s *SandboxPoolSpec) ValidateInfraComponents() error {
+func (s *SandboxPoolSpec) ValidateInfraComponents() error { //nolint:gocognit // pre-existing cross-field validation checks; refactor tracked separately
 	if s == nil {
 		return fmt.Errorf("%w: pool spec is required", ErrInfraComponentsInvalid)
 	}

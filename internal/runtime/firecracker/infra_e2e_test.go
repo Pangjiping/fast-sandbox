@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletinfra "fast-sandbox/internal/fastlet/infra"
-
-	"github.com/stretchr/testify/require"
 )
 
 // newE2EInfraManager builds a real Infra Manager with one archive component

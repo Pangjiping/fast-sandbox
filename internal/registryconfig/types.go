@@ -21,6 +21,9 @@ const (
 	MountPath     = "/etc/fast-sandbox/registry/registry.json"
 )
 
+// registryDockerHub is the normalized host of Docker Hub image references.
+const registryDockerHub = "docker.io"
+
 type Config struct {
 	Registries []RegistryRule `json:"registries,omitempty" yaml:"registries,omitempty"`
 }
@@ -284,7 +287,7 @@ func NormalizeHost(host string) string {
 	host = strings.TrimSuffix(host, "/v1")
 	switch host {
 	case "index.docker.io", "registry-1.docker.io":
-		return "docker.io"
+		return registryDockerHub
 	default:
 		return host
 	}
@@ -296,7 +299,7 @@ func splitReference(reference string) (string, string) {
 	value = strings.TrimPrefix(value, "http://")
 	value = strings.SplitN(value, "@", 2)[0]
 	parts := strings.Split(value, "/")
-	host := "docker.io"
+	host := registryDockerHub
 	repositoryParts := parts
 	if len(parts) > 1 && (strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":") || parts[0] == "localhost") {
 		host = NormalizeHost(parts[0])
@@ -306,7 +309,7 @@ func splitReference(reference string) (string, string) {
 	if colon := strings.LastIndex(repository, ":"); colon > strings.LastIndex(repository, "/") {
 		repository = repository[:colon]
 	}
-	if host == "docker.io" && !strings.Contains(repository, "/") {
+	if host == registryDockerHub && !strings.Contains(repository, "/") {
 		repository = "library/" + repository
 	}
 	return host, strings.Trim(repository, "/")

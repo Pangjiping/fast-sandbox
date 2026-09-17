@@ -11,16 +11,16 @@ import (
 	"testing"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/artifacts"
-	"fast-sandbox/internal/artifactstore"
-	"fast-sandbox/internal/registryconfig"
-
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/artifacts"
+	"fast-sandbox/internal/artifactstore"
+	"fast-sandbox/internal/registryconfig"
 )
 
 // artifactStoreMount writes the projected store/endpoint files into a temp

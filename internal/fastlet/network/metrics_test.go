@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	fsbtest "fast-sandbox/internal/testutil"
-
 	"github.com/stretchr/testify/require"
+
+	fsbtest "fast-sandbox/internal/testutil"
 )
 
 func TestNetworkLatencyMetricsAreCollectable(t *testing.T) {

@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	fastpathv2 "fast-sandbox/api/proto/v2"
-
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"k8s.io/klog/v2"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
 )
 
 var resetCmd = &cobra.Command{

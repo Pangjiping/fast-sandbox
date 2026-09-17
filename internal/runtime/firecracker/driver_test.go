@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	infracatalog "fast-sandbox/internal/catalog/infra"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
@@ -19,8 +21,6 @@ import (
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
 	infracontract "fast-sandbox/internal/infra/contract"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
-	"github.com/stretchr/testify/require"
 )
 
 // firecrackerConfigForTest returns the built-in Firecracker configuration with

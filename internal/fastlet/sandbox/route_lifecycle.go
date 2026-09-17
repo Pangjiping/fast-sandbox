@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	dataplane "fast-sandbox/internal/dataplane/contract"
-
 	"k8s.io/klog/v2"
+
+	dataplane "fast-sandbox/internal/dataplane/contract"
 )
 
 // ReconcileProxyRoutes is invoked after Fastlet Proxy reconnects. It rebuilds
@@ -21,8 +21,8 @@ func (m *SandboxManager) ReconcileProxyRoutes(ctx context.Context) error {
 	pendingInfra := false
 	for _, sandbox := range m.sandboxes {
 		switch sandbox.Phase {
-		case "terminating", "deleting", "delete-failed", "create-cleanup", "create-cleanup-failed", "infra-pending", "initializing-infra", "infra-unavailable":
-			if sandbox.Phase == "infra-pending" || sandbox.Phase == "initializing-infra" || sandbox.Phase == "infra-unavailable" {
+		case sandboxStateTerminating, sandboxStateDeleting, sandboxStateDeleteFailed, sandboxStateCreateCleanup, sandboxStateCreateCleanupFailed, sandboxStateInfraPending, sandboxStateInitializingInfra, sandboxStateInfraUnavailable:
+			if sandbox.Phase == sandboxStateInfraPending || sandbox.Phase == sandboxStateInitializingInfra || sandbox.Phase == sandboxStateInfraUnavailable {
 				pendingInfra = true
 			}
 			continue
@@ -49,8 +49,8 @@ func (m *SandboxManager) ReconcileProxyRoutes(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	for _, sandbox := range m.sandboxes {
-		if sandbox.Phase == "route-pending" || sandbox.Phase == "route-unavailable" {
-			sandbox.Phase = "running"
+		if sandbox.Phase == sandboxStateRoutePending || sandbox.Phase == sandboxStateRouteUnavailable {
+			sandbox.Phase = sandboxStateRunning
 		}
 	}
 	m.routeReady = true

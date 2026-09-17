@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -126,5 +127,5 @@ func syncDirectory(path string) error {
 }
 
 func errorsIsNotExist(err error) bool {
-	return err != nil && (os.IsNotExist(err) || err == fs.ErrNotExist)
+	return err != nil && (os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist))
 }

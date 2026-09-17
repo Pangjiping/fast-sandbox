@@ -6,15 +6,18 @@ import (
 	"sync"
 	"time"
 
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	"fast-sandbox/internal/controlplane/placement"
-	fastletapi "fast-sandbox/internal/protocol/fastlet"
-
 	corev1 "k8s.io/api/core/v1"
 	clientgocache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/controlplane/placement"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
+
+// fastletAppLabelValue is the "app" label value marking a Pod as a platform-managed Fastlet.
+const fastletAppLabelValue = "sandbox-fastlet"
 
 type HeartbeatClient interface {
 	Heartbeat(ctx context.Context, fastletIP string, req *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error)
@@ -100,7 +103,7 @@ func (l *Loop) Start(ctx context.Context) {
 
 func probeCandidate(object any) (placement.FastletInfo, bool) {
 	pod, ok := object.(*corev1.Pod)
-	if !ok || pod.Labels["app"] != "sandbox-fastlet" {
+	if !ok || pod.Labels["app"] != fastletAppLabelValue {
 		return placement.FastletInfo{}, false
 	}
 	info := fastletInfoFromPod(pod)
@@ -110,14 +113,14 @@ func probeCandidate(object any) (placement.FastletInfo, bool) {
 func shouldProbeUpdate(previous, current any) bool {
 	oldPod, oldOK := previous.(*corev1.Pod)
 	newPod, newOK := current.(*corev1.Pod)
-	if !newOK || newPod.Labels["app"] != "sandbox-fastlet" {
+	if !newOK || newPod.Labels["app"] != fastletAppLabelValue {
 		return false
 	}
 	newInfo := fastletInfoFromPod(newPod)
 	if !newInfo.PodReady {
 		return false
 	}
-	if !oldOK || oldPod.Labels["app"] != "sandbox-fastlet" {
+	if !oldOK || oldPod.Labels["app"] != fastletAppLabelValue {
 		return true
 	}
 	oldInfo := fastletInfoFromPod(oldPod)
@@ -127,8 +130,8 @@ func shouldProbeUpdate(previous, current any) bool {
 func (l *Loop) onPodUpdate(previous, current any) {
 	oldPod, oldOK := previous.(*corev1.Pod)
 	newPod, newOK := current.(*corev1.Pod)
-	if oldOK && oldPod.Labels["app"] == "sandbox-fastlet" &&
-		(!newOK || newPod.Labels["app"] != "sandbox-fastlet" || newPod.Name != oldPod.Name || newPod.UID != oldPod.UID) {
+	if oldOK && oldPod.Labels["app"] == fastletAppLabelValue &&
+		(!newOK || newPod.Labels["app"] != fastletAppLabelValue || newPod.Name != oldPod.Name || newPod.UID != oldPod.UID) {
 		l.Registry.RemoveIfPodUID(placement.FastletID(oldPod.Name), string(oldPod.UID))
 	}
 	if newOK {
@@ -140,12 +143,12 @@ func (l *Loop) nextInterval() time.Duration {
 	if l.Interval <= 0 {
 		return 20 * time.Second
 	}
-	return time.Duration(float64(l.Interval) * (0.8 + rand.Float64()*0.4))
+	return time.Duration(float64(l.Interval) * (0.8 + rand.Float64()*0.4)) //nolint:gosec // non-cryptographic jitter for heartbeat probe scheduling
 }
 
 func (l *Loop) onPodAdd(object any) {
 	pod, ok := object.(*corev1.Pod)
-	if !ok || pod.Labels["app"] != "sandbox-fastlet" {
+	if !ok || pod.Labels["app"] != fastletAppLabelValue {
 		return
 	}
 	l.Registry.UpsertPod(fastletInfoFromPod(pod))
@@ -158,7 +161,7 @@ func (l *Loop) onPodDelete(object any) {
 			pod, ok = tombstone.Obj.(*corev1.Pod)
 		}
 	}
-	if ok && pod.Labels["app"] == "sandbox-fastlet" {
+	if ok && pod.Labels["app"] == fastletAppLabelValue {
 		l.Registry.RemoveIfPodUID(placement.FastletID(pod.Name), string(pod.UID))
 	}
 }
