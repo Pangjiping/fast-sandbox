@@ -19,22 +19,19 @@ import (
 )
 
 // Firecracker asset pins: the release the runtime plan points at
-// (config/runtime-environments.yaml binaryPath/kernelPath) and the guest
-// kernel the snapshots bake.
+// (config/runtime-environments.yaml binaryPath). The guest kernel is a
+// build-time asset (the sandboxtemplate-builder embeds its own and bakes
+// it into the snapshot manifest); nodes never install one — restore is a
+// vmstate resume that does not boot a kernel (#84).
 const (
 	// DefaultFCVersion is the pinned Firecracker release.
 	DefaultFCVersion = "v1.16.1"
-	// defaultKernelURL is the pinned Amazon microvm CI kernel (6.1,
-	// ACPI + VMGenID; the quickstart 4.14 kernel's CRNG is not reseeded
-	// at snapshot resume, execd /command hangs, #1695) for the only
-	// supported architecture, x86_64.
-	defaultKernelURL = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260722-38359b8055fc-0/x86_64/vmlinux-6.1.176"
 	// DefaultAssetsDir is the on-node install target (matches
-	// config/runtime-environments.yaml binaryPath/kernelPath).
+	// config/runtime-environments.yaml binaryPath).
 	DefaultAssetsDir = "/opt/fast-sandbox/firecracker"
 	// releaseBaseURL is the Firecracker GitHub release root.
 	releaseBaseURL = "https://github.com/firecracker-microvm/firecracker/releases"
-	// maxAssetBytes bounds one downloaded asset (kernel ~ tens of MiB).
+	// maxAssetBytes bounds one downloaded asset.
 	maxAssetBytes = 1 << 30
 )
 
@@ -68,10 +65,6 @@ type AssetConfig struct {
 	Dir string
 	// FCVersion is the pinned Firecracker release (default v1.16.1).
 	FCVersion string
-	// KernelURL is the guest kernel blob URL; empty derives the pinned
-	// per-arch Amazon CI kernel (an explicit URL is used verbatim for
-	// both architectures).
-	KernelURL string
 	// ReleaseBase overrides the GitHub release root (tests point it at an
 	// httptest server).
 	ReleaseBase string
@@ -98,9 +91,9 @@ func assetArch() (string, error) {
 	}
 }
 
-// Ensure materializes {Dir}/{firecracker,jailer,vmlinux.bin}, downloading
-// whatever is missing and verifying the result. It is idempotent: a fully
-// installed and verifiable directory short-circuits without network.
+// Ensure materializes {Dir}/{firecracker,jailer}, downloading whatever is
+// missing and verifying the result. It is idempotent: a fully installed
+// and verifiable directory short-circuits without network.
 func (c AssetConfig) Ensure(ctx context.Context) error {
 	dir := c.dir()
 	if err := c.verify(); err == nil {
@@ -129,12 +122,6 @@ func (c AssetConfig) Ensure(ctx context.Context) error {
 			return err
 		}
 	}
-	kernel := filepath.Join(dir, "vmlinux.bin")
-	if info, err := os.Stat(kernel); err != nil || info.Size() == 0 {
-		if err := c.installFile(ctx, c.kernelURL(), kernel); err != nil {
-			return err
-		}
-	}
 	if err := c.verify(); err != nil {
 		return fmt.Errorf("verify installed firecracker assets: %w", err)
 	}
@@ -142,7 +129,7 @@ func (c AssetConfig) Ensure(ctx context.Context) error {
 	return nil
 }
 
-// verify executes both binaries and checks the kernel blob exists.
+// verify executes both binaries.
 func (c AssetConfig) verify() error {
 	dir := c.dir()
 	verify := c.VerifyBinary
@@ -153,13 +140,6 @@ func (c AssetConfig) verify() error {
 		if err := verify(filepath.Join(dir, name)); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
-	}
-	info, err := os.Stat(filepath.Join(dir, "vmlinux.bin"))
-	if err != nil {
-		return fmt.Errorf("vmlinux.bin: %w", err)
-	}
-	if info.Size() == 0 {
-		return errors.New("vmlinux.bin is empty")
 	}
 	return nil
 }
@@ -260,17 +240,8 @@ func extractTarball(tarball, dest, arch string) error {
 	}
 }
 
-// installFile downloads url to path (streaming, bounded).
-func (c AssetConfig) installFile(ctx context.Context, url, path string) error {
-	tmp := path + ".download"
-	if err := c.download(ctx, url, tmp); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
 // download streams url into path, rejecting bodies at or over the size
-// cap (a silent truncation would hand the node a corrupt kernel that
+// cap (a silent truncation would hand the node a corrupt binary that
 // still passes the non-empty verify).
 func (c AssetConfig) download(ctx context.Context, url, path string) error {
 	start := time.Now()
@@ -348,17 +319,6 @@ func (c AssetConfig) version() string {
 		return c.FCVersion
 	}
 	return DefaultFCVersion
-}
-
-// kernelURL resolves the guest kernel blob URL: an explicit URL is used
-// verbatim; the empty default is the pinned x86_64 Amazon CI kernel
-// (x86_64 is the only supported architecture — non-amd64 nodes fail the
-// cpu-arch check and assetArch() refuses them before any download).
-func (c AssetConfig) kernelURL() string {
-	if c.KernelURL != "" {
-		return c.KernelURL
-	}
-	return defaultKernelURL
 }
 
 func (c AssetConfig) base() string {

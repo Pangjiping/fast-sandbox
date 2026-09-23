@@ -159,6 +159,8 @@ environments:
 	require.Equal(t, "/opt/fast-sandbox/firecracker/firecracker", plan.Profile.Firecracker.BinaryPath)
 	require.Equal(t, "/opt/fast-sandbox/firecracker/jailer", plan.Profile.Firecracker.JailerPath)
 	require.Equal(t, "/opt/fast-sandbox/firecracker/vmlinux.bin", plan.Profile.Firecracker.KernelPath)
+	// An operator-pinned kernelPath is mounted into the fastlet pod.
+	require.True(t, hasHostPath(plan.Profile, "/opt/fast-sandbox/firecracker/vmlinux.bin"))
 	require.Equal(t, "/srv/fast-sandbox/firecracker/rootfs", plan.Profile.Firecracker.RootfsPath)
 	require.Equal(t, "/srv/fast-sandbox/firecracker", plan.Profile.Firecracker.StateRoot)
 	// The Deployment.HostPaths follow the overridden paths, not the builtin
@@ -187,7 +189,10 @@ environments:
 	require.NoError(t, err)
 	require.Equal(t, "/usr/local/bin/firecracker", plan.Profile.Firecracker.BinaryPath)
 	require.Equal(t, "/usr/local/bin/jailer", plan.Profile.Firecracker.JailerPath)
-	require.Equal(t, "/opt/fast-sandbox/firecracker/vmlinux.bin", plan.Profile.Firecracker.KernelPath)
+	// The builtin profile carries no node-side kernel (#84): an empty
+	// kernelPath mounts nothing.
+	require.Empty(t, plan.Profile.Firecracker.KernelPath)
+	require.False(t, hasHostPath(plan.Profile, "/opt/fast-sandbox/firecracker/vmlinux.bin"))
 	require.True(t, hasHostPath(plan.Profile, "/usr/local/bin/firecracker"))
 	require.True(t, hasHostPath(plan.Profile, "/usr/local/bin/jailer"))
 }

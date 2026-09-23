@@ -173,7 +173,8 @@ func applyFirecrackerBinding(config *runtimecatalog.FirecrackerConfig, binding *
 // replaceFirecrackerHostPaths drops the builtin firecracker-* host path
 // requirements from values and appends the ones derived from the resolved
 // configuration, so the fastlet pod mounts exactly the installed paths
-// (binary, jailer, kernel, rootfs, state root).
+// (binary, jailer, rootfs, state root — plus the kernel only when an
+// operator pins kernelPath).
 func replaceFirecrackerHostPaths(values []runtimecatalog.HostPathRequirement, config *runtimecatalog.FirecrackerConfig) []runtimecatalog.HostPathRequirement {
 	kept := values[:0]
 	for _, requirement := range values {
@@ -183,10 +184,14 @@ func replaceFirecrackerHostPaths(values []runtimecatalog.HostPathRequirement, co
 	}
 	kept = append(kept,
 		runtimecatalog.HostPathRequirement{Name: "firecracker-bin", HostPath: config.BinaryPath, MountPath: config.BinaryPath, Type: corev1.HostPathFile, ReadOnly: true},
-		runtimecatalog.HostPathRequirement{Name: "firecracker-kernel", HostPath: config.KernelPath, MountPath: config.KernelPath, Type: corev1.HostPathFile, ReadOnly: true},
 		runtimecatalog.HostPathRequirement{Name: "firecracker-rootfs", HostPath: config.RootfsPath, MountPath: config.RootfsPath, Type: corev1.HostPathDirectoryOrCreate},
 		runtimecatalog.HostPathRequirement{Name: "firecracker-state", HostPath: config.StateRoot, MountPath: config.StateRoot, Type: corev1.HostPathDirectoryOrCreate},
 	)
+	// The kernel is optional (restore never boots one, #84): only an
+	// operator-pinned kernelPath is mounted into the fastlet pod.
+	if config.KernelPath != "" {
+		kept = append(kept, runtimecatalog.HostPathRequirement{Name: "firecracker-kernel", HostPath: config.KernelPath, MountPath: config.KernelPath, Type: corev1.HostPathFile, ReadOnly: true})
+	}
 	if config.JailerPath != "" {
 		kept = append(kept, runtimecatalog.HostPathRequirement{Name: "firecracker-jailer", HostPath: config.JailerPath, MountPath: config.JailerPath, Type: corev1.HostPathFile, ReadOnly: true})
 	}

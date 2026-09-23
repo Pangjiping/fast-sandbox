@@ -51,9 +51,6 @@ func healthyProbes(t *testing.T) (fakeProbes, string) {
 	if err := os.MkdirAll(assets, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(assets, "vmlinux.bin"), []byte("kernel"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	return fakeProbes{
 		openDevice: func(string) error { return nil },
 		statFS: func(string) (FsStat, error) {

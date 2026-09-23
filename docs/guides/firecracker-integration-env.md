@@ -80,7 +80,7 @@ root-cause read) or `NOT REPRODUCED` (API fully usable).
 | MinIO | host Docker container | host | on the kind network (container IP = endpoint); publish + pull credentials |
 | controller | Deployment (1 replica) | control plane | CRDs + RBAC + route-keys; Fast-Path gRPC :9090 |
 | builder Pod | Job (on-demand) | either KVM node | /dev/kvm, /dev/net/tun, self-mknod loop devices, publish creds |
-| firecracker-runtime | DaemonSet (per-node, **all nodes**) | every node (labels itself) | host-readiness loop: KVM/TUN/kernel/storage checks + firecracker asset install (v1.16.1 + jailer + kernel) + applies the scheduling labels + FirecrackerReady condition; **cluster network** (not hostNetwork); UDS socket + StateRoot shared with fastlets; MinIO pull creds; orchestrates the dart child |
+| firecracker-runtime | DaemonSet (per-node, **all nodes**) | every node (labels itself) | host-readiness loop: KVM/TUN/kernel/storage checks + firecracker asset install (v1.16.1 binary + jailer; no guest kernel) + applies the scheduling labels + FirecrackerReady condition; **cluster network** (not hostNetwork); UDS socket + StateRoot shared with fastlets; MinIO pull creds; orchestrates the dart child |
 | node janitor (sidecar) | container in the firecracker-runtime pod | same pods | sweeps fastlet netns/tap/veth orphans + leaked VMM processes (hostPID; fastlets delegate over the node-cleanup UDS socket); containerd backend disabled here (the standalone config/janitor DaemonSet covers containerd runtimes) |
 | DART daemon (P2P provider) | agent child process ×2 | inside each agent | prefix cache API :8145 (loopback), admin/metrics :8147, peer :9000 (pod IP); cache `cache/p2p-<node>` under the shared StateRoot |
 | fastlet Pod | pool-managed Pod ×2 | one per node (anti-affinity) | profile hostPaths auto-injected; agent socket; registry plan |
@@ -315,17 +315,20 @@ Delivery timing with on-demand loading (two nodes, XFS StateRoot):
   earlier sandboxes' probe/reporting time and fakes linear growth.
 
 ### 6.4 Node asset installation (the agent readiness loop)
-- The agent downloads firecracker from GitHub releases and the kernel
-  from `s3.amazonaws.com` — fine for the integration env, **not** for
-  production: use a private artifact mirror, pre-baked node images, or
-  signed hostPath assets, and pin `nodeReadiness.fcVersion`/
-  `nodeReadiness.kernelURL` in the agent config
+- The agent downloads firecracker from GitHub releases — fine for the
+  integration env, **not** for production: use a private artifact mirror,
+  pre-baked node images, or signed hostPath assets, and pin
+  `nodeReadiness.fcVersion` in the agent config
   (config/dev/agent-config.yaml; the download short-circuits when the
   assets are already installed and verified).
-- The jailer/`vmlinux.bin` **must match the snapshot's baked kernel** and
-  firecracker version (restore compatibility), and must exist before any
-  fastlet starts (hostPath File mounts fail otherwise) — the readiness
-  labels only appear after the asset install verifies.
+- The node carries **no guest kernel**: snapshots bake their own (a
+  build-time asset recorded in the manifest) and restore is a vmstate
+  resume that does not boot one (#84). The firecracker binary **must
+  match the bake-time firecracker version** (restore compatibility) and
+  the assets must exist before any fastlet starts (hostPath File mounts
+  fail otherwise) — the readiness labels only appear after the asset
+  install verifies. Direct-boot operators pin their own `kernelPath` in
+  the runtime-environment.
 
 ### 6.5 Network & multi-node
 - Per-clone netns: each sandbox gets a slot IP in the fastlet pod netns;

@@ -36,12 +36,6 @@ func TestHostCapabilityProberFailsClosed(t *testing.T) {
 	require.Equal(t, runtimecatalog.CapabilityUnsupported, report.State)
 	require.Equal(t, "BoxLiteResourceEnforcementIncomplete", report.Reason)
 
-	firecracker, err := catalog.Resolve(apiv1alpha2.RuntimeFirecracker)
-	require.NoError(t, err)
-	report = NewHostCapabilityProber().Probe(context.Background(), firecracker, "")
-	require.Equal(t, runtimecatalog.CapabilityUnsupported, report.State)
-	require.Equal(t, "FirecrackerDriverUnimplemented", report.Reason)
-
 	kata, err := catalog.Resolve(apiv1alpha2.RuntimeKataQemu)
 	require.NoError(t, err)
 	prober := NewHostCapabilityProber()
@@ -66,16 +60,30 @@ func TestHostCapabilityProberAcceptsConfiguredFirecrackerProfile(t *testing.T) {
 func TestHostCapabilityProberFirecrackerDriverGate(t *testing.T) {
 	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeFirecracker)
 	require.NoError(t, err)
+	// The builtin firecracker profile is production-configured (the
+	// on-demand loading chain is implemented and E2E-verified) and needs
+	// no node-side kernel (#84).
+	require.Equal(t, runtimecatalog.CapabilityConfigured, profile.Capabilities.DefaultState)
+	require.Empty(t, profile.Firecracker.KernelPath)
 	prober := NewHostCapabilityProber()
 	prober.stat = func(string) (os.FileInfo, error) { return fakeFileInfo{}, nil }
 	report := prober.Probe(context.Background(), profile, "")
-	require.Equal(t, runtimecatalog.CapabilityUnsupported, report.State)
-	require.Equal(t, "FirecrackerDriverUnimplemented", report.Reason)
-
-	profile.Capabilities.DefaultState = runtimecatalog.CapabilityConfigured
-	report = prober.Probe(context.Background(), profile, "")
 	require.Equal(t, runtimecatalog.CapabilityAvailable, report.State)
 	require.Empty(t, report.Missing)
+
+	// An operator-pinned kernelPath (direct boot) is probed again.
+	prober.stat = func(path string) (os.FileInfo, error) {
+		if path == "/missing/vmlinux.bin" {
+			return nil, os.ErrNotExist
+		}
+		return fakeFileInfo{}, nil
+	}
+	profile.Firecracker.KernelPath = "/missing/vmlinux.bin"
+	report = prober.Probe(context.Background(), profile, "")
+	require.Equal(t, runtimecatalog.CapabilityDegraded, report.State)
+	require.Equal(t, "RuntimeKernelUnavailable", report.Reason)
+	require.Contains(t, report.Missing, "/missing/vmlinux.bin")
+	profile.Firecracker.KernelPath = ""
 
 	profile.Firecracker.BootTimeoutSeconds = 0
 	report = prober.Probe(context.Background(), profile, "")

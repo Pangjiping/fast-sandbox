@@ -8,8 +8,8 @@
 #     wire long-lived resources; changing them requires a pod restart).
 #   nodeReadiness — hot: thresholds, interval and the asset source apply
 #     on the next recheck pass. A pinned asset install is never silently
-#     replaced: changing fcVersion/kernelURL only re-downloads when the
-#     current assetsDir does not verify (clear it or point elsewhere).
+#     replaced: changing fcVersion only re-downloads when the current
+#     assetsDir does not verify (clear it or point elsewhere).
 #
 # Runtime identities stay in the pod spec (Downward API env): POD_UID,
 # FAST_SANDBOX_NODE_NAME (spec.nodeName), FAST_SANDBOX_NODE_IP
@@ -65,15 +65,13 @@ data:
     nodeReadiness:
       # The host-check / firecracker-asset-install / node-label loop.
       # Requires FAST_SANDBOX_NODE_NAME (injected by the DaemonSet).
-      # The asset install prefers the release/kernel bundled in the agent
-      # image; these pins route to downloads when set away from it.
+      # The asset install prefers the release bundled in the agent image;
+      # this pin routes to downloads when set away from it. No guest
+      # kernel is installed: snapshots bake their own (a build-time
+      # asset) and restore never boots one.
       enabled: true
       assetsDir: /opt/fast-sandbox/firecracker
       fcVersion: v1.16.1
-      # kernelURL empty = the pinned Amazon CI 6.1 kernel for x86_64 (the
-      # only supported arch — arm64 nodes fail the cpu-arch check before
-      # any install). Set an explicit URL only for a private mirror.
-      kernelURL: ""
       interval: 5m
       minFree: 10GiB
       minMemory: 2GiB
