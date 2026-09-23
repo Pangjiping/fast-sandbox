@@ -69,7 +69,7 @@ func verifyBinary(path string) error {
 type CheckConfig struct {
 	// StateRoot is the agent state root (directories are created here).
 	StateRoot string
-	// AssetsDir is the Firecracker asset directory (binary/jailer/kernel).
+	// AssetsDir is the Firecracker asset directory (binary/jailer).
 	AssetsDir string
 	// MinFreeBytes is the minimum free space on the StateRoot filesystem.
 	MinFreeBytes int64
@@ -299,26 +299,22 @@ func checkStateRootFS(report *Report, probes Probes, config CheckConfig) {
 	}
 }
 
-// checkAssets verifies the installed Firecracker binaries run and the
-// kernel blob is non-empty. The manager installs missing assets before
-// running the checks; in check-only mode (standalone script, local agent)
-// a missing install surfaces here.
+// checkAssets verifies the installed Firecracker binaries run. The node
+// never carries a guest kernel: the snapshots bake their own (a build-time
+// asset) and restore is a vmstate resume that does not boot one (#84).
+// The manager installs missing assets before running the checks; in
+// check-only mode (standalone script, local agent) a missing install
+// surfaces here.
 func checkAssets(report *Report, config CheckConfig, probes Probes) {
 	binary := filepath.Join(config.AssetsDir, "firecracker")
 	jailer := filepath.Join(config.AssetsDir, "jailer")
-	kernel := filepath.Join(config.AssetsDir, "vmlinux.bin")
 	for _, path := range []string{binary, jailer} {
 		if err := probes.VerifyBinary(path); err != nil {
 			report.fail("fc-assets", path+" --version failed: "+err.Error())
 			return
 		}
 	}
-	info, err := os.Stat(kernel)
-	if err != nil || info.Size() == 0 {
-		report.fail("fc-assets", kernel+" missing or empty")
-		return
-	}
-	report.pass("fc-assets", "firecracker, jailer and vmlinux.bin verified in "+config.AssetsDir)
+	report.pass("fc-assets", "firecracker and jailer verified in "+config.AssetsDir)
 }
 
 // ParseBytes parses a human byte size ("10GiB", "512MiB", "1GiB", bytes).

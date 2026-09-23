@@ -16,8 +16,9 @@
 #   net-tun                /dev/net/tun exists, opens RW
 #   stateroot-dirs         the StateRoot layout is creatable
 #   stateroot-filesystem   free space >= --min-free
-#   fc-assets              installed firecracker/jailer --version run and
-#                          vmlinux.bin is non-empty (fail when absent)
+#   fc-assets              firecracker + jailer run from ASSETS_DIR (no
+#                          guest kernel: snapshots bake their own, restore
+#                          never boots one)
 # Warned (informational, not blocking):
 #   nested-virtualization  vmx/svm CPU flag (nested VMs cannot run FC without it)
 #   memory-available       MemAvailable >= --min-memory
@@ -182,9 +183,8 @@ fi
 # --- fc-assets ---------------------------------------------------------------------------
 if [[ -x "$ASSETS_DIR/firecracker" && -x "$ASSETS_DIR/jailer" ]] &&
 	"$ASSETS_DIR/firecracker" --version >/dev/null 2>&1 &&
-	"$ASSETS_DIR/jailer" --version >/dev/null 2>&1 &&
-	[[ -s "$ASSETS_DIR/vmlinux.bin" ]]; then
-	pass "fc-assets" "firecracker, jailer and vmlinux.bin verified in $ASSETS_DIR"
+	"$ASSETS_DIR/jailer" --version >/dev/null 2>&1; then
+	pass "fc-assets" "firecracker and jailer verified in $ASSETS_DIR"
 else
 	fail_check "fc-assets" "missing or broken assets in $ASSETS_DIR (the agent readiness loop installs them; a fully ready host needs them)"
 fi

@@ -20,7 +20,7 @@ import (
 )
 
 // serveAssets spins an httptest server acting as the Firecracker release
-// host and kernel blob store. The fake tarball carries the release layout
+// host. The fake tarball carries the release layout
 // firecracker-v1.16.1-x86_64/firecracker-v1.16.1-x86_64 (and jailer).
 func serveAssets(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -46,14 +46,11 @@ func serveAssets(t *testing.T) *httptest.Server {
 		tarball = buffer.Bytes()
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch {
-		case regexp.MustCompile(`firecracker-.*\.tgz$`).MatchString(request.URL.Path):
+		if regexp.MustCompile(`firecracker-.*\.tgz$`).MatchString(request.URL.Path) {
 			writer.Write(tarball)
-		case request.URL.Path == "/vmlinux.bin":
-			writer.Write([]byte("fake kernel blob"))
-		default:
-			http.NotFound(writer, request)
+			return
 		}
+		http.NotFound(writer, request)
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -68,7 +65,6 @@ func TestAssetEnsureInstallsAndVerifies(t *testing.T) {
 	config := AssetConfig{
 		Dir:         dir,
 		FCVersion:   "v1.16.1",
-		KernelURL:   server.URL + "/vmlinux.bin",
 		ReleaseBase: server.URL,
 		VerifyBinary: func(path string) error {
 			// The fake payload doubles as a marker: it exists -> ok.
@@ -81,7 +77,7 @@ func TestAssetEnsureInstallsAndVerifies(t *testing.T) {
 	if err := config.Ensure(context.Background()); err != nil {
 		t.Fatalf("Ensure failed: %v", err)
 	}
-	for _, name := range []string{"firecracker", "jailer", "vmlinux.bin"} {
+	for _, name := range []string{"firecracker", "jailer"} {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil || info.Size() == 0 {
 			t.Fatalf("expected %s installed: err=%v", name, err)
@@ -94,7 +90,6 @@ func TestAssetEnsureIdempotent(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "fc")
 	config := AssetConfig{
 		Dir:          dir,
-		KernelURL:    server.URL + "/vmlinux.bin",
 		ReleaseBase:  server.URL,
 		VerifyBinary: func(path string) error { return nil },
 	}
@@ -104,11 +99,7 @@ func TestAssetEnsureIdempotent(t *testing.T) {
 	closed.Close()
 	closedConfig := config
 	closedConfig.ReleaseBase = closed.URL
-	closedConfig.KernelURL = closed.URL + "/vmlinux.bin"
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "vmlinux.bin"), []byte("kernel"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := closedConfig.Ensure(context.Background()); err != nil {
@@ -121,21 +112,11 @@ func TestAssetEnsureDownloadFailureFails(t *testing.T) {
 	closed.Close()
 	config := AssetConfig{
 		Dir:         filepath.Join(t.TempDir(), "fc"),
-		KernelURL:   closed.URL + "/vmlinux.bin",
 		ReleaseBase: closed.URL,
 	}
 	if err := config.Ensure(context.Background()); err == nil {
 		t.Fatal("Ensure must fail when the release host is unreachable")
 	}
-}
-
-func TestKernelURLDefaultsToX86Only(t *testing.T) {
-	// x86_64 is the only supported architecture: the default kernel URL
-	// is the pinned x86_64 blob, and the installer refuses other arches
-	// before any download (assetArch, asserted via the Ensure skip).
-	require.Equal(t, defaultKernelURL, AssetConfig{}.kernelURL())
-	custom := AssetConfig{KernelURL: "https://mirror.example/vmlinux.bin"}
-	require.Equal(t, "https://mirror.example/vmlinux.bin", custom.kernelURL())
 }
 
 func TestDownloadRejectsOversizedBody(t *testing.T) {
@@ -196,7 +177,7 @@ func statOKVerifyBinary(path string) error {
 	return nil
 }
 
-// writeBundleFixture materializes an image-bundle dir with the three fake
+// writeBundleFixture materializes an image-bundle dir with the fake
 // assets and a real SHA256SUMS manifest (digests of the actual bytes).
 func writeBundleFixture(t *testing.T, dir string) {
 	t.Helper()
@@ -206,10 +187,9 @@ func writeBundleFixture(t *testing.T, dir string) {
 	files := map[string][]byte{
 		"firecracker": []byte("fake firecracker binary"),
 		"jailer":      []byte("fake jailer binary"),
-		"vmlinux.bin": []byte("fake kernel blob"),
 	}
 	manifest := &strings.Builder{}
-	for _, name := range []string{"firecracker", "jailer", "vmlinux.bin"} {
+	for _, name := range []string{"firecracker", "jailer"} {
 		payload := files[name]
 		if err := os.WriteFile(filepath.Join(dir, name), payload, 0o755); err != nil {
 			t.Fatal(err)
@@ -242,7 +222,7 @@ func TestAssetEnsureInstallsFromBundle(t *testing.T) {
 		t.Skipf("asset install only runs on supported arch: %v", err)
 	}
 	// Stock pins + a served bundle: Ensure installs everything without
-	// touching the network (closed release host and kernel URL).
+	// touching the network (closed release host).
 	bundle := filepath.Join(t.TempDir(), "bundle")
 	writeBundleFixture(t, bundle)
 	dir := filepath.Join(t.TempDir(), "fc")
@@ -250,12 +230,11 @@ func TestAssetEnsureInstallsFromBundle(t *testing.T) {
 	config := AssetConfig{
 		Dir:          dir,
 		BundleDir:    bundle,
-		KernelURL:    closed + "/vmlinux.bin",
 		ReleaseBase:  closed,
 		VerifyBinary: statOKVerifyBinary,
 	}
 	require.NoError(t, config.Ensure(context.Background()))
-	for _, name := range []string{"firecracker", "jailer", "vmlinux.bin"} {
+	for _, name := range []string{"firecracker", "jailer"} {
 		info, err := os.Stat(filepath.Join(dir, name))
 		require.NoError(t, err, name)
 		require.NotZero(t, info.Size(), name)
@@ -273,12 +252,11 @@ func TestAssetEnsureFallsBackToDownloadWhenBundleMissing(t *testing.T) {
 		Dir:          filepath.Join(t.TempDir(), "fc"),
 		BundleDir:    filepath.Join(t.TempDir(), "no-such-bundle"),
 		FCVersion:    "v1.16.1",
-		KernelURL:    server.URL + "/vmlinux.bin",
 		ReleaseBase:  server.URL,
 		VerifyBinary: statOKVerifyBinary,
 	}
 	require.NoError(t, config.Ensure(context.Background()))
-	for _, name := range []string{"firecracker", "jailer", "vmlinux.bin"} {
+	for _, name := range []string{"firecracker", "jailer"} {
 		require.FileExists(t, filepath.Join(config.Dir, name))
 	}
 }
@@ -300,22 +278,10 @@ func TestBundleFallsBackOnDigestMismatch(t *testing.T) {
 }
 
 func TestBundleGating(t *testing.T) {
-	// Custom pins gate the bundle per file: custom KernelURL keeps the
-	// kernel out but serves the stock binaries, custom FCVersion the
-	// reverse.
+	// A custom FCVersion gates the whole bundle out (the download path
+	// serves the pinned-away binaries).
 	bundle := filepath.Join(t.TempDir(), "bundle")
 	writeBundleFixture(t, bundle)
-
-	customKernel := AssetConfig{
-		Dir:          filepath.Join(t.TempDir(), "fc-kernel"),
-		BundleDir:    bundle,
-		KernelURL:    "https://mirror.example/vmlinux.bin",
-		VerifyBinary: statOKVerifyBinary,
-	}
-	require.NoError(t, customKernel.installFromBundle(customKernel.Dir))
-	require.FileExists(t, filepath.Join(customKernel.Dir, "firecracker"))
-	require.FileExists(t, filepath.Join(customKernel.Dir, "jailer"))
-	require.NoFileExists(t, filepath.Join(customKernel.Dir, "vmlinux.bin"))
 
 	customVersion := AssetConfig{
 		Dir:          filepath.Join(t.TempDir(), "fc-version"),
@@ -326,7 +292,6 @@ func TestBundleGating(t *testing.T) {
 	require.NoError(t, customVersion.installFromBundle(customVersion.Dir))
 	require.NoFileExists(t, filepath.Join(customVersion.Dir, "firecracker"))
 	require.NoFileExists(t, filepath.Join(customVersion.Dir, "jailer"))
-	require.FileExists(t, filepath.Join(customVersion.Dir, "vmlinux.bin"))
 }
 
 func TestBundleMissingManifestIsAnError(t *testing.T) {
@@ -350,17 +315,14 @@ func TestParseSHA256SumsMalformedLine(t *testing.T) {
 
 func TestDockerfileBundlePinsMatchGoDefaults(t *testing.T) {
 	// A drift would silently strand the bundle (or serve a different
-	// asset than the download path).
+	// binary than the download path).
 	payload, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "build", "Dockerfile.firecracker-runtime"))
 	require.NoError(t, err)
 	pins := map[string]string{}
 	for _, line := range strings.Split(string(payload), "\n") {
-		for _, name := range []string{"FC_VERSION", "FC_KERNEL_URL"} {
-			if value, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG "+name+"="); ok {
-				pins[name] = value
-			}
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG FC_VERSION="); ok {
+			pins["FC_VERSION"] = value
 		}
 	}
 	require.Equal(t, DefaultFCVersion, pins["FC_VERSION"], "Dockerfile FC_VERSION drifted from DefaultFCVersion")
-	require.Equal(t, defaultKernelURL, pins["FC_KERNEL_URL"], "Dockerfile FC_KERNEL_URL drifted from defaultKernelURL")
 }

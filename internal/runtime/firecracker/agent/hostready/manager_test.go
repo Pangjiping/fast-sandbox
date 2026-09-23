@@ -21,12 +21,8 @@ func TestManagerPassInstallsChecksAndApplies(t *testing.T) {
 	// A pre-verified asset layout keeps the manager off the network.
 	config := AssetConfig{
 		Dir:          assetsDir,
-		KernelURL:    "http://127.0.0.1:1/kernel",
 		ReleaseBase:  "http://127.0.0.1:1",
 		VerifyBinary: func(string) error { return nil },
-	}
-	if err := os.WriteFile(filepath.Join(assetsDir, "vmlinux.bin"), []byte("kernel"), 0o644); err != nil {
-		t.Fatal(err)
 	}
 	probes, _ := healthyProbes(t)
 	client := &fakeNodeClient{node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}}

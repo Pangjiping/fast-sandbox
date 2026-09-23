@@ -40,7 +40,6 @@ func (c AssetConfig) installFromBundle(dir string) error {
 	}{
 		{name: "firecracker", allowed: stockBinary},
 		{name: "jailer", allowed: stockBinary},
-		{name: "vmlinux.bin", allowed: c.KernelURL == ""},
 	}
 	var failures []error
 	for _, entry := range entries {
@@ -64,12 +63,7 @@ func (c AssetConfig) installFromBundle(dir string) error {
 // bundleNeeds reports whether dir/name still needs an install (same
 // predicate as the download path, so a working install is never replaced).
 func (c AssetConfig) bundleNeeds(dir, name string) bool {
-	path := filepath.Join(dir, name)
-	if name == "vmlinux.bin" {
-		info, err := os.Stat(path)
-		return err != nil || info.Size() == 0
-	}
-	return c.binaryMissing(path)
+	return c.binaryMissing(filepath.Join(dir, name))
 }
 
 // copyVerified copies src to dst after verifying its digest against want

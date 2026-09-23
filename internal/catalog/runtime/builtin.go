@@ -16,8 +16,6 @@ const (
 	kvmDevicePath = "/dev/kvm"
 	// boxliteStateRootDir is the host state root directory of the BoxLite runtime.
 	boxliteStateRootDir = "/var/lib/fast-sandbox/boxlite"
-	// firecrackerVmlinuxPath is the host kernel image of the Firecracker runtime.
-	firecrackerVmlinuxPath = "/opt/fast-sandbox/firecracker/vmlinux.bin"
 	// firecrackerStateRootDir is the host state root directory of the Firecracker runtime.
 	firecrackerStateRootDir = "/var/lib/fast-sandbox/firecracker"
 	// firecrackerBinaryPath is the host Firecracker binary installed by hostready.
@@ -96,7 +94,12 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 			RuntimeProfile{
 				Name: apiv1alpha2.RuntimeFirecracker, Version: builtinProfileVersion, Driver: DriverKindFirecracker,
 				Firecracker: &FirecrackerConfig{
-					BinaryPath: firecrackerBinaryPath, KernelPath: firecrackerVmlinuxPath,
+					BinaryPath: firecrackerBinaryPath,
+					// KernelPath stays empty: the node never carries a guest
+					// kernel — snapshots bake their own (a build-time asset
+					// recorded in the manifest) and restore is a vmstate
+					// resume that does not boot one (#84). Operators running
+					// direct boot pin kernelPath in their runtime-environment.
 					RootfsPath: firecrackerRootfsDir, StateRoot: firecrackerStateRootDir,
 					DefaultVCPUs: 1, DefaultMemory: "512Mi", BootTimeoutSeconds: 30,
 				},
@@ -106,7 +109,6 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 						{Name: "dev-kvm", HostPath: kvmDevicePath, MountPath: kvmDevicePath, Type: corev1.HostPathCharDev},
 						{Name: "dev-net-tun", HostPath: "/dev/net/tun", MountPath: "/dev/net/tun", Type: corev1.HostPathCharDev},
 						{Name: "firecracker-bin", HostPath: firecrackerBinaryPath, MountPath: firecrackerBinaryPath, Type: corev1.HostPathFile, ReadOnly: true},
-						{Name: "firecracker-kernel", HostPath: firecrackerVmlinuxPath, MountPath: firecrackerVmlinuxPath, Type: corev1.HostPathFile, ReadOnly: true},
 						{Name: "firecracker-rootfs", HostPath: firecrackerRootfsDir, MountPath: firecrackerRootfsDir, Type: corev1.HostPathDirectoryOrCreate},
 						{Name: "firecracker-state", HostPath: firecrackerStateRootDir, MountPath: firecrackerStateRootDir, Type: corev1.HostPathDirectoryOrCreate},
 					}, linuxNetworkPaths...),

@@ -29,14 +29,14 @@ data:
           # Firecracker on-demand loading: the node-level runtime-agent pulls
           # the golden snapshot set from the artifact store into StateRoot,
           # and the driver restores every Sandbox from it (jailer mode with
-          # per-clone netns). The binary/jailer/kernel are installed on the
-          # node by the agent's readiness loop (hostready: host checks +
-          # asset install + node labels); the paths below are the
-          # environment-side installation values.
+          # per-clone netns). The binary/jailer are installed on the node by
+          # the agent's readiness loop (hostready: host checks + asset
+          # install + node labels); the paths below are the environment-side
+          # installation values. No kernelPath: restore never boots a kernel
+          # (snapshots bake their own); direct-boot operators pin one here.
           firecracker:
             firecracker:
               binaryPath: /opt/fast-sandbox/firecracker/firecracker
               jailerPath: /opt/fast-sandbox/firecracker/jailer
-              kernelPath: /opt/fast-sandbox/firecracker/vmlinux.bin
               rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs
               stateRoot: /var/lib/fast-sandbox/firecracker

@@ -410,7 +410,6 @@ func readinessSettings(configPath, stateRoot string) func() (agenthostready.Sett
 			Assets: &agenthostready.AssetConfig{
 				Dir:       readiness.AssetsDir,
 				FCVersion: readiness.FCVersion,
-				KernelURL: readiness.KernelURL,
 			},
 			Interval: interval,
 		}, nil

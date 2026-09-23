@@ -9,10 +9,10 @@
 // are read once at startup (they wire long-lived resources — changing
 // them needs a pod restart); the nodeReadiness section is re-read before
 // every recheck pass, so threshold/interval/asset-source edits land
-// through the mounted ConfigMap without a restart. Changing
-// fcVersion/kernelURL takes effect on the next pass only if the assets
-// do not already verify in assetsDir (a pinned install is never silently
-// replaced — point assetsDir elsewhere or clear it).
+// through the mounted ConfigMap without a restart. Changing fcVersion
+// takes effect on the next pass only if the assets do not already verify
+// in assetsDir (a pinned install is never silently replaced — point
+// assetsDir elsewhere or clear it).
 package main
 
 import (
@@ -90,10 +90,9 @@ type agentNodeReadinessConfig struct {
 	// Enabled turns the readiness loop on (the DaemonSet sets this plus
 	// FAST_SANDBOX_NODE_NAME).
 	Enabled bool `yaml:"enabled"`
-	// AssetsDir/FCVersion/KernelURL feed the Firecracker asset install.
+	// AssetsDir/FCVersion feed the Firecracker asset install.
 	AssetsDir string `yaml:"assetsDir"`
 	FCVersion string `yaml:"fcVersion"`
-	KernelURL string `yaml:"kernelURL"`
 	// Interval is the recheck cadence ("5m").
 	Interval string `yaml:"interval"`
 	// MinFree/MinMemory are the byte thresholds ("10GiB").
@@ -175,8 +174,8 @@ func (c *agentConfig) normalize() error {
 	if c.NodeReadiness.FCVersion == "" {
 		c.NodeReadiness.FCVersion = agenthostready.DefaultFCVersion
 	}
-	// nodeReadiness.kernelURL stays empty by default: the installer uses
-	// the pinned x86_64 Amazon CI kernel (the only supported arch).
+	// nodeReadiness installs no guest kernel: the snapshots bake their
+	// own (a build-time asset) and restore never boots one (#84).
 	// minFree/minMemory/interval are resolved by the readiness settings
 	// loader against the hostready package defaults — no duplicated
 	// default literals here.

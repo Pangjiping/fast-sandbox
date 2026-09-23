@@ -87,7 +87,10 @@ func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.R
 			p.missing(&report, "firecracker runtime configuration", "RuntimeProfileInvalid")
 			break
 		}
-		if profile.Firecracker.BinaryPath == "" || profile.Firecracker.KernelPath == "" || profile.Firecracker.RootfsPath == "" || profile.Firecracker.StateRoot == "" {
+		// KernelPath is optional (snapshots bake their own kernel and
+		// restore never boots one, #84); an operator-pinned path is
+		// still probed below.
+		if profile.Firecracker.BinaryPath == "" || profile.Firecracker.RootfsPath == "" || profile.Firecracker.StateRoot == "" {
 			p.missing(&report, "firecracker runtime paths", "RuntimeProfileInvalid")
 			break
 		}
@@ -96,7 +99,9 @@ func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.R
 			break
 		}
 		p.requirePath(&report, profile.Firecracker.BinaryPath, "RuntimeBinaryUnavailable")
-		p.requirePath(&report, profile.Firecracker.KernelPath, "RuntimeKernelUnavailable")
+		if profile.Firecracker.KernelPath != "" {
+			p.requirePath(&report, profile.Firecracker.KernelPath, "RuntimeKernelUnavailable")
+		}
 		p.requirePath(&report, profile.Firecracker.StateRoot, "RuntimeStateRootUnavailable")
 	default:
 		p.missing(&report, string(profile.Driver), "RuntimeDriverUnsupported")

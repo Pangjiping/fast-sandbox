@@ -73,7 +73,10 @@ func TestBuiltinCatalogProfiles(t *testing.T) {
 	require.True(t, hasHostPath(firecracker.Deployment.HostPaths, "/dev/net/tun"))
 	require.True(t, hasHostPath(firecracker.Deployment.HostPaths, "/usr/local/bin/firecracker"))
 	require.Equal(t, "/usr/local/bin/firecracker", firecracker.Firecracker.BinaryPath)
-	require.Equal(t, "/opt/fast-sandbox/firecracker/vmlinux.bin", firecracker.Firecracker.KernelPath)
+	// No node-side guest kernel: snapshots bake their own and restore
+	// never boots one (#84); direct boot pins an operator kernelPath.
+	require.Empty(t, firecracker.Firecracker.KernelPath)
+	require.False(t, hasHostPath(firecracker.Deployment.HostPaths, "/opt/fast-sandbox/firecracker/vmlinux.bin"))
 	require.Equal(t, int32(1), firecracker.Firecracker.DefaultVCPUs)
 	require.Equal(t, "512Mi", firecracker.Firecracker.DefaultMemory)
 
