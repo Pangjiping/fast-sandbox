@@ -87,9 +87,7 @@ func (p *HostCapabilityProber) Probe(_ context.Context, profile runtimecatalog.R
 			p.missing(&report, "firecracker runtime configuration", "RuntimeProfileInvalid")
 			break
 		}
-		// KernelPath is optional (snapshots bake their own kernel and
-		// restore never boots one, #84); an operator-pinned path is
-		// still probed below.
+		// KernelPath is optional (#84); a pinned path is still probed.
 		if profile.Firecracker.BinaryPath == "" || profile.Firecracker.RootfsPath == "" || profile.Firecracker.StateRoot == "" {
 			p.missing(&report, "firecracker runtime paths", "RuntimeProfileInvalid")
 			break

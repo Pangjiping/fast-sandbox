@@ -30,10 +30,8 @@ data:
           # the golden snapshot set from the artifact store into StateRoot,
           # and the driver restores every Sandbox from it (jailer mode with
           # per-clone netns). The binary/jailer are installed on the node by
-          # the agent's readiness loop (hostready: host checks + asset
-          # install + node labels); the paths below are the environment-side
-          # installation values. No kernelPath: restore never boots a kernel
-          # (snapshots bake their own); direct-boot operators pin one here.
+          # the agent's readiness loop. No kernelPath: restore never boots a
+          # kernel; direct-boot operators pin one here.
           firecracker:
             firecracker:
               binaryPath: /opt/fast-sandbox/firecracker/firecracker

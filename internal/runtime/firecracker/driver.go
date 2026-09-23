@@ -220,9 +220,7 @@ func (d *Driver) gcImageCache() {
 }
 
 func validateConfig(config runtimecatalog.FirecrackerConfig) error {
-	// KernelPath is optional: snapshots bake their own kernel (a
-	// build-time asset) and restore is a vmstate resume that does not
-	// boot one (#84). Only direct-boot operators pin a node-side path.
+	// KernelPath is optional (#84): only direct-boot operators pin it.
 	if config.BinaryPath == "" || config.RootfsPath == "" || config.StateRoot == "" {
 		return fmt.Errorf("%w: firecracker binary, rootfs, and state root are required", ErrInvalidConfig)
 	}
@@ -318,8 +316,7 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 		{"/dev/net/tun", "TapDeviceUnavailable"},
 		{config.BinaryPath, "RuntimeBinaryUnavailable"},
 	}
-	// The node-side kernel is optional (restore never boots one, #84);
-	// only an operator-pinned path is probed.
+	// The node-side kernel is optional; only a pinned path is probed.
 	if config.KernelPath != "" {
 		checks = append(checks, struct {
 			path   string

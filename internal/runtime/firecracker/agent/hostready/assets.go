@@ -19,10 +19,9 @@ import (
 )
 
 // Firecracker asset pins: the release the runtime plan points at
-// (config/runtime-environments.yaml binaryPath). The guest kernel is a
-// build-time asset (the sandboxtemplate-builder embeds its own and bakes
-// it into the snapshot manifest); nodes never install one — restore is a
-// vmstate resume that does not boot a kernel (#84).
+// (config/runtime-environments.yaml binaryPath). No guest kernel: it is
+// a build-time asset baked into the snapshots, and restore never boots
+// one (#84).
 const (
 	// DefaultFCVersion is the pinned Firecracker release.
 	DefaultFCVersion = "v1.16.1"

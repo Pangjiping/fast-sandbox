@@ -300,11 +300,9 @@ func checkStateRootFS(report *Report, probes Probes, config CheckConfig) {
 }
 
 // checkAssets verifies the installed Firecracker binaries run. The node
-// never carries a guest kernel: the snapshots bake their own (a build-time
-// asset) and restore is a vmstate resume that does not boot one (#84).
-// The manager installs missing assets before running the checks; in
-// check-only mode (standalone script, local agent) a missing install
-// surfaces here.
+// carries no guest kernel — snapshots bake their own and restore never
+// boots one (#84). The manager installs missing assets before the checks;
+// in check-only mode a missing install surfaces here.
 func checkAssets(report *Report, config CheckConfig, probes Probes) {
 	binary := filepath.Join(config.AssetsDir, "firecracker")
 	jailer := filepath.Join(config.AssetsDir, "jailer")
