@@ -173,8 +173,7 @@ func applyFirecrackerBinding(config *runtimecatalog.FirecrackerConfig, binding *
 // replaceFirecrackerHostPaths drops the builtin firecracker-* host path
 // requirements from values and appends the ones derived from the resolved
 // configuration, so the fastlet pod mounts exactly the installed paths
-// (binary, jailer, rootfs, state root — plus the kernel only when an
-// operator pins kernelPath).
+// (binary, jailer, rootfs, state root; the kernel only when pinned).
 func replaceFirecrackerHostPaths(values []runtimecatalog.HostPathRequirement, config *runtimecatalog.FirecrackerConfig) []runtimecatalog.HostPathRequirement {
 	kept := values[:0]
 	for _, requirement := range values {
@@ -187,8 +186,7 @@ func replaceFirecrackerHostPaths(values []runtimecatalog.HostPathRequirement, co
 		runtimecatalog.HostPathRequirement{Name: "firecracker-rootfs", HostPath: config.RootfsPath, MountPath: config.RootfsPath, Type: corev1.HostPathDirectoryOrCreate},
 		runtimecatalog.HostPathRequirement{Name: "firecracker-state", HostPath: config.StateRoot, MountPath: config.StateRoot, Type: corev1.HostPathDirectoryOrCreate},
 	)
-	// The kernel is optional (restore never boots one, #84): only an
-	// operator-pinned kernelPath is mounted into the fastlet pod.
+	// The kernel mounts only when an operator pins kernelPath (#84).
 	if config.KernelPath != "" {
 		kept = append(kept, runtimecatalog.HostPathRequirement{Name: "firecracker-kernel", HostPath: config.KernelPath, MountPath: config.KernelPath, Type: corev1.HostPathFile, ReadOnly: true})
 	}

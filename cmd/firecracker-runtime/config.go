@@ -174,11 +174,10 @@ func (c *agentConfig) normalize() error {
 	if c.NodeReadiness.FCVersion == "" {
 		c.NodeReadiness.FCVersion = agenthostready.DefaultFCVersion
 	}
-	// nodeReadiness installs no guest kernel: the snapshots bake their
-	// own (a build-time asset) and restore never boots one (#84).
-	// minFree/minMemory/interval are resolved by the readiness settings
-	// loader against the hostready package defaults — no duplicated
-	// default literals here.
+	// No guest kernel install: snapshots bake their own and restore
+	// never boots one (#84). minFree/minMemory/interval are resolved by
+	// the readiness settings loader against the hostready package
+	// defaults — no duplicated default literals here.
 	return nil
 }
 

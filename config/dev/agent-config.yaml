@@ -67,8 +67,7 @@ data:
       # Requires FAST_SANDBOX_NODE_NAME (injected by the DaemonSet).
       # The asset install prefers the release bundled in the agent image;
       # this pin routes to downloads when set away from it. No guest
-      # kernel is installed: snapshots bake their own (a build-time
-      # asset) and restore never boots one.
+      # kernel is installed (snapshots bake their own).
       enabled: true
       assetsDir: /opt/fast-sandbox/firecracker
       fcVersion: v1.16.1

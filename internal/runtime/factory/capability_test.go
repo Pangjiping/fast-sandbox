@@ -60,8 +60,7 @@ func TestHostCapabilityProberAcceptsConfiguredFirecrackerProfile(t *testing.T) {
 func TestHostCapabilityProberFirecrackerDriverGate(t *testing.T) {
 	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeFirecracker)
 	require.NoError(t, err)
-	// The builtin firecracker profile is production-configured (the
-	// on-demand loading chain is implemented and E2E-verified) and needs
+	// The builtin firecracker profile is production-configured and needs
 	// no node-side kernel (#84).
 	require.Equal(t, runtimecatalog.CapabilityConfigured, profile.Capabilities.DefaultState)
 	require.Empty(t, profile.Firecracker.KernelPath)

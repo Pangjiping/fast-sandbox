@@ -94,12 +94,10 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 			RuntimeProfile{
 				Name: apiv1alpha2.RuntimeFirecracker, Version: builtinProfileVersion, Driver: DriverKindFirecracker,
 				Firecracker: &FirecrackerConfig{
+					// KernelPath stays empty: snapshots bake their own kernel
+					// and restore never boots one (#84); direct boot pins an
+					// operator kernelPath.
 					BinaryPath: firecrackerBinaryPath,
-					// KernelPath stays empty: the node never carries a guest
-					// kernel — snapshots bake their own (a build-time asset
-					// recorded in the manifest) and restore is a vmstate
-					// resume that does not boot one (#84). Operators running
-					// direct boot pin kernelPath in their runtime-environment.
 					RootfsPath: firecrackerRootfsDir, StateRoot: firecrackerStateRootDir,
 					DefaultVCPUs: 1, DefaultMemory: "512Mi", BootTimeoutSeconds: 30,
 				},

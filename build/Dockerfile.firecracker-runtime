@@ -11,10 +11,8 @@ ARG DART_REV=a85f39f13d81241b3d57f7f7fe7b7c84d58b7aa2
 
 # Firecracker assets baked in (fc-assets stage below): the hostready
 # installer copies them onto the node instead of downloading. The pin must
-# match hostready.DefaultFCVersion (asserted by assets_test.go); config
-# pins still route around the bundle to downloads. No guest kernel is
-# bundled: the snapshots bake their own (a build-time asset) and restore
-# is a vmstate resume that never boots one (#84).
+# match hostready.DefaultFCVersion (asserted by assets_test.go). No guest
+# kernel: snapshots bake their own and restore never boots one (#84).
 ARG FC_VERSION=v1.16.1
 
 # --- dart (P2P daemon, pinned) ------------------------------------------------
