@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -301,24 +302,19 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	preparedFastlets := r.preparedFastletCount(&pool, infraPlan.Revision)
 	warmImageStatuses := r.aggregateWarmImageStatus(&pool, childPods.Items)
 	idleFastlets, busyFastlets := r.fastletUtilizationCounts(&pool, childPods.Items)
-	if pool.Status.CurrentPods != currentCount ||
-		pool.Status.ReadyPods != readyPods || pool.Status.IdleFastlets != idleFastlets ||
-		pool.Status.BusyFastlets != busyFastlets ||
-		pool.Status.RuntimeRevision != runtimePlan.Revision || pool.Status.InfraRevision != infraPlan.Revision ||
-		pool.Status.FastletRevision != desiredPodHash || pool.Status.PreparedFastlets != preparedFastlets ||
-		!reflect.DeepEqual(pool.Status.WarmImages, warmImageStatuses) {
-		pool.Status.CurrentPods = currentCount
-		pool.Status.ReadyPods = readyPods
-		pool.Status.IdleFastlets = idleFastlets
-		pool.Status.BusyFastlets = busyFastlets
-		pool.Status.RuntimeRevision = runtimePlan.Revision
-		pool.Status.InfraRevision = infraPlan.Revision
-		pool.Status.FastletRevision = desiredPodHash
-		pool.Status.PreparedFastlets = preparedFastlets
-		pool.Status.WarmImages = warmImageStatuses
-		if err := r.Status().Update(ctx, &pool); err != nil {
-			return ctrl.Result{}, err
-		}
+	observation := poolObservation{
+		currentPods:      currentCount,
+		readyPods:        readyPods,
+		idleFastlets:     idleFastlets,
+		busyFastlets:     busyFastlets,
+		runtimeRevision:  runtimePlan.Revision,
+		infraRevision:    infraPlan.Revision,
+		fastletRevision:  desiredPodHash,
+		preparedFastlets: preparedFastlets,
+		warmImages:       warmImageStatuses,
+	}
+	if err := r.updatePoolStatus(ctx, &pool, observation.apply); err != nil {
+		return ctrl.Result{}, err
 	}
 	if result, handled, err := r.reconcileDraining(ctx, &pool, childPods.Items, allSandboxes.Items, desiredPods, desiredPodHash); err != nil {
 		return ctrl.Result{}, err
@@ -1850,16 +1846,100 @@ func mountPropagation(value *corev1.MountPropagationMode) corev1.MountPropagatio
 
 // updatePoolCondition stamps ObservedGeneration and persists the condition;
 // an unchanged condition is a no-op, avoiding a pointless status write per
-// reconcile.
+// reconcile. Conflicts are retried against the latest object, see
+// updatePoolStatus.
 func (r *SandboxPoolReconciler) updatePoolCondition(ctx context.Context, pool *apiv1alpha2.SandboxPool, condition metav1.Condition) error {
-	condition.ObservedGeneration = pool.Generation
-	existing := apiMeta.FindStatusCondition(pool.Status.Conditions, condition.Type)
-	if existing != nil && existing.Status == condition.Status && existing.Reason == condition.Reason &&
-		existing.Message == condition.Message && existing.ObservedGeneration == condition.ObservedGeneration {
-		return nil
+	return r.updatePoolStatus(ctx, pool, func(current *apiv1alpha2.SandboxPool) bool {
+		condition.ObservedGeneration = current.Generation
+		existing := apiMeta.FindStatusCondition(current.Status.Conditions, condition.Type)
+		if existing != nil && existing.Status == condition.Status && existing.Reason == condition.Reason &&
+			existing.Message == condition.Message && existing.ObservedGeneration == condition.ObservedGeneration {
+			return false
+		}
+		apiMeta.SetStatusCondition(&current.Status.Conditions, condition)
+		return true
+	})
+}
+
+// poolObservation carries the per-reconcile counter/revision projection into
+// SandboxPool.status.
+type poolObservation struct {
+	currentPods      int32
+	readyPods        int32
+	idleFastlets     int32
+	busyFastlets     int32
+	runtimeRevision  string
+	infraRevision    string
+	fastletRevision  string
+	preparedFastlets int32
+	warmImages       []apiv1alpha2.WarmImageStatus
+}
+
+func (o poolObservation) apply(pool *apiv1alpha2.SandboxPool) bool {
+	status := &pool.Status
+	if status.CurrentPods == o.currentPods &&
+		status.ReadyPods == o.readyPods && status.IdleFastlets == o.idleFastlets &&
+		status.BusyFastlets == o.busyFastlets &&
+		status.RuntimeRevision == o.runtimeRevision && status.InfraRevision == o.infraRevision &&
+		status.FastletRevision == o.fastletRevision && status.PreparedFastlets == o.preparedFastlets &&
+		reflect.DeepEqual(status.WarmImages, o.warmImages) {
+		return false
 	}
-	apiMeta.SetStatusCondition(&pool.Status.Conditions, condition)
-	return r.Status().Update(ctx, pool)
+	status.CurrentPods = o.currentPods
+	status.ReadyPods = o.readyPods
+	status.IdleFastlets = o.idleFastlets
+	status.BusyFastlets = o.busyFastlets
+	status.RuntimeRevision = o.runtimeRevision
+	status.InfraRevision = o.infraRevision
+	status.FastletRevision = o.fastletRevision
+	status.PreparedFastlets = o.preparedFastlets
+	status.WarmImages = o.warmImages
+	return true
+}
+
+// updatePoolStatus persists a SandboxPool status mutation conflict-safely.
+// Concurrent writers (for example the OpenSandbox server pool service in
+// all-in-one deployments) and the controller's own informer-cache lag used to
+// surface raw Conflict errors dozens of times per minute and flood the log;
+// see issue #88. apply mutates current in place and reports whether anything
+// changed, so re-applying on conflict stays idempotent and an already-applied
+// change stays a no-op. On conflict the latest object is re-read through the
+// durable (API-server) reader, never the informer cache: a stale cached
+// resourceVersion would turn every retry into another conflict and keep the
+// storm alive. On success the caller's pool adopts the persisted
+// resourceVersion and status so later writes within the same reconcile do not
+// race their own predecessor.
+func (r *SandboxPoolReconciler) updatePoolStatus(ctx context.Context, pool *apiv1alpha2.SandboxPool, apply func(*apiv1alpha2.SandboxPool) bool) error {
+	key := client.ObjectKeyFromObject(pool)
+	var persisted *apiv1alpha2.SandboxPool
+	firstAttempt := true
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := pool.DeepCopy()
+		if !firstAttempt {
+			var latest apiv1alpha2.SandboxPool
+			if err := r.durableReader().Get(ctx, key, &latest); err != nil {
+				return err
+			}
+			current = &latest
+		}
+		firstAttempt = false
+		if !apply(current) {
+			persisted = current
+			return nil
+		}
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		persisted = current
+		return nil
+	})
+	if err != nil || persisted == nil {
+		return err
+	}
+	pool.ResourceVersion = persisted.ResourceVersion
+	pool.Generation = persisted.Generation
+	pool.Status = persisted.Status
+	return nil
 }
 
 func boolPtr(b bool) *bool {

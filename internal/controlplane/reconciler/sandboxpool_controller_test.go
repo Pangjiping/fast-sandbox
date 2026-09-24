@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1066,4 +1067,112 @@ func envValueFromArgs(args []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func TestUpdatePoolConditionRetriesConflictByRefetchingLatest(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "tenant-a"},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&apiv1alpha2.SandboxPool{}).
+		WithObjects(pool).Build()
+	reconciler := &SandboxPoolReconciler{Client: k8sClient, Scheme: scheme}
+	key := client.ObjectKey{Namespace: "tenant-a", Name: "pool-a"}
+
+	stale := &apiv1alpha2.SandboxPool{}
+	require.NoError(t, k8sClient.Get(context.Background(), key, stale))
+
+	// A concurrent writer (for example the OpenSandbox server pool service)
+	// records its observation and bumps the resourceVersion after our stale
+	// read; the condition write must retry instead of surfacing a Conflict.
+	external := &apiv1alpha2.SandboxPool{}
+	require.NoError(t, k8sClient.Get(context.Background(), key, external))
+	external.Status.CurrentPods = 9
+	require.NoError(t, k8sClient.Status().Update(context.Background(), external))
+
+	require.NoError(t, reconciler.updatePoolCondition(context.Background(), stale, metav1.Condition{
+		Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionTrue,
+		Reason: apiv1alpha2.ReasonRegistryAvailable, Message: "ok",
+	}))
+
+	var persisted apiv1alpha2.SandboxPool
+	require.NoError(t, k8sClient.Get(context.Background(), key, &persisted))
+	require.Equal(t, int32(9), persisted.Status.CurrentPods, "the concurrent writer's field must survive")
+	require.NotNil(t, apiMeta.FindStatusCondition(persisted.Status.Conditions, apiv1alpha2.PoolConditionRegistryReady))
+	require.Equal(t, stale.ResourceVersion, persisted.ResourceVersion, "the caller must adopt the persisted resourceVersion")
+}
+
+func TestUpdatePoolConditionIsNoopWhenConflictRefetchAlreadyApplied(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "tenant-a", Generation: 3},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&apiv1alpha2.SandboxPool{}).
+		WithObjects(pool).Build()
+	reconciler := &SandboxPoolReconciler{Client: k8sClient, Scheme: scheme}
+	key := client.ObjectKey{Namespace: "tenant-a", Name: "pool-a"}
+	condition := metav1.Condition{
+		Type: apiv1alpha2.PoolConditionRegistryReady, Status: metav1.ConditionTrue,
+		Reason: apiv1alpha2.ReasonRegistryAvailable, Message: "ok", ObservedGeneration: 3,
+	}
+
+	stale := &apiv1alpha2.SandboxPool{}
+	require.NoError(t, k8sClient.Get(context.Background(), key, stale))
+	// Another writer already applied the identical condition; the retry must
+	// detect the no-op instead of rewriting the same status forever.
+	external := &apiv1alpha2.SandboxPool{}
+	require.NoError(t, k8sClient.Get(context.Background(), key, external))
+	apiMeta.SetStatusCondition(&external.Status.Conditions, condition)
+	require.NoError(t, k8sClient.Status().Update(context.Background(), external))
+	var afterExternal apiv1alpha2.SandboxPool
+	require.NoError(t, k8sClient.Get(context.Background(), key, &afterExternal))
+
+	require.NoError(t, reconciler.updatePoolCondition(context.Background(), stale, condition))
+
+	var persisted apiv1alpha2.SandboxPool
+	require.NoError(t, k8sClient.Get(context.Background(), key, &persisted))
+	require.Equal(t, afterExternal.ResourceVersion, persisted.ResourceVersion, "an already-applied condition must not trigger another status write")
+}
+
+func TestUpdatePoolObservationRetriesConflictByRefetchingLatest(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "tenant-a"},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&apiv1alpha2.SandboxPool{}).
+		WithObjects(pool).Build()
+	reconciler := &SandboxPoolReconciler{Client: k8sClient, Scheme: scheme}
+	key := client.ObjectKey{Namespace: "tenant-a", Name: "pool-a"}
+
+	stale := &apiv1alpha2.SandboxPool{}
+	require.NoError(t, k8sClient.Get(context.Background(), key, stale))
+	external := &apiv1alpha2.SandboxPool{}
+	require.NoError(t, k8sClient.Get(context.Background(), key, external))
+	apiMeta.SetStatusCondition(&external.Status.Conditions, metav1.Condition{
+		Type: apiv1alpha2.PoolConditionRuntimeReady, Status: metav1.ConditionTrue, Reason: "external", Message: "external",
+	})
+	require.NoError(t, k8sClient.Status().Update(context.Background(), external))
+
+	observation := poolObservation{
+		currentPods: 2, readyPods: 2, idleFastlets: 1, busyFastlets: 1,
+		runtimeRevision: "runtime-1", infraRevision: "infra-1", fastletRevision: "hash-1",
+		preparedFastlets: 2, warmImages: []apiv1alpha2.WarmImageStatus{{Image: "alpine:latest", DesiredFastlets: 2}},
+	}
+	require.NoError(t, reconciler.updatePoolStatus(context.Background(), stale, observation.apply))
+
+	var persisted apiv1alpha2.SandboxPool
+	require.NoError(t, k8sClient.Get(context.Background(), key, &persisted))
+	require.Equal(t, int32(2), persisted.Status.CurrentPods)
+	require.Equal(t, "runtime-1", persisted.Status.RuntimeRevision)
+	require.NotNil(t, apiMeta.FindStatusCondition(persisted.Status.Conditions, apiv1alpha2.PoolConditionRuntimeReady), "conditions written by another writer must be preserved")
+	require.Equal(t, observation.warmImages, stale.Status.WarmImages, "the caller must adopt the persisted status")
 }
