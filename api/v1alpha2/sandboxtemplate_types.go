@@ -145,6 +145,22 @@ type OutputSpec struct {
 	Prime *PrimeSpec `json:"prime,omitempty"`
 }
 
+// MITMCertificateSpec selects the Secret entry holding the egress MITM
+// proxy CA certificate (OSEP-0022).
+type MITMCertificateSpec struct {
+	// SecretRef references the Secret carrying the certificate; it must
+	// live in the template's namespace.
+	// +kubebuilder:validation:Required
+	SecretRef corev1.LocalObjectReference `json:"secretRef"`
+	// Key is the Secret data entry holding the PEM certificate. Only this
+	// key is projected into the build Pod, so the CA private key never
+	// enters the build; the builder rejects non-certificate entries.
+	// +kubebuilder:default=ca.crt
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Key string `json:"key"`
+}
+
 // SandboxTemplateSpec defines the desired golden-image build.
 type SandboxTemplateSpec struct {
 	// Image is the OCI image reference to convert.
@@ -195,6 +211,15 @@ type SandboxTemplateSpec struct {
 	// the inherited value.
 	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
+
+	// EgressMITMCertificate bakes the egress MITM proxy CA certificate into
+	// the template: the builder places it at /opt/opensandbox/mitmproxy-ca-cert.pem
+	// (the execd bootstrap contract path) and enables the trust gate, so
+	// the bootstrap installs it into the guest trust store and client env
+	// vars at the snapshot boot. Restored sandboxes trust the CA from first
+	// boot; the CA is cluster-global, so the field is pool-agnostic.
+	// +optional
+	EgressMITMCertificate *MITMCertificateSpec `json:"egressMitmCertificate,omitempty"`
 
 	// Readiness defines when the guest is considered ready.
 	Readiness ReadinessSpec `json:"readiness"`

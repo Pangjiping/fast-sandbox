@@ -185,6 +185,14 @@ func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint str
 		// bare value containing $ or backticks would be expanded by sh.
 		envLines = append(envLines, fmt.Sprintf("export %s=%s", name, shellQuote(merged[name])))
 	}
+	// Bake the egress MITM CA at the bootstrap contract path; the gate line
+	// follows the merged envs so it wins over spec.envs.
+	if spec.EgressMITMCertificate != nil {
+		if err := injectEgressMITMCertificate(spec, mountPoint); err != nil {
+			return err
+		}
+		envLines = append(envLines, "export "+guestMITMTrustGate+"=true")
+	}
 	if err := os.WriteFile(filepath.Join(mountPoint, "etc", "sandbox-init.env"),
 		[]byte(strings.Join(envLines, "\n")+"\n"), 0o600); err != nil {
 		return err
