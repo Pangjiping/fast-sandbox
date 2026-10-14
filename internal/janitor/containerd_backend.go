@@ -11,6 +11,7 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 )
@@ -81,7 +82,7 @@ func (b *ContainerdBackend) Cleanup(ctx context.Context, expected ResourceIdenti
 	}
 
 	var result error
-	task, err := container.Task(ctx, nil)
+	task, err := container.Task(ctx, cio.Load)
 	if err == nil {
 		exit, waitErr := task.Wait(ctx)
 		if waitErr != nil && !errdefs.IsNotFound(waitErr) {
@@ -105,6 +106,10 @@ func (b *ContainerdBackend) Cleanup(ctx context.Context, expected ResourceIdenti
 	}
 	if err := container.Delete(ctx, containerd.WithSnapshotCleanup); err != nil && !errdefs.IsNotFound(err) {
 		result = errors.Join(result, err)
+	}
+	// Do not unlink FIFOs when runtime cleanup failed: a task may still use them.
+	if result != nil {
+		return result
 	}
 	if err := cleanupFIFOs(b.fifoDir, expected.ResourceID); err != nil {
 		result = errors.Join(result, err)
@@ -138,14 +143,46 @@ func cleanupFIFOs(root, resourceID string) error {
 	if resourceID == "" {
 		return errors.New("container ID is empty")
 	}
-	matches, err := filepath.Glob(filepath.Join(root, resourceID+"*"))
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("read FIFO root: %w", err)
 	}
 	var result error
-	for _, match := range matches {
-		if err := os.Remove(match); err != nil && !os.IsNotExist(err) {
-			result = errors.Join(result, err)
+	// CIO puts each set of FIFOs in its own randomly named subdirectory.
+	// The root is runtime-owned and resourceID comes from containerd.
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		removed := false
+		for _, stream := range [...]string{"stdin", "stdout", "stderr"} {
+			path := filepath.Join(dir, resourceID+"-"+stream)
+			info, err := os.Lstat(path)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				result = errors.Join(result, err)
+				continue
+			}
+			if info.Mode()&os.ModeNamedPipe == 0 {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				result = errors.Join(result, err)
+			} else {
+				removed = true
+			}
+		}
+		if removed {
+			if err := os.Remove(dir); err != nil &&
+				!errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
+				result = errors.Join(result, err)
+			}
 		}
 	}
 	return result

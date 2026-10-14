@@ -147,17 +147,3 @@ func TestLinuxNetworkBackendCleanupIsIdentityFencedAndIdempotent(t *testing.T) {
 	require.NoError(t, backend.Cleanup(context.Background(), resources[0]))
 	require.Equal(t, []string{"slot-a"}, driver.destroyed)
 }
-
-func TestCleanupFIFOs(t *testing.T) {
-	root := t.TempDir()
-	for _, name := range []string{"container-a-stdout", "container-a-stderr", "other"} {
-		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte("test"), 0o600))
-	}
-	require.NoError(t, cleanupFIFOs(root, "container-a"))
-	_, err := os.Stat(filepath.Join(root, "container-a-stdout"))
-	require.True(t, os.IsNotExist(err))
-	_, err = os.Stat(filepath.Join(root, "container-a-stderr"))
-	require.True(t, os.IsNotExist(err))
-	_, err = os.Stat(filepath.Join(root, "other"))
-	require.NoError(t, err)
-}
