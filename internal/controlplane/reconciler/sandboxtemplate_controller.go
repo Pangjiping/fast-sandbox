@@ -84,6 +84,16 @@ const (
 	publishCredentialsDirEnv        = "SANDBOX_TEMPLATE_PUBLISH_SECRET_DIR"
 )
 
+// sandboxTemplateMitmCertDir is where the build Pod mounts the single
+// egressMitmCertificate key (volume Items): the rest of the Secret — e.g.
+// the CA private key — never enters the build.
+const (
+	sandboxTemplateMitmCertDir = "/etc/fast-sandbox/mitm-certificate"
+	mitmCertificateDirEnv      = "SANDBOX_TEMPLATE_MITM_CERT_DIR"
+	mitmCertificateItemName    = "tls.crt"
+	mitmCertificateDefaultKey  = "ca.crt"
+)
+
 // SandboxTemplateReconciler reconciles SandboxTemplate resources by driving
 // golden-image builds as Pods (design: SandboxTemplate — declarative
 // golden-image builds). The Pod executes the build pipeline (convert →
@@ -578,6 +588,27 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 			Name: "publish-credentials",
 			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 				SecretName: ref.Name,
+			}},
+		})
+	}
+	// The egress MITM CA certificate: files, never env, key-only projection.
+	if cert := template.Spec.EgressMITMCertificate; cert != nil {
+		key := cert.Key
+		if key == "" {
+			key = mitmCertificateDefaultKey // mirror the CRD default
+		}
+		env = append(env, corev1.EnvVar{Name: mitmCertificateDirEnv, Value: sandboxTemplateMitmCertDir})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name: "mitm-certificate", MountPath: sandboxTemplateMitmCertDir, ReadOnly: true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "mitm-certificate",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: cert.SecretRef.Name,
+				Items: []corev1.KeyToPath{{
+					Key:  key,
+					Path: mitmCertificateItemName,
+				}},
 			}},
 		})
 	}
