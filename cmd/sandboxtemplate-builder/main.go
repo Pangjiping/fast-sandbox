@@ -87,6 +87,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := validateMemoryReclaim(spec.MemoryReclaim); err != nil {
+		return err
+	}
 	credentials, err := loadPublishCredentials(os.Getenv(publishCredentialsDirEnv))
 	if err != nil {
 		return err

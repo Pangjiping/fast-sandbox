@@ -53,6 +53,11 @@ set's `artifactDigest` — changing any byte produces a different artifact set.
 
 ## Field reference
 
+An optional `memoryReclaim` object records the guest reclamation policy baked
+into a new template. It is inherited unchanged by live snapshots/checkpoints;
+restore uses the saved balloon device and guest state, not a new host-side
+configuration. Older manifests omit it. See [Memory reclamation](memory-reclamation.md).
+
 | Field | Meaning and purpose |
 | --- | --- |
 | `schemaVersion` | Manifest schema version, currently always `1`. Forward-compatibility marker; no consumer branches on it yet |

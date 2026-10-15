@@ -213,6 +213,7 @@ spec:
 | `kernel` | Yes | — | Guest kernel embedded in the builder image (build-time asset, not a node runtime asset) |
 | `machine.vcpu` | Yes | `"1"` | Snapshot VM vCPUs (resource quantity) |
 | `machine.memory` | Yes | `"2Gi"` | Snapshot VM memory (resource quantity); restore requires ≥ this |
+| `memoryReclaim` | No | Disabled | Opt-in `freePageReporting` and bounded `damonReclaim`; `minAgeSeconds` defaults to 60 and `quotaMiB` to 64. See [Memory reclamation](../guides/memory-reclamation.md) |
 | `entrypoint` | No | `["tail","-f","/dev/null"]` | Guest business command as an argv list |
 | `execd` | No | — | OpenSandbox execd image injected into the guest rootfs |
 | `init` | No | `/usr/local/sbin/sandbox-init` | Injected guest PID 1 (readiness marker + heartbeat) |

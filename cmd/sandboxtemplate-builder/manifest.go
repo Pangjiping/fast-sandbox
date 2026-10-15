@@ -103,7 +103,7 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 		"firecrackerVersion": artifacts.FirecrackerVersion(firecrackerBin),
 		"hostKernel":         artifacts.HostKernelRelease(),
 	}
-	return map[string]any{
+	document := map[string]any{
 		"schemaVersion": 1,
 		"runtime":       "firecracker",
 		"lineage": map[string]any{
@@ -147,7 +147,11 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 			"booted":   true,
 			"restored": true,
 		},
-	}, nil
+	}
+	if spec.MemoryReclaim != nil {
+		document["memoryReclaim"] = spec.MemoryReclaim
+	}
+	return document, nil
 }
 
 // compatibilityCPUTemplate normalizes the snapshot-stage CPU template for

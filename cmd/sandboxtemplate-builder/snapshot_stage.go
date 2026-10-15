@@ -339,6 +339,14 @@ func configureVM(vm *vmm, kernel, rootfs, bootArgs string, spec apiv1alpha2.Sand
 	if err := api(vm.socket, "PUT", "/machine-config", machineConfig); err != nil {
 		return err
 	}
+	if p := spec.MemoryReclaim; p != nil && p.FreePageReporting {
+		if err := api(vm.socket, "PUT", "/balloon", map[string]any{
+			"amount_mib": 0, "deflate_on_oom": true,
+			"stats_polling_interval_s": 1, "free_page_reporting": true,
+		}); err != nil {
+			return fmt.Errorf("configure free-page reporting: %w", err)
+		}
+	}
 	// Entropy device (virtio-rng): the microVM has no other entropy source —
 	// the T2 CPU template masks RDRAND/RDSEED (snapshot determinism) and no
 	// host RNG device is passed through — so without it the guest CRNG never
