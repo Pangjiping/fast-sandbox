@@ -42,7 +42,6 @@ const (
 	specEnv                  = "SANDBOX_TEMPLATE_SPEC"
 	workDirEnv               = "SANDBOX_TEMPLATE_WORKDIR"
 	publishCredentialsDirEnv = "SANDBOX_TEMPLATE_PUBLISH_SECRET_DIR"
-	mitmCertificateDirEnv    = "SANDBOX_TEMPLATE_MITM_CERT_DIR"
 	manifestRefAnnotation    = "sandbox.fast.io/manifest-ref"
 	digestAnnotation         = "sandbox.fast.io/artifact-digest"
 )

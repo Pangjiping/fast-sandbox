@@ -154,7 +154,10 @@ type MITMCertificateSpec struct {
 	SecretRef corev1.LocalObjectReference `json:"secretRef"`
 	// Key is the Secret data entry holding the PEM certificate. Only this
 	// key is projected into the build Pod, so the CA private key never
-	// enters the build; the builder rejects non-certificate entries.
+	// enters the build. The builder accepts entries consisting solely of
+	// PEM CERTIFICATE blocks — private keys, other PEM blocks, and trailing
+	// non-PEM data are rejected — and bakes them re-encoded; CA constraints
+	// (BasicConstraints CA:TRUE) are not verified.
 	// +kubebuilder:default=ca.crt
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
