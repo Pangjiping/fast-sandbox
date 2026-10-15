@@ -24,8 +24,7 @@ func TestCompatibilityCPUTemplate(t *testing.T) {
 	}
 }
 
-// buildManifestFixture stages the checksummed files buildManifest requires
-// and returns a minimal spec with the paths it checksums.
+// buildManifestFixture stages the files buildManifest checksums.
 func buildManifestFixture(t *testing.T) (apiv1alpha2.SandboxTemplateSpec, string, string, string, string) {
 	t.Helper()
 	workdir := t.TempDir()
@@ -52,8 +51,7 @@ func buildManifestFixture(t *testing.T) (apiv1alpha2.SandboxTemplateSpec, string
 }
 
 // TestBuildManifestMitmCALineage: lineage.egressMitmCA is present exactly
-// when the build baked a CA, carrying the fingerprints verbatim; absent
-// otherwise (legacy/consumer semantics: "unknown, skip comparison").
+// when the build baked a CA.
 func TestBuildManifestMitmCALineage(t *testing.T) {
 	spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
 

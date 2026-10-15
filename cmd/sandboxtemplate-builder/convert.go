@@ -65,9 +65,8 @@ func ensureLoopDevices() error {
 }
 
 // stageConvert materializes the OCI layout into a sparse ext4 rootfs and
-// injects execd, the optional guest init, envs, and /etc/hosts. It returns
-// the rootfs path and the egress MITM CA lineage fingerprints the build
-// baked (nil when the template bakes no CA).
+// injects execd, the optional guest init, envs, and /etc/hosts, returning
+// the rootfs path and the baked MITM CA lineage (nil when none).
 func stageConvert(spec apiv1alpha2.SandboxTemplateSpec, workdir string) (string, []mitmCALineage, error) {
 	rootfs := filepath.Join(workdir, rootfsImageName)
 	layoutDir := filepath.Join(workdir, "oci-layout")
@@ -130,8 +129,8 @@ func guestInitPath(spec apiv1alpha2.SandboxTemplateSpec) string {
 }
 
 // injectRuntime writes the execd files, the rendered guest init, the sandbox
-// env, and /etc/hosts into the mounted rootfs. It returns the egress MITM CA
-// lineage fingerprints when the template bakes a CA (nil otherwise).
+// env, and /etc/hosts into the mounted rootfs, returning the baked MITM CA
+// lineage (nil when none).
 func injectRuntime(spec apiv1alpha2.SandboxTemplateSpec, workdir, mountPoint string) ([]mitmCALineage, error) {
 	opt := filepath.Join(mountPoint, "opt", "opensandbox")
 	if err := os.MkdirAll(opt, 0o755); err != nil {

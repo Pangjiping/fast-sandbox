@@ -30,29 +30,24 @@ const guestMITMCertPath = "/opt/opensandbox/mitmproxy-ca-cert.pem"
 // (system store, merged bundle, NSS, JDK keystores, client env vars).
 const guestMITMTrustGate = "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT"
 
-// mitmCALineage is one baked certificate's public-key identity in the
-// manifest lineage (lineage.egressMitmCA.certificates[]): fingerprints
-// only — never the Secret reference, the private key, or certificate
-// bytes.
+// mitmCALineage is one baked certificate's public-key identity for the
+// manifest lineage (lineage.egressMitmCA.certificates[]) — fingerprints
+// only, never key or Secret material.
 type mitmCALineage struct {
-	// CertSHA256 is the SHA-256 of the certificate DER (lowercase hex, the
-	// manifest digest convention): the identity of the exact certificate
-	// file, matched byte-for-byte against the egress pinned-CA fingerprint.
+	// CertSHA256 is the SHA-256 of the certificate DER (lowercase hex),
+	// matched against the egress pinned-CA fingerprint on /healthz.
 	CertSHA256 string `json:"certSha256"`
 	// SPKISHA256 is the SHA-256 of the SubjectPublicKeyInfo DER: the key
-	// identity, stable across re-issuance that keeps the same key.
+	// identity, stable across re-issuance.
 	SPKISHA256 string `json:"spkiSha256"`
-	// NotAfter is the certificate expiry (RFC3339, display-only): a baked
-	// CA expiring is a future outage visible in the manifest itself.
+	// NotAfter is the certificate expiry (RFC3339, display-only).
 	NotAfter string `json:"notAfter"`
 }
 
-// injectEgressMITMCertificate copies the mounted MITM CA certificate into
-// the guest rootfs at the bootstrap contract path and returns the lineage
-// fingerprints of the certificates it baked. The trust installation itself
-// stays owned by the execd bootstrap script: it runs at this build's
-// snapshot boot, so its rootfs writes and env become part of the golden
-// image.
+// injectEgressMITMCertificate bakes the mounted MITM CA certificate into the
+// guest rootfs at the bootstrap contract path and returns its lineage
+// fingerprints. The trust installation itself stays owned by the execd
+// bootstrap script, which runs at this build's snapshot boot.
 func injectEgressMITMCertificate(spec apiv1alpha2.SandboxTemplateSpec, mountPoint string) ([]mitmCALineage, error) {
 	dir := os.Getenv(mitmCertificateDirEnv)
 	if dir == "" {
@@ -80,14 +75,11 @@ func injectEgressMITMCertificate(spec apiv1alpha2.SandboxTemplateSpec, mountPoin
 }
 
 // parseCACertificates is the second gate after the controller's key-only
-// projection. It rejects empty entries, entries containing a private key,
-// and entries without at least one valid PEM CERTIFICATE block, returning
-// the certificates in the order they appear. It is deliberately loose
-// beyond that: non-CERTIFICATE PEM blocks (CSR, CRL, ...) are skipped and
-// trailing non-PEM data is ignored rather than rejected, and the
-// certificate is not required to be a CA (BasicConstraints CA:TRUE is
-// not verified). The entry is baked verbatim, so Secret operators must
-// supply a well-formed entry holding only the CA certificate.
+// projection: it rejects empty entries, private keys, and entries without a
+// valid PEM CERTIFICATE block, returning the certificates in entry order.
+// It is deliberately loose beyond that (non-CERTIFICATE blocks skipped,
+// trailing data ignored, CA:TRUE not verified) — the entry is baked
+// verbatim.
 func parseCACertificates(payload []byte) ([]*x509.Certificate, error) {
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return nil, errors.New("mounted mitm certificate entry is empty")
@@ -119,8 +111,7 @@ func parseCACertificates(payload []byte) ([]*x509.Certificate, error) {
 }
 
 // certificateLineage fingerprints the parsed certificates for the manifest
-// lineage: SHA-256 over the certificate DER and over the SubjectPublicKeyInfo
-// DER, plus the expiry.
+// lineage.
 func certificateLineage(certificates []*x509.Certificate) ([]mitmCALineage, error) {
 	lineage := make([]mitmCALineage, 0, len(certificates))
 	for _, certificate := range certificates {

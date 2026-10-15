@@ -131,7 +131,7 @@ func run(ctx context.Context) error {
 	}
 
 	// Stage 5: manifest + checksums, recording the CPU template the
-	// snapshot stage actually booted with and the baked MITM CA lineage.
+	// snapshot stage actually booted with.
 	manifestStarted := time.Now()
 	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, layers, workdir, phases.CPUTemplate, mitmCA)
 	if err != nil {

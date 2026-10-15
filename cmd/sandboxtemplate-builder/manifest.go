@@ -32,9 +32,8 @@ const (
 // between the two outputs via the cache. The serialization and checksum
 // conventions live in internal/artifacts so every producer (builder, live
 // snapshot driver, runtime-agent) emits byte-identical layouts. cpuTemplate
-// is what the snapshot stage reported (see compatibilityCPUTemplate);
-// mitmCA is the baked egress MITM CA lineage (nil when the template bakes
-// no CA).
+// is what the snapshot stage reported (see compatibilityCPUTemplate); mitmCA
+// carries the baked egress MITM CA lineage (nil when none).
 func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, layers []string, workdir, cpuTemplate string, mitmCA []mitmCALineage) ([]byte, error) {
 	cache := map[string]string{}
 	rootfsGiB, err := sizeGiB(spec.Output.RootfsSize)
@@ -120,12 +119,9 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 		// credentials.
 		"envs": spec.Envs,
 	}
-	// The egress MITM CA the build baked into the guest trust flow:
-	// public-key fingerprints only — never the Secret reference, the
-	// private key, or certificate bytes. Absent when the template bakes no
-	// CA (legacy artifacts included); consumers read that as "unknown" and
-	// skip pinning comparisons (field semantics live in
-	// docs/guides/artifact-manifest-reference.md).
+	// The egress MITM CA the build baked: public-key fingerprints only.
+	// Absent when no CA is baked; consumers read that as unknown and skip
+	// pinning comparisons.
 	if len(mitmCA) > 0 {
 		lineage["egressMitmCA"] = map[string]any{"certificates": mitmCA}
 	}
