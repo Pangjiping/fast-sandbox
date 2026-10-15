@@ -21,8 +21,8 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
-// testCACert generates a self-signed CA certificate with real DER, so the
-// X.509 parser is actually exercised, and returns it with its PEM encoding.
+// testCACert generates a self-signed CA certificate with real DER and
+// returns it with its PEM encoding.
 func testCACert(t *testing.T, commonName string) (*x509.Certificate, []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -55,7 +55,7 @@ func testCACertificatePEM(t *testing.T) []byte {
 	return pemBytes
 }
 
-// expectedLineage computes the fingerprints the manifest lineage must carry,
+// expectedLineage computes the fingerprints the lineage must carry,
 // independently of the code under test.
 func expectedLineage(t *testing.T, certificate *x509.Certificate) mitmCALineage {
 	t.Helper()
@@ -83,7 +83,7 @@ func stageMitmCertificate(t *testing.T, payload []byte) string {
 }
 
 // TestParseCACertificates: only a PEM X.509 certificate passes; a private
-// key — alone or concatenated with the certificate — never does.
+// key never does.
 func TestParseCACertificates(t *testing.T) {
 	valid := testCACertificatePEM(t)
 	privateKey := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not really der")})
@@ -154,9 +154,8 @@ func TestParseCACertificatesOrder(t *testing.T) {
 	}
 }
 
-// TestInjectEgressMITMCertificate: the mounted certificate lands verbatim at
-// the execd bootstrap contract path with its lineage fingerprints; a missing
-// mount env or an invalid entry fails the build.
+// TestInjectEgressMITMCertificate: the certificate lands verbatim at the
+// contract path with its lineage; invalid entries fail the build.
 func TestInjectEgressMITMCertificate(t *testing.T) {
 	certificate, certPEM := testCACert(t, "opensandbox-mitm-ca.test")
 
@@ -212,8 +211,7 @@ func TestInjectEgressMITMCertificate(t *testing.T) {
 }
 
 // TestInjectRuntimeBakesMitmCertificateAndGate: the gate line follows the
-// merged envs, so it wins over a user-provided value in spec.envs, and the
-// lineage fingerprints are returned to the manifest stage.
+// merged envs, so it wins over spec.envs, and the lineage is returned.
 func TestInjectRuntimeBakesMitmCertificateAndGate(t *testing.T) {
 	stageMitmCertificate(t, testCACertificatePEM(t))
 	workdir, rootfs := t.TempDir(), t.TempDir()
