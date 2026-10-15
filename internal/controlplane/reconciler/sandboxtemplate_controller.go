@@ -84,16 +84,6 @@ const (
 	publishCredentialsDirEnv        = "SANDBOX_TEMPLATE_PUBLISH_SECRET_DIR"
 )
 
-// sandboxTemplateMitmCertDir is where the build Pod mounts the single
-// egressMitmCertificate key (volume Items): the rest of the Secret — e.g.
-// the CA private key — never enters the build.
-const (
-	sandboxTemplateMitmCertDir = "/etc/fast-sandbox/mitm-certificate"
-	mitmCertificateDirEnv      = "SANDBOX_TEMPLATE_MITM_CERT_DIR"
-	mitmCertificateItemName    = "tls.crt"
-	mitmCertificateDefaultKey  = "ca.crt"
-)
-
 // SandboxTemplateReconciler reconciles SandboxTemplate resources by driving
 // golden-image builds as Pods (design: SandboxTemplate — declarative
 // golden-image builds). The Pod executes the build pipeline (convert →
@@ -209,17 +199,6 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 		return ctrl.Result{}, nil
 	}
 
-	// A MITM certificate selector with an empty Secret name would only fail
-	// later at Pod admission with an opaque apiserver error; surface it as a
-	// terminal build failure instead.
-	if cert := template.Spec.EgressMITMCertificate; cert != nil && cert.SecretRef.Name == "" {
-		err := fmt.Errorf("spec.egressMitmCertificate.secretRef.name is required")
-		if failErr := r.failBuild(ctx, &template, "InvalidMITMCertificate", err); failErr != nil {
-			return ctrl.Result{}, failErr
-		}
-		return ctrl.Result{}, nil
-	}
-
 	pod, err := r.findBuildPod(ctx, &template)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -229,6 +208,18 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 	// generations cannot stack up concurrent privileged builds.
 	if err := r.cleanupStalePods(ctx, &template); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// A MITM certificate selector with an empty Secret name would only fail
+	// later at Pod admission with an opaque apiserver error; surface it as a
+	// terminal build failure instead. This runs after cleanupStalePods so a
+	// superseded build Pod never outlives a terminal Failed template.
+	if cert := template.Spec.EgressMITMCertificate; cert != nil && cert.SecretRef.Name == "" {
+		err := fmt.Errorf("spec.egressMitmCertificate.secretRef.name is required")
+		if failErr := r.failBuild(ctx, &template, "InvalidMITMCertificate", err); failErr != nil {
+			return ctrl.Result{}, failErr
+		}
+		return ctrl.Result{}, nil
 	}
 
 	switch {
@@ -606,11 +597,11 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 	if cert := template.Spec.EgressMITMCertificate; cert != nil {
 		key := cert.Key
 		if key == "" {
-			key = mitmCertificateDefaultKey // mirror the CRD default
+			key = apiv1alpha2.EgressMITMCertDefaultKey // mirror the CRD default
 		}
-		env = append(env, corev1.EnvVar{Name: mitmCertificateDirEnv, Value: sandboxTemplateMitmCertDir})
+		env = append(env, corev1.EnvVar{Name: apiv1alpha2.EgressMITMCertDirEnv, Value: apiv1alpha2.EgressMITMCertMountDir})
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name: "mitm-certificate", MountPath: sandboxTemplateMitmCertDir, ReadOnly: true,
+			Name: "mitm-certificate", MountPath: apiv1alpha2.EgressMITMCertMountDir, ReadOnly: true,
 		})
 		volumes = append(volumes, corev1.Volume{
 			Name: "mitm-certificate",
@@ -618,7 +609,7 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 				SecretName: cert.SecretRef.Name,
 				Items: []corev1.KeyToPath{{
 					Key:  key,
-					Path: mitmCertificateItemName,
+					Path: apiv1alpha2.EgressMITMCertItemName,
 				}},
 			}},
 		})

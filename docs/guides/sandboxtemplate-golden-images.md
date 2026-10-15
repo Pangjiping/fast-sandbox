@@ -159,12 +159,13 @@ Behavior:
 
 - The controller projects the single configured key (volume `Items`) into the
   build Pod; the rest of the Secret — e.g. the CA private key — never enters
-  the build. The builder rejects empty entries, entries containing a private
-  key, and entries without a valid X.509 PEM `CERTIFICATE` block. It does not
-  verify CA constraints (`BasicConstraints CA:TRUE`), so the entry must hold
-  a properly issued CA certificate; the entry is baked verbatim, so keep it
-  free of unrelated PEM blocks or trailing data.
-- The builder writes the certificate verbatim into the rootfs at
+  the build. The builder accepts entries consisting solely of PEM
+  `CERTIFICATE` blocks — private keys, other PEM blocks, and trailing
+  non-PEM data are rejected — and bakes them re-encoded (canonical PEM), so
+  the published bytes are exactly what the lineage fingerprints cover. It
+  does not verify CA constraints (`BasicConstraints CA:TRUE`), so the entry
+  must hold a properly issued CA certificate.
+- The builder writes the certificates into the rootfs at
   `/opt/opensandbox/mitmproxy-ca-cert.pem` — the path the execd bootstrap
   script watches — and sets the trust gate
   (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`, after `spec.envs`, so it
@@ -188,8 +189,8 @@ Behavior:
 - The CA is cluster-global (one Secret per deployment): one baked template
   works with every pool's egress — the field is pool-agnostic.
 - Requires `spec.execd` (the trust installation lives in the bootstrap
-  script); without it the builder warns and the certificate is baked but not
-  trusted.
+  script); without it the build fails — the certificate could be baked but
+  never trusted.
 
 ### `spec.readiness`
 
