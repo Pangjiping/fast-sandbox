@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,6 +84,11 @@ func (c *restartAwareActionCaller) setInvokeBlock(block <-chan struct{}) {
 	c.mu.Unlock()
 }
 
+func (c *restartAwareActionCaller) Relay(ctx context.Context, _ int32, _, _ string, _ []byte) (int, []byte, error) {
+	c.Invoke(ctx, 0, actionapi.Request{})
+	return http.StatusOK, nil, nil
+}
+
 func (*failingDeleteActionCaller) Status(context.Context, int32) (actionapi.HandlerStatus, error) {
 	return actionapi.HandlerStatus{APIVersion: actionapi.APIVersion, Ready: true, InstanceID: "handler-a"}, nil
 }
@@ -93,6 +99,10 @@ func (c *failingDeleteActionCaller) Invoke(_ context.Context, _ int32, request a
 		return errors.New("injected Handler RemoveBinding failure")
 	}
 	return nil
+}
+
+func (c *failingDeleteActionCaller) Relay(ctx context.Context, port int32, method, path string, body []byte) (int, []byte, error) {
+	return http.StatusOK, nil, nil
 }
 
 func TestInspectUsesProbeInvalidatedActionStatusBeforeControllerProjection(t *testing.T) {

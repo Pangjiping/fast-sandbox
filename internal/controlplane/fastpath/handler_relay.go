@@ -36,6 +36,11 @@ func (s *Server) InvokeHandlerAction(ctx context.Context, request *fastpathv2.In
 	if request.Handler == "" {
 		return nil, status.Error(codes.InvalidArgument, "handler is required")
 	}
+	// Fail fast on invalid relay addressing before any cross-network hop;
+	// the Fastlet re-validates with the same shared contract.
+	if err := fastletapi.ValidateHandlerRelay(request.Method, request.Path); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	sandbox, err := s.sandboxFromReferenceAtGeneration(ctx, request.Sandbox, 0)
 	if err != nil {
 		return nil, err
@@ -66,6 +71,8 @@ func (s *Server) InvokeHandlerAction(ctx context.Context, request *fastpathv2.In
 		Identity: internalIdentity(sandbox, envelope),
 		Handler:  request.Handler,
 		Payload:  request.Payload,
+		Method:   request.Method,
+		Path:     request.Path,
 	})
 	var failure *fastletapi.FastletError
 	if errors.As(callErr, &failure) {

@@ -22,6 +22,8 @@ func relayRequest(name string, handler string, payload []byte) *fastpathv2.Invok
 		Sandbox: expectedReference(name, "default"),
 		Handler: handler,
 		Payload: payload,
+		Method:  http.MethodPut,
+		Path:    "/vault/" + name,
 	}
 }
 
@@ -42,6 +44,8 @@ func TestInvokeHandlerActionRelaysToAssignedFastlet(t *testing.T) {
 	relayed := fastlet.invokeRequests[0]
 	require.Equal(t, "egress", relayed.Handler)
 	require.Equal(t, payload, relayed.Payload)
+	require.Equal(t, http.MethodPut, relayed.Method)
+	require.Equal(t, "/vault/relay-a", relayed.Path)
 	require.Equal(t, created.Sandbox.GetIdentity().GetUid(), relayed.Identity.SandboxUID)
 	require.Equal(t, "relay-a", relayed.Identity.Name)
 	require.Equal(t, "default", relayed.Identity.Namespace)
@@ -83,6 +87,23 @@ func TestInvokeHandlerActionValidatesReferenceAndHandler(t *testing.T) {
 	_, err = server.InvokeHandlerAction(context.Background(), &fastpathv2.InvokeHandlerActionRequest{Handler: "egress"})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 	_, err = server.InvokeHandlerAction(context.Background(), relayRequest("relay-c", "", []byte(`{}`)))
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	unsupported := relayRequest("relay-c", "egress", []byte(`{}`))
+	unsupported.Method = "TRACE"
+	_, err = server.InvokeHandlerAction(context.Background(), unsupported)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	noPath := relayRequest("relay-c", "egress", []byte(`{}`))
+	noPath.Path = ""
+	_, err = server.InvokeHandlerAction(context.Background(), noPath)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	absolute := relayRequest("relay-c", "egress", []byte(`{}`))
+	absolute.Path = "http://127.0.0.1:18080/vault/x"
+	_, err = server.InvokeHandlerAction(context.Background(), absolute)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	framing := relayRequest("relay-c", "egress", []byte(`{}`))
+	framing.Path = "/vault/x HTTP/1.1\r\nHost: evil"
+	_, err = server.InvokeHandlerAction(context.Background(), framing)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 
 	_, err = server.InvokeHandlerAction(context.Background(), relayRequest("missing-sandbox", "egress", []byte(`{}`)))

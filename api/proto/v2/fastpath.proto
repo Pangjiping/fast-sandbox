@@ -489,8 +489,15 @@ message InvokeHandlerActionRequest {
   SandboxReference sandbox = 1;
   // handler is the Pool-declared Action Handler name.
   string handler = 2;
-  // payload is opaque bytes relayed to the handler verbatim.
+  // payload is opaque bytes relayed to the handler verbatim as the request
+  // body.
   bytes payload = 3;
+  // method is the HTTP method of the relayed request; empty defaults to
+  // POST.
+  string method = 4;
+  // path is the loopback request path addressed on the handler (for example
+  // /vault/{sandboxUid}); it must start with '/'.
+  string path = 5;
 }
 
 // HandlerActionResult is the handler's HTTP response returned verbatim: a

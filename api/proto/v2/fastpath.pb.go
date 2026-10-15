@@ -3668,8 +3668,15 @@ type InvokeHandlerActionRequest struct {
 	Sandbox *SandboxReference `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
 	// handler is the Pool-declared Action Handler name.
 	Handler string `protobuf:"bytes,2,opt,name=handler,proto3" json:"handler,omitempty"`
-	// payload is opaque bytes relayed to the handler verbatim.
-	Payload       []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	// payload is opaque bytes relayed to the handler verbatim as the request
+	// body.
+	Payload []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	// method is the HTTP method of the relayed request; empty defaults to
+	// POST.
+	Method string `protobuf:"bytes,4,opt,name=method,proto3" json:"method,omitempty"`
+	// path is the loopback request path addressed on the handler (for example
+	// /vault/{sandboxUid}); it must start with '/'.
+	Path          string `protobuf:"bytes,5,opt,name=path,proto3" json:"path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3723,6 +3730,20 @@ func (x *InvokeHandlerActionRequest) GetPayload() []byte {
 		return x.Payload
 	}
 	return nil
+}
+
+func (x *InvokeHandlerActionRequest) GetMethod() string {
+	if x != nil {
+		return x.Method
+	}
+	return ""
+}
+
+func (x *InvokeHandlerActionRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
 }
 
 // HandlerActionResult is the handler's HTTP response returned verbatim: a
@@ -4099,11 +4120,13 @@ const file_api_proto_v2_fastpath_proto_rawDesc = "" +
 	"\asandbox\x18\x01 \x01(\v2\x18.fastpath.v2.SandboxInfoR\asandbox\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x02 \x01(\x03R\n" +
-	"generation\"\x89\x01\n" +
+	"generation\"\xb5\x01\n" +
 	"\x1aInvokeHandlerActionRequest\x127\n" +
 	"\asandbox\x18\x01 \x01(\v2\x1d.fastpath.v2.SandboxReferenceR\asandbox\x12\x18\n" +
 	"\ahandler\x18\x02 \x01(\tR\ahandler\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayload\"A\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\x12\x16\n" +
+	"\x06method\x18\x04 \x01(\tR\x06method\x12\x12\n" +
+	"\x04path\x18\x05 \x01(\tR\x04path\"A\n" +
 	"\x13HandlerActionResult\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\rR\x06status\x12\x12\n" +
 	"\x04body\x18\x02 \x01(\fR\x04body\"W\n" +
