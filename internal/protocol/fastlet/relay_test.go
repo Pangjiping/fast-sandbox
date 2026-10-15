@@ -23,18 +23,34 @@ func TestValidateHandlerRelay(t *testing.T) {
 		require.NoError(t, ValidateHandlerRelay(request.method, request.path), "%s %s", request.method, request.path)
 	}
 
-	invalid := []struct{ method, path string }{
-		{"TRACE", "/vault/s-a"},
-		{"CONNECT", "/vault/s-a"},
-		{"get", "/vault/s-a"},
-		{"POST", ""},
-		{"POST", "vault/s-a"},
-		{"POST", "http://127.0.0.1:18080/vault/s-a"},
-		{"POST", "/vault/s-a x"},
-		{"POST", "/vault/\x7f"},
-		{"POST", strings.Repeat("/a", 2048)},
+	invalid := []struct{ method, path, message string }{
+		{"TRACE", "/vault/s-a", "method"},
+		{"CONNECT", "/vault/s-a", "method"},
+		{"get", "/vault/s-a", "method"},
+		{"POST", "", "path is required"},
+		{"POST", "vault/s-a", "must start with '/'"},
+		{"POST", "http://127.0.0.1:18080/vault/s-a", "must start with '/'"},
+		{"POST", "/vault/s-a x", "printable ASCII"},
+		{"POST", "/vault/\x7f", "printable ASCII"},
+		{"POST", strings.Repeat("/a", 2048), "exceeds"},
+		{"POST", "/vault/s-a/../vault/s-b", "dot segments"},
+		// The handler's own privileged Action management surface shares the
+		// TargetHTTPPort and is fenced by attachment identity — the tenant
+		// relay must never address it, including via dot-segment traversal.
+		{"POST", "/_fastlet/v1/actions", "reserved"},
+		{"GET", "/_fastlet/v1/actions/status", "reserved"},
+		{"PUT", "/_fastlet/", "reserved"},
+		{"POST", "/_fastlet/v1/actions/../vault/s-a", "reserved|dot"},
+		{"POST", "/vault/../_fastlet/v1/actions", "dot segments"},
+		{"GET", "/vault/../../_fastlet/v1/actions/status", "dot segments"},
 	}
 	for _, request := range invalid {
-		require.Error(t, ValidateHandlerRelay(request.method, request.path), "%s %q", request.method, request.path)
+		err := ValidateHandlerRelay(request.method, request.path)
+		require.Error(t, err, "%s %q", request.method, request.path)
+		if request.message == "reserved|dot" {
+			require.True(t, strings.Contains(err.Error(), "reserved") || strings.Contains(err.Error(), "dot segments"), "%q", err.Error())
+			continue
+		}
+		require.ErrorContains(t, err, request.message)
 	}
 }

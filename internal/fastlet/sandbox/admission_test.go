@@ -84,7 +84,7 @@ func (c *restartAwareActionCaller) setInvokeBlock(block <-chan struct{}) {
 	c.mu.Unlock()
 }
 
-func (c *restartAwareActionCaller) Relay(ctx context.Context, _ int32, _, _ string, _ []byte) (int, []byte, error) {
+func (c *restartAwareActionCaller) Relay(ctx context.Context, _ int32, _, _, _ string, _ []byte) (int, []byte, error) {
 	c.Invoke(ctx, 0, actionapi.Request{})
 	return http.StatusOK, nil, nil
 }
@@ -101,7 +101,7 @@ func (c *failingDeleteActionCaller) Invoke(_ context.Context, _ int32, request a
 	return nil
 }
 
-func (c *failingDeleteActionCaller) Relay(ctx context.Context, port int32, method, path string, body []byte) (int, []byte, error) {
+func (c *failingDeleteActionCaller) Relay(ctx context.Context, _ int32, _, _, _ string, _ []byte) (int, []byte, error) {
 	return http.StatusOK, nil, nil
 }
 

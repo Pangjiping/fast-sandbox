@@ -24,10 +24,11 @@ type recordedRequest struct {
 }
 
 type recordedRelay struct {
-	port   int32
-	method string
-	path   string
-	body   []byte
+	port       int32
+	sandboxUID string
+	method     string
+	path       string
+	body       []byte
 }
 
 type fakeCaller struct {
@@ -70,10 +71,10 @@ func (f *fakeCaller) snapshot() []recordedRequest {
 	return append([]recordedRequest(nil), f.requests...)
 }
 
-func (f *fakeCaller) Relay(_ context.Context, port int32, method, path string, body []byte) (int, []byte, error) {
+func (f *fakeCaller) Relay(_ context.Context, port int32, sandboxUID, method, path string, body []byte) (int, []byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.relayCalls = append(f.relayCalls, recordedRelay{port: port, method: method, path: path, body: append([]byte(nil), body...)})
+	f.relayCalls = append(f.relayCalls, recordedRelay{port: port, sandboxUID: sandboxUID, method: method, path: path, body: append([]byte(nil), body...)})
 	if f.relayErr != nil {
 		return 0, nil, f.relayErr
 	}
@@ -272,7 +273,7 @@ func (b *blockingCaller) Invoke(context.Context, int32, actionapi.Request) error
 	return nil
 }
 
-func (*blockingCaller) Relay(context.Context, int32, string, string, []byte) (int, []byte, error) {
+func (*blockingCaller) Relay(context.Context, int32, string, string, string, []byte) (int, []byte, error) {
 	return http.StatusOK, nil, nil
 }
 
@@ -319,7 +320,7 @@ func (b *multiBlockingCaller) Invoke(_ context.Context, _ int32, request actiona
 	return nil
 }
 
-func (*multiBlockingCaller) Relay(context.Context, int32, string, string, []byte) (int, []byte, error) {
+func (*multiBlockingCaller) Relay(context.Context, int32, string, string, string, []byte) (int, []byte, error) {
 	return http.StatusOK, nil, nil
 }
 
@@ -403,7 +404,7 @@ func (c *deleteDeadlineCaller) Invoke(ctx context.Context, port int32, request a
 	return ctx.Err()
 }
 
-func (*deleteDeadlineCaller) Relay(context.Context, int32, string, string, []byte) (int, []byte, error) {
+func (*deleteDeadlineCaller) Relay(context.Context, int32, string, string, string, []byte) (int, []byte, error) {
 	return http.StatusOK, nil, nil
 }
 

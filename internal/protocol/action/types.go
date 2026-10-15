@@ -3,6 +3,13 @@ package action
 
 const APIVersion = "sandbox.fast.io/actions/v1"
 
+// HeaderSandboxUID is the trusted sandbox identity header the Fastlet
+// injects on relayed handler requests. The relayed method/path/body are
+// caller-controlled, so Handlers must scope per-subject state by this
+// platform-endorsed value (fence-validated by the Fastlet) instead of any
+// caller-controlled path segment.
+const HeaderSandboxUID = "X-Sandbox-Uid"
+
 type Operation string
 
 const (
