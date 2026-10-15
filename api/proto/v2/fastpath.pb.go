@@ -3669,7 +3669,8 @@ type InvokeHandlerActionRequest struct {
 	// handler is the Pool-declared Action Handler name.
 	Handler string `protobuf:"bytes,2,opt,name=handler,proto3" json:"handler,omitempty"`
 	// payload is opaque bytes relayed to the handler verbatim as the request
-	// body.
+	// body. The relay body contract is fixed: a non-empty payload is always
+	// delivered with Content-Type application/json.
 	Payload []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
 	// method is the HTTP method of the relayed request; empty defaults to
 	// POST.
