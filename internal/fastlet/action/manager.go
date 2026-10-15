@@ -33,10 +33,11 @@ const (
 type Caller interface {
 	Status(context.Context, int32) (actionapi.HandlerStatus, error)
 	Invoke(context.Context, int32, actionapi.Request) error
-	// Relay delivers one opaque payload to a Handler's loopback port and
-	// returns the Handler's HTTP status and body verbatim: any response
-	// status is a result, and only transport failures are errors.
-	Relay(ctx context.Context, port int32, method, path string, body []byte) (int, []byte, error)
+	// Relay delivers one opaque payload to a Handler's loopback port on
+	// behalf of a fence-validated Sandbox and returns the Handler's HTTP
+	// status and body verbatim: any response status is a result, and only
+	// transport failures are errors.
+	Relay(ctx context.Context, port int32, sandboxUID, method, path string, body []byte) (int, []byte, error)
 }
 
 type HTTPCaller struct{ client *http.Client }
@@ -107,14 +108,21 @@ func (c *HTTPCaller) Invoke(ctx context.Context, port int32, invocation actionap
 // loopback port and returns the Handler's HTTP status and body verbatim.
 // The bounded client timeout and the 32 KiB bounded read are the same
 // delivery machinery the Sandbox Actions calls use; redirects are surfaced
-// as the Handler's response instead of being followed.
-func (c *HTTPCaller) Relay(ctx context.Context, port int32, method, path string, body []byte) (int, []byte, error) {
+// as the Handler's response instead of being followed. A non-empty body is
+// always delivered as Content-Type: application/json — the fixed relay
+// body contract. SandboxUID is injected as the trusted actionapi.HeaderSandboxUID
+// header so the Handler can scope per-subject state by the fence-validated
+// identity instead of caller-controlled path segments.
+func (c *HTTPCaller) Relay(ctx context.Context, port int32, sandboxUID, method, path string, body []byte) (int, []byte, error) {
 	if method == "" {
 		method = http.MethodPost
 	}
 	request, err := http.NewRequestWithContext(ctx, method, endpoint(port, path), bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, err
+	}
+	if sandboxUID != "" {
+		request.Header.Set(actionapi.HeaderSandboxUID, sandboxUID)
 	}
 	if len(body) > 0 {
 		request.Header.Set("Content-Type", "application/json")
@@ -269,9 +277,11 @@ var ErrUnknownHandler = errors.New("Action Handler is not declared by the Fastle
 // RelayHandler performs the relay hop for the FastPath handler-relay
 // channel: it resolves the Pool-declared Handler's loopback port and
 // delivers the payload verbatim, returning the Handler's HTTP status and
-// body verbatim. It does not touch per-Sandbox Binding state, so a slow
-// Handler never delays Binding reconciliation.
-func (m *Manager) RelayHandler(ctx context.Context, name, method, path string, payload []byte) (int, []byte, error) {
+// body verbatim. SandboxUID is the fence-validated identity injected as the
+// trusted actionapi.HeaderSandboxUID header on the loopback request. The
+// relay does not touch per-Sandbox Binding state, so a slow Handler never
+// delays Binding reconciliation.
+func (m *Manager) RelayHandler(ctx context.Context, sandboxUID, name, method, path string, payload []byte) (int, []byte, error) {
 	m.mu.RLock()
 	handler, found := m.byName[name]
 	caller := m.caller
@@ -279,7 +289,7 @@ func (m *Manager) RelayHandler(ctx context.Context, name, method, path string, p
 	if !found {
 		return 0, nil, ErrUnknownHandler
 	}
-	return caller.Relay(ctx, handler.TargetHTTPPort, method, path, payload)
+	return caller.Relay(ctx, handler.TargetHTTPPort, sandboxUID, method, path, payload)
 }
 
 func (m *Manager) notifyChanged(sandboxUID string) {

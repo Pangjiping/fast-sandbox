@@ -490,7 +490,8 @@ message InvokeHandlerActionRequest {
   // handler is the Pool-declared Action Handler name.
   string handler = 2;
   // payload is opaque bytes relayed to the handler verbatim as the request
-  // body.
+  // body. The relay body contract is fixed: a non-empty payload is always
+  // delivered with Content-Type application/json.
   bytes payload = 3;
   // method is the HTTP method of the relayed request; empty defaults to
   // POST.

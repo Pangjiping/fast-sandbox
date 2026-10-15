@@ -12,6 +12,7 @@ import (
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletaction "fast-sandbox/internal/fastlet/action"
+	actionapi "fast-sandbox/internal/protocol/action"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
@@ -33,10 +34,11 @@ func newRelayManager(t *testing.T, handlerPort int32) *SandboxManager {
 }
 
 func TestInvokeHandlerRelaysOverHandlerLoopback(t *testing.T) {
-	var seenMethod, seenURI, seenContentType string
+	var seenMethod, seenURI, seenContentType, seenSandboxUID string
 	var seenBody []byte
 	handlerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenMethod, seenURI, seenContentType = r.Method, r.URL.RequestURI(), r.Header.Get("Content-Type")
+		seenSandboxUID = r.Header.Get(actionapi.HeaderSandboxUID)
 		seenBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":"exists"}`))
@@ -56,6 +58,10 @@ func TestInvokeHandlerRelaysOverHandlerLoopback(t *testing.T) {
 	require.Equal(t, "/vault/uid-a", seenURI)
 	require.Equal(t, "application/json", seenContentType)
 	require.Equal(t, []byte(`{"revision":7}`), seenBody)
+	// The trusted identity header is the fence-validated Sandbox UID — the
+	// Handler scopes per-subject state by it, not by the caller-controlled
+	// path.
+	require.Equal(t, "uid-a", seenSandboxUID)
 }
 
 func TestInvokeHandlerUnreachableHandlerSurfacesError(t *testing.T) {

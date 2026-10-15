@@ -3,11 +3,19 @@ package fastlet
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // maxHandlerRelayPathBytes bounds the loopback request path of a relayed
 // handler invocation.
 const maxHandlerRelayPathBytes = 2048
+
+// reservedHandlerPrefix is the Handler's trusted Action management surface
+// (SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING and the status endpoint).
+// It shares the handler's TargetHTTPPort but is fenced by the Fastlet's
+// attachment/generation identity — a tenant-controlled relay request must
+// never be able to reach it.
+const reservedHandlerPrefix = "/_fastlet/"
 
 // ValidateHandlerRelay validates the HTTP addressing of a relayed handler
 // invocation. It is the shared contract of both relay endpoints: FastPath
@@ -36,8 +44,19 @@ func ValidateHandlerRelay(method, path string) error {
 	if path[0] != '/' {
 		return fmt.Errorf("relay path must start with '/'")
 	}
-	if _, err := url.ParseRequestURI(path); err != nil {
-		return fmt.Errorf("relay path is invalid: %w", err)
+	// Dot segments have no legitimate use in a relay path; rejecting them
+	// outright means the literal reserved-prefix check below cannot be
+	// escaped via traversal.
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("relay path must not contain dot segments")
+		}
+	}
+	if _, parseErr := url.ParseRequestURI(path); parseErr != nil {
+		return fmt.Errorf("relay path is invalid: %w", parseErr)
+	}
+	if strings.HasPrefix(path, reservedHandlerPrefix) {
+		return fmt.Errorf("relay path must not address the reserved %s prefix", reservedHandlerPrefix)
 	}
 	return nil
 }
