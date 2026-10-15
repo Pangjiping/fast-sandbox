@@ -87,9 +87,6 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := validateMemoryReclaim(spec.MemoryReclaim); err != nil {
-		return err
-	}
 	credentials, err := loadPublishCredentials(os.Getenv(publishCredentialsDirEnv))
 	if err != nil {
 		return err
@@ -135,7 +132,7 @@ func run(ctx context.Context) error {
 	// Stage 5: manifest + checksums, recording the CPU template the
 	// snapshot stage actually booted with.
 	manifestStarted := time.Now()
-	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, layers, workdir, phases.CPUTemplate)
+	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, layers, workdir, phases)
 	if err != nil {
 		return err
 	}

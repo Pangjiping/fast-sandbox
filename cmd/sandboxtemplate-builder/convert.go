@@ -363,7 +363,7 @@ mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
 ` + loGate + `
 exec </dev/console >/dev/console 2>&1
 hostname sandbox
-` + renderMemoryReclaim(spec.MemoryReclaim) + `
+` + renderFreePageReporting() + `
 [ -f /etc/sandbox-init.env ] && . /etc/sandbox-init.env
 if [ -x /opt/opensandbox/bootstrap.sh ]; then
   # The entrypoint becomes the bootstrap's user command: bootstrap.sh TERMs

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,37 +16,71 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
-func TestMemoryReclaimPolicy(t *testing.T) {
-	if renderMemoryReclaim(nil) != "" {
-		t.Fatal("disabled templates changed")
+func TestDefaultGuestReportingSupport(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		modules []string
+		want    bool
+	}{
+		{name: "supported", modules: []string{"virtio_balloon", "page_reporting"}, want: true},
+		{name: "missing page reporting", modules: []string{"virtio_balloon"}},
+		{name: "missing balloon", modules: []string{"page_reporting"}},
+		{name: "unsupported kernel"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			modules := t.TempDir()
+			for _, module := range test.modules {
+				require.NoError(t, os.Mkdir(filepath.Join(modules, module), 0o755))
+			}
+			script := strings.ReplaceAll(renderFreePageReporting(), "/sys/module", shellQuote(modules))
+			command := exec.Command("sh", "-eu")
+			command.Stdin = strings.NewReader(script + "\necho SANDBOX_READY\n")
+			output, err := command.CombinedOutput()
+			require.NoError(t, err, "%s", output)
+			require.Contains(t, string(output), "SANDBOX_READY", "unsupported kernels must remain bootable")
+			if !test.want {
+				require.Contains(t, string(output), "SANDBOX_FREE_PAGE_REPORTING_UNAVAILABLE")
+			}
+			log := filepath.Join(t.TempDir(), "boot.console.log")
+			require.NoError(t, os.WriteFile(log, output, 0o600))
+			enabled, err := readFreePageReportingSupport(log)
+			require.NoError(t, err)
+			require.Equal(t, test.want, enabled)
+		})
 	}
-	if validateMemoryReclaim(&apiv1alpha2.MemoryReclaimSpec{DamonReclaim: true}) == nil {
-		t.Fatal("DAMON without reporting accepted")
+	init := renderGuestInit(apiv1alpha2.SandboxTemplateSpec{})
+	require.Contains(t, init, renderFreePageReporting(), "reporting needs no template configuration")
+	require.NotContains(t, init, "damon_reclaim")
+}
+
+func TestReadFreePageReportingSupport(t *testing.T) {
+	for _, test := range []struct {
+		name, log string
+		want      bool
+	}{
+		{name: "serial newlines", log: freePageReportingReadyMarker + "\r\nSANDBOX_READY\r\n", want: true},
+		{name: "missing marker", log: "SANDBOX_READY\n"},
+		{name: "quoted marker", log: "diagnostic: " + freePageReportingReadyMarker + "\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "boot.console.log")
+			require.NoError(t, os.WriteFile(log, []byte(test.log), 0o600))
+			enabled, err := readFreePageReportingSupport(log)
+			require.NoError(t, err)
+			require.Equal(t, test.want, enabled)
+		})
 	}
-	p := &apiv1alpha2.MemoryReclaimSpec{FreePageReporting: true, DamonReclaim: true}
-	if err := validateMemoryReclaim(p); err != nil {
-		t.Fatal(err)
-	}
-	script := renderMemoryReclaim(p)
-	for _, expected := range []string{"free_page_reporting_unsupported", "damon_reclaim_unsupported_", "echo Y > \"$damon/skip_anon\"", "echo 60000000", "echo 67108864", "echo 1000 > \"$damon/wmarks_high\"", "echo 1000 > \"$damon/wmarks_mid\"", "echo 0 > \"$damon/wmarks_low\""} {
-		if !strings.Contains(script, expected) {
-			t.Fatalf("missing safety/configuration %q", expected)
-		}
-	}
-	p.DamonReclaim = false
-	if strings.Contains(renderMemoryReclaim(p), "damon_reclaim/parameters") {
-		t.Fatal("reporting-only template enabled DAMON")
-	}
+	_, err := readFreePageReportingSupport(filepath.Join(t.TempDir(), "missing.log"))
+	require.ErrorContains(t, err, "read guest free-page reporting support")
 }
 
 func TestFreePageReportingDeviceConfiguration(t *testing.T) {
 	for _, test := range []struct {
 		name      string
-		enabled   bool
 		rejectAPI bool
 	}{
-		{name: "disabled"}, {name: "enabled", enabled: true},
-		{name: "unsupported VMM", enabled: true, rejectAPI: true},
+		{name: "enabled by default"},
+		{name: "unsupported VMM", rejectAPI: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir, err := os.MkdirTemp("", "fpr-")
@@ -73,9 +108,6 @@ func TestFreePageReportingDeviceConfiguration(t *testing.T) {
 			go func() { _ = server.Serve(listener) }()
 			t.Cleanup(func() { _ = server.Close() })
 			spec := apiv1alpha2.SandboxTemplateSpec{Machine: apiv1alpha2.MachineSpec{VCPU: "1", Memory: "1Gi"}}
-			if test.enabled {
-				spec.MemoryReclaim = &apiv1alpha2.MemoryReclaimSpec{FreePageReporting: true}
-			}
 			err = configureVM(&vmm{socket: socket}, "kernel", "rootfs", "args", spec, "")
 			mu.Lock()
 			defer mu.Unlock()
@@ -85,10 +117,6 @@ func TestFreePageReportingDeviceConfiguration(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			if !test.enabled {
-				require.NotContains(t, paths, "/balloon")
-				return
-			}
 			require.Equal(t, "/balloon", paths[1], "device must be installed before boot")
 			require.Equal(t, map[string]any{"amount_mib": float64(0), "deflate_on_oom": true,
 				"stats_polling_interval_s": float64(1), "free_page_reporting": true}, balloon)

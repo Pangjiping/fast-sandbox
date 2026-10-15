@@ -1,37 +1,29 @@
 ---
 title: Firecracker memory reclamation
-description: Opt-in free-page reporting, bounded cold-file reclamation, and pressure-aware admission.
+description: Default free-page reporting and opt-in pressure-aware admission.
 ---
 
 # Firecracker memory reclamation
 
 Reclamation keeps the sandbox running while returning unused guest pages to
 the host. It does not change configured RAM or replace checkpoint pause/resume.
-Existing templates keep their current behavior; enable the policy on new ones.
+New golden snapshots enable free-page reporting (FPR) by default, without a
+SandboxTemplate field. Existing snapshots keep their current device state;
+rebuild a template to acquire reporting.
 
-```yaml
-spec:
-  memoryReclaim:
-    freePageReporting: true
-    damonReclaim: true
-    minAgeSeconds: 60
-    quotaMiB: 64
-```
+The builder installs a zero-sized balloon with statistics before boot. The
+Firecracker binary must support `free_page_reporting`; an unsupported VMM fails
+the build. The guest needs built-in VIRTIO_BALLOON and PAGE_REPORTING. A custom
+kernel without either interface can still boot: its console reports
+`SANDBOX_FREE_PAGE_REPORTING_UNAVAILABLE`, and the manifest records
+`freePageReporting: false` rather than claiming reclamation is active.
 
-Reporting installs a zero-sized balloon with statistics before boot. The guest
-needs built-in VIRTIO_BALLOON and PAGE_REPORTING. Optional DAMON reclamation
-needs built-in DAMON_RECLAIM with `skip_anon`: only cold file pages are reclaimed,
-with reclaim work bounded by 10 ms and `quotaMiB` attempted bytes per second.
-Monitoring adds separate CPU cost. Guest free-memory watermarks span the full
-range (`high=1000`, `mid=1000`, `low=0`, in per-thousand units), so spare guest RAM
-does not retain cold cache on an overcommitted host. Setting `high=0` would
-deactivate reclamation whenever free memory exists. Missing interfaces fail the
-build instead of silently advertising an inactive policy. DAMON requires reporting.
+The builder records the observed guest capability as `freePageReporting` in the
+immutable manifest. Snapshots and checkpoints inherit it along with the saved
+balloon device and guest state. DAMON cold-file reclamation is not configured.
+Reporting cannot be disabled on a live VM; rollback selects an older template.
 
-The policy is recorded in the immutable manifest and inherited by checkpoints.
-Rollback selects an older template; reporting cannot be disabled on a live VM.
-
-Compare disabled, reporting-only, and reporting plus DAMON at identical density.
+Compare old snapshots and newly built reporting snapshots at identical density.
 Measure aggregate VMM PSS, guest memory, cgroup usage/events and PSI, CPU cost,
 OOMs, and tail latency after idle. Separate peak memory from time-integrated
 usage. Verify process/file state through snapshot and cross-host resume. Guest
@@ -40,10 +32,8 @@ overcommit until measurements establish a safe operating envelope.
 
 Shared pmem/DAX layers are a separate storage optimization.
 
-Upgrade the controller and builder together with the additive SandboxTemplate
-CRD before using this field: an older controller's typed spec drops unknown
-fields when preparing the build Job. Existing templates need rebuilding to
-acquire the balloon device and guest policy. A new Fastlet binary is required
+Upgrade the builder and rebuild templates; no new CRD field or controller
+upgrade is required for reporting. A new Fastlet binary is required
 only for host telemetry/admission; existing Firecracker runtimes that support
 reporting can restore the new golden snapshot. Verify this against the actual
 Firecracker version and storage backend before rollout.
@@ -72,7 +62,7 @@ only the PSI gate. Node and cgroup checks remain required. The
 Rejections reuse retryable `CapacityRejected` feedback and do not consume a
 slot. Existing instances and idempotent replays remain accessible. Policies
 do not automatically change Pool budgets or call pause, kill, or inflate.
-Guest DAMON/FPR and host admission run independently; a healthy host does not
+Guest FPR and host admission run independently; a healthy host does not
 disable guest reclamation, and exhausted headroom stops new demand.
 
 `fast_sandbox_memory_pressure{observation="..."}` exports telemetry validity,
@@ -87,8 +77,10 @@ counts before interpreting totals; shared golden pages are apportioned in PSS.
 
 ## Limits
 
-Anonymous pages that still belong to a live process are retained. A resident
-kernel, browser, or JVM can therefore keep its working set during inactivity;
+Only pages already freed by the guest are reported; cold file cache is not
+actively evicted. Anonymous pages that still belong to a live process are
+retained. A resident kernel, browser, or JVM can therefore keep its working set
+during inactivity;
 this policy does not force collection or discard application state.
 
 Native pause removes the VMM but can leave checkpoint file cache charged to

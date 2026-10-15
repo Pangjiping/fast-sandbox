@@ -53,10 +53,12 @@ set's `artifactDigest` — changing any byte produces a different artifact set.
 
 ## Field reference
 
-An optional `memoryReclaim` object records the guest reclamation policy baked
-into a new template. It is inherited unchanged by live snapshots/checkpoints;
-restore uses the saved balloon device and guest state, not a new host-side
-configuration. Older manifests omit it. See [Memory reclamation](memory-reclamation.md).
+The `freePageReporting` boolean records whether the builder observed guest
+support for the default reporting device. A custom kernel without the required
+interfaces records `false`. It is inherited unchanged by live snapshots and
+checkpoints; restore uses the saved balloon device and guest state. Older
+manifests omit it, which does not establish reporting support.
+See [Memory reclamation](memory-reclamation.md).
 
 | Field | Meaning and purpose |
 | --- | --- |

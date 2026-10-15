@@ -258,41 +258,6 @@ spec:
                 - memory
                 - vcpu
                 type: object
-              memoryReclaim:
-                description: MemoryReclaim is opt-in and baked into the guest and
-                  device snapshot.
-                properties:
-                  damonReclaim:
-                    default: false
-                    description: DamonReclaim reclaims cold file pages, excluding
-                      anonymous pages.
-                    type: boolean
-                  freePageReporting:
-                    default: false
-                    description: FreePageReporting returns unused guest pages without
-                      inflating the balloon.
-                    type: boolean
-                  minAgeSeconds:
-                    default: 60
-                    format: int32
-                    maximum: 3600
-                    minimum: 1
-                    type: integer
-                  quotaMiB:
-                    default: 64
-                    description: QuotaMiB bounds attempted reclamation per second,
-                      in addition to a CPU quota.
-                    format: int32
-                    maximum: 1024
-                    minimum: 1
-                    type: integer
-                required:
-                - damonReclaim
-                - freePageReporting
-                type: object
-                x-kubernetes-validations:
-                - message: damonReclaim requires freePageReporting
-                  rule: '!self.damonReclaim || self.freePageReporting'
               output:
                 description: Output describes the artifacts to produce and where to
                   publish them.

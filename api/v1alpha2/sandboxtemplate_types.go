@@ -61,28 +61,6 @@ type MachineSpec struct {
 	Memory string `json:"memory"`
 }
 
-// MemoryReclaimSpec configures guest-assisted reclamation in a new golden VM.
-// +kubebuilder:validation:XValidation:rule="!self.damonReclaim || self.freePageReporting",message="damonReclaim requires freePageReporting"
-type MemoryReclaimSpec struct {
-	// FreePageReporting returns unused guest pages without inflating the balloon.
-	// +kubebuilder:default=false
-	FreePageReporting bool `json:"freePageReporting"`
-	// DamonReclaim reclaims cold file pages, excluding anonymous pages.
-	// +kubebuilder:default=false
-	DamonReclaim bool `json:"damonReclaim"`
-	// +kubebuilder:default=60
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=3600
-	// +optional
-	MinAgeSeconds int32 `json:"minAgeSeconds,omitempty"`
-	// QuotaMiB bounds attempted reclamation per second, in addition to a CPU quota.
-	// +kubebuilder:default=64
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1024
-	// +optional
-	QuotaMiB int32 `json:"quotaMiB,omitempty"`
-}
-
 // ReadinessSpec defines when the guest is considered ready for snapshot.
 // The probe takes precedence; when unset, the injected execd /ping is
 // probed; as a final fallback a time-based warmup plus healthcheck applies.
@@ -203,10 +181,6 @@ type SandboxTemplateSpec struct {
 
 	// Machine describes the reference machine of the golden image.
 	Machine MachineSpec `json:"machine"`
-
-	// MemoryReclaim is opt-in and baked into the guest and device snapshot.
-	// +optional
-	MemoryReclaim *MemoryReclaimSpec `json:"memoryReclaim,omitempty"`
 
 	// Init is the injected PID 1 path inside the rootfs. The init script
 	// carries the readiness marker and heartbeat the build depends on, so it
