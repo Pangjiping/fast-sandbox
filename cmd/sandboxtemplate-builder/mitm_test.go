@@ -4,8 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -19,9 +21,9 @@ import (
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
 
-// testCACertificatePEM generates a self-signed CA certificate with real
-// DER, so the X.509 parser is actually exercised.
-func testCACertificatePEM(t *testing.T) []byte {
+// testCACert generates a self-signed CA certificate with real DER, so the
+// X.509 parser is actually exercised, and returns it with its PEM encoding.
+func testCACert(t *testing.T, commonName string) (*x509.Certificate, []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -29,7 +31,7 @@ func testCACertificatePEM(t *testing.T) []byte {
 	}
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "opensandbox-mitm-ca.test"},
+		Subject:               pkix.Name{CommonName: commonName},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		IsCA:                  true,
@@ -40,7 +42,34 @@ func testCACertificatePEM(t *testing.T) []byte {
 	if err != nil {
 		t.Fatalf("create certificate: %v", err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	return certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func testCACertificatePEM(t *testing.T) []byte {
+	t.Helper()
+	_, pemBytes := testCACert(t, "opensandbox-mitm-ca.test")
+	return pemBytes
+}
+
+// expectedLineage computes the fingerprints the manifest lineage must carry,
+// independently of the code under test.
+func expectedLineage(t *testing.T, certificate *x509.Certificate) mitmCALineage {
+	t.Helper()
+	spki, err := x509.MarshalPKIXPublicKey(certificate.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal SPKI: %v", err)
+	}
+	certDigest := sha256.Sum256(certificate.Raw)
+	spkiDigest := sha256.Sum256(spki)
+	return mitmCALineage{
+		CertSHA256: hex.EncodeToString(certDigest[:]),
+		SPKISHA256: hex.EncodeToString(spkiDigest[:]),
+		NotAfter:   certificate.NotAfter.UTC().Format(time.RFC3339),
+	}
 }
 
 func stageMitmCertificate(t *testing.T, payload []byte) string {
@@ -53,9 +82,9 @@ func stageMitmCertificate(t *testing.T, payload []byte) string {
 	return dir
 }
 
-// TestValidateCACertificate: only a PEM X.509 certificate passes; a private
+// TestParseCACertificates: only a PEM X.509 certificate passes; a private
 // key — alone or concatenated with the certificate — never does.
-func TestValidateCACertificate(t *testing.T) {
+func TestParseCACertificates(t *testing.T) {
 	valid := testCACertificatePEM(t)
 	privateKey := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not really der")})
 	tests := []struct {
@@ -92,30 +121,50 @@ func TestValidateCACertificate(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateCACertificate(test.payload)
+			_, err := parseCACertificates(test.payload)
 			if test.wantError == "" {
 				if err != nil {
-					t.Fatalf("validateCACertificate: %v", err)
+					t.Fatalf("parseCACertificates: %v", err)
 				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
-				t.Fatalf("validateCACertificate error = %v, want containing %q", err, test.wantError)
+				t.Fatalf("parseCACertificates error = %v, want containing %q", err, test.wantError)
 			}
 		})
 	}
 }
 
-// TestInjectEgressMITMCertificate: the mounted certificate lands verbatim at
-// the execd bootstrap contract path; a missing mount env or an invalid entry
-// fails the build.
-func TestInjectEgressMITMCertificate(t *testing.T) {
-	certPEM := testCACertificatePEM(t)
+// TestParseCACertificatesOrder: every CERTIFICATE block is returned, in the
+// order it appears in the entry.
+func TestParseCACertificatesOrder(t *testing.T) {
+	_, firstPEM := testCACert(t, "ca-one.test")
+	_, secondPEM := testCACert(t, "ca-two.test")
+	payload := append(append([]byte{}, firstPEM...), secondPEM...)
+	certificates, err := parseCACertificates(payload)
+	if err != nil {
+		t.Fatalf("parseCACertificates: %v", err)
+	}
+	if len(certificates) != 2 {
+		t.Fatalf("expected 2 certificates, got %d", len(certificates))
+	}
+	if certificates[0].Subject.CommonName != "ca-one.test" || certificates[1].Subject.CommonName != "ca-two.test" {
+		t.Fatalf("certificates out of order: %q, %q",
+			certificates[0].Subject.CommonName, certificates[1].Subject.CommonName)
+	}
+}
 
-	t.Run("bakes the certificate at the bootstrap contract path", func(t *testing.T) {
+// TestInjectEgressMITMCertificate: the mounted certificate lands verbatim at
+// the execd bootstrap contract path with its lineage fingerprints; a missing
+// mount env or an invalid entry fails the build.
+func TestInjectEgressMITMCertificate(t *testing.T) {
+	certificate, certPEM := testCACert(t, "opensandbox-mitm-ca.test")
+
+	t.Run("bakes the certificate at the bootstrap contract path with lineage", func(t *testing.T) {
 		stageMitmCertificate(t, certPEM)
 		rootfs := t.TempDir()
-		if err := injectEgressMITMCertificate(apiv1alpha2.SandboxTemplateSpec{Execd: "opensandbox/execd:1.1.0"}, rootfs); err != nil {
+		lineage, err := injectEgressMITMCertificate(apiv1alpha2.SandboxTemplateSpec{Execd: "opensandbox/execd:1.1.0"}, rootfs)
+		if err != nil {
 			t.Fatalf("injectEgressMITMCertificate: %v", err)
 		}
 		payload, err := os.ReadFile(filepath.Join(rootfs, strings.TrimPrefix(guestMITMCertPath, "/")))
@@ -125,11 +174,29 @@ func TestInjectEgressMITMCertificate(t *testing.T) {
 		if string(payload) != string(certPEM) {
 			t.Fatalf("baked certificate differs from the mounted entry")
 		}
+		want := expectedLineage(t, certificate)
+		if len(lineage) != 1 || lineage[0] != want {
+			t.Fatalf("lineage = %+v, want [%+v]", lineage, want)
+		}
+	})
+
+	t.Run("fingerprints every certificate in order", func(t *testing.T) {
+		first, firstPEM := testCACert(t, "ca-one.test")
+		second, secondPEM := testCACert(t, "ca-two.test")
+		stageMitmCertificate(t, append(append([]byte{}, firstPEM...), secondPEM...))
+		lineage, err := injectEgressMITMCertificate(apiv1alpha2.SandboxTemplateSpec{}, t.TempDir())
+		if err != nil {
+			t.Fatalf("injectEgressMITMCertificate: %v", err)
+		}
+		want := []mitmCALineage{expectedLineage(t, first), expectedLineage(t, second)}
+		if len(lineage) != 2 || lineage[0] != want[0] || lineage[1] != want[1] {
+			t.Fatalf("lineage = %+v, want %+v", lineage, want)
+		}
 	})
 
 	t.Run("fails without the controller mount env", func(t *testing.T) {
 		t.Setenv(mitmCertificateDirEnv, "")
-		err := injectEgressMITMCertificate(apiv1alpha2.SandboxTemplateSpec{}, t.TempDir())
+		_, err := injectEgressMITMCertificate(apiv1alpha2.SandboxTemplateSpec{}, t.TempDir())
 		if err == nil || !strings.Contains(err.Error(), "SANDBOX_TEMPLATE_MITM_CERT_DIR is unset") {
 			t.Fatalf("injectEgressMITMCertificate error = %v, want missing-mount error", err)
 		}
@@ -137,7 +204,7 @@ func TestInjectEgressMITMCertificate(t *testing.T) {
 
 	t.Run("fails on a private key entry", func(t *testing.T) {
 		stageMitmCertificate(t, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("x")}))
-		err := injectEgressMITMCertificate(apiv1alpha2.SandboxTemplateSpec{}, t.TempDir())
+		_, err := injectEgressMITMCertificate(apiv1alpha2.SandboxTemplateSpec{}, t.TempDir())
 		if err == nil || !strings.Contains(err.Error(), "private key") {
 			t.Fatalf("injectEgressMITMCertificate error = %v, want private-key rejection", err)
 		}
@@ -145,7 +212,8 @@ func TestInjectEgressMITMCertificate(t *testing.T) {
 }
 
 // TestInjectRuntimeBakesMitmCertificateAndGate: the gate line follows the
-// merged envs, so it wins over a user-provided value in spec.envs.
+// merged envs, so it wins over a user-provided value in spec.envs, and the
+// lineage fingerprints are returned to the manifest stage.
 func TestInjectRuntimeBakesMitmCertificateAndGate(t *testing.T) {
 	stageMitmCertificate(t, testCACertificatePEM(t))
 	workdir, rootfs := t.TempDir(), t.TempDir()
@@ -161,8 +229,12 @@ func TestInjectRuntimeBakesMitmCertificateAndGate(t *testing.T) {
 			Key:       "ca.crt",
 		},
 	}
-	if err := injectRuntime(spec, workdir, rootfs); err != nil {
+	mitmCA, err := injectRuntime(spec, workdir, rootfs)
+	if err != nil {
 		t.Fatalf("injectRuntime: %v", err)
+	}
+	if len(mitmCA) != 1 {
+		t.Fatalf("expected one lineage entry, got %+v", mitmCA)
 	}
 	payload, err := os.ReadFile(filepath.Join(rootfs, strings.TrimPrefix(guestMITMCertPath, "/")))
 	if err != nil {
@@ -183,5 +255,20 @@ func TestInjectRuntimeBakesMitmCertificateAndGate(t *testing.T) {
 	if userIdx == -1 || gateIdx == -1 || gateIdx < userIdx {
 		t.Fatalf("sandbox-init.env must carry the gate after the user env (user at %d, gate at %d):\n%s",
 			userIdx, gateIdx, envContent)
+	}
+}
+
+// TestInjectRuntimeWithoutMitmCertificate: no CA configured, no lineage.
+func TestInjectRuntimeWithoutMitmCertificate(t *testing.T) {
+	workdir, rootfs := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rootfs, "etc"), 0o755); err != nil {
+		t.Fatalf("stage etc: %v", err)
+	}
+	mitmCA, err := injectRuntime(apiv1alpha2.SandboxTemplateSpec{}, workdir, rootfs)
+	if err != nil {
+		t.Fatalf("injectRuntime: %v", err)
+	}
+	if mitmCA != nil {
+		t.Fatalf("expected nil lineage without egressMitmCertificate, got %+v", mitmCA)
 	}
 }

@@ -169,6 +169,16 @@ Behavior:
   script watches — and sets the trust gate
   (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`, after `spec.envs`, so it
   wins).
+- The builder records the baked CA's public-key identity into the manifest
+  lineage (`lineage.egressMitmCA`): per `CERTIFICATE` block, `certSha256`
+  (SHA-256 of the certificate DER — matched byte-for-byte against the egress
+  pinned-CA fingerprint exposed on `/healthz`, which is how a template↔pool
+  pinning mismatch becomes checkable), `spkiSha256` (the key identity,
+  stable across re-issuance with the same key), and `notAfter`. Fingerprints
+  only — never the Secret reference, the private key, or certificate bytes;
+  absent when this field is unset (consumers treat that as "unknown" and
+  skip the comparison). See the
+  [artifact manifest reference](artifact-manifest-reference.md).
 - At the build's snapshot boot the bootstrap installs the CA into the guest
   trust store (`update-ca-certificates` / `update-ca-trust`, plus NSS and JDK
   keystores), builds the merged bundle (roots + MITM CA), and exports
