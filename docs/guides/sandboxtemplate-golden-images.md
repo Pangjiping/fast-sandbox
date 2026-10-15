@@ -159,8 +159,11 @@ Behavior:
 
 - The controller projects the single configured key (volume `Items`) into the
   build Pod; the rest of the Secret — e.g. the CA private key — never enters
-  the build. The builder additionally rejects any entry that is not a valid
-  X.509 PEM certificate.
+  the build. The builder rejects empty entries, entries containing a private
+  key, and entries without a valid X.509 PEM `CERTIFICATE` block. It does not
+  verify CA constraints (`BasicConstraints CA:TRUE`), so the entry must hold
+  a properly issued CA certificate; the entry is baked verbatim, so keep it
+  free of unrelated PEM blocks or trailing data.
 - The builder writes the certificate verbatim into the rootfs at
   `/opt/opensandbox/mitmproxy-ca-cert.pem` — the path the execd bootstrap
   script watches — and sets the trust gate

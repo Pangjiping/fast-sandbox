@@ -209,6 +209,17 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, request ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	// A MITM certificate selector with an empty Secret name would only fail
+	// later at Pod admission with an opaque apiserver error; surface it as a
+	// terminal build failure instead.
+	if cert := template.Spec.EgressMITMCertificate; cert != nil && cert.SecretRef.Name == "" {
+		err := fmt.Errorf("spec.egressMitmCertificate.secretRef.name is required")
+		if failErr := r.failBuild(ctx, &template, "InvalidMITMCertificate", err); failErr != nil {
+			return ctrl.Result{}, failErr
+		}
+		return ctrl.Result{}, nil
+	}
+
 	pod, err := r.findBuildPod(ctx, &template)
 	if err != nil {
 		return ctrl.Result{}, err

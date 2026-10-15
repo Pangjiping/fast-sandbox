@@ -57,8 +57,14 @@ func injectEgressMITMCertificate(spec apiv1alpha2.SandboxTemplateSpec, mountPoin
 	return nil
 }
 
-// validateCACertificate accepts only a PEM X.509 certificate — the second
-// gate after the controller's key-only projection.
+// validateCACertificate is the second gate after the controller's key-only
+// projection. It rejects empty entries, entries containing a private key,
+// and entries without at least one valid PEM CERTIFICATE block. It is
+// deliberately loose beyond that: non-CERTIFICATE PEM blocks (CSR, CRL, ...)
+// are skipped and trailing non-PEM data is ignored rather than rejected, and
+// the certificate is not required to be a CA (BasicConstraints CA:TRUE is
+// not verified). The entry is baked verbatim, so Secret operators must
+// supply a well-formed entry holding only the CA certificate.
 func validateCACertificate(payload []byte) error {
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return errors.New("mounted mitm certificate entry is empty")
