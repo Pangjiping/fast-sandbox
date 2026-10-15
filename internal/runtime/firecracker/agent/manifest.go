@@ -82,6 +82,19 @@ func (m manifest) nativeFiles() ([]nativeFile, error) {
 	return files, nil
 }
 
+// vaultFile returns the optional vault bundle entry of a checkpoint set:
+// nil when the manifest carries none (golden images never do).
+func (m manifest) vaultFile() *nativeFile {
+	entry, ok := m.Files[publishVaultName]
+	if !ok || !validSHA256(entry.SHA256) {
+		return nil
+	}
+	return &nativeFile{
+		publish: publishVaultName, cache: publishVaultName,
+		sha256: entry.SHA256, sizeBytes: entry.SizeBytes,
+	}
+}
+
 // validSHA256 reports whether sum is a lowercase sha256 hex digest.
 func validSHA256(sum string) bool {
 	if len(sum) != sha256.Size*2 {
