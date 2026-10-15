@@ -360,6 +360,12 @@ type InvokeHandlerRequest struct {
 	Handler string `json:"handler"`
 	// Payload is opaque bytes relayed to the handler as the request body.
 	Payload []byte `json:"payload,omitempty"`
+	// Method is the HTTP method of the relayed request; empty defaults to
+	// POST.
+	Method string `json:"method,omitempty"`
+	// Path is the loopback request path addressed on the handler; it must
+	// start with '/'.
+	Path string `json:"path"`
 }
 
 // InvokeHandlerResponse carries the handler's HTTP response verbatim. Status
