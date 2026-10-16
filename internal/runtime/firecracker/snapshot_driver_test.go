@@ -472,7 +472,9 @@ func TestCreateTemplateSnapshotDoesNotCommitCheckpointCache(t *testing.T) {
 		"template snapshots keep discarding staging (same-node prewarm is issue #57)")
 }
 
-// fakeVaultMover records the driver-invoked vault transfer.
+// fakeVaultMover plays the Handler side of the vault transfer: a successful
+// export writes the payload to the driver-provided bundle path (as the
+// egress copy would); imports record the handed-over path.
 type fakeVaultMover struct {
 	mu          sync.Mutex
 	exportData  []byte
@@ -481,20 +483,23 @@ type fakeVaultMover struct {
 	imports     []string
 }
 
-func (f *fakeVaultMover) ExportVault(_ context.Context, sandboxUID string) ([]byte, error) {
+func (f *fakeVaultMover) ExportVault(_ context.Context, sandboxUID, bundlePath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.exportCalls = append(f.exportCalls, sandboxUID)
+	f.exportCalls = append(f.exportCalls, sandboxUID+":"+bundlePath)
 	if f.exportErr != nil {
-		return nil, f.exportErr
+		return f.exportErr
 	}
-	return f.exportData, nil
+	if f.exportData != nil {
+		return os.WriteFile(bundlePath, f.exportData, 0o600)
+	}
+	return nil
 }
 
-func (f *fakeVaultMover) ImportVault(_ context.Context, sandboxUID string, data []byte) error {
+func (f *fakeVaultMover) ImportVault(_ context.Context, sandboxUID, bundlePath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.imports = append(f.imports, sandboxUID+":"+string(data))
+	f.imports = append(f.imports, sandboxUID+":"+bundlePath)
 	return nil
 }
 
@@ -603,7 +608,7 @@ func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	vaultContent := []byte(`{"vault":true}`)
 
 	// A resumed checkpoint whose bundle carries a provenance-verified vault
-	// file: the import receives the exact bytes.
+	// file: the import hands the exact bundle path to the mover.
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), vaultContent, 0o600))
 	writeCheckpointManifest(t, cacheDir, vaultContent, true)
 	spec := fixture.sandboxSpec.Spec
@@ -611,7 +616,7 @@ func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
 	exports, imports := mover.snapshot()
 	require.Empty(t, exports)
-	require.Equal(t, []string{sandboxID + ":{\"vault\":true}"}, imports)
+	require.Equal(t, []string{sandboxID + ":" + filepath.Join(cacheDir, vaultBundleName)}, imports)
 
 	// A manifest without the egressVault marker never authorizes a delivery,
 	// and neither does a digest mismatch: unverified credential bytes are

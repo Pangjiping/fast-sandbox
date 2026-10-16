@@ -2,30 +2,28 @@ package contract
 
 import (
 	"context"
-	"errors"
 )
 
-// ErrVaultAbsent reports that egress holds no vault for the Sandbox — there
-// is nothing to carry across pause/resume. It is a result, not a failure.
-var ErrVaultAbsent = errors.New("egress holds no vault for the Sandbox")
-
-// VaultMover carries the egress-owned vault file across pause/resume. The
-// driver invokes ExportVault inside the pause flow — strictly before the
-// runtime teardown purges the egress-local file (REMOVE_BINDING) — and
-// ImportVault at restore, before the restored Sandbox's data plane becomes
-// ready. Implementations live on the Fastlet side and deliver over the Pod
-// loopback to the Pool's vault-capable Action Handler (OSEP-0022: export /
-// import via driver, egress re-stamps the incarnation at load).
+// VaultMover carries the egress-owned vault file across pause/resume
+// (OSEP-0022 "Vault Lifecycle"): the driver invokes ExportVault inside the
+// pause flow — strictly before the runtime teardown purges the egress-local
+// file — and ImportVault at restore, before the restored Sandbox's data
+// plane becomes ready. The transfer rides the Sandbox Actions envelope
+// (VAULT_EXPORT / VAULT_IMPORT, snapshot.path): the Handler copies/reads the
+// bundle file itself, so no credential bytes ever cross the driver process.
+// bundlePath is the Pod-local staging file: the export target inside the
+// snapshot bundle, or the bundle source at restore.
 //
-// Failure semantics: an export failure fails the checkpoint (the control
-// plane only releases the runtime after the checkpoint is durable, so the
-// egress-local file survives for the retry); an import failure degrades the
-// restored subject's vault (fail-closed interception, observable) and must
-// not fail the restore.
+// "No vault" is signalled by no file at bundlePath after a successful export
+// — not an error. Failure semantics: an export failure fails the checkpoint
+// (the control plane only releases the runtime after the checkpoint is
+// durable, so the egress-local file survives for the retry); an import
+// failure degrades the restored subject's vault (fail-closed, observable)
+// and must not fail the restore.
 type VaultMover interface {
-	// ExportVault returns the subject's egress-held vault file bytes.
-	// ErrVaultAbsent means the subject holds no vault.
-	ExportVault(ctx context.Context, sandboxUID string) ([]byte, error)
-	// ImportVault delivers a bundled vault file to egress for the subject.
-	ImportVault(ctx context.Context, sandboxUID string, data []byte) error
+	// ExportVault copies the subject's vault file into the bundle target.
+	ExportVault(ctx context.Context, sandboxUID, bundlePath string) error
+	// ImportVault lands the bundle source file as the subject's vault,
+	// re-stamped by the Handler with the restored runtime fence.
+	ImportVault(ctx context.Context, sandboxUID, bundlePath string) error
 }

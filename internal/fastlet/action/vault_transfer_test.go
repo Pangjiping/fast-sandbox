@@ -1,115 +1,108 @@
 package action
 
 import (
-	"bytes"
 	"context"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
-	runtimecontract "fast-sandbox/internal/runtime/contract"
+	actionapi "fast-sandbox/internal/protocol/action"
 )
 
-func newVaultTransferManager(t *testing.T, handlerPort int32) *Manager {
+// newVaultTransferManager wires a manager declaring the egress handler with
+// vault transfer enabled, and registers one Sandbox's Action state.
+func newVaultTransferManager(t *testing.T) (*Manager, *fakeCaller) {
 	t.Helper()
-	manager, err := NewManager([]apiv1alpha2.ActionHandler{{Name: "egress", TargetHTTPPort: handlerPort}}, &fakeCaller{instanceID: "handler-1"})
+	caller := &fakeCaller{instanceID: "handler-1"}
+	manager, err := NewManager([]apiv1alpha2.ActionHandler{{Name: "egress", TargetHTTPPort: 18080}}, caller)
 	require.NoError(t, err)
 	manager.SetVaultHandler("egress")
-	return manager
+	manager.probe(context.Background())
+	_, _, reconcileErr := manager.Reconcile(context.Background(), attachment("a"), 1, []DesiredInput{input("egress", "v1")})
+	require.NoError(t, reconcileErr)
+	return manager, caller
 }
 
-func TestExportVaultReturnsFileBytes(t *testing.T) {
-	var seenMethod, seenPath string
-	handlerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenMethod, seenPath = r.Method, r.URL.Path
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"v":1,"revision":7,"vault":{}}`))
-	}))
-	t.Cleanup(handlerServer.Close)
-	manager := newVaultTransferManager(t, int32(handlerServer.Listener.Addr().(*net.TCPAddr).Port))
-
-	data, err := manager.ExportVault(context.Background(), "uid-a")
-	require.NoError(t, err)
-	require.Equal(t, []byte(`{"v":1,"revision":7,"vault":{}}`), data)
-	require.Equal(t, http.MethodGet, seenMethod)
-	require.Equal(t, "/vault/uid-a/export", seenPath)
+// vaultCalls returns the recorded vault-transfer invocations, excluding the
+// SET_BINDING traffic the registration itself emits.
+func vaultCalls(caller *fakeCaller) []recordedRequest {
+	var calls []recordedRequest
+	for _, request := range caller.snapshot() {
+		switch request.request.Operation {
+		case actionapi.OperationVaultExport, actionapi.OperationVaultImport:
+			calls = append(calls, request)
+		}
+	}
+	return calls
 }
 
-func TestExportVaultMapsAbsentAndFailures(t *testing.T) {
-	t.Run("handler answers 404", func(t *testing.T) {
-		handlerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		t.Cleanup(handlerServer.Close)
-		manager := newVaultTransferManager(t, int32(handlerServer.Listener.Addr().(*net.TCPAddr).Port))
-		_, err := manager.ExportVault(context.Background(), "uid-a")
-		require.ErrorIs(t, err, runtimecontract.ErrVaultAbsent, "no vault is a result, not a failure")
-	})
-	t.Run("handler answers 500", func(t *testing.T) {
-		handlerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-			// An oversized error page must surface as the HTTP status, not a
-			// transfer size error.
-			_, _ = w.Write(bytes.Repeat([]byte("x"), maxVaultTransferBytes+1))
-		}))
-		t.Cleanup(handlerServer.Close)
-		manager := newVaultTransferManager(t, int32(handlerServer.Listener.Addr().(*net.TCPAddr).Port))
-		_, err := manager.ExportVault(context.Background(), "uid-a")
-		require.ErrorContains(t, err, "HTTP 500")
-		require.NotContains(t, err.Error(), "exceeds")
-	})
-	t.Run("handler unreachable", func(t *testing.T) {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		require.NoError(t, err)
-		require.NoError(t, listener.Close())
-		manager := newVaultTransferManager(t, int32(listener.Addr().(*net.TCPAddr).Port))
-		_, err = manager.ExportVault(context.Background(), "uid-a")
-		require.Error(t, err)
-	})
-	t.Run("handler undeclared", func(t *testing.T) {
-		manager, err := NewManager([]apiv1alpha2.ActionHandler{{Name: "audit", TargetHTTPPort: 18081}}, &fakeCaller{instanceID: "handler-1"})
-		require.NoError(t, err)
-		manager.SetVaultHandler("egress")
-		_, err = manager.ExportVault(context.Background(), "uid-a")
-		require.ErrorIs(t, err, runtimecontract.ErrVaultAbsent, "a pool without the vault handler can never hold vault state")
-	})
+func TestExportVaultSendsEnvelopeOpWithBundlePath(t *testing.T) {
+	manager, caller := newVaultTransferManager(t)
+
+	require.NoError(t, manager.ExportVault(context.Background(), "a", "/state/snapshots/ckpt-1/vault.json"))
+	requests := vaultCalls(caller)
+	require.Len(t, requests, 1)
+	require.Equal(t, int32(18080), requests[0].port)
+	require.Equal(t, actionapi.OperationVaultExport, requests[0].request.Operation)
+	require.Equal(t, "/state/snapshots/ckpt-1/vault.json", requests[0].request.Snapshot.Path)
+	require.Equal(t, "a", requests[0].request.Sandbox.UID)
+	// The envelope fence is the registered fence: the Handler matches it
+	// against the registration and rejects stale invocations itself.
+	require.Equal(t, "runtime-a", requests[0].request.Revision.RuntimeInstanceID)
+	require.Empty(t, requests[0].request.Binding)
+}
+
+func TestImportVaultSendsEnvelopeOpWithBundlePath(t *testing.T) {
+	manager, caller := newVaultTransferManager(t)
+
+	require.NoError(t, manager.ImportVault(context.Background(), "a", "/state/images/ckpt/vault.json"))
+	requests := vaultCalls(caller)
+	require.Len(t, requests, 1)
+	require.Equal(t, actionapi.OperationVaultImport, requests[0].request.Operation)
+	require.Equal(t, "/state/images/ckpt/vault.json", requests[0].request.Snapshot.Path)
+}
+
+func TestVaultTransferSurfacesHandlerFailure(t *testing.T) {
+	manager, caller := newVaultTransferManager(t)
+	caller.mu.Lock()
+	caller.fail = map[actionapi.Operation]int{actionapi.OperationVaultExport: 1}
+	caller.mu.Unlock()
+
+	err := manager.ExportVault(context.Background(), "a", "/tmp/vault.json")
+	require.ErrorContains(t, err, "VAULT_EXPORT vault transfer")
+}
+
+func TestVaultTransferSkipsWhenDisabledOrUndeclared(t *testing.T) {
 	t.Run("transfer disabled", func(t *testing.T) {
-		manager, err := NewManager([]apiv1alpha2.ActionHandler{{Name: "egress", TargetHTTPPort: 18080}}, &fakeCaller{instanceID: "handler-1"})
+		caller := &fakeCaller{instanceID: "handler-1"}
+		manager, err := NewManager([]apiv1alpha2.ActionHandler{{Name: "egress", TargetHTTPPort: 18080}}, caller)
 		require.NoError(t, err)
-		_, err = manager.ExportVault(context.Background(), "uid-a")
-		require.ErrorIs(t, err, runtimecontract.ErrVaultAbsent)
+		manager.probe(context.Background())
+		_, _, reconcileErr := manager.Reconcile(context.Background(), attachment("a"), 1, []DesiredInput{input("egress", "v1")})
+		require.NoError(t, reconcileErr)
+		require.NoError(t, manager.ExportVault(context.Background(), "a", "/tmp/vault.json"), "no vault handler configured: nothing to transfer")
+		require.Empty(t, vaultCalls(caller))
+	})
+	t.Run("handler undeclared by the Pool", func(t *testing.T) {
+		caller := &fakeCaller{instanceID: "handler-1"}
+		manager, err := NewManager([]apiv1alpha2.ActionHandler{{Name: "audit", TargetHTTPPort: 18081}}, caller)
+		require.NoError(t, err)
+		manager.probe(context.Background())
+		manager.SetVaultHandler("egress")
+		_, _, reconcileErr := manager.Reconcile(context.Background(), attachment("a"), 1, []DesiredInput{input("audit", "v1")})
+		require.NoError(t, reconcileErr)
+		require.NoError(t, manager.ExportVault(context.Background(), "a", "/tmp/vault.json"), "a pool without the vault handler can never hold vault state")
+		require.Empty(t, vaultCalls(caller))
 	})
 }
 
-func TestImportVaultDeliversFileBytes(t *testing.T) {
-	var seenMethod, seenPath, seenContentType string
-	var seenBody []byte
-	handlerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenMethod, seenPath, seenContentType = r.Method, r.URL.Path, r.Header.Get("Content-Type")
-		seenBody = make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(seenBody)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(handlerServer.Close)
-	manager := newVaultTransferManager(t, int32(handlerServer.Listener.Addr().(*net.TCPAddr).Port))
+func TestVaultTransferFailsForUnregisteredSandbox(t *testing.T) {
+	manager, caller := newVaultTransferManager(t)
 
-	require.NoError(t, manager.ImportVault(context.Background(), "uid-a", []byte(`{"v":1}`)))
-	require.Equal(t, http.MethodPost, seenMethod)
-	require.Equal(t, "/vault/uid-a/import", seenPath)
-	require.Equal(t, "application/json", seenContentType)
-	require.Equal(t, []byte(`{"v":1}`), seenBody)
-
-	// A rejected import is a transfer failure the driver logs and tolerates.
-	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-	}))
-	t.Cleanup(rejecting.Close)
-	rejectManager := newVaultTransferManager(t, int32(rejecting.Listener.Addr().(*net.TCPAddr).Port))
-	require.ErrorContains(t, rejectManager.ImportVault(context.Background(), "uid-a", []byte(`{}`)), "HTTP 409")
+	err := manager.ExportVault(context.Background(), "ghost", "/tmp/vault.json")
+	require.ErrorContains(t, err, "no registered Action state")
+	require.Empty(t, vaultCalls(caller))
 }
 
 func TestVaultHandlerFromEnvDefaultsToEgress(t *testing.T) {

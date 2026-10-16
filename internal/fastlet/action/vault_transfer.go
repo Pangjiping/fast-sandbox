@@ -1,53 +1,35 @@
 package action
 
 // vault_transfer.go implements the Fastlet side of the driver-invoked vault
-// transfer (runtimecontract.VaultMover): the egress-owned vault file moves
-// across pause/resume over the same Pod-loopback delivery path as Sandbox
-// Actions. The transfer endpoints are the driver-facing slice of the
-// OpenSandbox-owned egress vault surface:
+// transfer (runtimecontract.VaultMover, OSEP-0022 "Vault Lifecycle"): the
+// subject's vault file moves across pause/resume as VAULT_EXPORT /
+// VAULT_IMPORT invocations on the Pool-declared vault-capable Action Handler
+// over the existing Pod-loopback Sandbox Actions channel. The envelope
+// carries the bundle file PATH (snapshot.path) — the Handler copies/reads
+// the file itself through its commit protocol, so no credential bytes ever
+// cross this process. The envelope fence is the Sandbox's currently
+// registered fence, so a stale invocation is rejected by the Handler.
 //
-//	GET  /vault/{sandboxUid}/export -> 200 + vault file bytes; 404 = absent
-//	POST /vault/{sandboxUid}/import <- vault file bytes; 2xx = accepted
-//
-// The egress re-stamps the imported file with the new incarnation at load —
-// the transfer never interprets the bytes.
+// The default vault handler name matches the OSEP-0022 fast-sandbox profile
+// convention ("egress"); pools without that handler never transfer vault
+// files, and a successful export without a bundle file simply means the
+// subject held no vault.
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"strings"
 
+	actionapi "fast-sandbox/internal/protocol/action"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 // vaultTransferEnvVar optionally overrides the name of the Pool-declared
-// Action Handler that serves the egress vault surface. The default matches
-// the OSEP-0022 fast-sandbox profile convention ("egress"); pools without
-// that handler never stage vault files (ExportVault reports ErrVaultAbsent).
+// Action Handler that serves the egress vault surface.
 const vaultTransferEnvVar = "FAST_SANDBOX_VAULT_HANDLER"
 
 // defaultVaultHandler is the conventional name of the egress Action Handler.
 const defaultVaultHandler = "egress"
-
-// maxVaultTransferBytes bounds one vault file transfer. The vault is
-// deliberately decoupled from the 64 KiB binding-input cap, so the transfer
-// carries its own (generous) bound instead of reusing the 32 KiB action
-// response limit.
-const maxVaultTransferBytes = 4 << 20
-
-// vaultHTTPClient is the transfer client: loopback only, bounded timeout,
-// redirects surfaced instead of followed — the same delivery posture as the
-// Sandbox Actions caller.
-var vaultHTTPClient = &http.Client{
-	Timeout: defaultTimeout,
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-}
 
 // SetVaultHandler configures the Pool-declared Action Handler name that
 // serves the egress vault surface. An empty name disables vault transfer.
@@ -75,96 +57,67 @@ func VaultHandlerFromEnv() string {
 
 var _ runtimecontract.VaultMover = (*Manager)(nil)
 
-// vaultPort resolves the declared loopback port of the vault handler. An
-// unset or undeclared handler means the Pool cannot hold vault state at all,
-// which is the ErrVaultAbsent result — not a failure.
-func (m *Manager) vaultPort() (int32, error) {
+// ExportVault copies the subject's vault file into the driver-provided
+// bundle target. The Handler seals the subject on success; any non-2xx
+// answer (unknown subject, stale fence, copy failure) is a transfer failure
+// that fails the checkpoint.
+func (m *Manager) ExportVault(ctx context.Context, sandboxUID, bundlePath string) error {
+	return m.invokeVaultTransfer(ctx, actionapi.OperationVaultExport, sandboxUID, bundlePath)
+}
+
+// ImportVault lands the bundle source file as the subject's vault,
+// re-stamped by the Handler with the restored runtime fence. A failure is
+// returned to the driver, which logs it and proceeds — the restored
+// subject's vault then degrades (fail-closed, observable).
+func (m *Manager) ImportVault(ctx context.Context, sandboxUID, bundlePath string) error {
+	return m.invokeVaultTransfer(ctx, actionapi.OperationVaultImport, sandboxUID, bundlePath)
+}
+
+// invokeVaultTransfer sends one vault-transfer invocation on the actions
+// channel. Transfer is disabled (a silent no-op) without a configured
+// handler or when the Pool does not declare it; a Sandbox without a
+// registered Action state cannot be transferred.
+func (m *Manager) invokeVaultTransfer(ctx context.Context, operation actionapi.Operation, sandboxUID, bundlePath string) error {
 	m.mu.RLock()
 	name := m.vaultHandler
-	handler, found := m.byName[name]
+	handler, declared := m.byName[name]
 	m.mu.RUnlock()
-	if name == "" || !found {
-		return 0, runtimecontract.ErrVaultAbsent
+	if name == "" || !declared {
+		// The Pool cannot hold vault state at all: nothing to transfer.
+		return nil
 	}
-	return handler.TargetHTTPPort, nil
-}
-
-// ExportVault returns the subject's egress-held vault file bytes. A 404 from
-// the handler maps to ErrVaultAbsent (the subject holds no vault); any other
-// non-2xx answer or transport failure is a transfer failure carrying the
-// handler's status.
-func (m *Manager) ExportVault(ctx context.Context, sandboxUID string) ([]byte, error) {
-	port, err := m.vaultPort()
-	if err != nil {
-		return nil, err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint(port, fmt.Sprintf("/vault/%s/export", sandboxUID)), nil)
-	if err != nil {
-		return nil, err
-	}
-	response, err := vaultHTTPClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("export vault from handler: %w", err)
-	}
-	defer response.Body.Close()
-	// The status is classified before any body read: an oversized handler
-	// error page must surface as the HTTP status, not a size error.
-	if response.StatusCode == http.StatusNotFound {
-		return nil, runtimecontract.ErrVaultAbsent
-	}
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return nil, fmt.Errorf("export vault from handler: HTTP %d: %s", response.StatusCode, summarizeBody(response.Body))
-	}
-	return readVaultTransferBody(response.Body)
-}
-
-// ImportVault delivers a bundled vault file to egress. A non-2xx answer or
-// transport failure is returned to the driver, which logs it and proceeds —
-// the restored subject's vault then degrades (fail-closed, observable).
-func (m *Manager) ImportVault(ctx context.Context, sandboxUID string, data []byte) error {
-	port, err := m.vaultPort()
+	invocation, err := m.vaultInvocation(ctx, operation, name, sandboxUID, bundlePath)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint(port, fmt.Sprintf("/vault/%s/import", sandboxUID)), bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	if len(data) > 0 {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := vaultHTTPClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("import vault to handler: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return fmt.Errorf("import vault to handler: HTTP %d: %s", response.StatusCode, summarizeBody(response.Body))
-	}
-	if _, err := readVaultTransferBody(response.Body); err != nil {
-		return err
+	if err := m.caller.Invoke(ctx, handler.TargetHTTPPort, invocation); err != nil {
+		return fmt.Errorf("%s vault transfer for Sandbox %s: %w", operation, sandboxUID, err)
 	}
 	return nil
 }
 
-// summarizeBody reads a small bounded slice of an error response body for
-// diagnostics — the same posture as the Sandbox Actions caller.
-func summarizeBody(reader io.Reader) string {
-	body, err := io.ReadAll(io.LimitReader(reader, 4096))
+// vaultInvocation builds the transfer envelope from the Sandbox's currently
+// registered fence: the Handler matches it against the registration, so a
+// stale invocation (replaced runtime, superseded attachment) is rejected
+// instead of touching the wrong subject slice.
+func (m *Manager) vaultInvocation(ctx context.Context, operation actionapi.Operation, handlerName, sandboxUID, bundlePath string) (actionapi.Request, error) {
+	m.mu.RLock()
+	state := m.states[sandboxUID]
+	m.mu.RUnlock()
+	if state == nil {
+		return actionapi.Request{}, fmt.Errorf("%s vault transfer: Sandbox %s has no registered Action state", operation, sandboxUID)
+	}
+	if !state.lockOperations(ctx) {
+		return actionapi.Request{}, ctx.Err()
+	}
+	attachment := state.attachment
+	generation := state.desiredGeneration
+	state.unlockOperations()
+	instance, err := m.handlerInstance(handlerName)
 	if err != nil {
-		return ""
+		instance = ""
 	}
-	return truncate(strings.TrimSpace(string(body)), 512)
-}
-
-// readVaultTransferBody reads a bounded transfer payload.
-func readVaultTransferBody(reader io.Reader) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, maxVaultTransferBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read vault transfer body: %w", err)
-	}
-	if len(body) > maxVaultTransferBytes {
-		return nil, fmt.Errorf("vault transfer exceeds %d bytes", maxVaultTransferBytes)
-	}
-	return body, nil
+	request := buildRequest(operation, stableInvocationID(operation, handlerName, instance, generation, attachment, "", bundlePath), generation, attachment)
+	request.Snapshot = &actionapi.SnapshotTransfer{Path: bundlePath}
+	return request, nil
 }

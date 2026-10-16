@@ -648,10 +648,10 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 const vaultBundleName = "vault.json"
 
 // stageCheckpointVault exports the subject's egress vault into the checkpoint
-// staging directory (no-op without a mover). ErrVaultAbsent and an empty
-// payload stage nothing — the subject simply holds no vault content; any
-// other export failure fails the checkpoint so the egress-local file
-// survives for the retry.
+// staging directory (no-op without a mover). The Handler copies the file
+// itself: a successful export with no file at the target simply means the
+// subject held no vault; any transfer failure fails the checkpoint so the
+// egress-local file survives for the retry.
 func (d *Driver) stageCheckpointVault(ctx context.Context, sandboxUID, staging string) error {
 	d.mu.RLock()
 	mover := d.vaultMover
@@ -659,17 +659,8 @@ func (d *Driver) stageCheckpointVault(ctx context.Context, sandboxUID, staging s
 	if mover == nil {
 		return nil //nolint:nilerr // no mover wired: vault transfer disabled
 	}
-	vaultData, err := mover.ExportVault(ctx, sandboxUID)
-	switch {
-	case errors.Is(err, runtimecontract.ErrVaultAbsent):
-		return nil //nolint:nilerr // the subject holds no vault: nothing to stage
-	case err != nil:
+	if err := mover.ExportVault(ctx, sandboxUID, filepath.Join(staging, vaultBundleName)); err != nil {
 		return fmt.Errorf("export egress vault for the checkpoint bundle: %w", err)
-	case len(vaultData) == 0:
-		return nil //nolint:nilerr // an empty payload carries no vault content
-	}
-	if writeErr := os.WriteFile(filepath.Join(staging, vaultBundleName), vaultData, 0o600); writeErr != nil {
-		return fmt.Errorf("stage exported vault into the checkpoint bundle: %w", writeErr)
 	}
 	return nil
 }
@@ -681,7 +672,8 @@ func (d *Driver) stageCheckpointVault(ctx context.Context, sandboxUID, staging s
 // the staged credential bytes: a missing file is silence, but a read
 // failure, a marker mismatch, or an import failure all degrade the
 // subject's vault fail-closed and observably — mirroring the corrupt vault
-// file posture at registration.
+// file posture at registration. The Handler reads the bundle file itself;
+// the driver verifies it against the manifest and hands over the path.
 func (d *Driver) importRestoreVault(ctx context.Context, spec fastletapi.SandboxSpec, restoreRef, vmstatePath, sandboxUID string) {
 	if spec.Restore == nil {
 		return
@@ -709,7 +701,7 @@ func (d *Driver) importRestoreVault(ctx context.Context, spec fastletapi.Sandbox
 			"sandboxID", sandboxUID, "checkpoint", restoreRef, "file", vaultPath)
 		return //nolint:nilerr // unverified credential bytes are never delivered
 	}
-	if importErr := mover.ImportVault(ctx, sandboxUID, vaultData); importErr != nil {
+	if importErr := mover.ImportVault(ctx, sandboxUID, vaultPath); importErr != nil {
 		klog.ErrorS(importErr, "egress vault import failed; the restored Sandbox vault degrades",
 			"sandboxID", sandboxUID, "checkpoint", restoreRef)
 	}
