@@ -619,8 +619,8 @@ func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	require.Equal(t, []string{sandboxID + ":" + filepath.Join(cacheDir, vaultBundleName)}, imports)
 
 	// A manifest without the egressVault marker never authorizes a delivery,
-	// and neither does a digest mismatch: unverified credential bytes are
-	// never handed to egress.
+	// and neither does a digest or size mismatch: unverified credential
+	// bytes are never handed to egress.
 	mover.imports = nil
 	writeCheckpointManifest(t, cacheDir, vaultContent, false)
 	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
@@ -633,10 +633,26 @@ func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	_, imports = mover.snapshot()
 	require.Empty(t, imports)
 
-	// A bundle without a vault file imports nothing (fresh-boot caches and
-	// vault-less checkpoints).
 	mover.imports = nil
+	writeCheckpointManifest(t, cacheDir, vaultContent, true)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), append(vaultContent, []byte("x")...), 0o600))
+	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
+	_, imports = mover.snapshot()
+	require.Empty(t, imports)
+
+	// A manifest that authorizes a vault whose bundle file went missing is a
+	// loud degradation, never a silent skip.
+	mover.imports = nil
+	writeCheckpointManifest(t, cacheDir, vaultContent, true)
 	require.NoError(t, os.Remove(filepath.Join(cacheDir, vaultBundleName)))
+	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
+	_, imports = mover.snapshot()
+	require.Empty(t, imports)
+
+	// A bundle without a manifest-listed vault imports nothing (vault-less
+	// checkpoints).
+	mover.imports = nil
+	writeCheckpointManifest(t, cacheDir, vaultContent, false)
 	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
 	_, imports = mover.snapshot()
 	require.Empty(t, imports)

@@ -110,8 +110,14 @@ func (m *Manager) vaultInvocation(ctx context.Context, operation actionapi.Opera
 	if !state.lockOperations(ctx) {
 		return actionapi.Request{}, ctx.Err()
 	}
+	// The op token serializes against other invocation flows but NOT against
+	// the writers: registerDesired mutates both fields under state.mu (before
+	// the token is acquired and on the RegisterDesired path), so the field
+	// reads take state.mu like every established reader.
+	state.mu.RLock()
 	attachment := state.attachment
 	generation := state.desiredGeneration
+	state.mu.RUnlock()
 	state.unlockOperations()
 	instance, err := m.handlerInstance(handlerName)
 	if err != nil {
