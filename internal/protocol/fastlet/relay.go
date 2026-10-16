@@ -35,10 +35,16 @@ func ValidateHandlerRelay(method, path string) error {
 	}
 	// The path is spliced into the HTTP request line of the loopback call:
 	// only printable ASCII without whitespace can never break the framing or
-	// smuggle headers.
+	// smuggle headers. Percent-encodings are rejected outright: every
+	// legitimate relay character is permitted literally, and an encoded
+	// %2F or %2e%2e can decode (in the handler's router) into the reserved
+	// prefix or dot-segment traversal the literal checks below forbid.
 	for index := range len(path) {
 		if path[index] < 0x21 || path[index] > 0x7e {
 			return fmt.Errorf("relay path must contain printable ASCII without whitespace")
+		}
+		if path[index] == '%' {
+			return fmt.Errorf("relay path must not contain percent-encodings")
 		}
 	}
 	if path[0] != '/' {

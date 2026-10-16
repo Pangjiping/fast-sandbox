@@ -237,6 +237,9 @@ type Manager struct {
 	observed map[string]handlerObservation
 	ready    bool
 	message  string
+	// vaultHandler is the Pool-declared Action Handler serving the egress
+	// vault surface; empty disables the driver-invoked vault transfer.
+	vaultHandler string
 
 	startOnce sync.Once
 	probeMu   sync.Mutex
