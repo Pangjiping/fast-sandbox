@@ -12,6 +12,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -75,10 +76,16 @@ func (c *Client) PublishImage(ctx context.Context, kind, key, dir string) (Publi
 
 	// Artifacts and SHA256SUMS first: the namespace stays incomplete (and
 	// unaddressable) until the manifest lands. The vault bundle file joins
-	// the artifact uploads when the checkpoint staged one.
+	// the artifact uploads when the checkpoint staged one — any stat failure
+	// other than absence fails the publish, since the staged manifest and
+	// SHA256SUMS already reference the file and a stranded member would
+	// break the cross-node resume.
 	entries := append([]string(nil), publishArtifacts...)
 	if _, err := os.Stat(filepath.Join(dir, publishVaultName)); err == nil {
 		entries = append(entries, publishVaultName)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		klog.ErrorS(err, "runtime-agent publish failed", "kind", kind, "key", key, "file", publishVaultName)
+		return PublishResult{}, fmt.Errorf("stat staged %s: %w", publishVaultName, err)
 	}
 	entries = append(entries, artifacts.SHA256SUMSName)
 	for _, name := range entries {

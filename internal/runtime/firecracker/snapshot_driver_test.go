@@ -378,6 +378,45 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 		document["lineage"].(map[string]any)["image"])
 }
 
+func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
+	fixture := newSnapshotDriverFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+
+	// The Sandbox is itself a resume from a checkpoint whose manifest carries
+	// an egressVault entry; this dump stages no vault file of its own.
+	dir := filepath.Join(fixture.stateRoot, sandboxStateDir, sandboxID)
+	state, err := loadState(dir)
+	require.NoError(t, err)
+	restore := &fastletapi.RestoreSpec{ManifestRef: "s3://bucket/publish/abcdef/manifest.json", ArtifactDigest: "lineage-digest"}
+	state.Config.Spec.Restore = restore
+	require.NoError(t, saveState(dir, state))
+
+	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(artifacts.CheckpointReference(restore.ArtifactDigest)))
+	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
+	lineage, err := json.Marshal(map[string]any{
+		"schemaVersion": 1, "runtime": "firecracker",
+		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
+		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
+		"egressVault":  map[string]any{"sha256": "stale", "sizeBytes": 7},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
+
+	staging := t.TempDir()
+	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
+		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
+	}
+	_, err = assembleSnapshotManifest(fixture.stateRoot, staging, dir, nil)
+	require.NoError(t, err)
+
+	payload, err := os.ReadFile(filepath.Join(staging, "manifest.json"))
+	require.NoError(t, err)
+	var document map[string]any
+	require.NoError(t, json.Unmarshal(payload, &document))
+	require.NotContains(t, document, "egressVault",
+		"a source checkpoint's vault marker must not ride forward into a vault-less dump")
+}
+
 func TestCreateSnapshotPublishesWithTemplateKind(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
@@ -538,6 +577,19 @@ func TestCreateTemplateSnapshotNeverExportsVault(t *testing.T) {
 	require.NotContains(t, agent.manifest, "egressVault")
 }
 
+// writeCheckpointManifest writes a committed checkpoint manifest with an
+// egressVault entry describing content.
+func writeCheckpointManifest(t *testing.T, dir string, content []byte, withMarker bool) {
+	t.Helper()
+	document := map[string]any{"schemaVersion": 1, "runtime": "firecracker"}
+	if withMarker {
+		document["egressVault"] = map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}
+	}
+	payload, err := json.Marshal(document)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotManifestName), payload, 0o644))
+}
+
 func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	fixture := newSnapshotDriverFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
@@ -548,16 +600,33 @@ func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	cacheDir := t.TempDir()
 	vmstatePath := filepath.Join(cacheDir, vmstateSnapshotName)
 	require.NoError(t, os.WriteFile(vmstatePath, []byte("vmstate"), 0o600))
+	vaultContent := []byte(`{"vault":true}`)
 
-	// A resumed checkpoint whose bundle carries the vault file: the import
-	// receives the exact bytes.
-	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), []byte(`{"vault":true}`), 0o600))
+	// A resumed checkpoint whose bundle carries a provenance-verified vault
+	// file: the import receives the exact bytes.
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), vaultContent, 0o600))
+	writeCheckpointManifest(t, cacheDir, vaultContent, true)
 	spec := fixture.sandboxSpec.Spec
 	spec.Restore = restore
 	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
 	exports, imports := mover.snapshot()
 	require.Empty(t, exports)
 	require.Equal(t, []string{sandboxID + ":{\"vault\":true}"}, imports)
+
+	// A manifest without the egressVault marker never authorizes a delivery,
+	// and neither does a digest mismatch: unverified credential bytes are
+	// never handed to egress.
+	mover.imports = nil
+	writeCheckpointManifest(t, cacheDir, vaultContent, false)
+	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
+	_, imports = mover.snapshot()
+	require.Empty(t, imports)
+
+	mover.imports = nil
+	writeCheckpointManifest(t, cacheDir, []byte(`{"vault":"other"}`), true)
+	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
+	_, imports = mover.snapshot()
+	require.Empty(t, imports)
 
 	// A bundle without a vault file imports nothing (fresh-boot caches and
 	// vault-less checkpoints).

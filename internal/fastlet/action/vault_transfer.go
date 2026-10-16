@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
@@ -90,7 +91,8 @@ func (m *Manager) vaultPort() (int32, error) {
 
 // ExportVault returns the subject's egress-held vault file bytes. A 404 from
 // the handler maps to ErrVaultAbsent (the subject holds no vault); any other
-// non-2xx answer or transport failure is a transfer failure.
+// non-2xx answer or transport failure is a transfer failure carrying the
+// handler's status.
 func (m *Manager) ExportVault(ctx context.Context, sandboxUID string) ([]byte, error) {
 	port, err := m.vaultPort()
 	if err != nil {
@@ -105,17 +107,15 @@ func (m *Manager) ExportVault(ctx context.Context, sandboxUID string) ([]byte, e
 		return nil, fmt.Errorf("export vault from handler: %w", err)
 	}
 	defer response.Body.Close()
+	// The status is classified before any body read: an oversized handler
+	// error page must surface as the HTTP status, not a size error.
 	if response.StatusCode == http.StatusNotFound {
 		return nil, runtimecontract.ErrVaultAbsent
 	}
-	body, err := readVaultTransferBody(response.Body)
-	if err != nil {
-		return nil, err
-	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return nil, fmt.Errorf("export vault from handler: HTTP %d", response.StatusCode)
+		return nil, fmt.Errorf("export vault from handler: HTTP %d: %s", response.StatusCode, summarizeBody(response.Body))
 	}
-	return body, nil
+	return readVaultTransferBody(response.Body)
 }
 
 // ImportVault delivers a bundled vault file to egress. A non-2xx answer or
@@ -138,13 +138,23 @@ func (m *Manager) ImportVault(ctx context.Context, sandboxUID string, data []byt
 		return fmt.Errorf("import vault to handler: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return fmt.Errorf("import vault to handler: HTTP %d: %s", response.StatusCode, summarizeBody(response.Body))
+	}
 	if _, err := readVaultTransferBody(response.Body); err != nil {
 		return err
 	}
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return fmt.Errorf("import vault to handler: HTTP %d", response.StatusCode)
-	}
 	return nil
+}
+
+// summarizeBody reads a small bounded slice of an error response body for
+// diagnostics — the same posture as the Sandbox Actions caller.
+func summarizeBody(reader io.Reader) string {
+	body, err := io.ReadAll(io.LimitReader(reader, 4096))
+	if err != nil {
+		return ""
+	}
+	return truncate(strings.TrimSpace(string(body)), 512)
 }
 
 // readVaultTransferBody reads a bounded transfer payload.

@@ -676,10 +676,12 @@ func (d *Driver) stageCheckpointVault(ctx context.Context, sandboxUID, staging s
 
 // importRestoreVault delivers a restored checkpoint's vault bundle file to
 // egress — before the data plane becomes ready. Only a resumed checkpoint
-// carries the file (golden-image caches never do); a missing file, a nil
-// mover, and an import failure are all non-fatal: the subject's vault then
-// degrades fail-closed and observably on the handler, mirroring the corrupt
-// vault file posture at registration.
+// carries the file (golden-image caches never do); a nil mover is a no-op.
+// The bundle's manifest entry (egressVault) is the enforced provenance of
+// the staged credential bytes: a missing file is silence, but a read
+// failure, a marker mismatch, or an import failure all degrade the
+// subject's vault fail-closed and observably — mirroring the corrupt vault
+// file posture at registration.
 func (d *Driver) importRestoreVault(ctx context.Context, spec fastletapi.SandboxSpec, restoreRef, vmstatePath, sandboxUID string) {
 	if spec.Restore == nil {
 		return
@@ -690,14 +692,54 @@ func (d *Driver) importRestoreVault(ctx context.Context, spec fastletapi.Sandbox
 	if mover == nil {
 		return
 	}
-	vaultData, err := os.ReadFile(filepath.Join(filepath.Dir(vmstatePath), vaultBundleName))
+	bundleDir := filepath.Dir(vmstatePath)
+	vaultPath := filepath.Join(bundleDir, vaultBundleName)
+	vaultData, err := os.ReadFile(vaultPath)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			// Anything but absence (EIO/EACCES on the network-backed
+			// StateRoot) must never pass as "no vault" in silence.
+			klog.ErrorS(err, "read bundled egress vault failed; the restored Sandbox vault degrades",
+				"sandboxID", sandboxUID, "checkpoint", restoreRef, "file", vaultPath)
+		}
 		return //nolint:nilerr // no bundled vault file: nothing to import
+	}
+	if err := verifyVaultBundle(bundleDir, vaultData); err != nil {
+		klog.ErrorS(err, "bundled egress vault failed provenance verification; the restored Sandbox vault degrades",
+			"sandboxID", sandboxUID, "checkpoint", restoreRef, "file", vaultPath)
+		return //nolint:nilerr // unverified credential bytes are never delivered
 	}
 	if importErr := mover.ImportVault(ctx, sandboxUID, vaultData); importErr != nil {
 		klog.ErrorS(importErr, "egress vault import failed; the restored Sandbox vault degrades",
 			"sandboxID", sandboxUID, "checkpoint", restoreRef)
 	}
+}
+
+// verifyVaultBundle checks the staged vault file against the egressVault
+// entry of the committed checkpoint manifest (sha256 + size). A manifest
+// without the marker never authorizes a delivery.
+func verifyVaultBundle(bundleDir string, vaultData []byte) error {
+	payload, err := os.ReadFile(filepath.Join(bundleDir, snapshotManifestName))
+	if err != nil {
+		return fmt.Errorf("read checkpoint manifest: %w", err)
+	}
+	var document struct {
+		EgressVault *struct {
+			SHA256    string `json:"sha256"`
+			SizeBytes int64  `json:"sizeBytes"`
+		} `json:"egressVault"`
+	}
+	if err := json.Unmarshal(payload, &document); err != nil {
+		return fmt.Errorf("decode checkpoint manifest: %w", err)
+	}
+	if document.EgressVault == nil {
+		return errors.New("checkpoint manifest carries no egressVault marker")
+	}
+	if document.EgressVault.SHA256 != artifacts.SHA256Of(vaultData) || document.EgressVault.SizeBytes != int64(len(vaultData)) {
+		return fmt.Errorf("bundled vault digest/size mismatch the manifest entry (want sha256 %s, %d bytes)",
+			document.EgressVault.SHA256, document.EgressVault.SizeBytes)
+	}
+	return nil
 }
 
 // assembleSnapshotManifest builds the restore-compatible manifest of the
@@ -783,8 +825,11 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindi
 		}
 		document["actionBindings"] = recorded
 	}
-	// The egress vault marker names the staged vault file so the restore
-	// path knows the bundle carries subject-private credential state.
+	// The egress vault marker describes THIS dump: a source checkpoint's
+	// inherited marker must never ride forward — it would claim vault state
+	// this bundle does not carry and publish the previous subject's vault
+	// fingerprint into shared, world-readable template manifests.
+	delete(document, "egressVault")
 	if vaultEntry, ok := files[vaultBundleName]; ok {
 		document["egressVault"] = vaultEntry
 	}

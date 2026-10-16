@@ -34,6 +34,11 @@ func TestValidateHandlerRelay(t *testing.T) {
 		{"POST", "/vault/\x7f", "printable ASCII"},
 		{"POST", strings.Repeat("/a", 2048), "exceeds"},
 		{"POST", "/vault/s-a/../vault/s-b", "dot segments"},
+		// Percent-encodings decode in the handler's router: %2F can
+		// reassemble the reserved prefix, %2e%2e can smuggle dot segments.
+		{"POST", "//_fastlet%2Fv1%2Factions", "percent-encodings"},
+		{"GET", "/vault/%2e%2e/v1/actions/status", "percent-encodings"},
+		{"POST", "/vault/s-a%3Fx=1", "percent-encodings"},
 		// The handler's own privileged Action management surface shares the
 		// TargetHTTPPort and is fenced by attachment identity — the tenant
 		// relay must never address it, including via dot-segment traversal.

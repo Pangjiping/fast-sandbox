@@ -278,9 +278,12 @@ func (c *Client) materializeSet(ctx context.Context, dir, manifestKey, artifactD
 		return err
 	}
 	// The optional vault bundle file of a checkpoint set materializes next
-	// to the snapshot files so the restore path can hand it to egress.
-	if vault := document.vaultFile(); vault != nil {
-		files = append(files, *vault)
+	// to the snapshot files so the restore path can hand it to egress. A
+	// malformed entry fails the pull like any native artifact.
+	if vault, ok, err := document.vaultFile(); err != nil {
+		return err
+	} else if ok {
+		files = append(files, vault)
 	}
 
 	// Artifacts live in the same per-build digest namespace as the

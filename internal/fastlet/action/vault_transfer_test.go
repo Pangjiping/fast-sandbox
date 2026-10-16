@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"net/http"
@@ -51,11 +52,15 @@ func TestExportVaultMapsAbsentAndFailures(t *testing.T) {
 	t.Run("handler answers 500", func(t *testing.T) {
 		handlerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
+			// An oversized error page must surface as the HTTP status, not a
+			// transfer size error.
+			_, _ = w.Write(bytes.Repeat([]byte("x"), maxVaultTransferBytes+1))
 		}))
 		t.Cleanup(handlerServer.Close)
 		manager := newVaultTransferManager(t, int32(handlerServer.Listener.Addr().(*net.TCPAddr).Port))
 		_, err := manager.ExportVault(context.Background(), "uid-a")
 		require.ErrorContains(t, err, "HTTP 500")
+		require.NotContains(t, err.Error(), "exceeds")
 	})
 	t.Run("handler unreachable", func(t *testing.T) {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
