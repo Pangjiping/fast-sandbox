@@ -1,6 +1,7 @@
 package firecracker
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,31 +114,28 @@ func copyFrozenUpper(source, target string) error {
 }
 
 func copyUpperExtents(input, output *os.File, length int64) error {
+	return copyUpperExtentsWithSeek(input, output, length, unix.Seek)
+}
+
+func copyUpperExtentsWithSeek(input, output *os.File, length int64, seek func(int, int64, int) (int64, error)) error {
 	var err error
 	for offset := int64(0); offset < length; {
-		data, e := unix.Seek(int(input.Fd()), offset, unix.SEEK_DATA)
+		data, e := seek(int(input.Fd()), offset, unix.SEEK_DATA)
 		if errors.Is(e, unix.ENXIO) {
 			break
 		}
 		// A filesystem without extent seeking can still export a consistent upper;
 		// this fallback copies the private upper, never the full stacked rootfs.
 		if errors.Is(e, unix.EINVAL) || errors.Is(e, unix.ENOTSUP) {
-			if _, err = input.Seek(0, io.SeekStart); err != nil {
-				return err
-			}
-			if _, err = output.Seek(0, io.SeekStart); err != nil {
-				return err
-			}
-			_, err = io.Copy(output, input)
-			if err != nil {
-				return err
-			}
-			return nil
+			return copyUpperSparseScan(input, output, length)
 		}
 		if e != nil {
 			return e
 		}
-		hole, e := unix.Seek(int(input.Fd()), data, unix.SEEK_HOLE)
+		hole, e := seek(int(input.Fd()), data, unix.SEEK_HOLE)
+		if errors.Is(e, unix.EINVAL) || errors.Is(e, unix.ENOTSUP) {
+			return copyUpperSparseScan(input, output, length)
+		}
 		if e != nil {
 			return e
 		}
@@ -157,6 +155,37 @@ func copyUpperExtents(input, output *os.File, length int64) error {
 			return err
 		}
 		offset = hole
+	}
+	return nil
+}
+
+// copyUpperSparseScan scans in bounded blocks when extent seeking is unavailable.
+// Skipping all-zero blocks preserves holes even for large logical uppers.
+func copyUpperSparseScan(input, output *os.File, length int64) error {
+	buffer := make([]byte, 1<<20)
+	zeros := make([]byte, 4096)
+	for offset := int64(0); offset < length; {
+		size := int64(len(buffer))
+		if length-offset < size {
+			size = length - offset
+		}
+		chunk := buffer[:size]
+		if _, err := input.ReadAt(chunk, offset); err != nil {
+			return err
+		}
+		for start := 0; start < len(chunk); start += len(zeros) {
+			end := start + len(zeros)
+			if end > len(chunk) {
+				end = len(chunk)
+			}
+			block := chunk[start:end]
+			if !bytes.Equal(block, zeros[:len(block)]) {
+				if _, err := output.WriteAt(block, offset+int64(start)); err != nil {
+					return err
+				}
+			}
+		}
+		offset += size
 	}
 	return nil
 }

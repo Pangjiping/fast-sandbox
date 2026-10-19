@@ -495,3 +495,9 @@ sudo curl -fsS \
 - create/delete state is local host state, not a distributed control-plane resource.
 
 For build/create sequencing and artifact ownership, see the [fsb-vm design](../design/adr-fsb-vm-cli.en.md).
+
+OCI Fastlets share host `/dev` so dynamically created ublk devices remain visible. The image entrypoint supervises both the component and ublkd; either process exiting terminates the container. OCI jailers bind the configured snapshot spill directory before launch.
+
+After interrupted checkpoint packaging, retry and staging deletion first recover pack devices by their config paths. Cleanup failures retain backing files. OverlayBD credentials are synchronized for the actual rootfs/snapfiles repositories: anonymous access replaces that repository’s old credential without deleting credentials for other repositories. This does not promise immediate revocation for already running VMs.
+
+Build the OCI Fastlet with `make images-oci OCI_FASTLET_IMAGE=opensandbox/fsb-fastlet:dev-oci`, then push it and select that image in the Pool. This is a local build example, not a claim that the tag is published. Missing native tools trigger `make oci-tools`, requiring a Linux amd64 host and the dependencies listed in `scripts/build-oci-tools.sh`. Existing tools are reused; run `make oci-tools` after changing native sources or patches. Ordinary `make images COMPONENT=fastlet` keeps its existing image path. On filesystems without extent seeking, upper copying scans zero blocks to preserve sparsity; scanning can take longer than reflink or extent copying.

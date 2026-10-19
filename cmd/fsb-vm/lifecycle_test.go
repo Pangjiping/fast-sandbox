@@ -570,6 +570,7 @@ func TestOverlaybdCredentialsRekeysForBlobURL(t *testing.T) {
 		"registry-1.docker.io/library/redis": "alice:secret",
 		"registry.example.com/team/app":      "bob:pw",
 		"registry.example.com/team/db":       "carol:pw2",
+		"unknown.example.com/x/y":            ":",
 	}
 	if len(handoff.Auths) != len(want) {
 		t.Fatalf("handoff keys = %v", handoff.Auths)

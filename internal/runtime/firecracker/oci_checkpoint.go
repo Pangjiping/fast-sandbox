@@ -200,3 +200,16 @@ func prepareOCICheckpoint(plan dumpPlan, kind fastletapi.SnapshotKind) (bool, er
 	_, err = checkpointDestinationForSource(source, plan.snapshotID)
 	return true, err
 }
+
+// cleanupSnapshotStaging must release pack mounts and devices before deleting their backing files.
+func (d *Driver) cleanupSnapshotStaging(ctx context.Context, staging string) error {
+	if _, err := os.Stat(filepath.Join(staging, ".pack-resources-active")); err == nil {
+		args := append(d.fsbArgs(), "--build-work-dir", filepath.Join(staging, "pack-work"), "cleanup-pack", "--bundle-dir", staging)
+		if output, err := exec.CommandContext(ctx, "fsb-vm", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("recover checkpoint pack resources: %w: %s", err, output)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.RemoveAll(staging)
+}

@@ -847,7 +847,11 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 			klog.V(2).InfoS("infra instance cleanup on delete leaked resources", "sandboxID", sandboxID, "err", removeErr)
 		}
 	}
-	d.releaseAgentSandbox(ctx, sandboxID, state.Config.Spec.Image)
+	reference, err := restoreReference(state.Config.Spec)
+	if err != nil {
+		return err
+	}
+	d.releaseAgentSandbox(ctx, sandboxID, reference)
 	d.removeJailRoot(sandboxID)
 	d.ensureResidualProcessAbsent(ctx, sandboxID)
 	if err := d.releaseOCI(ctx, sandboxID); err != nil {
@@ -1139,23 +1143,7 @@ func (d *Driver) prepareInstance(stateRoot, sandboxID, image, stateDir, vmstateP
 		if prepareErr := prepareJailRoot(jailRoot, cached, vmstatePath, memoryPath); prepareErr != nil {
 			return "", "", "", prepareErr
 		}
-		// Bind the snapshot spill root into the jail BEFORE the VMM starts:
-		// the jailer clones its mount namespace at process start, so a dump
-		// window bind would be invisible to the running VMM. A failed bind
-		// only disables spilling for this sandbox (the dump falls back to
-		// the staging directory).
-		if spillRoot := d.snapshotSpillRoot(); spillRoot != "" {
-			spillMount := filepath.Join(jailRoot, jailerSpillDirName)
-			// The bind target must exist before MS_BIND (the jail root only
-			// carries snapshots/ from prepareJailRoot).
-			if err := os.MkdirAll(spillRoot, 0o750); err != nil {
-				klog.InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
-			} else if err := os.MkdirAll(spillMount, 0o750); err != nil {
-				klog.InfoS("create the jail spill mount point failed; spilling disabled", "err", err)
-			} else if err := bindMount(spillRoot, spillMount); err != nil {
-				klog.InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
-			}
-		}
+		d.prepareSnapshotSpill(jailRoot)
 		return instanceRootfs, jailRoot, apiAddress, nil
 	}
 	instanceRootfs, err = prepareInstanceRootfs(stateRoot, image, stateDir)
@@ -1403,3 +1391,19 @@ func pidAlive(pid int) error {
 }
 
 var _ runtimecontract.Driver = (*Driver)(nil)
+
+// prepareSnapshotSpill binds the spill area before the jailer clones its mount namespace.
+func (d *Driver) prepareSnapshotSpill(jailRoot string) {
+	if spillRoot := d.snapshotSpillRoot(); spillRoot != "" {
+		spillMount := filepath.Join(jailRoot, jailerSpillDirName)
+		// The bind target must exist before MS_BIND (the jail root only
+		// carries snapshots/ from prepareJailRoot).
+		if err := os.MkdirAll(spillRoot, 0o750); err != nil {
+			klog.InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
+		} else if err := os.MkdirAll(spillMount, 0o750); err != nil {
+			klog.InfoS("create the jail spill mount point failed; spilling disabled", "err", err)
+		} else if err := bindMount(spillRoot, spillMount); err != nil {
+			klog.InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
+		}
+	}
+}

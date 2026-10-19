@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,4 +48,101 @@ func TestPackedPairPreservesRootfsParentLayers(t *testing.T) {
 	var manifest ocispec.Manifest
 	require.NoError(t, json.Unmarshal(raw, &manifest))
 	require.Equal(t, []ocispec.Descriptor{parent, delta}, manifest.Layers)
+}
+
+func TestRecoverPackReleasesOnlyOwnedDeviceBeforeRemovingFiles(t *testing.T) {
+	for _, failure := range []string{"", "unmount", "list", "detach", "outside", "symlink"} {
+		t.Run(failure, func(t *testing.T) {
+			previous := global
+			t.Cleanup(func() { global = previous })
+			bundle := t.TempDir()
+			global.buildWorkDir = filepath.Join(bundle, "pack-work")
+			require.NoError(t, os.MkdirAll(global.buildWorkDir, 0750))
+			work, err := os.MkdirTemp(global.buildWorkDir, "snapshot_test-")
+			require.NoError(t, err)
+			config := filepath.Join(work, snapfilesConfigName)
+			require.NoError(t, os.WriteFile(config, []byte("backing-files"), 0600))
+			marker := filepath.Join(bundle, packActiveMarker)
+			markerWork := work
+			if failure == "outside" {
+				markerWork = t.TempDir()
+			}
+			if failure == "symlink" {
+				markerWork = filepath.Join(global.buildWorkDir, "snapshot_link")
+				require.NoError(t, os.Symlink(t.TempDir(), markerWork))
+			}
+			require.NoError(t, os.WriteFile(marker, []byte(markerWork), 0600))
+			devices := &fakeReleaser{devices: []ublkdDevice{{DevID: 1, Config: config}, {DevID: 2, Config: filepath.Join(bundle, "another.config")}}, delErr: map[int]error{}}
+			if failure == "list" {
+				devices.listErr = errors.New("list failed")
+			}
+			if failure == "detach" {
+				devices.delErr[1] = errors.New("detach failed")
+			}
+			unmounted := false
+			err = recoverPack(context.Background(), bundle, devices, func(path string) error {
+				require.Equal(t, filepath.Join(work, "mnt-snapfiles"), path)
+				require.FileExists(t, config)
+				require.Empty(t, devices.deleted)
+				unmounted = true
+				if failure == "unmount" {
+					return errors.New("unmount failed")
+				}
+				return nil
+			})
+			if failure != "" {
+				require.Error(t, err)
+				require.FileExists(t, marker)
+				require.FileExists(t, config)
+				require.Empty(t, devices.deleted)
+			} else {
+				require.NoError(t, err)
+				require.True(t, unmounted)
+				require.Equal(t, []int{1}, devices.deleted)
+				require.NoDirExists(t, work)
+				require.NoFileExists(t, marker)
+				require.NoError(t, recoverPack(context.Background(), bundle, devices, func(string) error { t.Fatal("already recovered"); return nil }))
+			}
+		})
+	}
+}
+
+func TestPackRecoveryRefusesActivePack(t *testing.T) {
+	previous := global
+	t.Cleanup(func() { global = previous })
+	global.stateDir = t.TempDir()
+	bundle := t.TempDir()
+	release, err := lockPackBundle(bundle)
+	require.NoError(t, err)
+	_, err = lockPackBundle(bundle)
+	require.ErrorIs(t, err, errBusy)
+	release()
+	release, err = lockPackBundle(bundle)
+	require.NoError(t, err)
+	release()
+}
+
+func TestRecoverPackKeepsUncertainAddBackingFiles(t *testing.T) {
+	for _, phase := range []string{"prepared", "adding", "attached", "released"} {
+		t.Run(phase, func(t *testing.T) {
+			previous := global
+			t.Cleanup(func() { global = previous })
+			bundle := t.TempDir()
+			global.buildWorkDir = filepath.Join(bundle, "pack-work")
+			work := filepath.Join(global.buildWorkDir, "snapshot_test-work")
+			require.NoError(t, os.MkdirAll(work, 0750))
+			marker := filepath.Join(bundle, packActiveMarker)
+			require.NoError(t, writePackResources(marker, work, phase))
+			err := recoverPack(context.Background(), bundle, &fakeReleaser{}, func(string) error { return nil })
+			if phase == "adding" {
+				require.ErrorContains(t, err, "may still be in flight")
+				require.DirExists(t, work)
+				require.FileExists(t, marker)
+			} else {
+				require.NoError(t, err)
+				require.NoDirExists(t, work)
+				require.NoFileExists(t, marker)
+			}
+		})
+	}
 }

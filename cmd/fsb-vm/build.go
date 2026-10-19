@@ -23,29 +23,30 @@ import (
 const defaultBuildDiskSizeGiB = 20
 
 type buildOptions struct {
-	snapshotMetadata []byte
-	snapshotExtras   map[string]string
-	injectDir        string
-	tapName          string
-	guestMAC         string
-	source           string
-	output           string
-	kernel           string
-	kernelVersion    string
-	vcpu             int
-	memoryMB         int
-	diskSizeGiB      int
-	snapfilesSizeMB  int
-	rootfsDriveID    string
-	bootArgs         string
-	initPath         string
-	initScriptFile   string
-	readyPattern     string
-	readyTimeout     time.Duration
-	authFile         string
-	username         string
-	noCompress       bool
-	keepWorkDir      bool
+	snapfilesProgress func(string) error
+	snapshotMetadata  []byte
+	snapshotExtras    map[string]string
+	injectDir         string
+	tapName           string
+	guestMAC          string
+	source            string
+	output            string
+	kernel            string
+	kernelVersion     string
+	vcpu              int
+	memoryMB          int
+	diskSizeGiB       int
+	snapfilesSizeMB   int
+	rootfsDriveID     string
+	bootArgs          string
+	initPath          string
+	initScriptFile    string
+	readyPattern      string
+	readyTimeout      time.Duration
+	authFile          string
+	username          string
+	noCompress        bool
+	keepWorkDir       bool
 }
 
 func newBuildCommand() *cobra.Command {
@@ -672,7 +673,19 @@ func captureSnapfiles(ctx context.Context, ublkd *ublkdClient, options *buildOpt
 	snapfiles := trackDevice(snapConfig, ublkd.Del, func(ctx context.Context, config string) (int, error) {
 		return releaseOwnedDevicesByConfig(ctx, ublkd, config)
 	}, undo)
+	progress := func(phase string) error {
+		if options.snapfilesProgress != nil {
+			return options.snapfilesProgress(phase)
+		}
+		return nil
+	}
+	if err := progress(packPhaseAdding); err != nil {
+		return err
+	}
 	if err := snapfiles.add(ctx, ublkd.Add); err != nil {
+		return err
+	}
+	if err := progress(packPhaseAttached); err != nil {
 		return err
 	}
 	if err := mkfsExt4(ctx, snapfiles.devPath); err != nil {
@@ -708,7 +721,10 @@ func captureSnapfiles(ctx context.Context, ublkd *ublkdClient, options *buildOpt
 	if err := unmount(snapMount); err != nil {
 		return err
 	}
-	return snapfiles.detach(ctx)
+	if err := snapfiles.detach(ctx); err != nil {
+		return err
+	}
+	return progress(packPhaseReleased)
 }
 
 // sealUpper commits the detached upper of stage into a read-only layer blob

@@ -27,6 +27,14 @@ func newPackCommand() *cobra.Command {
 }
 
 func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr error) {
+	releaseBundle, err := lockPackBundle(bundle)
+	if err != nil {
+		return err
+	}
+	defer releaseBundle()
+	if err := recoverPack(ctx, bundle, newUblkdClient(global.ublkdSocket), unmount); err != nil {
+		return err
+	}
 	output, err := parseOutput(outputName)
 	if err != nil {
 		return err
@@ -46,7 +54,7 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 		return err
 	}
 	undo := &rollback{}
-	activeMarker := filepath.Join(bundle, ".pack-resources-active")
+	activeMarker := filepath.Join(bundle, packActiveMarker)
 	defer func() {
 		if e := undo.run(); e != nil {
 			resultErr = errors.Join(resultErr, e)
@@ -64,14 +72,14 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 		return err
 	}
 	ublkd := newUblkdClient(global.ublkdSocket)
-	options := &buildOptions{vcpu: machine.VCPUCount, memoryMB: machine.MemoryMB, diskSizeGiB: gibCeil(machine.DiskSizeMB), snapshotMetadata: metadata, snapshotExtras: map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}}
+	options := &buildOptions{vcpu: machine.VCPUCount, memoryMB: machine.MemoryMB, diskSizeGiB: gibCeil(machine.DiskSizeMB), snapshotMetadata: metadata, snapshotExtras: map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}, snapfilesProgress: func(phase string) error { return writePackResources(activeMarker, work, phase) }}
 	if _, err = os.Stat(filepath.Join(bundle, "vault.json")); err == nil {
 		options.snapshotExtras["vault.json"] = filepath.Join(bundle, "vault.json")
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	// Preserve backing files if this process is killed or resource rollback fails.
-	if err = os.WriteFile(activeMarker, []byte(work), 0600); err != nil {
+	if err = writePackResources(activeMarker, work, packPhasePrepared); err != nil {
 		return err
 	}
 	if err = captureSnapfiles(ctx, ublkd, options, work, filepath.Join(bundle, "vmstate.snap"), filepath.Join(bundle, "memory.snap"), undo); err != nil {

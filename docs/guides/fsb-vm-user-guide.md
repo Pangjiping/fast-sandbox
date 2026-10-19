@@ -489,3 +489,9 @@ sudo curl -fsS \
 - create/delete 状态是本机状态，不是分布式控制面资源。
 
 构建、创建步骤和产物所有权说明见 [fsb-vm 设计](../design/adr-fsb-vm-cli.md)。
+
+OCI Fastlet 使用宿主机 `/dev`，以访问运行期间新增的 ublk 设备。镜像入口同时监督 Fastlet 和 ublkd；任一进程退出都会结束容器。OCI jailer 也会在启动前挂载配置的 snapshot spill 目录。
+
+快照打包中断后，重试或删除 staging 前会先按 config 路径恢复并释放 pack 设备；清理失败时保留 backing files。仓库凭据按实际 rootfs/snapfiles 仓库同步到 OverlayBD：匿名访问会覆盖该仓库的旧凭据，不会删除其他仓库的凭据。此同步不承诺立即撤销已经运行的 VM 的访问。
+
+构建支持 OCI 的 Fastlet 镜像使用 `make images-oci OCI_FASTLET_IMAGE=opensandbox/fsb-fastlet:dev-oci`，然后自行推送并在 Pool 中使用该镜像。此 tag 是本地构建示例，不表示已发布版本。缺少 native 工具时，该目标会调用 `make oci-tools`；首次构建需要 Linux amd64 主机及 `scripts/build-oci-tools.sh` 列出的依赖。已有工具可复用，修改 native 工具源码或补丁后用 `make oci-tools` 强制重建。普通 `make images COMPONENT=fastlet` 保留原镜像路径。无 extent seek 支持时，upper 复制会扫描零块并保留稀疏空间，但扫描耗时可能高于 reflink/extent copy。

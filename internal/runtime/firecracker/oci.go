@@ -133,5 +133,6 @@ func (d *Driver) prepareOCIInstance(id, directory, rootfs, vmstate, memory strin
 			return "", "", "", err
 		}
 	}
+	d.prepareSnapshotSpill(root)
 	return filepath.Join(root, "rootfs.dev"), root, filepath.Join(root, "api.sock"), nil
 }

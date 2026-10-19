@@ -25,13 +25,12 @@ func overlaybdCredentials(config dockerConfig, imageRefs ...string) (dockerConfi
 		if err != nil {
 			return dockerConfig{}, err
 		}
-		credential, found, err := credentialFor(config, ref)
+		credential, _, err := credentialFor(config, ref)
 		if err != nil {
 			return dockerConfig{}, fmt.Errorf("credential for %s: %w", imageRef, err)
 		}
-		if !found || (credential.Username == "" && credential.Password == "" && credential.RefreshToken == "") {
-			continue
-		}
+		// An explicit anonymous entry replaces a previously installed credential
+		// and masks less-specific host entries without touching other repositories.
 		key := canonicalRegistryHost(ref.Registry) + "/" + ref.Repository
 		if credential.RefreshToken != "" {
 			handoff.Auths[key] = authEntry{IdentityToken: credential.RefreshToken}

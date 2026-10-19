@@ -122,7 +122,7 @@ func (d *Driver) releaseAgentSandbox(ctx context.Context, sandboxID, image strin
 		d.forgetLease(sandboxID)
 	}
 	if image != "" {
-		if err := client.UnpinImage(ctx, "unpin-"+sandboxID, image); err != nil && !errorsIsAgentUnreachable(err) {
+		if err := client.UnpinImage(ctx, "unpin-"+sandboxID+"-"+imageKey(image), image); err != nil && !errorsIsAgentUnreachable(err) {
 			klog.V(2).InfoS("firecracker runtime-agent UnpinImage failed", "sandboxID", sandboxID, "err", err)
 		}
 	}

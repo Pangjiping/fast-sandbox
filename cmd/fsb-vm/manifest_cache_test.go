@@ -317,3 +317,26 @@ func TestResolveImageIndexDigestDoesNotCacheChildUnderParent(t *testing.T) {
 		t.Fatalf("selected child was cached under its parent index digest: %v", err)
 	}
 }
+
+func TestResolveImageRevokedCredentialCannotUsePrivateManifestCache(t *testing.T) {
+	setupManifestCache(t)
+	raw := cacheTestManifest(t, "private-rootfs")
+	r := newManifestCacheRegistry(t, raw)
+	reference := r.reference(digest.FromBytes(raw).String())
+	host := strings.TrimPrefix(r.server.URL, "http://")
+	private := dockerConfig{Auths: map[string]authEntry{host: {Username: "reader", Password: "secret"}}}
+	_, err := resolveImage(context.Background(), reference, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := r.requestCount()
+	r.mu.Lock()
+	r.deny = true
+	r.mu.Unlock()
+	if _, err := resolveImage(context.Background(), reference, dockerConfig{}); err == nil {
+		t.Fatal("revoked access reused the private manifest cache")
+	}
+	if r.requestCount() <= before {
+		t.Fatal("revoked access did not revalidate anonymous access with the registry")
+	}
+}

@@ -84,6 +84,8 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 				Deployment: DeploymentRequirements{
 					Privileged: true, RequiresKVM: true, Overhead: overhead("250m", "256Mi"),
 					HostPaths: append([]HostPathRequirement{
+						// Share devtmpfs so ublk devices created after Pod startup are visible.
+						{Name: "host-dev", HostPath: "/dev", MountPath: "/dev", Type: corev1.HostPathDirectory},
 						{Name: "dev-kvm", HostPath: kvmDevicePath, MountPath: kvmDevicePath, Type: corev1.HostPathCharDev},
 						{Name: "dev-net-tun", HostPath: "/dev/net/tun", MountPath: "/dev/net/tun", Type: corev1.HostPathCharDev},
 						{Name: "firecracker-bin", HostPath: firecrackerBinaryPath, MountPath: firecrackerBinaryPath, Type: corev1.HostPathFile, ReadOnly: true},

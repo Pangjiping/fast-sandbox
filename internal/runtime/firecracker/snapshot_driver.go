@@ -123,7 +123,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 	plan.staging = filepath.Join(plan.stateRoot, snapshotStagingDir, plan.snapshotID)
-	if err := os.RemoveAll(plan.staging); err != nil {
+	if err := d.cleanupSnapshotStaging(ctx, plan.staging); err != nil {
 		return nil, fmt.Errorf("clear stale snapshot staging %s: %w", plan.staging, err)
 	}
 
@@ -319,7 +319,7 @@ func publishKind(kind fastletapi.SnapshotKind) string {
 
 // DeleteSnapshot discards the staging directory of a snapshot. It never
 // unpublishes stored objects. A missing directory is a successful no-op.
-func (d *Driver) DeleteSnapshot(_ context.Context, snapshotID string) error {
+func (d *Driver) DeleteSnapshot(ctx context.Context, snapshotID string) error {
 	if err := validateSandboxID(snapshotID); err != nil {
 		return fmt.Errorf("%w: invalid snapshot id %q", ErrInvalidConfig, snapshotID)
 	}
@@ -327,7 +327,7 @@ func (d *Driver) DeleteSnapshot(_ context.Context, snapshotID string) error {
 	stateRoot := d.config.StateRoot
 	d.mu.RUnlock()
 	staging := filepath.Join(stateRoot, snapshotStagingDir, snapshotID)
-	if err := os.RemoveAll(staging); err != nil {
+	if err := d.cleanupSnapshotStaging(ctx, staging); err != nil {
 		return fmt.Errorf("remove snapshot staging %s: %w", staging, err)
 	}
 	return nil

@@ -150,16 +150,7 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 	}()
 	persist := func() error { return writeState(layout.home, state) }
 
-	// Step 2: resolve both manifests into ordered lower-layer lists.
-	rootfsImage, err := resolveImage(ctx, state.RootfsRef, dockerAuth)
-	if err != nil {
-		return err
-	}
-	snapfilesImage, err := resolveImage(ctx, state.SnapfilesRef, dockerAuth)
-	if err != nil {
-		return err
-	}
-
+	// Synchronize credentials before resolving manifests, including failed creates.
 	// Step 3: hand the credential to overlaybd's global cred.json before any
 	// device add, or overlaybd's on-demand pulls fail with 401.
 	handoff, err := overlaybdCredentials(dockerAuth, state.RootfsRef, state.SnapfilesRef)
@@ -167,6 +158,16 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 		return err
 	}
 	if err := mergeCredentials(global.credFile, handoff); err != nil {
+		return err
+	}
+
+	// Step 2: resolve both manifests into ordered lower-layer lists.
+	rootfsImage, err := resolveImage(ctx, state.RootfsRef, dockerAuth)
+	if err != nil {
+		return err
+	}
+	snapfilesImage, err := resolveImage(ctx, state.SnapfilesRef, dockerAuth)
+	if err != nil {
 		return err
 	}
 
