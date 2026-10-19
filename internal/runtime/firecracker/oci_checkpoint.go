@@ -29,6 +29,18 @@ func checkpointDestination(repository, id string) (string, error) {
 	}
 	return ref.Registry + "/" + ref.Repository + ":" + id, nil
 }
+
+func checkpointDestinationForSource(source, id string) (string, error) {
+	repository := strings.TrimSpace(os.Getenv(ociSnapshotRepositoryEnv))
+	if repository == "" {
+		ref, err := registry.ParseReference(strings.TrimPrefix(source, ocitemplate.Prefix))
+		if err != nil {
+			return "", err
+		}
+		repository = ref.Registry + "/" + ref.Repository
+	}
+	return checkpointDestination(repository, id)
+}
 func checkpointCredential(reference string) (registryconfig.Credential, error) {
 	path := os.Getenv("FAST_SANDBOX_REGISTRY_CONFIG_PATH")
 	if path == "" {
@@ -44,6 +56,37 @@ func checkpointCredential(reference string) (registryconfig.Credential, error) {
 	return credential, nil
 }
 
+// A repository may have separate read and write accounts. Only the destination
+// receives its write credential; inherited parent blobs use their own read rule.
+func checkpointCredentials(destination string) (ocitemplate.CredentialFunc, error) {
+	credential, err := checkpointCredential(destination)
+	if err != nil {
+		return nil, err
+	}
+	target, err := registry.ParseReference(destination)
+	if err != nil {
+		return nil, err
+	}
+	return func(_ context.Context, reference string) (auth.Credential, error) {
+		ref, err := registry.ParseReference(reference)
+		if err != nil {
+			return auth.EmptyCredential, err
+		}
+		value := credential
+		if ref.Registry != target.Registry || ref.Repository != target.Repository {
+			path := os.Getenv("FAST_SANDBOX_REGISTRY_CONFIG_PATH")
+			if path == "" {
+				path = registryconfig.MountPath
+			}
+			value, _, err = registryconfig.NewFileProvider(path).Credentials(reference)
+		} else if value.WriteUsername != "" {
+			value.Username, value.Password = value.WriteUsername, value.WritePassword
+			value.IdentityToken = ""
+		}
+		return auth.Credential{Username: value.Username, Password: value.Password, RefreshToken: value.IdentityToken}, err
+	}, nil
+}
+
 // publishOCICheckpoint runs inside the existing asynchronous snapshot worker.
 // Success means the immutable metadata commit point is visible in ACR.
 func (d *Driver) publishOCICheckpoint(ctx context.Context, plan dumpPlan, sizeBytes int64, onPublishing func()) (*runtimecontract.SnapshotResult, error) {
@@ -54,11 +97,19 @@ func (d *Driver) publishOCICheckpoint(ctx context.Context, plan dumpPlan, sizeBy
 		}
 		_ = os.RemoveAll(plan.staging)
 	}()
-	destination, err := checkpointDestination(os.Getenv(ociSnapshotRepositoryEnv), plan.snapshotID)
+	state, err := loadState(plan.sandboxDir)
 	if err != nil {
 		return nil, err
 	}
-	credential, err := checkpointCredential(destination)
+	sourceRef, err := restoreReference(state.Config.Spec)
+	if err != nil {
+		return nil, err
+	}
+	destination, err := checkpointDestinationForSource(sourceRef, plan.snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	credentials, err := checkpointCredentials(destination)
 	if err != nil {
 		return nil, err
 	}
@@ -81,10 +132,6 @@ func (d *Driver) publishOCICheckpoint(ctx context.Context, plan dumpPlan, sizeBy
 	}
 	delete(document, "oci")
 	document["format"] = "overlaybd"
-	state, err := loadState(plan.sandboxDir)
-	if err != nil {
-		return nil, err
-	}
 	document["checkpoint"] = map[string]string{"sandboxUID": state.Config.Identity.SandboxUID, "namespace": state.Config.Identity.Namespace}
 	raw, err = json.Marshal(document)
 	if err != nil {
@@ -93,16 +140,7 @@ func (d *Driver) publishOCICheckpoint(ctx context.Context, plan dumpPlan, sizeBy
 	if onPublishing != nil {
 		onPublishing()
 	}
-	user, password := credential.Username, credential.Password
-	if credential.WriteUsername != "" {
-		user, password = credential.WriteUsername, credential.WritePassword
-	}
-	ref, _, err := ocitemplate.Push(ctx, filepath.Join(plan.staging, "artifacts", "snapshot_"+plan.snapshotID), destination, raw, func(_ context.Context, host string) (auth.Credential, error) {
-		if host != credential.Host {
-			return auth.EmptyCredential, nil
-		}
-		return auth.Credential{Username: user, Password: password, RefreshToken: credential.IdentityToken}, nil
-	})
+	ref, _, err := ocitemplate.Push(ctx, filepath.Join(plan.staging, "artifacts", "snapshot_"+plan.snapshotID), destination, raw, credentials)
 	if err != nil {
 		return nil, fmt.Errorf("publish OCI checkpoint: %w", err)
 	}
@@ -159,6 +197,6 @@ func prepareOCICheckpoint(plan dumpPlan, kind fastletapi.SnapshotKind) (bool, er
 	if kind != fastletapi.SnapshotKindCheckpoint {
 		return false, fmt.Errorf("%w: OCI live template publication is not a pause checkpoint", runtimecontract.ErrSnapshotUnsupported)
 	}
-	_, err = checkpointDestination(os.Getenv(ociSnapshotRepositoryEnv), plan.snapshotID)
+	_, err = checkpointDestinationForSource(source, plan.snapshotID)
 	return true, err
 }

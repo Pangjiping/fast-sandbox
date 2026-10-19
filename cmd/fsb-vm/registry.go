@@ -30,9 +30,10 @@ type dockerConfig struct {
 }
 
 type authEntry struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	Auth     string `json:"auth,omitempty"`
+	Username      string `json:"username,omitempty"`
+	Password      string `json:"password,omitempty"`
+	Auth          string `json:"auth,omitempty"`
+	IdentityToken string `json:"identitytoken,omitempty"`
 }
 
 // parseDockerConfig decodes the dockerAuth string. An empty string yields an

@@ -18,4 +18,5 @@ COPY build/oci/entrypoint.sh /usr/local/bin/oci-entrypoint
 RUN chmod 0755 /usr/local/bin/oci-entrypoint
 ENV LD_LIBRARY_PATH=/opt/overlaybd/lib
 ENV PATH=/opt/overlaybd/bin:${PATH}
+ENV FAST_SANDBOX_OCI_ENABLED=true
 ENTRYPOINT ["/usr/local/bin/oci-entrypoint", "/usr/local/bin/runtime-component"]

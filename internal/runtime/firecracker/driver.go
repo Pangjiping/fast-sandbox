@@ -617,7 +617,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		infraCtx, infraSpan := observability.Start(ctx, "fastlet.firecracker.infra")
 		instance, prepareErr := d.prepareInfra(infraCtx, config)
 		if prepareErr == nil {
-			prepareErr = deliverGuestInfra(infraCtx, d.runner, instanceRootfs, instance)
+			prepareErr = deliverGuestInfra(infraCtx, d.runner, instanceRootfs, instance, pair != nil)
 		}
 		observability.End(infraSpan, prepareErr)
 		if prepareErr != nil {

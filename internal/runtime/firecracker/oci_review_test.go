@@ -1,0 +1,141 @@
+package firecracker
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"oras.land/oras-go/v2/registry/remote/auth"
+
+	fastletinfra "fast-sandbox/internal/fastlet/infra"
+	"fast-sandbox/internal/registryconfig"
+)
+
+func installOCIRegistryConfig(t *testing.T, credentials ...registryconfig.Credential) {
+	t.Helper()
+	compiled, err := registryconfig.NewCompiled(credentials)
+	require.NoError(t, err)
+	raw, err := json.Marshal(compiled)
+	require.NoError(t, err)
+	file := filepath.Join(t.TempDir(), "registries.json")
+	require.NoError(t, os.WriteFile(file, raw, 0600))
+	t.Setenv("FAST_SANDBOX_REGISTRY_CONFIG_PATH", file)
+}
+
+func TestCheckpointCredentialsSeparateParentReadAndDestinationWrite(t *testing.T) {
+	installOCIRegistryConfig(t,
+		registryconfig.Credential{Host: "r.example", RepositoryPrefix: "templates", Username: "parent-reader", Password: "read-secret"},
+		registryconfig.Credential{Host: "other.example", RepositoryPrefix: "templates", IdentityToken: "parent-token"},
+		registryconfig.Credential{Host: "r.example", RepositoryPrefix: "checkpoints", IdentityToken: "checkpoint-read-token", WriteUsername: "writer", WritePassword: "write-secret"},
+	)
+	credentials, err := checkpointCredentials("r.example/checkpoints/sandbox:pause")
+	require.NoError(t, err)
+	for _, test := range []struct {
+		reference string
+		want      auth.Credential
+	}{
+		{"r.example/checkpoints/sandbox:pause_rootfs", auth.Credential{Username: "writer", Password: "write-secret"}},
+		{"r.example/templates/base:rootfs", auth.Credential{Username: "parent-reader", Password: "read-secret"}},
+		{"other.example/templates/base:rootfs", auth.Credential{RefreshToken: "parent-token"}},
+		{"public.example/base:rootfs", auth.EmptyCredential},
+	} {
+		got, err := credentials(context.Background(), test.reference)
+		require.NoError(t, err)
+		require.Equal(t, test.want, got, test.reference)
+	}
+	_, err = checkpointCredentials("missing.example/checkpoints/sandbox:pause")
+	require.ErrorContains(t, err, "no registry credential")
+}
+
+func TestAttachOCIPreservesTokenAndCleansPartialResources(t *testing.T) {
+	for _, mode := range []string{"success", "create-failed", "missing-state", "corrupt-state", "empty-device", "cleanup-failed", "existing-home"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			d := &Driver{config: firecrackerConfigForTest(t, root)}
+			image := "oci://r.example/templates/base:build"
+			manifest := cachedManifestPath(root, image)
+			require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0750))
+			require.NoError(t, os.WriteFile(manifest, []byte(`{"oci":{"rootfs":"r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapfiles":"r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), 0600))
+			installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", RepositoryPrefix: "templates", IdentityToken: "refresh-secret"})
+			t.Setenv("TEST_OCI_MODE", mode)
+			t.Setenv("TEST_OCI_ROOT", root)
+			bin := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(bin, "fsb-vm"), []byte(`#!/bin/sh
+set -eu
+while [ "$1" != create ] && [ "$1" != delete ]; do shift; done
+home="$TEST_OCI_ROOT/oci/sandboxes/sandbox-1"
+if [ "$1" = delete ]; then
+  touch "$TEST_OCI_ROOT/deleted"
+  if [ "$TEST_OCI_MODE" = cleanup-failed ]; then echo cleanup-failed >&2; exit 1; fi
+  rm -rf "$home"
+  exit 0
+fi
+cp "$TEST_OCI_ROOT/oci/inputs/sandbox-1.json" "$TEST_OCI_ROOT/captured.json"
+mkdir -p "$home"
+case "$TEST_OCI_MODE" in
+  create-failed) exit 1;;
+  missing-state) exit 0;;
+  corrupt-state|cleanup-failed) echo '{broken' > "$home/state.json";;
+  empty-device) echo '{}' > "$home/state.json";;
+  *) echo '{"rootfs_device":{"dev_path":"/dev/ublkb42"}}' > "$home/state.json";;
+esac
+`), 0755))
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			home := filepath.Join(root, "oci/sandboxes/sandbox-1")
+			if mode == "existing-home" {
+				require.NoError(t, os.MkdirAll(home, 0750))
+			}
+			device, _, _, err := d.attachOCI(context.Background(), "sandbox-1", image)
+			if mode == "success" {
+				require.NoError(t, err)
+				require.Equal(t, "/dev/ublkb42", device)
+				require.DirExists(t, home)
+				require.NoFileExists(t, filepath.Join(root, "deleted"))
+			} else {
+				require.Error(t, err)
+				if mode == "existing-home" {
+					require.DirExists(t, home)
+					require.NoFileExists(t, filepath.Join(root, "deleted"))
+					return
+				}
+				require.FileExists(t, filepath.Join(root, "deleted"))
+				if mode == "cleanup-failed" {
+					require.ErrorContains(t, err, "cleanup-failed")
+					require.DirExists(t, home)
+				} else {
+					require.NoDirExists(t, home)
+				}
+			}
+			raw, err := os.ReadFile(filepath.Join(root, "captured.json"))
+			require.NoError(t, err)
+			var input struct {
+				Template struct {
+					Auth struct {
+						DockerAuth string `json:"dockerAuth"`
+					} `json:"auth"`
+				} `json:"template"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &input))
+			var docker struct {
+				Auths map[string]struct {
+					Token string `json:"identitytoken"`
+				} `json:"auths"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(input.Template.Auth.DockerAuth), &docker))
+			require.Equal(t, "refresh-secret", docker.Auths["r.example/templates"].Token)
+			require.NoFileExists(t, filepath.Join(root, "oci/inputs/sandbox-1.json"))
+		})
+	}
+}
+
+func TestDeliverGuestInfraMountsOCIDeviceDirectly(t *testing.T) {
+	runner := &infraRunner{}
+	require.NoError(t, deliverGuestInfra(context.Background(), runner, "/dev/ublkb42", fastletinfra.PreparedInstance{Mounts: infraMounts(t)}, true))
+	require.Contains(t, runner.commands[0], "mount /dev/ublkb42 ")
+	for _, command := range runner.commands {
+		require.NotContains(t, command, "loop")
+	}
+}

@@ -39,14 +39,7 @@ func (c *Client) readOCI(ctx context.Context, image string) ([]byte, error) {
 			return auth.Credential{Username: v.Username, Password: v.Password, RefreshToken: v.IdentityToken}, nil
 		}
 	}
-	// Auth callbacks receive a host; repository matching is performed once here
-	// to preserve prefix-scoped registry rules.
-	callback := credentials
-	value, err := callback(ctx, image[len(ocitemplate.Prefix):])
-	if err != nil {
-		return nil, err
-	}
-	return ocitemplate.Resolve(ctx, image, func(context.Context, string) (auth.Credential, error) { return value, nil })
+	return ocitemplate.Resolve(ctx, image, credentials)
 }
 
 var ociPullLocks [256]sync.Mutex

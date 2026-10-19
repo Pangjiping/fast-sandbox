@@ -154,6 +154,12 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 ## 4. 构建模板
 
+`SandboxTemplate` 的标准 Builder 镜像包含 OCI 所需的 `fsb-vm`、convertor 和 OverlayBD 工具。Builder 仅在输出为 `oci://` 时启动 ublkd，并通过本机只读 registry 复用已暂存的 OCI layout；`SANDBOX_TEMPLATE_IMAGE_TAR` 也使用这一条路径，不会再次从源仓库拉取。发布目标仍需要网络访问。
+
+`build/Dockerfile.oci` 生成的 Fastlet 镜像默认启动 ublkd；显式设置 `FAST_SANDBOX_OCI_ENABLED=false` 可关闭它。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。镜像内的 OverlayBD registry v2 支持 Docker `identitytoken` 的 OAuth refresh-token 认证，包括后续按需读块时重新获取访问 token。外部 OverlayBD 安装需包含 `build/oci/overlaybd-identitytoken.patch`。
+
+Checkpoint 默认写回源模板仓库；可用 `FAST_SANDBOX_OCI_SNAPSHOT_REPOSITORY=registry/repository` 指定其他目标。目标凭证需具备 push 权限，独立写账号通过 registry rule 的 `writeSecretRef` 配置。Checkpoint 发布按完整仓库路径分别选择父层读凭证和目标写凭证；跨仓库时需在 Pool 中配置两者。OCI GuestCopy 直接挂载 ublk 块设备，普通 rootfs 镜像文件仍使用 loop 挂载。
+
 最小命令：
 
 ```bash
@@ -327,7 +333,7 @@ registry.example.com/team/application:v1_snapfiles
 
 发布工具必须先上传这两个 manifest 引用的全部 `blobs/sha256/*`，再按对应 tag 上传 rootfs 和 snapfiles manifest。`manifest/index.json` 记录了 manifest 文件名和 digest，可供发布脚本读取。
 
-当前 CLI 尚未提供 `push` 子命令。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。生产环境应使用能够保留 OCI manifest 和 OverlayBD layer media type 的发布流程。
+`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，先上传 blob 和模板对，再提交带不可变模板对引用的元数据 manifest，返回 `manifestRef` 与 `artifactDigest`。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
 
 ## 6. 准备 template.json
 

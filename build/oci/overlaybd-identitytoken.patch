@@ -1,0 +1,61 @@
+--- a/src/image_service.cpp
++++ b/src/image_service.cpp
+@@ -107,7 +107,14 @@
+         if (!match)
+             continue;
+ 
+-        if (iter.value.HasMember("auth")) {
++        if (iter.value.HasMember("identitytoken") &&
++            iter.value["identitytoken"].IsString() &&
++            iter.value["identitytoken"].GetStringLength() != 0) {
++            // Empty username distinguishes OAuth refresh from Basic auth.
++            username.clear();
++            password = iter.value["identitytoken"].GetString();
++            return 0;
++        } else if (iter.value.HasMember("auth")) {
+             std::string token;
+             if (!photon::net::Base64Decode(iter.value["auth"].GetString(), token)) {
+                 LOG_ERROR("invalid base64 auth for: `", addr);
+--- a/src/overlaybd/registryfs/registryfs_v2.cpp
++++ b/src/overlaybd/registryfs/registryfs_v2.cpp
+@@ -407,7 +407,39 @@
+         Timeout tmo(timeout);
+         estring userpwd_b64;
+         photon::net::Base64Encode(estring().appends(username, ":", password), userpwd_b64);
+-        HTTP_OP op(m_client, Verb::GET, authurl);
++        // Docker identitytoken is an OAuth refresh token, never a Basic password.
++        bool refresh = username.empty() && !password.empty();
++        estring endpoint = authurl;
++        estring form;
++        if (refresh) {
++            auto query = authurl.find('?');
++            if (query != std::string::npos) {
++                endpoint = authurl.substr(0, query);
++                form = authurl.substr(query + 1);
++                form += "&";
++            }
++            form += "grant_type=refresh_token&client_id=fast-sandbox&refresh_token=";
++            static const char hex[] = "0123456789ABCDEF";
++            for (unsigned char c : password) {
++                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
++                    form += c;
++                } else {
++                    form += '%';
++                    form += hex[c >> 4];
++                    form += hex[c & 15];
++                }
++            }
++        }
++        HTTP_OP op(m_client, refresh ? Verb::POST : Verb::GET, endpoint);
++        auto writer = [&](Request *req) -> ssize_t {
++            return req->write(form.data(), form.size());
++        };
++        if (refresh) {
++            op.req.headers.insert("Content-Type", "application/x-www-form-urlencoded");
++            op.req.headers.content_length(form.size());
++            op.body_writer = writer;
++        }
+         op.follow = 0;
+         op.retry = 0;
+         if (!username.empty()) {

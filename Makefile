@@ -29,7 +29,7 @@ LINUX_BIN_DIR := $(CURDIR)/.build/linux-amd64
 ALL_BINARIES := controller fastlet sandbox-init sandbox-action-fixture fastlet-proxy sandbox-proxy janitor fastctl firecracker-runtime fsb-vm
 CORE_IMAGES := controller fastlet fastlet-proxy sandbox-proxy janitor
 ALL_IMAGES := $(CORE_IMAGES) sandbox-action-fixture firecracker-runtime
-UNIT_PACKAGES := ./api/... ./cmd/... ./internal/... ./pkg/... ./test/e2e/env/... ./test/e2e/support/... ./test/performance/...
+UNIT_PACKAGES := ./api/... ./cmd/... ./internal/... ./pkg/... ./build/oci ./test/e2e/env/... ./test/e2e/support/... ./test/performance/...
 
 ifeq ($(DEBUG),1)
 GO_BUILD_FLAGS := -gcflags="all=-N -l"

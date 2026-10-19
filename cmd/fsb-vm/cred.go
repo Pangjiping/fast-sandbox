@@ -29,10 +29,14 @@ func overlaybdCredentials(config dockerConfig, imageRefs ...string) (dockerConfi
 		if err != nil {
 			return dockerConfig{}, fmt.Errorf("credential for %s: %w", imageRef, err)
 		}
-		if !found || (credential.Username == "" && credential.Password == "") {
+		if !found || (credential.Username == "" && credential.Password == "" && credential.RefreshToken == "") {
 			continue
 		}
 		key := canonicalRegistryHost(ref.Registry) + "/" + ref.Repository
+		if credential.RefreshToken != "" {
+			handoff.Auths[key] = authEntry{IdentityToken: credential.RefreshToken}
+			continue
+		}
 		handoff.Auths[key] = authEntry{
 			Auth: base64.StdEncoding.EncodeToString([]byte(credential.Username + ":" + credential.Password)),
 		}

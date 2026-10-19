@@ -23,23 +23,20 @@ func newPushCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		ref, err := parseRegistryReference(destination)
-		if err != nil {
+		if _, err = parseRegistryReference(destination); err != nil {
 			return err
 		}
 		payload, err := os.ReadFile(metadata)
 		if err != nil {
 			return err
 		}
-		credential, _, err := credentialFor(cfg, ref)
-		if err != nil {
-			return err
-		}
-		manifestRef, digest, err := ocitemplate.Push(cmd.Context(), dir, destination, payload, func(_ context.Context, host string) (auth.Credential, error) {
-			if host != ref.Registry {
-				return auth.EmptyCredential, nil
+		manifestRef, digest, err := ocitemplate.Push(cmd.Context(), dir, destination, payload, func(_ context.Context, reference string) (auth.Credential, error) {
+			ref, err := parseRegistryReference(reference)
+			if err != nil {
+				return auth.EmptyCredential, err
 			}
-			return credential, nil
+			credential, _, err := credentialFor(cfg, ref)
+			return credential, err
 		})
 		if err != nil {
 			return err

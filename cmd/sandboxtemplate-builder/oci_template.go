@@ -48,6 +48,11 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	if err != nil {
 		return err
 	}
+	source, closeSource, err := serveOCILayout(workdir)
+	if err != nil {
+		return err
+	}
+	defer closeSource()
 	inject := filepath.Join(workdir, "inject")
 	if err = os.MkdirAll(filepath.Join(inject, "etc"), 0755); err != nil {
 		return err
@@ -70,15 +75,12 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	}
 	size := artifacts.SizeGiB(sizeQuantity.Value())
 
-	tap := "fsbtpl0"
-	if out, e := exec.CommandContext(ctx, "ip", "tuntap", "add", "dev", tap, "mode", "tap").CombinedOutput(); e != nil {
-		return fmt.Errorf("create build tap: %w: %s", e, out)
+	tap := buildTap
+	if err = ensureBuildTap(); err != nil {
+		return err
 	}
-	defer func() { _ = exec.Command("ip", "link", "del", tap).Run() }()
-	if out, e := exec.CommandContext(ctx, "ip", "link", "set", tap, "up").CombinedOutput(); e != nil {
-		return fmt.Errorf("enable build tap: %w: %s", e, out)
-	}
-	args := []string{"--firecracker", firecrackerBin, "--overlaybd-convertor", "/usr/local/bin/convertor", "--build-work-dir", filepath.Join(workdir, "builds"), "--build-output-dir", filepath.Join(workdir, "artifacts"), "build", "--source", spec.Image, "--output", "template:build", "--kernel", kernel, "--kernel-version", filepath.Base(kernel), "--vcpu", strconv.FormatInt(vcpu.Value(), 10), "--memory-mb", strconv.FormatInt((memory.Value()+(1<<20)-1)/(1<<20), 10), "--disk-size-gb", strconv.Itoa(size), "--inject-dir", inject, "--init-path", guestInitPath(spec), "--init-script-file", filepath.Join(inject, strings.TrimPrefix(guestInitPath(spec), "/")), "--boot-args", bakedNetworkBootArgs("console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 random.trust_cpu=on root=/dev/vda rw init=" + guestInitPath(spec)), "--tap-name", tap, "--guest-mac", bakedGuestMAC, "--ready-pattern", "SANDBOX_READY", "--ready-timeout", "3m", "--auth-file", authFile}
+	defer deleteBuildTap()
+	args := []string{"--plain-http", "--firecracker", firecrackerBin, "--overlaybd-convertor", "/usr/local/bin/convertor", "--build-work-dir", filepath.Join(workdir, "builds"), "--build-output-dir", filepath.Join(workdir, "artifacts"), "build", "--source", source, "--output", "template:build", "--kernel", kernel, "--kernel-version", strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), "--vcpu", strconv.FormatInt(vcpu.Value(), 10), "--memory-mb", strconv.FormatInt((memory.Value()+(1<<20)-1)/(1<<20), 10), "--disk-size-gb", strconv.Itoa(size), "--inject-dir", inject, "--init-path", guestInitPath(spec), "--init-script-file", filepath.Join(inject, strings.TrimPrefix(guestInitPath(spec), "/")), "--boot-args", bakedNetworkBootArgs("console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 random.trust_cpu=on root=/dev/vda rw init=" + guestInitPath(spec)), "--tap-name", tap, "--guest-mac", bakedGuestMAC, "--ready-pattern", "SANDBOX_READY", "--ready-timeout", readinessTimeout(spec).String(), "--auth-file", authFile}
 	cmd := exec.CommandContext(ctx, "fsb-vm", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

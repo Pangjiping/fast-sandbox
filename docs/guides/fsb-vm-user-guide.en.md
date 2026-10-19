@@ -154,6 +154,12 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 ## 4. Build a template
 
+The standard `SandboxTemplate` builder image includes `fsb-vm`, the convertor and OverlayBD tools. It starts ublkd only for `oci://` output and reuses its staged OCI layout through a local read-only registry, including `SANDBOX_TEMPLATE_IMAGE_TAR` input. The source is not downloaded again; publishing still requires access to the destination registry.
+
+Fastlet images built with `build/Dockerfile.oci` start ublkd by default; set `FAST_SANDBOX_OCI_ENABLED=false` to disable it. The standard builder uses `auto` mode so non-OCI builds do not require ublk. The bundled OverlayBD registry v2 supports OAuth refresh-token authentication from Docker `identitytoken`, including renewed tokens for subsequent block reads. External OverlayBD installations need `build/oci/overlaybd-identitytoken.patch`.
+
+Checkpoints default to the source template repository; `FAST_SANDBOX_OCI_SNAPSHOT_REPOSITORY=registry/repository` overrides the destination. The selected destination credential must allow push (use the registry rule's `writeSecretRef` for a separate write account). Checkpoint publication selects parent-read and destination-write credentials by full repository reference; configure both in the Pool when they differ. OCI GuestCopy mounts ublk devices directly; regular rootfs image files continue to use loop mounts.
+
 Minimal invocation:
 
 ```bash
@@ -330,7 +336,7 @@ registry.example.com/team/application:v1_snapfiles
 
 The publishing process must upload every `blobs/sha256/*` object referenced by the two manifests before uploading the rootfs and snapfiles manifests under their tags. `manifest/index.json` records their filenames and digests for a publishing script.
 
-The CLI does not currently have a `push` subcommand. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for artifact layout and upload ordering. A production publishing process must preserve the OCI manifest and OverlayBD layer media types.
+`fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It uploads blobs and the template pair before committing the metadata manifest with immutable pair references, then returns `manifestRef` and `artifactDigest`. The OCI `SandboxTemplate` builder runs this step automatically. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
 
 ## 6. Prepare template.json
 

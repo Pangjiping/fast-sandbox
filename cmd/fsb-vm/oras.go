@@ -73,6 +73,9 @@ func parseRegistryReference(ref string) (registry.Reference, error) {
 // credential decodes the docker config entry into an ORAS credential,
 // preferring the explicit username/password pair over the base64 auth token.
 func (e authEntry) credential() (auth.Credential, error) {
+	if e.IdentityToken != "" {
+		return auth.Credential{RefreshToken: e.IdentityToken}, nil
+	}
 	if e.Username != "" || e.Password != "" {
 		return auth.Credential{Username: e.Username, Password: e.Password}, nil
 	}

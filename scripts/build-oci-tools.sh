@@ -10,6 +10,7 @@ mkdir -p "$out/bin" "$out/lib" "$repo_root/.build/linux-amd64"
 git -C "$work" clone https://github.com/containerd/overlaybd.git
 cd "$work/overlaybd"
 git checkout --detach 5119193d540010e09c0af98add1ef2b0f4a51bc0
+git apply "$repo_root/build/oci/overlaybd-identitytoken.patch"
 # The checkpoint packer imports captured raw block roots before compression.
 install -m 0644 "$repo_root/build/sandboxtemplate-builder/overlaybd-import-raw.cpp" src/tools/overlaybd-import-raw.cpp
 sed -i '/add_executable(overlaybd-create/i add_executable(overlaybd-import-raw overlaybd-import-raw.cpp)\ntarget_include_directories(overlaybd-import-raw PUBLIC ${PHOTON_INCLUDE_DIR})\ntarget_link_libraries(overlaybd-import-raw photon_static overlaybd_lib)\n' src/tools/CMakeLists.txt

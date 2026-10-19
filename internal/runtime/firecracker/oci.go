@@ -31,7 +31,7 @@ func ociPair(stateRoot, image string) (*ocitemplate.Pair, error) {
 func (d *Driver) fsbArgs() []string {
 	return []string{"--state-dir", filepath.Join(d.config.StateRoot, "oci/sandboxes"), "--runtime-dir", filepath.Join(d.config.StateRoot, "oci/runtime"), "--firecracker", d.config.BinaryPath}
 }
-func (d *Driver) attachOCI(ctx context.Context, id, image string) (string, string, string, error) {
+func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmstate, memory string, resultErr error) {
 	pair, err := ociPair(d.config.StateRoot, image)
 	if err != nil {
 		return "", "", "", err
@@ -44,7 +44,11 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (string, strin
 	if err != nil {
 		return "", "", "", err
 	}
-	auth, err := json.Marshal(map[string]any{"auths": map[string]any{credential.Host: map[string]string{"username": credential.Username, "password": credential.Password}}})
+	key := credential.Host
+	if credential.RepositoryPrefix != "" {
+		key += "/" + strings.Trim(credential.RepositoryPrefix, "/")
+	}
+	auth, err := json.Marshal(map[string]any{"auths": map[string]any{key: map[string]string{"username": credential.Username, "password": credential.Password, "identitytoken": credential.IdentityToken}}})
 	if err != nil {
 		return "", "", "", err
 	}
@@ -62,12 +66,22 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (string, strin
 		return "", "", "", err
 	}
 	defer os.Remove(file)
+	home := filepath.Join(d.config.StateRoot, "oci/sandboxes", id)
+	if _, err = os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		return "", "", "", fmt.Errorf("OCI sandbox home already exists or is inaccessible: %s", home)
+	}
+	// fsb-vm rolls back normal failures. Retry teardown if it retained resources,
+	// or if attachment succeeded but reading the resulting state fails.
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, d.releaseOCI(context.Background(), id))
+		}
+	}()
 	args := append(d.fsbArgs(), "create", "--prepare-only", "-f", file)
 	output, err := exec.CommandContext(ctx, "fsb-vm", args...).CombinedOutput()
 	if err != nil {
 		return "", "", "", fmt.Errorf("attach OCI template: %w: %s", err, output)
 	}
-	home := filepath.Join(d.config.StateRoot, "oci/sandboxes", id)
 	var state struct {
 		Rootfs struct {
 			Path string `json:"dev_path"`
@@ -79,6 +93,9 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (string, strin
 	}
 	if err = json.Unmarshal(raw, &state); err != nil {
 		return "", "", "", err
+	}
+	if state.Rootfs.Path == "" {
+		return "", "", "", fmt.Errorf("OCI attachment state has no rootfs device")
 	}
 	return state.Rootfs.Path, filepath.Join(home, "mnt/vmstate.bin"), filepath.Join(home, "mnt/memfile"), nil
 }

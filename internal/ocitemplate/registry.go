@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/errcode"
 	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
@@ -30,6 +33,7 @@ type Pair struct {
 	Snapfiles string `json:"snapfiles"`
 }
 
+// CredentialFunc resolves a full registry/repository reference, not just a host.
 type CredentialFunc func(context.Context, string) (auth.Credential, error)
 
 func Repository(reference string, credentials CredentialFunc) (*remote.Repository, registry.Reference, error) {
@@ -44,7 +48,16 @@ func Repository(reference string, credentials CredentialFunc) (*remote.Repositor
 	if err != nil {
 		return nil, ref, err
 	}
-	repo.Client = &auth.Client{Client: retry.DefaultClient, Cache: auth.NewCache(), Credential: auth.CredentialFunc(credentials)}
+	client := &auth.Client{Client: retry.DefaultClient, Cache: auth.NewCache()}
+	if credentials != nil {
+		client.Credential = func(ctx context.Context, host string) (auth.Credential, error) {
+			if host != ref.Registry {
+				return auth.EmptyCredential, nil
+			}
+			return credentials(ctx, ref.String())
+		}
+	}
+	repo.Client = client
 	return repo, ref, nil
 }
 
@@ -244,7 +257,17 @@ func inheritBlob(ctx context.Context, destination *remote.Repository, desc oci.D
 	}
 	getContent := func() (io.ReadCloser, error) { return from.Blobs().Fetch(ctx, desc) }
 	if parsed.Registry == destination.Reference.Registry {
-		return destination.Mount(ctx, desc, parsed.Repository, getContent)
+		err = destination.Mount(ctx, desc, parsed.Repository, getContent)
+		if err == nil {
+			return nil
+		}
+		// A destination writer may lack source-read permission. Some registries
+		// reject the mount instead of offering an upload; stream with the two
+		// separate accounts in that case.
+		var response *errcode.ErrorResponse
+		if !errors.As(err, &response) || (response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden) {
+			return err
+		}
 	}
 	stream, err := getContent()
 	if err != nil {
