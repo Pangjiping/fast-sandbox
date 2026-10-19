@@ -12,12 +12,7 @@ import (
 	"fast-sandbox/internal/registryconfig"
 )
 
-// WithOCIProvider supplies the node's live registry credentials.
-func WithOCIProvider(provider registryconfig.Provider) Option {
-	return func(c *optionsConfig) { c.ociProvider = provider }
-}
-func (c *Client) readOCI(ctx context.Context, image string) ([]byte, error) {
-	provider := c.ociProvider
+func readOCI(ctx context.Context, image string, provider registryconfig.Provider) ([]byte, error) {
 	if provider == nil {
 		provider = registryconfig.NewFileProvider(registryconfig.MountPath)
 	}
@@ -29,7 +24,8 @@ func (c *Client) readOCI(ctx context.Context, image string) ([]byte, error) {
 
 var ociPullLocks [256]sync.Mutex
 
-func (c *Client) pullOCI(ctx context.Context, stateRoot, image string) error {
+// PullOCIImage pulls OCI metadata independently of the native object-store client.
+func PullOCIImage(ctx context.Context, stateRoot, image string, provider registryconfig.Provider) error {
 	dir := imageDir(stateRoot, image)
 	lock := &ociPullLocks[sha256.Sum256([]byte(dir))[0]]
 	lock.Lock()
@@ -37,7 +33,7 @@ func (c *Client) pullOCI(ctx context.Context, stateRoot, image string) error {
 	if ready, err := cacheComplete(dir); ready || err != nil {
 		return err
 	}
-	data, err := c.readOCI(ctx, image)
+	data, err := readOCI(ctx, image, provider)
 	if err != nil {
 		return err
 	}
@@ -45,9 +41,4 @@ func (c *Client) pullOCI(ctx context.Context, stateRoot, image string) error {
 		return err
 	}
 	return commitManifest(dir, data)
-}
-
-// PullOCIImage is independent of the optional native object-store configuration.
-func PullOCIImage(ctx context.Context, stateRoot, image string, provider registryconfig.Provider) error {
-	return (&Client{ociProvider: provider}).pullOCI(ctx, stateRoot, image)
 }

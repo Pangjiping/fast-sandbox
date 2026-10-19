@@ -146,3 +146,47 @@ func TestRecoverPackKeepsUncertainAddBackingFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePackBundlePreservesMetadataAndChecksMachine(t *testing.T) {
+	for _, mode := range []string{"valid", "invalid-cpu", "invalid-drive", "short-memory", "short-rootfs"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			machine := vmMetadata{VCPUCount: 1, MemoryMB: 1, DiskSizeMB: 1, RootfsDrivePath: rootfsDriveLink}
+			if mode == "invalid-cpu" {
+				machine.VCPUCount = 0
+			}
+			if mode == "invalid-drive" {
+				machine.RootfsDrivePath = "/unrelated"
+			}
+			raw, err := json.Marshal(machine)
+			require.NoError(t, err)
+			var document map[string]any
+			require.NoError(t, json.Unmarshal(raw, &document))
+			document["checkpointExtension"] = map[string]string{"keep": "opaque metadata"}
+			raw, err = json.MarshalIndent(document, "", "  ")
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "metadata.json"), raw, 0600))
+			for _, name := range []string{"rootfs.ext4", "memory.snap", "vmstate.snap", "manifest.json"} {
+				file, err := os.Create(filepath.Join(dir, name))
+				require.NoError(t, err)
+				size := int64(1)
+				if name == "rootfs.ext4" || name == "memory.snap" {
+					size = 1 << 20
+				}
+				if (mode == "short-memory" && name == "memory.snap") || (mode == "short-rootfs" && name == "rootfs.ext4") {
+					size--
+				}
+				require.NoError(t, file.Truncate(size))
+				require.NoError(t, file.Close())
+			}
+			metadata, upper, err := validatePackBundle(dir)
+			if mode == "valid" {
+				require.NoError(t, err)
+				require.Equal(t, raw, metadata)
+				require.Nil(t, upper)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}

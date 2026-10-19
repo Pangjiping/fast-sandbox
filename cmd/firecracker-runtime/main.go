@@ -241,7 +241,7 @@ func (l *livePullClient) current() (*agentpull.Client, error) {
 	if l.client != nil && l.key == key {
 		return l.client, nil
 	}
-	client, err := agentpull.NewClient(config.Store, credential, append(append([]agentpull.Option{}, l.options...), agentpull.WithOCIProvider(l.registry))...)
+	client, err := agentpull.NewClient(config.Store, credential, l.options...)
 	if err != nil {
 		return nil, err
 	}

@@ -151,7 +151,7 @@ fp PauseSandbox "{\"sandbox\": $SANDBOX_REF}"
 fp GetSandbox "{\"sandbox\": $SANDBOX_REF}"
 ```
 
-Pause is asynchronous. **Repeat `GetSandbox` until the runtime state is `RUNTIME_STATE_PAUSED` before resuming.** At that point, the checkpoint is durable and the Fastlet slot has been released.
+Pause is asynchronous. **Repeat `GetSandbox` until the runtime state is `RUNTIME_STATE_PAUSED` before resuming.** While pausing or paused, `GetSandbox` returns the controller’s durable state, including during runtime release and assignment cleanup. At that point, the checkpoint is durable and the runtime has been released; assignment cleanup may still be converging.
 
 ```bash
 CHECKPOINT_ID=$(fp GetSandbox "{\"sandbox\": $SANDBOX_REF}" \

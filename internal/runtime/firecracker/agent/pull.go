@@ -18,7 +18,6 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"fast-sandbox/internal/ocitemplate"
 	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
@@ -27,8 +26,7 @@ import (
 // the node-local cache. With a P2P peer gateway (WithPeerGateway) artifact
 // bytes route through it, falling back to direct header-signed S3.
 type Client struct {
-	s3          *s3Client
-	ociProvider registryconfig.Provider
+	s3 *s3Client
 	// peer is the P2P peer gateway; nil keeps pulls on the direct path.
 	peer *peerGateway
 }
@@ -54,7 +52,7 @@ func NewClient(storeRoot string, credential registryconfig.Credential, options .
 	if err != nil {
 		return nil, err
 	}
-	client := &Client{s3: s3, ociProvider: config.ociProvider}
+	client := &Client{s3: s3}
 	if config.peerBase != "" {
 		httpClient := config.httpClient
 		if httpClient == nil {
@@ -73,7 +71,6 @@ func NewClient(storeRoot string, credential registryconfig.Credential, options .
 type Option func(*optionsConfig)
 
 type optionsConfig struct {
-	ociProvider     registryconfig.Provider
 	region          string
 	endpoint        string
 	httpClient      *http.Client
@@ -149,9 +146,6 @@ func WithPeerGateway(base, routePrefix string) Option {
 // picked up after clearing the cache directory or switching to a new tag —
 // the intended trade-off for warm-image preheating.
 func (c *Client) PullImage(ctx context.Context, stateRoot, image string) (resultErr error) {
-	if strings.HasPrefix(image, ocitemplate.Prefix) {
-		return c.pullOCI(ctx, stateRoot, image)
-	}
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("%w: image reference is required", runtimecontract.ErrInvalidConfig)
 	}

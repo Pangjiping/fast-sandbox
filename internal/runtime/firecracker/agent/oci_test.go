@@ -85,7 +85,7 @@ func TestReadOCIUsesLiveRepositoryCredentials(t *testing.T) {
 	documents["/v2/team/t/manifests/"+rootSum] = root
 	documents["/v2/team/t/blobs/"+config.Digest.String()] = cfg
 	file := filepath.Join(t.TempDir(), "registries.json")
-	client := &Client{ociProvider: registryconfig.NewFileProvider(file)}
+	provider := registryconfig.NewFileProvider(file)
 	image := "oci://" + host + "/team/t@" + topSum
 	for _, secret := range []string{"original", "rotated"} {
 		password.Store(secret)
@@ -94,14 +94,14 @@ func TestReadOCIUsesLiveRepositoryCredentials(t *testing.T) {
 		raw, err := compiled.Marshal()
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(file, raw, 0600))
-		got, err := client.readOCI(context.Background(), image)
+		got, err := readOCI(context.Background(), image, provider)
 		require.NoError(t, err)
 		require.JSONEq(t, string(cfg), string(got))
 	}
 	require.NoError(t, os.WriteFile(file, []byte(`{"revision":"invalid"}`), 0600))
-	_, err = client.readOCI(context.Background(), image)
+	_, err = readOCI(context.Background(), image, provider)
 	require.Error(t, err, "invalid live credentials must not reuse a prior successful read")
 	require.NoError(t, os.Remove(file))
-	_, err = client.readOCI(context.Background(), image)
+	_, err = readOCI(context.Background(), image, provider)
 	require.Error(t, err, "removed credentials must fail closed")
 }
