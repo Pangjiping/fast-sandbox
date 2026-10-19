@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,8 +83,21 @@ func recoverPack(ctx context.Context, bundle string, devices deviceReleaser, unm
 	if err != nil {
 		return err
 	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(record.Work))
+	if err != nil {
+		return err
+	}
+	if parent != root || !strings.HasPrefix(filepath.Base(record.Work), "snapshot_") {
+		return fmt.Errorf("retained pack work %q is outside the configured pack work root", record.Work)
+	}
 	work, err := filepath.EvalSymlinks(record.Work)
 	if err != nil {
+		if record.Phase == packPhaseReleased && errors.Is(err, os.ErrNotExist) {
+			// A dangling link is not proof that this work directory was removed.
+			if _, statErr := os.Lstat(record.Work); errors.Is(statErr, os.ErrNotExist) {
+				return os.Remove(marker)
+			}
+		}
 		return fmt.Errorf("resolve retained pack work: %w", err)
 	}
 	if filepath.Dir(work) != root || !strings.HasPrefix(filepath.Base(work), "snapshot_") {
@@ -92,12 +106,22 @@ func recoverPack(ctx context.Context, bundle string, devices deviceReleaser, unm
 	if err := unmount(filepath.Join(work, "mnt-snapfiles")); err != nil {
 		return err
 	}
-	matches, err := releaseOwnedDevicesByConfig(ctx, devices, filepath.Join(record.Work, snapfilesConfigName))
+	config := filepath.Join(record.Work, snapfilesConfigName)
+	if record.Phase == packPhaseAdding {
+		// List omits pending Adds. Fence them before inspecting visible devices.
+		fencer, ok := devices.(interface {
+			FenceAdd(context.Context, string) error
+		})
+		if !ok {
+			return fmt.Errorf("pack device add may still be in flight; retaining backing files")
+		}
+		if err := fencer.FenceAdd(ctx, config); err != nil {
+			return err
+		}
+	}
+	_, err = releaseOwnedDevicesByConfig(ctx, devices, config)
 	if err != nil {
 		return err
-	}
-	if record.Phase == packPhaseAdding && matches == 0 {
-		return fmt.Errorf("pack device add may still be in flight; retaining backing files")
 	}
 
 	if err := os.RemoveAll(work); err != nil {

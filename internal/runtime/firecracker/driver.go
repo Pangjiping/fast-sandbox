@@ -553,6 +553,12 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		}
 	}()
 	if isOCI {
+		// Record ownership before fsb-vm can attach devices. Restart recovery
+		// can then release a prepare-only attachment even before VM launch.
+		if err := saveState(directory, &SandboxState{Config: *config, Phase: PhaseStarting}); err != nil {
+			releaseSlot()
+			return nil, err
+		}
 		ociRootfs, vmstatePath, memoryPath, err = d.attachOCI(ctx, identity.SandboxUID, restoreRef)
 		ociAttached = err == nil
 	} else {

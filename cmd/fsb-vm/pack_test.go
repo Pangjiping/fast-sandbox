@@ -71,7 +71,7 @@ func TestRecoverPackReleasesOnlyOwnedDeviceBeforeRemovingFiles(t *testing.T) {
 				markerWork = filepath.Join(global.buildWorkDir, "snapshot_link")
 				require.NoError(t, os.Symlink(t.TempDir(), markerWork))
 			}
-			require.NoError(t, os.WriteFile(marker, []byte(markerWork), 0600))
+			require.NoError(t, writePackResources(marker, markerWork, packPhaseAttached))
 			devices := &fakeReleaser{devices: []ublkdDevice{{DevID: 1, Config: config}, {DevID: 2, Config: filepath.Join(bundle, "another.config")}}, delErr: map[int]error{}}
 			if failure == "list" {
 				devices.listErr = errors.New("list failed")

@@ -68,6 +68,8 @@ data:
           name: registry-credentials
 ```
 
+OCI templates require `output.publishSecretRef` with a non-empty Secret name and a `.dockerconfigjson` key. Missing references are rejected before a build Pod is created. The builder preserves an existing `/etc/hosts` in the source image and only supplies defaults when it is absent.
+
 Keep the Secret, ConfigMap, Pool, and template in the same namespace. For private source or execd images, also include their credentials in the Builder's `.dockerconfigjson`.
 
 ## 3. Create a template

@@ -511,6 +511,9 @@ func (r *SandboxTemplateReconciler) effectiveOutput(output apiv1alpha2.OutputSpe
 		if output.Format != apiv1alpha2.ArtifactFormatOverlayBD {
 			return output, fmt.Errorf("OCI templates require overlaybd format")
 		}
+		if output.PublishSecretRef == nil || strings.TrimSpace(output.PublishSecretRef.Name) == "" {
+			return output, fmt.Errorf("OCI templates require output.publishSecretRef with a Secret name containing .dockerconfigjson")
+		}
 		return output, nil
 	}
 	if output.Publish == "" {

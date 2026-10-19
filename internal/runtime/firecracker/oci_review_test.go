@@ -190,3 +190,56 @@ touch "$TEST_PACK_STAGING/cleaned"
 		}
 	}
 }
+
+func TestOCIRecordsOwnershipBeforePrepareAndRecoversInterruptedAttachment(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.sandboxSpec.Spec.Image = "oci://r.example/templates/base:build"
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	manifest := cachedManifestPath(fixture.stateRoot, fixture.sandboxSpec.Spec.Image)
+	raw, err := os.ReadFile(manifest)
+	require.NoError(t, err)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	doc["oci"] = map[string]string{"rootfs": "r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "snapfiles": "r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	raw, err = json.Marshal(doc)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest, raw, 0600))
+	installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", Username: "reader", Password: "secret"})
+	bin := t.TempDir()
+	t.Setenv("TEST_OCI_ROOT", fixture.stateRoot)
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "fsb-vm"), []byte(`#!/bin/sh
+set -eu
+while [ "$1" != create ] && [ "$1" != delete ]; do shift; done
+if [ "$1" = create ]; then
+ cp "$TEST_OCI_ROOT/sandboxes/sandbox-1/meta.json" "$TEST_OCI_ROOT/at-prepare.json"
+ exit 7
+fi
+rm -rf "$TEST_OCI_ROOT/oci/sandboxes/sandbox-1"
+touch "$TEST_OCI_ROOT/recovered"
+`), 0755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err = fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	require.ErrorContains(t, err, "attach OCI template")
+	raw, err = os.ReadFile(filepath.Join(fixture.stateRoot, "at-prepare.json"))
+	require.NoError(t, err)
+	var state SandboxState
+	require.NoError(t, json.Unmarshal(raw, &state))
+	require.Equal(t, fixture.sandboxSpec, state.Config)
+	require.Equal(t, PhaseStarting, state.Phase)
+	require.Zero(t, state.PID)
+	// Model process death immediately after prepare-only succeeded: only the
+	// ownership record exists; neither API address nor VMM PID was persisted.
+	home := filepath.Join(fixture.stateRoot, "oci/sandboxes/sandbox-1")
+	require.NoError(t, os.MkdirAll(home, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "state.json"), []byte(`{"rootfs_device":{"dev_id":42}}`), 0600))
+	require.NoError(t, fixture.driver.RecoverRuntimeResources(context.Background(), nil))
+	require.NoDirExists(t, home)
+	require.NoDirExists(t, filepath.Join(fixture.stateRoot, sandboxStateDir, "sandbox-1"))
+	require.FileExists(t, filepath.Join(fixture.stateRoot, "recovered"))
+	require.Equal(t, 0, fixture.manager.Snapshot().Bound)
+	// A retry reaches prepare again rather than rejecting an existing OCI home.
+	require.NoError(t, os.Remove(filepath.Join(fixture.stateRoot, "at-prepare.json")))
+	_, err = fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	require.ErrorContains(t, err, "attach OCI template")
+	require.FileExists(t, filepath.Join(fixture.stateRoot, "at-prepare.json"))
+}

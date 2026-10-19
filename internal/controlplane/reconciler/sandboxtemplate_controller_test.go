@@ -1080,6 +1080,7 @@ func TestSandboxTemplateReconcileDefaultsMitmCertificateKey(t *testing.T) {
 func TestSandboxTemplateOCIOutputAndDeviceMount(t *testing.T) {
 	template := newSandboxTemplate("default", "oci-template")
 	template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine:build"
+	template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: "registry"}
 	r := newSandboxTemplateReconciler(t, template)
 	output, err := r.effectiveOutput(template.Spec.Output, "s3://native/store")
 	if err != nil {
@@ -1104,5 +1105,33 @@ func TestSandboxTemplateOCIOutputAndDeviceMount(t *testing.T) {
 	output.Format = apiv1alpha2.ArtifactFormatNative
 	if _, err = r.effectiveOutput(output, "s3://native/store"); err == nil {
 		t.Fatal("native OCI output must fail")
+	}
+}
+
+func TestOCIMissingPublishSecretFailsBeforeCreatingPod(t *testing.T) {
+	for _, name := range []string{"nil", "", "  "} {
+		t.Run(name, func(t *testing.T) {
+			template := newSandboxTemplate("default", "oci-no-secret")
+			template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine:build"
+			if name != "nil" {
+				template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: name}
+			}
+			r := newSandboxTemplateReconciler(t, template)
+			reconcileOnce(t, r, client.ObjectKeyFromObject(template))
+			var current apiv1alpha2.SandboxTemplate
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(template), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase != apiv1alpha2.SandboxTemplatePhaseFailed || !strings.Contains(findBuildCondition(t, &current).Message, "publishSecretRef") {
+				t.Fatalf("expected missing-secret failure: %+v", current.Status)
+			}
+			var pods corev1.PodList
+			if err := r.List(context.Background(), &pods); err != nil {
+				t.Fatal(err)
+			}
+			if len(pods.Items) != 0 {
+				t.Fatal("invalid OCI output launched a Pod")
+			}
+		})
 	}
 }

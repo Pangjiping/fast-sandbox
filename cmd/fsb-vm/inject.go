@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,15 @@ func injectDirectory(device, mountPoint, source string, undo *rollback) error {
 		return err
 	}
 	undo.push("mount "+mountPoint, func() error { return unmount(mountPoint) })
-	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+	if err := copyInjection(mountPoint, source); err != nil {
+		return err
+	}
+	syncFilesystems()
+	return unmount(mountPoint)
+}
+
+func copyInjection(mountPoint, source string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -30,15 +39,24 @@ func injectDirectory(device, mountPoint, source string, undo *rollback) error {
 		if err != nil {
 			return err
 		}
+		if filepath.ToSlash(relative) == "etc/hosts" {
+			root, err := os.OpenRoot(mountPoint)
+			if err != nil {
+				return err
+			}
+			_, err = root.Lstat(relative)
+			root.Close()
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		return writeGuestFile(mountPoint, "/"+filepath.ToSlash(relative), data, info.Mode().Perm())
 	})
-	if err != nil {
-		return err
-	}
-	syncFilesystems()
-	return unmount(mountPoint)
 }
