@@ -95,4 +95,10 @@ type HandlerStatus struct {
 	Ready      bool   `json:"ready"`
 	InstanceID string `json:"instanceId"`
 	Message    string `json:"message,omitempty"`
+	// VaultTransfer reports that the Handler can carry a subject's vault
+	// file across pause/resume (VAULT_EXPORT / VAULT_IMPORT): it serves the
+	// vault operations and persists vault files. Absent (older Handler
+	// builds) decodes as false: vault transfer is skipped and the
+	// checkpoint proceeds without a vault — the pre-transfer semantics.
+	VaultTransfer bool `json:"vaultTransfer,omitempty"`
 }

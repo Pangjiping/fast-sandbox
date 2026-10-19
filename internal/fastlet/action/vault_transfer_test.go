@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,7 +15,7 @@ import (
 // vault transfer enabled, and registers one Sandbox's Action state.
 func newVaultTransferManager(t *testing.T) (*Manager, *fakeCaller) {
 	t.Helper()
-	caller := &fakeCaller{instanceID: "handler-1"}
+	caller := &fakeCaller{instanceID: "handler-1", vaultTransfer: true}
 	manager, err := NewManager([]apiv1alpha2.ActionHandler{{Name: "egress", TargetHTTPPort: 18080}}, caller)
 	require.NoError(t, err)
 	manager.SetVaultHandler("egress")
@@ -102,6 +103,33 @@ func TestVaultTransferFailsForUnregisteredSandbox(t *testing.T) {
 
 	err := manager.ExportVault(context.Background(), "ghost", "/tmp/vault.json")
 	require.ErrorContains(t, err, "no registered Action state")
+	require.Empty(t, vaultCalls(caller))
+}
+
+// A Handler without the vaultTransfer capability (older build predating the
+// vault operations, or vault persistence not configured) must not fail the
+// checkpoint: the transfer is skipped and the pause proceeds without a vault.
+func TestVaultTransferSkipsWhenHandlerNotVaultCapable(t *testing.T) {
+	manager, caller := newVaultTransferManager(t)
+	caller.mu.Lock()
+	caller.vaultTransfer = false
+	caller.mu.Unlock()
+
+	require.NoError(t, manager.ExportVault(context.Background(), "a", "/tmp/vault.json"))
+	require.NoError(t, manager.ImportVault(context.Background(), "a", "/tmp/vault.json"))
+	require.Empty(t, vaultCalls(caller))
+}
+
+// An unreachable Handler is not a capability answer: the probe failure fails
+// the checkpoint so the egress-local vault survives for the retry.
+func TestVaultTransferFailsWhenCapabilityProbeFails(t *testing.T) {
+	manager, caller := newVaultTransferManager(t)
+	caller.mu.Lock()
+	caller.statusErr = errors.New("handler unreachable")
+	caller.mu.Unlock()
+
+	err := manager.ExportVault(context.Background(), "a", "/tmp/vault.json")
+	require.ErrorContains(t, err, "capability probe")
 	require.Empty(t, vaultCalls(caller))
 }
 
