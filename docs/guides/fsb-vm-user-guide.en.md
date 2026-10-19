@@ -267,6 +267,22 @@ For a plain HTTP registry, place this global option before the subcommand:
 sudo "$FSB_VM" --plain-http build ...
 ```
 
+### Immutable manifest cache
+
+`create` caches rootfs and snapfiles image manifests referenced by `@sha256:...`
+under `<state-dir>/.manifest-cache/`. Later creates verify the local SHA256 and
+manifest descriptors before reuse, avoiding registry manifest requests and their
+authentication token requests on a hit. Entries are scoped by registry,
+repository, HTTP/HTTPS, and the current credential. Files contain only the raw
+manifest, not credentials. Deleting one sandbox preserves this shared cache.
+
+Missing or corrupt entries are fetched again and written atomically. Cache write
+failures do not prevent using a verified remote manifest. Mutable tags always
+resolve remotely; digest references to multi-platform indexes retain the existing
+platform selection flow. Remove `.manifest-cache/` to clear cached manifests.
+This is separate from OverlayBD's block cache: each sandbox still gets its own
+writable upper and devices, and uncached blocks are read on demand by OverlayBD.
+
 ### 4.4 Disk size
 
 The default rootfs size is 20 GiB. Specify another positive integer GiB value with:

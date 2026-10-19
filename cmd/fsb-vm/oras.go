@@ -267,13 +267,20 @@ func resolveImage(ctx context.Context, imageRef string, config dockerConfig) (re
 	if err != nil {
 		return resolvedImage{}, err
 	}
-	repository, err := newRemoteRepository(ref, config, global.plainHTTP)
+	cachePath, err := createManifestCachePath(ref, config)
 	if err != nil {
 		return resolvedImage{}, err
 	}
-	_, raw, err := fetchManifestJSON(ctx, repository, ref.Reference)
-	if err != nil {
-		return resolvedImage{}, fmt.Errorf("pull manifest %q: %w", imageRef, err)
+	raw, cached := readCachedImageManifest(cachePath, ref.Reference)
+	if !cached {
+		repository, err := newRemoteRepository(ref, config, global.plainHTTP)
+		if err != nil {
+			return resolvedImage{}, err
+		}
+		_, raw, err = fetchManifestJSON(ctx, repository, ref.Reference)
+		if err != nil {
+			return resolvedImage{}, fmt.Errorf("pull manifest %q: %w", imageRef, err)
+		}
 	}
 	var manifest ocispec.Manifest
 	if err := json.Unmarshal(raw, &manifest); err != nil {
@@ -288,6 +295,11 @@ func resolveImage(ctx context.Context, imageRef string, config dockerConfig) (re
 	}
 	if len(lowers) == 0 {
 		return resolvedImage{}, fmt.Errorf("image %q has no layers", imageRef)
+	}
+	if !cached {
+		if err := cacheImageManifest(cachePath, ref.Reference, raw); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cache image manifest: %v\n", err)
+		}
 	}
 	return resolvedImage{Lowers: lowers, RepoBlobURL: repoBlobURL(ref, global.plainHTTP)}, nil
 }

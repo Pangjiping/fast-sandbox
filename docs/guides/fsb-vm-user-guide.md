@@ -267,6 +267,19 @@ sudo "$FSB_VM" build \
 sudo "$FSB_VM" --plain-http build ...
 ```
 
+### 不可变 manifest 缓存
+
+`create` 将以 `@sha256:...` 引用的 rootfs 和 snapfiles 镜像 manifest 缓存在
+`<state-dir>/.manifest-cache/`。后续创建先校验本地文件的 SHA256 和 manifest 描述符，
+命中后直接使用，不再向 registry 请求这两份 manifest 或获取对应的认证 token。
+缓存按 registry、repository、HTTP/HTTPS 和当前凭证隔离；文件中只保存原始 manifest，
+不保存凭证。删除单个 sandbox 不会删除这份共享缓存。
+
+缓存缺失或损坏时重新从 registry 获取并原子写入；缓存写入失败不会阻止使用已验证的
+远端 manifest。可变 tag 始终回源解析，指向多架构 index 的 digest 保持现有平台选择流程。
+删除 `.manifest-cache/` 可清除本地 manifest 缓存。它与 OverlayBD 数据块缓存独立：
+每个 sandbox 仍创建独立的可写层和设备，未缓存的数据块仍由 OverlayBD 按需读取。
+
 ### 4.4 磁盘大小
 
 rootfs 默认是 20 GiB，可指定其他正整数 GiB：
