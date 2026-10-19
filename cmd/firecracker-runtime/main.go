@@ -23,6 +23,7 @@ import (
 
 	"fast-sandbox/internal/artifactstore"
 	"fast-sandbox/internal/observability"
+	"fast-sandbox/internal/ocitemplate"
 	"fast-sandbox/internal/registryconfig"
 	agentpull "fast-sandbox/internal/runtime/firecracker/agent"
 	agentdart "fast-sandbox/internal/runtime/firecracker/agent/dart"
@@ -240,7 +241,7 @@ func (l *livePullClient) current() (*agentpull.Client, error) {
 	if l.client != nil && l.key == key {
 		return l.client, nil
 	}
-	client, err := agentpull.NewClient(config.Store, credential, l.options...)
+	client, err := agentpull.NewClient(config.Store, credential, append(append([]agentpull.Option{}, l.options...), agentpull.WithOCIProvider(l.registry))...)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +252,9 @@ func (l *livePullClient) current() (*agentpull.Client, error) {
 
 // PullImage pulls one image with a client built from the current config.
 func (l *livePullClient) PullImage(ctx context.Context, stateRoot, image string) error {
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		return agentpull.PullOCIImage(ctx, stateRoot, image, l.registry)
+	}
 	client, err := l.current()
 	if err != nil {
 		return err

@@ -116,7 +116,10 @@ type OutputSpec struct {
 	// +kubebuilder:default=overlaybd
 	Format ArtifactFormat `json:"format"`
 
-	// Publish is the S3-compatible object store target, e.g.
+	// Publish selects the destination. oci://registry/namespace/repo:tag
+	// invokes fsb-vm and publishes an OverlayBD OCI template pair;
+	// PublishSecretRef then requires .dockerconfigjson.
+	// Otherwise Publish is the S3-compatible object store target, e.g.
 	// s3://bucket/sandbox-images/ (digest-addressed publication). When
 	// empty, the controller defaults it to the platform artifact store
 	// (the fast-sandbox-artifact-store ConfigMap); when set it must equal

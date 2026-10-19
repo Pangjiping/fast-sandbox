@@ -1076,3 +1076,33 @@ func TestSandboxTemplateReconcileDefaultsMitmCertificateKey(t *testing.T) {
 	}
 	t.Fatalf("expected a mitm-certificate secret volume, got %+v", pods[0].Spec.Volumes)
 }
+
+func TestSandboxTemplateOCIOutputAndDeviceMount(t *testing.T) {
+	template := newSandboxTemplate("default", "oci-template")
+	template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine:build"
+	r := newSandboxTemplateReconciler(t, template)
+	output, err := r.effectiveOutput(template.Spec.Output, "s3://native/store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.createBuildPod(context.Background(), template, output, ""); err != nil {
+		t.Fatal(err)
+	}
+	var pod corev1.Pod
+	if err = r.Get(context.Background(), client.ObjectKey{Namespace: template.Namespace, Name: buildPodName(template)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, mount := range pod.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "host-dev" && mount.MountPath == "/dev" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("OCI builder must see dynamically created host ublk devices")
+	}
+	output.Format = apiv1alpha2.ArtifactFormatNative
+	if _, err = r.effectiveOutput(output, "s3://native/store"); err == nil {
+		t.Fatal("native OCI output must fail")
+	}
+}

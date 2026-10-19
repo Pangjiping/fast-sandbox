@@ -15,6 +15,7 @@ import (
 
 	"k8s.io/klog/v2"
 
+	"fast-sandbox/internal/ocitemplate"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
@@ -73,6 +74,11 @@ func resolveRootfsImage(stateRoot, image string) (string, error) {
 // network slot only to release-destroy it on the snapshot check — burning
 // the slot pool faster than replenishment and failing the cold create.
 func verifyRestorableImage(stateRoot, image string) error {
+	if pair, err := ociPair(stateRoot, image); err != nil {
+		return fmt.Errorf("%w: %w", ErrImageNotReady, err)
+	} else if pair != nil {
+		return nil
+	}
 	if _, err := resolveRootfsImage(stateRoot, image); err != nil {
 		return err
 	}
@@ -100,6 +106,10 @@ func listCachedImages(stateRoot string) ([]string, error) {
 		}
 		if _, err := os.Stat(filepath.Join(base, entry.Name(), rootfsImageName)); err == nil {
 			images = append(images, entry.Name())
+		} else if payload, err := os.ReadFile(filepath.Join(base, entry.Name(), "manifest.json")); err == nil {
+			if pair, err := ocitemplate.Decode(payload); err == nil && pair != nil {
+				images = append(images, entry.Name())
+			}
 		}
 	}
 	return images, nil

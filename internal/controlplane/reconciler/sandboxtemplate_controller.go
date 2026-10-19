@@ -507,6 +507,12 @@ var errArtifactStoreUnconfigured = errors.New("no platform artifact store is con
 // publishing where no node agent reads. Trailing slashes are ignored in the
 // comparison because the builder strips them when naming objects.
 func (r *SandboxTemplateReconciler) effectiveOutput(output apiv1alpha2.OutputSpec, storeRoot string) (apiv1alpha2.OutputSpec, error) {
+	if strings.HasPrefix(output.Publish, "oci://") {
+		if output.Format != apiv1alpha2.ArtifactFormatOverlayBD {
+			return output, fmt.Errorf("OCI templates require overlaybd format")
+		}
+		return output, nil
+	}
 	if output.Publish == "" {
 		if storeRoot == "" {
 			return output, fmt.Errorf("%w: spec.output.publish is empty (set output.publish or configure the controller artifact store)", errArtifactStoreUnconfigured)
@@ -580,6 +586,10 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 				Path: "/dev/net/tun", Type: ptr(corev1.HostPathCharDev),
 			}},
 		},
+	}
+	if strings.HasPrefix(output.Publish, "oci://") {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "host-dev", MountPath: "/dev"})
+		volumes = append(volumes, corev1.Volume{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev", Type: ptr(corev1.HostPathDirectory)}}})
 	}
 	if ref := template.Spec.Output.PublishSecretRef; ref != nil {
 		env = append(env, corev1.EnvVar{Name: publishCredentialsDirEnv, Value: sandboxTemplatePublishSecretDir})

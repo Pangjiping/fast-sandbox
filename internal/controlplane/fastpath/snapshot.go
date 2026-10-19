@@ -24,6 +24,7 @@ import (
 	"fast-sandbox/internal/controlplane/assignment"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/observability"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 

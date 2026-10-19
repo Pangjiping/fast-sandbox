@@ -23,24 +23,29 @@ import (
 const defaultBuildDiskSizeGiB = 20
 
 type buildOptions struct {
-	source          string
-	output          string
-	kernel          string
-	kernelVersion   string
-	vcpu            int
-	memoryMB        int
-	diskSizeGiB     int
-	snapfilesSizeMB int
-	rootfsDriveID   string
-	bootArgs        string
-	initPath        string
-	initScriptFile  string
-	readyPattern    string
-	readyTimeout    time.Duration
-	authFile        string
-	username        string
-	noCompress      bool
-	keepWorkDir     bool
+	snapshotMetadata []byte
+	snapshotExtras   map[string]string
+	injectDir        string
+	tapName          string
+	guestMAC         string
+	source           string
+	output           string
+	kernel           string
+	kernelVersion    string
+	vcpu             int
+	memoryMB         int
+	diskSizeGiB      int
+	snapfilesSizeMB  int
+	rootfsDriveID    string
+	bootArgs         string
+	initPath         string
+	initScriptFile   string
+	readyPattern     string
+	readyTimeout     time.Duration
+	authFile         string
+	username         string
+	noCompress       bool
+	keepWorkDir      bool
 }
 
 func newBuildCommand() *cobra.Command {
@@ -53,6 +58,9 @@ func newBuildCommand() *cobra.Command {
 		},
 	}
 	flags := command.Flags()
+	flags.StringVar(&options.injectDir, "inject-dir", "", "directory of guest files to inject before snapshot")
+	flags.StringVar(&options.tapName, "tap-name", "", "preconfigured build tap (optional)")
+	flags.StringVar(&options.guestMAC, "guest-mac", "02:FC:00:00:00:01", "baked guest NIC MAC")
 	flags.StringVar(&options.source, "source", "", "source overlaybd image reference (required)")
 	flags.StringVar(&options.output, "output", "", "logical output name <name>:<tag>; produces <tag>_rootfs and <tag>_snapfiles (required)")
 	flags.StringVar(&options.kernel, "kernel", "", "vmlinux path used for the cold boot (required)")
@@ -550,6 +558,11 @@ func runBuild(ctx context.Context, options *buildOptions) (err error) {
 		return err
 	}
 
+	if options.injectDir != "" {
+		if err := injectDirectory(rootfs.devPath, filepath.Join(workDir, "mnt-inject"), options.injectDir, undo); err != nil {
+			return err
+		}
+	}
 	// Step 4: inject the init script into the rootfs.
 	initScript := []byte(defaultInitScript())
 	if options.initScriptFile != "" {
@@ -676,12 +689,20 @@ func captureSnapfiles(ctx context.Context, ublkd *ublkdClient, options *buildOpt
 	if err := copyFile(memfilePath, filepath.Join(snapMount, inDiskMemfile), 0o640); err != nil {
 		return err
 	}
-	metadataPayload, err := buildSnapfilesMetadata(options, options.source, time.Now())
+	metadataPayload := options.snapshotMetadata
+	if len(metadataPayload) == 0 {
+		metadataPayload, err = buildSnapfilesMetadata(options, options.source, time.Now())
+	}
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(snapMount, inDiskMetadata), metadataPayload, 0o600); err != nil {
 		return fmt.Errorf("write metadata.json: %w", err)
+	}
+	for name, source := range options.snapshotExtras {
+		if err := copyFile(source, filepath.Join(snapMount, name), 0600); err != nil {
+			return err
+		}
 	}
 	syncFilesystems()
 	if err := unmount(snapMount); err != nil {

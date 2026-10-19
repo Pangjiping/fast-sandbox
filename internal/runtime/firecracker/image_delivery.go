@@ -27,6 +27,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"fast-sandbox/internal/artifacts"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
@@ -81,6 +82,12 @@ func (d *Driver) DeliverImage(_ context.Context, image string) (runtimecontract.
 func (d *Driver) DeliverCheckpoint(_ context.Context, restore *fastletapi.RestoreSpec) (runtimecontract.ImageDeliveryStatus, error) {
 	if restore == nil || strings.TrimSpace(restore.ManifestRef) == "" || strings.TrimSpace(restore.ArtifactDigest) == "" {
 		return "", fmt.Errorf("%w: checkpoint manifestRef and artifactDigest are required", ErrInvalidConfig)
+	}
+	if strings.HasPrefix(restore.ManifestRef, ocitemplate.Prefix) {
+		if err := ocitemplate.ValidateDigestReference(restore.ManifestRef, restore.ArtifactDigest); err != nil {
+			return "", fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+		}
+		return d.DeliverImage(context.Background(), restore.ManifestRef)
 	}
 	reference := artifacts.CheckpointReference(restore.ArtifactDigest)
 	return d.deliverReference(reference, func(ctx context.Context) error {

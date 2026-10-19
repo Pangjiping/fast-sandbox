@@ -16,6 +16,7 @@ import (
 // createOptions holds the create-command flags (ADR-007/009/010). The machine
 // sizing is fixed by the snapshot, so create takes no vCPU/memory flags.
 type createOptions struct {
+	prepareOnly  bool
 	templateFile string
 	kernel       string
 	network      string
@@ -32,6 +33,7 @@ func newCreateCommand() *cobra.Command {
 		},
 	}
 	flags := command.Flags()
+	flags.BoolVar(&options.prepareOnly, "prepare-only", false, "attach template disks for an external Firecracker lifecycle owner")
 	flags.StringVarP(&options.templateFile, "file", "f", "", "path to template.json (required)")
 	flags.StringVar(&options.kernel, "kernel", "", "override the resolved vmlinux path")
 	flags.StringVar(&options.network, "network", networkNone, "network provider (only 'none' is supported)")
@@ -84,7 +86,7 @@ func (r *rollback) run() error {
 
 func (r *rollback) disarm() { r.steps = nil }
 
-func runCreate(ctx context.Context, options *createOptions) error {
+func runCreate(ctx context.Context, options *createOptions) error { //nolint:gocognit // ordered device transaction keeps rollback ownership visible
 	provider, err := selectNetworkProvider(options.network)
 	if err != nil {
 		return err
@@ -205,6 +207,10 @@ func runCreate(ctx context.Context, options *createOptions) error {
 		return err
 	}
 
+	if options.prepareOnly {
+		created = true
+		return nil
+	}
 	// Step 6: resolve the kernel path (ADR-004). Firecracker snapshot restore
 	// carries the guest kernel in the memory state, but the ADR requires the
 	// host-local vmlinux to be present and version-matched.

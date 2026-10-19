@@ -1,0 +1,198 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/spf13/cobra"
+
+	"fast-sandbox/internal/ocitemplate"
+)
+
+// pack exports an already captured checkpoint. It never boots a new VM.
+func newPackCommand() *cobra.Command {
+	var bundle, output string
+	cmd := &cobra.Command{Use: "pack", Short: "Package captured rootfs, memory and VM state as an OverlayBD pair", RunE: func(cmd *cobra.Command, _ []string) error { return packCheckpoint(cmd.Context(), bundle, output) }}
+	cmd.Flags().StringVar(&bundle, "bundle-dir", "", "captured checkpoint directory")
+	cmd.Flags().StringVar(&output, "output", "", "local logical output name:tag")
+	_ = cmd.MarkFlagRequired("bundle-dir")
+	_ = cmd.MarkFlagRequired("output")
+	return cmd
+}
+
+func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr error) {
+	output, err := parseOutput(outputName)
+	if err != nil {
+		return err
+	}
+	metadata, machine, upper, err := validatePackBundle(bundle)
+	if err != nil {
+		return err
+	}
+	name := sanitizeFileName(outputName)
+	release, err := tryLock(global.buildOutputDir, name)
+	if err != nil {
+		return err
+	}
+	defer release()
+	layout, final, err := createStagedArtifactLayout(global.buildOutputDir, name)
+	if err != nil {
+		return err
+	}
+	undo := &rollback{}
+	activeMarker := filepath.Join(bundle, ".pack-resources-active")
+	defer func() {
+		if e := undo.run(); e != nil {
+			resultErr = errors.Join(resultErr, e)
+		} else if e := os.Remove(activeMarker); e != nil && !os.IsNotExist(e) {
+			resultErr = errors.Join(resultErr, e)
+		}
+	}()
+	undo.push("staging "+layout.root, func() error { return os.RemoveAll(layout.root) })
+	work, err := createBuildWorkDir(name, false, undo)
+	if err != nil {
+		return err
+	}
+	rootLayers, err := packRootfs(ctx, bundle, work, layout, upper)
+	if err != nil {
+		return err
+	}
+	ublkd := newUblkdClient(global.ublkdSocket)
+	options := &buildOptions{vcpu: machine.VCPUCount, memoryMB: machine.MemoryMB, diskSizeGiB: gibCeil(machine.DiskSizeMB), snapshotMetadata: metadata, snapshotExtras: map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}}
+	if _, err = os.Stat(filepath.Join(bundle, "vault.json")); err == nil {
+		options.snapshotExtras["vault.json"] = filepath.Join(bundle, "vault.json")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	// Preserve backing files if this process is killed or resource rollback fails.
+	if err = os.WriteFile(activeMarker, []byte(work), 0600); err != nil {
+		return err
+	}
+	if err = captureSnapfiles(ctx, ublkd, options, work, filepath.Join(bundle, "vmstate.snap"), filepath.Join(bundle, "memory.snap"), undo); err != nil {
+		return err
+	}
+	snap, err := sealUpper(ctx, layout, work, "snapfiles", true)
+	if err != nil {
+		return err
+	}
+	if err = writePackedPair(layout, output, rootLayers, snap); err != nil {
+		return err
+	}
+	if err = publishArtifactLayout(layout, final); err != nil {
+		return err
+	}
+	// Device and mount releases are idempotent; keep rollback armed until every
+	// kernel resource has been released, then discard only the scratch directory.
+	return nil
+}
+func writePackedPair(layout artifactLayout, output outputNames, root []ocispec.Descriptor, snap ocispec.Descriptor) error {
+	cfg, err := layout.installBytes(minimalImageConfig(), ocispec.MediaTypeImageConfig)
+	if err != nil {
+		return err
+	}
+	index := layoutIndex{SourceRef: "checkpoint"}
+	for _, entry := range []struct {
+		name   string
+		layers []ocispec.Descriptor
+	}{{output.rootfsName(), root}, {output.snapfilesName(), []ocispec.Descriptor{snap}}} {
+		payload, desc, err := assembleManifest(cfg, entry.layers)
+		if err != nil {
+			return err
+		}
+		file := sanitizeFileName(entry.name) + ".json"
+		if err = writeFileAtomic(layout.manifestPath(file), payload, 0640); err != nil {
+			return err
+		}
+		index.Images = append(index.Images, layoutIndexEntry{Name: entry.name, ManifestFile: file, ManifestDigest: desc.Digest.String()})
+	}
+	return layout.writeLayoutIndex(index)
+}
+
+func validatePackBundle(bundle string) ([]byte, vmMetadata, *ocitemplate.RootfsUpper, error) {
+	metadata, err := os.ReadFile(filepath.Join(bundle, "metadata.json"))
+	if err != nil {
+		return nil, vmMetadata{}, nil, err
+	}
+	var machine vmMetadata
+	if err = json.Unmarshal(metadata, &machine); err != nil {
+		return nil, vmMetadata{}, nil, err
+	}
+	if machine.VCPUCount < 1 || machine.MemoryMB < 1 || machine.DiskSizeMB < 1 || machine.RootfsDrivePath != rootfsDriveLink {
+		return nil, vmMetadata{}, nil, fmt.Errorf("invalid checkpoint machine metadata")
+	}
+	upper, upperErr := ocitemplate.ReadRootfsUpper(bundle)
+	if upperErr != nil && !errors.Is(upperErr, os.ErrNotExist) {
+		return nil, vmMetadata{}, nil, upperErr
+	}
+	required := []string{"vmstate.snap", "memory.snap", "manifest.json"}
+	sizes := map[string]int64{"memory.snap": int64(machine.MemoryMB) << 20}
+	if upper != nil {
+		if upper.VirtualSizeBytes != int64(machine.DiskSizeMB)<<20 {
+			return nil, vmMetadata{}, nil, fmt.Errorf("rootfs upper size does not match machine metadata")
+		}
+		required = append(required, ocitemplate.UpperDataName, ocitemplate.UpperIndexName)
+	} else {
+		required = append(required, "rootfs.ext4")
+		sizes["rootfs.ext4"] = int64(machine.DiskSizeMB) << 20
+	}
+	for _, name := range required {
+		if info, err := os.Stat(filepath.Join(bundle, name)); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return nil, vmMetadata{}, nil, fmt.Errorf("checkpoint is missing non-empty regular %s", name)
+		}
+	}
+	for name, want := range sizes {
+		info, err := os.Stat(filepath.Join(bundle, name))
+		if err != nil {
+			return nil, vmMetadata{}, nil, err
+		}
+		if info.Size() != want {
+			return nil, vmMetadata{}, nil, fmt.Errorf("checkpoint %s size %d does not match machine metadata %d", name, info.Size(), want)
+		}
+	}
+
+	return metadata, machine, upper, nil
+}
+
+func packRootfs(ctx context.Context, bundle, work string, layout artifactLayout, upper *ocitemplate.RootfsUpper) ([]ocispec.Descriptor, error) {
+	compressed := filepath.Join(work, "rootfs.zfile")
+	var rootLayers []ocispec.Descriptor
+	if upper != nil {
+		if err := commitLayer(ctx, filepath.Join(bundle, ocitemplate.UpperDataName), filepath.Join(bundle, ocitemplate.UpperIndexName), compressed, true); err != nil {
+			return nil, err
+		}
+		rootLayers = append(rootLayers, upper.Lowers...)
+		sources := map[string]string{}
+		for _, lower := range upper.Lowers {
+			sources[lower.Digest.String()] = upper.Repository
+		}
+		raw, e := json.Marshal(sources)
+		if e != nil {
+			return nil, e
+		}
+		if err := os.WriteFile(filepath.Join(layout.root, ocitemplate.RemoteSourcesName), raw, 0600); err != nil {
+			return nil, err
+		}
+	} else {
+		rawLayer := filepath.Join(work, "rootfs.sealed")
+		importer := exec.CommandContext(ctx, "overlaybd-import-raw", filepath.Join(bundle, "rootfs.ext4"), filepath.Join(work, "rootfs.data"), filepath.Join(work, "rootfs.index"), rawLayer)
+		if output, e := importer.CombinedOutput(); e != nil {
+			return nil, fmt.Errorf("import checkpoint rootfs: %w: %s", e, output)
+		}
+		if output, e := exec.CommandContext(ctx, global.overlaybdCommit, "-f", "-z", "--commit_sealed", rawLayer, compressed).CombinedOutput(); e != nil {
+			return nil, fmt.Errorf("compress checkpoint rootfs: %w: %s", e, output)
+		}
+	}
+	root, err := installCommittedLayer(layout, compressed, true)
+	if err != nil {
+		return nil, err
+	}
+	rootLayers = append(rootLayers, root)
+
+	return rootLayers, nil
+}

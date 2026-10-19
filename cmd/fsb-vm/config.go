@@ -116,4 +116,6 @@ func init() {
 	rootCmd.AddCommand(newListCommand())
 	rootCmd.AddCommand(newDeleteCommand())
 	rootCmd.AddCommand(newBuildCommand())
+	rootCmd.AddCommand(newPushCommand())
+	rootCmd.AddCommand(newPackCommand())
 }

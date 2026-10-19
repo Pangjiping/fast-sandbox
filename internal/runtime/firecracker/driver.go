@@ -459,6 +459,9 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if err := verifyRestorableImage(stateRoot, restoreRef); err != nil {
 		return nil, err
 	}
+	if err := validateOCIResumeOwner(stateRoot, restoreRef, config); err != nil {
+		return nil, err
+	}
 
 	directory, err := ensureSandboxDir(stateRoot, identity.SandboxUID)
 	if err != nil {
@@ -535,7 +538,25 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
-	vmstatePath, memoryPath, err := resolveRestoreSnapshotFiles(stateRoot, restoreRef)
+	pair, pairErr := ociPair(stateRoot, restoreRef)
+	var ociRootfs, vmstatePath, memoryPath string
+	err = pairErr
+	ociAttached := false
+	createdComplete := false
+	defer func() {
+		if ociAttached && !createdComplete {
+			d.removeJailRoot(identity.SandboxUID)
+			if releaseErr := d.releaseOCI(context.Background(), identity.SandboxUID); releaseErr != nil {
+				resultErr = errors.Join(resultErr, releaseErr)
+			}
+		}
+	}()
+	if err == nil && pair != nil {
+		ociRootfs, vmstatePath, memoryPath, err = d.attachOCI(ctx, identity.SandboxUID, restoreRef)
+		ociAttached = err == nil
+	} else if err == nil {
+		vmstatePath, memoryPath, err = resolveRestoreSnapshotFiles(stateRoot, restoreRef)
+	}
 	// The machine tuple of the golden snapshot is baked in the vmstate
 	// (v1.16 restores it from the snapshot); the manifest values are only
 	// validated here, not applied via the API (any machine-config call
@@ -551,9 +572,13 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	}
 	var instanceRootfs, jailRoot, apiAddress string
 	if err == nil {
-		instanceRootfs, jailRoot, apiAddress, err = d.prepareInstance(
-			stateRoot, identity.SandboxUID, restoreRef, directory, vmstatePath, memoryPath,
-		)
+		if pair != nil {
+			instanceRootfs, jailRoot, apiAddress, err = d.prepareOCIInstance(identity.SandboxUID, directory, ociRootfs, vmstatePath, memoryPath)
+		} else {
+			instanceRootfs, jailRoot, apiAddress, err = d.prepareInstance(
+				stateRoot, identity.SandboxUID, restoreRef, directory, vmstatePath, memoryPath,
+			)
+		}
 	}
 	observability.End(rootfsSpan, err)
 	if err != nil {
@@ -564,7 +589,6 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	// directories created above: every failure between here and the
 	// successful return removes them (the VMM is killed on each failure
 	// path before this defer runs, which removeJailRoot requires).
-	createdComplete := false
 	defer func() {
 		if createdComplete {
 			return
@@ -798,7 +822,8 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 	state, err := loadState(directory)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			d.removeJailRoot(sandboxID)
+			return d.releaseOCI(ctx, sandboxID)
 		}
 		return err
 	}
@@ -825,6 +850,9 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 	d.releaseAgentSandbox(ctx, sandboxID, state.Config.Spec.Image)
 	d.removeJailRoot(sandboxID)
 	d.ensureResidualProcessAbsent(ctx, sandboxID)
+	if err := d.releaseOCI(ctx, sandboxID); err != nil {
+		return err
+	}
 	if removeErr := removeSandboxDir(directory); removeErr != nil {
 		klog.ErrorS(removeErr, "Failed to remove sandbox state directory", "sandboxID", sandboxID)
 	}
@@ -887,6 +915,9 @@ func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 			}
 			d.killAndForget(state.Config.Identity.SandboxUID, state.PID)
 			d.removeJailRoot(state.Config.Identity.SandboxUID)
+			if err := d.releaseOCI(ctx, state.Config.Identity.SandboxUID); err != nil {
+				return err
+			}
 			if removeErr := removeSandboxDir(directory); removeErr != nil {
 				klog.ErrorS(removeErr, "Firecracker recovery failed to remove the sandbox state directory", "stateDirectory", directory)
 			}
@@ -1145,6 +1176,9 @@ func (d *Driver) removeJailRoot(sandboxID string) {
 	// otherwise descend into the SHARED spill root and delete other
 	// sandboxes' dumps.
 	_ = unmountPath(filepath.Join(root, jailerSpillDirName))
+	for _, target := range []string{"rootfs.dev", filepath.Join(jailerChrootSnapshotsDir, vmstateSnapshotName), filepath.Join(jailerChrootSnapshotsDir, memorySnapshotName)} {
+		_ = unmountPath(filepath.Join(root, target))
+	}
 	if err := os.RemoveAll(filepath.Dir(root)); err != nil {
 		klog.V(2).InfoS("remove firecracker jail root failed", "sandboxID", sandboxID, "err", err)
 	}
@@ -1339,6 +1373,9 @@ func (d *Driver) cleanupStale(ctx context.Context, directory string, state *Sand
 		}
 	}
 	d.removeJailRoot(sandboxUID)
+	if err := d.releaseOCI(ctx, sandboxUID); err != nil {
+		return err
+	}
 	return removeSandboxDir(directory)
 }
 

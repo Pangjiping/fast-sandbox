@@ -19,6 +19,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
@@ -26,6 +27,7 @@ import (
 	"fast-sandbox/internal/artifacts"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	fastletnetwork "fast-sandbox/internal/fastlet/network"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
@@ -46,6 +48,12 @@ func restoreReference(spec fastletapi.SandboxSpec) (string, error) {
 	}
 	if spec.Restore.ManifestRef == "" || spec.Restore.ArtifactDigest == "" {
 		return "", fmt.Errorf("%w: restore requires manifestRef and artifactDigest", ErrInvalidConfig)
+	}
+	if strings.HasPrefix(spec.Restore.ManifestRef, ocitemplate.Prefix) {
+		if err := ocitemplate.ValidateDigestReference(spec.Restore.ManifestRef, spec.Restore.ArtifactDigest); err != nil {
+			return "", fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+		}
+		return spec.Restore.ManifestRef, nil
 	}
 	return artifacts.CheckpointReference(spec.Restore.ArtifactDigest), nil
 }

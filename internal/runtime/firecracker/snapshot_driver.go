@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"fast-sandbox/internal/artifacts"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
@@ -117,6 +118,10 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	}
 	d.mu.RUnlock()
 	plan.sandboxDir = filepath.Join(plan.stateRoot, sandboxStateDir, plan.sandboxID)
+	ociCheckpoint, err := prepareOCICheckpoint(plan, kind)
+	if err != nil {
+		return nil, err
+	}
 	plan.staging = filepath.Join(plan.stateRoot, snapshotStagingDir, plan.snapshotID)
 	if err := os.RemoveAll(plan.staging); err != nil {
 		return nil, fmt.Errorf("clear stale snapshot staging %s: %w", plan.staging, err)
@@ -177,6 +182,9 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind,
 		"sizeBytes", sizeBytes, "staging", plan.staging)
 
+	if ociCheckpoint {
+		return d.publishOCICheckpoint(ctx, plan, sizeBytes, input.OnPublishing)
+	}
 	client, err := d.agentClientOrNil()
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
@@ -384,12 +392,34 @@ func (d *Driver) dumpFootprintBytes(plan dumpPlan) (int64, error) {
 	if plan.jailed {
 		rootfs = filepath.Join(plan.jailRoot(), rootfsImageName)
 	}
+	if source, e := restoreReference(state.Config.Spec); e == nil && strings.HasPrefix(source, "oci://") {
+		rootfs = filepath.Join(filepath.Dir(rootfs), "rootfs.dev")
+	}
 	info, err := d.stat(rootfs)
 	if err != nil {
 		return 0, err
 	}
+	rootBytes := info.Size()
+	if source, e := restoreReference(state.Config.Spec); e == nil && strings.HasPrefix(source, "oci://") {
+		// Frozen upper extents, snapfiles and compressed output are staged;
+		// remote parent data is never materialized in local scratch space.
+		home := filepath.Join(plan.stateRoot, "oci/sandboxes", plan.sandboxID, "upper")
+		var upperBytes int64
+		for _, name := range []string{"writable_data", "writable_index"} {
+			info, e := os.Stat(filepath.Join(home, name))
+			if e != nil {
+				return 0, e
+			}
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+				upperBytes += stat.Blocks * 512
+			} else {
+				upperBytes += info.Size()
+			}
+		}
+		return 3*(upperBytes+(int64(mib)<<20)) + (512 << 20), nil
+	}
 	// vmstate is small; the margin covers filesystem overhead.
-	return info.Size() + int64(mib)<<20 + (64 << 20) + int64(mib)<<20/8, nil
+	return rootBytes + int64(mib)<<20 + (64 << 20) + int64(mib)<<20/8, nil
 }
 
 // stagingFree reports the free bytes of the filesystem holding the
@@ -485,7 +515,7 @@ func (d *Driver) spillDirFor(snapshotID, memoryQuantity string) string {
 // window pays the spill area's bandwidth (tmpfs/local NVMe) instead of the
 // StateRoot filesystem. The Sandbox keeps running on every failure path,
 // with a failed resume joined after (and never masking) the dump error.
-func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error { //nolint:gocognit // pre-existing pause/dump/resume window; refactor tracked separately
+func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error { //nolint:gocognit,maintidx // pre-existing pause/dump/resume window; refactor tracked separately
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
 
@@ -556,6 +586,14 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		}
 	}
 
+	sourceRef, err := restoreReference(state.Config.Spec)
+	if err != nil {
+		return err
+	}
+	ociRoot := strings.HasPrefix(sourceRef, "oci://")
+	if ociRoot {
+		rootfs = filepath.Join(filepath.Dir(rootfs), "rootfs.dev")
+	}
 	cleanupSpill := func() {
 		if !plan.spilled {
 			return
@@ -573,8 +611,10 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 	stagedRootfs := filepath.Join(plan.staging, publishedRootfsName)
 	rootfsCloned := false
 	reflinkStarted := time.Now()
-	if err := reflinkOnly(rootfs, stagedRootfs); err == nil {
-		rootfsCloned = true
+	if !ociRoot {
+		if err := reflinkOnly(rootfs, stagedRootfs); err == nil {
+			rootfsCloned = true
+		}
 	}
 	plan.rootfsClone = time.Since(reflinkStarted)
 
@@ -591,7 +631,7 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "spilled", plan.spilled,
 		"rootfsCloned", rootfsCloned)
 	dumpErr := func() error {
-		if !rootfsCloned {
+		if !rootfsCloned && !ociRoot {
 			copyStarted := time.Now()
 			if err := copyReflinkOrCopy(rootfs, stagedRootfs); err != nil {
 				return fmt.Errorf("copy instance rootfs: %w", err)
@@ -607,6 +647,13 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		plan.dumpAPI = time.Since(dumpStarted)
 		if err != nil {
 			return fmt.Errorf("create Firecracker snapshot: %w", err)
+		}
+		if ociRoot {
+			copyStarted := time.Now()
+			if err := captureOCIUpper(plan.stateRoot, plan.sandboxID, plan.staging); err != nil {
+				return fmt.Errorf("freeze OverlayBD private upper: %w", err)
+			}
+			plan.rootfsCopy = time.Since(copyStarted)
 		}
 		return nil
 	}()
@@ -1082,6 +1129,13 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 	if err != nil {
 		return 0, err
 	}
+	var incrementalRootBytes int64
+	if upper, err := ocitemplate.ReadRootfsUpper(staging); err == nil {
+		incrementalRootBytes = upper.VirtualSizeBytes
+		bundleFiles = bundleFiles[1:] // OCI carries rootfs separately from snapfiles.
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
 
 	cache := map[string]string{}
 	files := map[string]any{}
@@ -1099,6 +1153,10 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 			}
 		}
 	}
+	if incrementalRootBytes > 0 {
+		rootfsSize = incrementalRootBytes
+		sizeBytes += incrementalRootBytes
+	}
 	if err := artifacts.WriteSHA256SUMS(staging, bundleFiles, cache); err != nil {
 		return 0, err
 	}
@@ -1115,6 +1173,7 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 	}
 	lineage["image"] = state.Config.Spec.Image
 	// compatibility rides forward untouched — see assembleSnapshotManifest.
+	delete(document, "oci")
 	document["files"] = files
 	// machine.rootfs reflects this dump's actual rootfs size; vcpu/memory
 	// ride forward from the source manifest untouched.

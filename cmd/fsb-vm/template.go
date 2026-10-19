@@ -17,6 +17,8 @@ type templateFile struct {
 // templateRef identifies the remote template: repo + template_id name the
 // image pair, and auth carries the registry credential.
 type templateRef struct {
+	Rootfs     string       `json:"rootfs,omitempty"`
+	Snapfiles  string       `json:"snapfiles,omitempty"`
 	Repo       string       `json:"repo"`
 	TemplateID string       `json:"template_id"`
 	Auth       templateAuth `json:"auth"`
@@ -33,12 +35,18 @@ type templateAuth struct {
 // rootfsRef returns the overlaybd rootfs image reference
 // (${repo}:${template_id}_rootfs).
 func (t templateFile) rootfsRef() string {
+	if t.Template.Rootfs != "" {
+		return t.Template.Rootfs
+	}
 	return fmt.Sprintf("%s:%s_rootfs", t.Template.Repo, t.Template.TemplateID)
 }
 
 // snapfilesRef returns the overlaybd snapfiles image reference
 // (${repo}:${template_id}_snapfiles).
 func (t templateFile) snapfilesRef() string {
+	if t.Template.Snapfiles != "" {
+		return t.Template.Snapfiles
+	}
 	return fmt.Sprintf("%s:%s_snapfiles", t.Template.Repo, t.Template.TemplateID)
 }
 
@@ -64,6 +72,9 @@ func loadTemplate(path string) (templateFile, error) {
 	// The id names directories under the state and runtime roots.
 	if err := validateSandboxID(template.SandboxID); err != nil {
 		return templateFile{}, fmt.Errorf("template %s: %w", path, err)
+	}
+	if template.Template.Rootfs != "" && template.Template.Snapfiles != "" {
+		return template, nil
 	}
 	if strings.TrimSpace(template.Template.Repo) == "" {
 		return templateFile{}, fmt.Errorf("template %s: template.repo is required", path)

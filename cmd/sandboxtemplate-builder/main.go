@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -86,6 +87,13 @@ func run(ctx context.Context) error {
 	spec, workdir, err := loadSpecAndWorkdir()
 	if err != nil {
 		return err
+	}
+	if strings.HasPrefix(spec.Output.Publish, "oci://") {
+		kernel, err := resolveKernel(spec.Kernel)
+		if err != nil {
+			return err
+		}
+		return buildOCITemplate(ctx, spec, workdir, kernel)
 	}
 	credentials, err := loadPublishCredentials(os.Getenv(publishCredentialsDirEnv))
 	if err != nil {

@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+
+	"fast-sandbox/internal/ocitemplate"
 )
 
 // manifestFile describes one published artifact.
@@ -19,6 +21,7 @@ type manifestFile struct {
 // manifest is the consumer-side view of manifest.json; only the file list
 // is needed by the pull layer.
 type manifest struct {
+	OCI   *ocitemplate.Pair       `json:"oci,omitempty"`
 	Files map[string]manifestFile `json:"files"`
 }
 
@@ -27,6 +30,12 @@ func parseManifest(payload []byte) (manifest, error) {
 	var document manifest
 	if err := json.Unmarshal(payload, &document); err != nil {
 		return manifest{}, fmt.Errorf("decode manifest: %w", err)
+	}
+	if document.OCI != nil {
+		if _, err := ocitemplate.Decode(payload); err != nil {
+			return manifest{}, err
+		}
+		return document, nil
 	}
 	if len(document.Files) == 0 {
 		return manifest{}, fmt.Errorf("manifest has no files")
