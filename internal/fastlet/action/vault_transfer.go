@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 
+	"k8s.io/klog/v2"
+
 	actionapi "fast-sandbox/internal/protocol/action"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
@@ -89,6 +91,21 @@ func (m *Manager) invokeVaultTransfer(ctx context.Context, operation actionapi.O
 	invocation, err := m.vaultInvocation(ctx, operation, name, sandboxUID, bundlePath)
 	if err != nil {
 		return err
+	}
+	// Capability probe before the invocation: a Handler without vault
+	// transfer (older build predating the vault operations, or a build
+	// without vault persistence configured) must not fail the checkpoint —
+	// skipping is the pre-transfer semantics, and the resumed subject's
+	// vault is then absent (fail-closed, observable). An unreachable
+	// Handler is NOT a capability answer: the probe failure fails the
+	// checkpoint so the egress-local vault survives for the retry.
+	status, err := m.caller.Status(ctx, handler.TargetHTTPPort)
+	if err != nil {
+		return fmt.Errorf("%s vault transfer capability probe for Sandbox %s: %w", operation, sandboxUID, err)
+	}
+	if !status.VaultTransfer {
+		klog.Infof("vault transfer skipped: Action Handler %s carries no vault state (vaultTransfer=false); proceeding without the vault", name)
+		return nil
 	}
 	if err := m.caller.Invoke(ctx, handler.TargetHTTPPort, invocation); err != nil {
 		return fmt.Errorf("%s vault transfer for Sandbox %s: %w", operation, sandboxUID, err)

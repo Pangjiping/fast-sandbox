@@ -32,16 +32,17 @@ type recordedRelay struct {
 }
 
 type fakeCaller struct {
-	mu          sync.Mutex
-	instanceID  string
-	statusErr   error
-	requests    []recordedRequest
-	fail        map[actionapi.Operation]int
-	statusCall  atomic.Int32
-	relayCalls  []recordedRelay
-	relayStatus int
-	relayBody   []byte
-	relayErr    error
+	mu            sync.Mutex
+	instanceID    string
+	vaultTransfer bool
+	statusErr     error
+	requests      []recordedRequest
+	fail          map[actionapi.Operation]int
+	statusCall    atomic.Int32
+	relayCalls    []recordedRelay
+	relayStatus   int
+	relayBody     []byte
+	relayErr      error
 }
 
 func (f *fakeCaller) Status(context.Context, int32) (actionapi.HandlerStatus, error) {
@@ -51,7 +52,10 @@ func (f *fakeCaller) Status(context.Context, int32) (actionapi.HandlerStatus, er
 	if f.statusErr != nil {
 		return actionapi.HandlerStatus{}, f.statusErr
 	}
-	return actionapi.HandlerStatus{APIVersion: actionapi.APIVersion, Ready: true, InstanceID: f.instanceID}, nil
+	return actionapi.HandlerStatus{
+		APIVersion: actionapi.APIVersion, Ready: true, InstanceID: f.instanceID,
+		VaultTransfer: f.vaultTransfer,
+	}, nil
 }
 
 func (f *fakeCaller) Invoke(_ context.Context, port int32, request actionapi.Request) error {
