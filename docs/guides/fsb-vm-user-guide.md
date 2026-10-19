@@ -286,6 +286,11 @@ sudo "$FSB_VM" --plain-http build ...
 删除 `.manifest-cache/` 可清除本地 manifest 缓存。它与 OverlayBD 数据块缓存独立：
 每个 sandbox 仍创建独立的可写层和设备，未缓存的数据块仍由 OverlayBD 按需读取。
 
+FastPath 在带 ActionHandlers 的 Pool 中还会读取模板记录的策略。对于不可变 SHA256
+引用，策略读取结果（包括空结果）缓存在控制面进程中，按 Pool 身份和已编译的仓库
+凭据版本隔离，不因 TTL 到期重复回源。每次查询仍检查当前凭据配置；凭据变更或
+Pool 重建会失效，读取失败不会缓存。可变 tag 保持每次回源，控制面重启后重新填充缓存。
+
 ### 4.4 磁盘大小
 
 rootfs 默认是 20 GiB，可指定其他正整数 GiB：

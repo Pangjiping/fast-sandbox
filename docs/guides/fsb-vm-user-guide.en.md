@@ -289,6 +289,14 @@ platform selection flow. Remove `.manifest-cache/` to clear cached manifests.
 This is separate from OverlayBD's block cache: each sandbox still gets its own
 writable upper and devices, and uncached blocks are read on demand by OverlayBD.
 
+FastPath also reads template-recorded policies for Pools with ActionHandlers.
+For immutable SHA256 references, policy results (including empty results) are
+cached in the control-plane process, scoped to Pool identity and compiled
+registry credential revision, without TTL refreshes. Every lookup still checks
+the current credentials; credential changes or Pool recreation invalidate the
+cache. Failed reads are not cached. Mutable tags are resolved remotely on every
+lookup, and a control-plane restart starts with an empty cache.
+
 ### 4.4 Disk size
 
 The default rootfs size is 20 GiB. Specify another positive integer GiB value with:
