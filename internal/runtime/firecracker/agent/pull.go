@@ -27,9 +27,8 @@ import (
 // the node-local cache. With a P2P peer gateway (WithPeerGateway) artifact
 // bytes route through it, falling back to direct header-signed S3.
 type Client struct {
-	s3             *s3Client
-	ociProvider    registryconfig.Provider
-	ociCredentials []registryconfig.Credential
+	s3          *s3Client
+	ociProvider registryconfig.Provider
 	// peer is the P2P peer gateway; nil keeps pulls on the direct path.
 	peer *peerGateway
 }
@@ -55,7 +54,7 @@ func NewClient(storeRoot string, credential registryconfig.Credential, options .
 	if err != nil {
 		return nil, err
 	}
-	client := &Client{s3: s3, ociCredentials: config.ociCredentials, ociProvider: config.ociProvider}
+	client := &Client{s3: s3, ociProvider: config.ociProvider}
 	if config.peerBase != "" {
 		httpClient := config.httpClient
 		if httpClient == nil {
@@ -75,7 +74,6 @@ type Option func(*optionsConfig)
 
 type optionsConfig struct {
 	ociProvider     registryconfig.Provider
-	ociCredentials  []registryconfig.Credential
 	region          string
 	endpoint        string
 	httpClient      *http.Client

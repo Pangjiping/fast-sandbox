@@ -126,11 +126,7 @@ func Resolve(ctx context.Context, reference string, credentials CredentialFunc) 
 		if pairRef.Registry != ref.Registry || pairRef.Repository != ref.Repository {
 			return nil, fmt.Errorf("template pair must stay in the template repository")
 		}
-		pairRepo, _, e := Repository(value, credentials)
-		if e != nil {
-			return nil, e
-		}
-		if _, e = pairRepo.Resolve(ctx, pairRef.Reference); e != nil {
+		if _, e = repo.Resolve(ctx, pairRef.Reference); e != nil {
 			return nil, e
 		}
 	}

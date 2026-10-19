@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	infracontract "fast-sandbox/internal/infra/contract"
 	"fast-sandbox/internal/nodecleanup"
 	"fast-sandbox/internal/observability"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
@@ -538,9 +540,8 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
-	pair, pairErr := ociPair(stateRoot, restoreRef)
+	isOCI := strings.HasPrefix(restoreRef, ocitemplate.Prefix)
 	var ociRootfs, vmstatePath, memoryPath string
-	err = pairErr
 	ociAttached := false
 	createdComplete := false
 	defer func() {
@@ -551,10 +552,10 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			}
 		}
 	}()
-	if err == nil && pair != nil {
+	if isOCI {
 		ociRootfs, vmstatePath, memoryPath, err = d.attachOCI(ctx, identity.SandboxUID, restoreRef)
 		ociAttached = err == nil
-	} else if err == nil {
+	} else {
 		vmstatePath, memoryPath, err = resolveRestoreSnapshotFiles(stateRoot, restoreRef)
 	}
 	// The machine tuple of the golden snapshot is baked in the vmstate
@@ -572,7 +573,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	}
 	var instanceRootfs, jailRoot, apiAddress string
 	if err == nil {
-		if pair != nil {
+		if isOCI {
 			instanceRootfs, jailRoot, apiAddress, err = d.prepareOCIInstance(identity.SandboxUID, directory, ociRootfs, vmstatePath, memoryPath)
 		} else {
 			instanceRootfs, jailRoot, apiAddress, err = d.prepareInstance(
@@ -617,7 +618,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		infraCtx, infraSpan := observability.Start(ctx, "fastlet.firecracker.infra")
 		instance, prepareErr := d.prepareInfra(infraCtx, config)
 		if prepareErr == nil {
-			prepareErr = deliverGuestInfra(infraCtx, d.runner, instanceRootfs, instance, pair != nil)
+			prepareErr = deliverGuestInfra(infraCtx, d.runner, instanceRootfs, instance, isOCI)
 		}
 		observability.End(infraSpan, prepareErr)
 		if prepareErr != nil {

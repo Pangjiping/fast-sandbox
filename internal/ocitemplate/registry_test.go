@@ -3,6 +3,7 @@ package ocitemplate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -123,4 +124,82 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	require.NoError(t, err)
 	_, err = repo.Resolve(context.Background(), parsed.Reference)
 	require.Error(t, err)
+}
+
+// The pair is constrained to the metadata repository, so its descriptor checks
+// must share the metadata client's bearer token while still checking both refs.
+func TestResolveSharesRepositoryAuthAndValidatesPair(t *testing.T) {
+	for _, mode := range []string{"valid", "missing-rootfs", "missing-snapfiles", "cross-repository", "cross-host"} {
+		t.Run(mode, func(t *testing.T) {
+			var tokens atomic.Int32
+			documents := map[string][]byte{}
+			heads := map[string]int{}
+			var server *httptest.Server
+			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					tokens.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"token":"test-token","expires_in":300}`))
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer test-token" {
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="registry",scope="repository:team/template:pull"`, server.URL))
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				raw, ok := documents[r.URL.Path]
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", oci.MediaTypeImageManifest)
+				w.Header().Set("Content-Length", fmt.Sprint(len(raw)))
+				w.Header().Set("Docker-Content-Digest", digest.FromBytes(raw).String())
+				if r.Method == http.MethodHead {
+					heads[r.URL.Path]++
+					return
+				}
+				_, _ = w.Write(raw)
+			}))
+			defer server.Close()
+			old := retry.DefaultClient
+			retry.DefaultClient = server.Client()
+			defer func() { retry.DefaultClient = old }()
+			repo := strings.TrimPrefix(server.URL, "https://") + "/team/template"
+			root, snap := []byte(`{"schemaVersion":2,"annotations":{"kind":"rootfs"}}`), []byte(`{"schemaVersion":2,"annotations":{"kind":"snapfiles"}}`)
+			rootSum, snapSum := digest.FromBytes(root).String(), digest.FromBytes(snap).String()
+			pair := Pair{Rootfs: repo + "@" + rootSum, Snapfiles: repo + "@" + snapSum}
+			switch mode {
+			case "cross-repository":
+				pair.Rootfs = strings.Replace(pair.Rootfs, "/team/template", "/other/template", 1)
+			case "cross-host":
+				pair.Rootfs = "other.example/team/template@" + rootSum
+			}
+			cfg, err := json.Marshal(map[string]any{"oci": pair})
+			require.NoError(t, err)
+			config := content.NewDescriptorFromBytes(ConfigMediaType, cfg)
+			top, err := json.Marshal(oci.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: oci.MediaTypeImageManifest, Config: config})
+			require.NoError(t, err)
+			topSum := digest.FromBytes(top).String()
+			documents["/v2/team/template/manifests/"+topSum] = top
+			documents["/v2/team/template/blobs/"+config.Digest.String()] = cfg
+			rootPath, snapPath := "/v2/team/template/manifests/"+rootSum, "/v2/team/template/manifests/"+snapSum
+			if mode != "missing-rootfs" {
+				documents[rootPath] = root
+			}
+			if mode != "missing-snapfiles" {
+				documents[snapPath] = snap
+			}
+			got, err := Resolve(context.Background(), repo+"@"+topSum, nil)
+			if mode == "valid" {
+				require.NoError(t, err)
+				require.JSONEq(t, string(cfg), string(got))
+				require.EqualValues(t, 1, tokens.Load(), "metadata and both pair checks must share one token cache")
+				require.Equal(t, 1, heads[rootPath])
+				require.Equal(t, 1, heads[snapPath])
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
 }

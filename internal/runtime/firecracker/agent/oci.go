@@ -12,34 +12,19 @@ import (
 	"fast-sandbox/internal/registryconfig"
 )
 
-// WithOCICredentials supplies the pool's compiled registry rules to control
-// plane metadata reads. Node agents use the mounted live registry provider.
+// WithOCIProvider supplies the node's live registry credentials.
 func WithOCIProvider(provider registryconfig.Provider) Option {
 	return func(c *optionsConfig) { c.ociProvider = provider }
-}
-func WithOCICredentials(credentials []registryconfig.Credential) Option {
-	return func(c *optionsConfig) { c.ociCredentials = credentials }
-}
-func RegistryCredentials(provider registryconfig.Provider) ocitemplate.CredentialFunc {
-	return func(_ context.Context, reference string) (auth.Credential, error) {
-		value, _, err := provider.Credentials(reference)
-		return auth.Credential{Username: value.Username, Password: value.Password, RefreshToken: value.IdentityToken}, err
-	}
 }
 func (c *Client) readOCI(ctx context.Context, image string) ([]byte, error) {
 	provider := c.ociProvider
 	if provider == nil {
 		provider = registryconfig.NewFileProvider(registryconfig.MountPath)
 	}
-	credentials := RegistryCredentials(provider)
-	if c.ociCredentials != nil {
-		compiled, _ := registryconfig.NewCompiled(c.ociCredentials)
-		credentials = func(_ context.Context, reference string) (auth.Credential, error) {
-			v, _ := compiled.Match(reference)
-			return auth.Credential{Username: v.Username, Password: v.Password, RefreshToken: v.IdentityToken}, nil
-		}
-	}
-	return ocitemplate.Resolve(ctx, image, credentials)
+	return ocitemplate.Resolve(ctx, image, func(_ context.Context, reference string) (auth.Credential, error) {
+		value, _, err := provider.Credentials(reference)
+		return auth.Credential{Username: value.Username, Password: value.Password, RefreshToken: value.IdentityToken}, err
+	})
 }
 
 var ociPullLocks [256]sync.Mutex
@@ -65,7 +50,4 @@ func (c *Client) pullOCI(ctx context.Context, stateRoot, image string) error {
 // PullOCIImage is independent of the optional native object-store configuration.
 func PullOCIImage(ctx context.Context, stateRoot, image string, provider registryconfig.Provider) error {
 	return (&Client{ociProvider: provider}).pullOCI(ctx, stateRoot, image)
-}
-func ReadOCIImage(ctx context.Context, image string, credentials []registryconfig.Credential) ([]byte, error) {
-	return (&Client{ociCredentials: credentials}).readOCI(ctx, image)
 }
