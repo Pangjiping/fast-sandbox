@@ -76,6 +76,14 @@ spec:
         volumeMounts:
         - name: egress-policy
           mountPath: /var/lib/opensandbox-egress/policy
+        # State bundle handoff (vault/policy export-import): the transfer
+        # envelope carries the driver's staging path under the runtime state
+        # root — mount the same runtime-injected volume so the path resolves
+        # in this container (the pool controller owns the `firecracker-state`
+        # hostPath; without it POLICY_EXPORT fails "validate-directory: no
+        # such file or directory").
+        - name: firecracker-state
+          mountPath: /var/lib/fast-sandbox/firecracker
         # Egress installs nft/iptables rules (DNS redirect + per-subject
         # sets) and marks sockets; NET_ADMIN covers nft/iptables/SO_MARK,
         # NET_RAW covers the raw sockets used for DNS response spoofing.
