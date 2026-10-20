@@ -43,6 +43,10 @@ spec:
           value: "true"
 ```
 
+Firecracker Fastlets persist OverlayBD data caches under the node's `<stateRoot>/overlaybd-cache/<poolUID>/<podName>/`. The Controller mounts the Pool's parent directory with `hostPath: DirectoryOrCreate` and selects `$(POD_NAME)` using `subPathExpr`, so each Pod mounts only its own subdirectory at `/opt/overlaybd/registry_cache`. The default `stateRoot` is `/var/lib/fast-sandbox/firecracker`; overriding the runtime environment's `stateRoot` relocates the cache as well. Concurrent Fastlet Pods use separate cache directories, with no numbered-directory allocator or additional entrypoint locks.
+
+Cache contents survive container restarts within the same Pod on the same node. A replacement Pod gets a new name and starts with a new cache. Old Pod directories remain on disk and need node-level garbage collection after their owners have exited. `cacheSizeGB: 4` limits each daemon's registry block cache, rather than imposing a node-wide quota. The same Pod directory also contains the gzip cache when enabled; gzip caching remains disabled by default. These caches are separate from fsb-vm's manifest and checkpoint state. Builders retain their temporary Pod-local cache.
+
 The examples below assume a Pool named `firecracker-pool` in namespace `fast-sandbox`, with a per-Sandbox profile of 1 CPU and 512Mi memory.
 
 ## 2. Configure registry credentials

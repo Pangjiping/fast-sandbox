@@ -91,6 +91,7 @@ func builtinProfiles() map[apiv1alpha2.RuntimeName]RuntimeProfile {
 						{Name: "firecracker-bin", HostPath: firecrackerBinaryPath, MountPath: firecrackerBinaryPath, Type: corev1.HostPathFile, ReadOnly: true},
 						{Name: "firecracker-rootfs", HostPath: firecrackerRootfsDir, MountPath: firecrackerRootfsDir, Type: corev1.HostPathDirectoryOrCreate},
 						{Name: "firecracker-state", HostPath: firecrackerStateRootDir, MountPath: firecrackerStateRootDir, Type: corev1.HostPathDirectoryOrCreate},
+						{Name: "firecracker-overlaybd-cache", HostPath: firecrackerStateRootDir + "/overlaybd-cache", MountPath: "/opt/overlaybd/registry_cache", Type: corev1.HostPathDirectoryOrCreate},
 					}, linuxNetworkPaths...),
 				},
 				// The on-demand loading chain is implemented and E2E-verified
