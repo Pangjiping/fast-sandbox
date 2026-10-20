@@ -281,14 +281,8 @@ func (c *Client) materializeSet(ctx context.Context, dir, manifestKey, artifactD
 	// recorded policy) materialize next to the snapshot files so the restore
 	// path can hand them to egress. A malformed entry fails the pull like
 	// any native artifact.
-	for _, bundle := range []struct {
-		name string
-		file func() (nativeFile, bool, error)
-	}{
-		{publishVaultName, document.vaultFile},
-		{publishPolicyName, document.policyFile},
-	} {
-		file, ok, err := bundle.file()
+	for _, bundleFile := range []func() (nativeFile, bool, error){document.vaultFile, document.policyFile} {
+		file, ok, err := bundleFile()
 		if err != nil {
 			return err
 		}

@@ -163,7 +163,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 
-	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, input.ActionBindings)
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, input.ActionBindings, d.policyBindingHandlerOf())
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
 		return nil, err
@@ -661,22 +661,14 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 	return nil
 }
 
-// vaultBundleName is the staged vault file of a checkpoint bundle. It
-// carries the egress-owned vault of one sandbox instance; the egress re-stamps
-// its incarnation at restore import.
-const vaultBundleName = "vault.json"
-
-// policyBundleName is the staged recorded-policy file of a snapshot bundle
-// (checkpoint and template alike). It carries the egress-recorded network
-// policy of one sandbox; the egress re-stamps its incarnation at restore
-// import, and the dumped content doubles as the manifest's egress action
-// binding for the clone-create path.
-const policyBundleName = "policy.json"
-
-// policyBindingHandler is the Action Handler name the dump-recorded policy
-// binding addresses in the manifest: the conventional egress handler that
-// serves the policy surface (the same convention as the transfer handler).
-const policyBindingHandler = "egress"
+// vaultBundleName / policyBundleName are the staged state bundle files of a
+// snapshot set. The names are owned by the shared protocol package: the
+// publisher uploads and the pull layer materializes the same names, so a
+// rename anywhere must go through there.
+const (
+	vaultBundleName  = agentprotocol.VaultBundleName
+	policyBundleName = agentprotocol.PolicyBundleName
+)
 
 // stageCheckpointVault exports the subject's egress vault into the checkpoint
 // staging directory (no-op without a mover). The Handler copies the file
@@ -714,6 +706,27 @@ func (d *Driver) stageCheckpointPolicy(ctx context.Context, sandboxUID, staging 
 		return fmt.Errorf("export egress policy for the snapshot bundle: %w", err)
 	}
 	return nil
+}
+
+// policyBindingHandlerOf resolves the Pool-declared handler name the
+// dump-recorded policy binding must address in the manifest: the same
+// handler that serves the state transfers (StateHandlerName, implemented by
+// the Fastlet action manager). An unknown name ("") skips the binding track
+// rather than guessing — a hardcoded name the target Pool may not declare
+// would be dropped at clone-create, silently reverting the clone to the
+// stale bootstrap while the resume path keeps the relayed policy.
+func (d *Driver) policyBindingHandlerOf() string {
+	d.mu.RLock()
+	mover := d.stateMover
+	d.mu.RUnlock()
+	if mover == nil {
+		return ""
+	}
+	namer, ok := mover.(interface{ StateHandlerName() string })
+	if !ok {
+		return ""
+	}
+	return namer.StateHandlerName()
 }
 
 // maxVaultBundleBytes bounds the vault bundle file buffered for provenance
@@ -756,7 +769,7 @@ func (d *Driver) importRestoreVault(ctx context.Context, spec fastletapi.Sandbox
 	}
 
 	importRestoreBundle(ctx, importPlan{
-		mover: mover, sandboxUID: sandboxUID, kind: runtimecontract.StateKindVault,
+		sandboxUID: sandboxUID,
 		restoreRef: restoreRef, path: vaultPath, marker: marker, markerPresent: markerPresent,
 		maxBytes:         maxVaultBundleBytes,
 		subject:          "vault",
@@ -797,7 +810,7 @@ func (d *Driver) importRestorePolicy(ctx context.Context, spec fastletapi.Sandbo
 	}
 
 	importRestoreBundle(ctx, importPlan{
-		mover: mover, sandboxUID: sandboxUID, kind: runtimecontract.StateKindPolicy,
+		sandboxUID: sandboxUID,
 		restoreRef: restoreRef, path: policyPath, marker: marker, markerPresent: markerPresent,
 		maxBytes:         maxPolicyBundleBytes,
 		subject:          "policy",
@@ -812,9 +825,7 @@ func (d *Driver) importRestorePolicy(ctx context.Context, spec fastletapi.Sandbo
 // importPlan carries one restore-side state bundle delivery: the verified
 // hand-over of a manifest-provenanced bundle file to the mover.
 type importPlan struct {
-	mover         runtimecontract.StateMover
 	sandboxUID    string
-	kind          runtimecontract.StateKind
 	restoreRef    string
 	path          string
 	marker        *fileMarker
@@ -824,7 +835,8 @@ type importPlan struct {
 	// degrade names the observable consequence of a failed delivery.
 	subject string
 	degrade string
-	// importIt performs the handler hand-over once provenance holds.
+	// importIt performs the handler hand-over once provenance holds (the
+	// caller's closure captures the mover and the state kind).
 	importIt func() error
 	// sentinels mark the degradation cause in the log line.
 	sentinelMissing, sentinelUnlisted, sentinelMismatch error
@@ -949,11 +961,15 @@ func policyManifestMarker(bundleDir string) (*fileMarker, bool, error) {
 // validation describe this dump. Returns the total logical artifact size.
 // A staged vault bundle file joins files, SHA256SUMS, and the egressVault
 // manifest marker. A staged policy file is recorded dual-track: it joins
-// files + SHA256SUMS (the resume import source) AND its dumped content
-// becomes the manifest's egress action binding (the clone-create path),
-// authoritative over any CRD-compiled egress binding — relay policy
-// mutations are invisible to the CRD.
-func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindings []runtimecontract.SnapshotActionBinding) (int64, error) {
+// files + SHA256SUMS (the resume import source) AND — when policyHandler
+// names the transfer handler — its dumped content becomes the manifest's
+// egress action binding (the clone-create path), authoritative over any
+// CRD-compiled binding of the same handler — relay policy mutations are
+// invisible to the CRD. Unknown handler names skip the binding track (the
+// hardcoded guess could be undeclared by the target Pool); dumps over the
+// CRD binding-input bound skip it too (a recorded binding would fail every
+// clone-create's validation), keeping the files track for the resume.
+func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindings []runtimecontract.SnapshotActionBinding, policyHandler string) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
@@ -976,12 +992,12 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindi
 	// any other stat failure fails the assembly — a transient error here
 	// would otherwise produce a manifest that omits a staged file while the
 	// publish still uploads the orphaned bytes. The staged policy content is
-	// read NOW (driver-staged, not guest-written): it feeds the
+	// read stat-first NOW (driver-staged, not guest-written): it feeds the
 	// actionBindings track below.
-	policyStaged := false
-	var policyContent []byte
+	policyBindingInput := ""
+	policyBindingOK := false
 	for _, bundleName := range []string{vaultBundleName, policyBundleName} {
-		_, statErr := os.Stat(filepath.Join(staging, bundleName))
+		info, statErr := os.Stat(filepath.Join(staging, bundleName))
 		if errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
@@ -989,13 +1005,38 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindi
 			return 0, fmt.Errorf("stat staged %s: %w", bundleName, statErr)
 		}
 		bundleFiles = append(bundleFiles, bundleName)
-		if bundleName == policyBundleName {
-			policyStaged = true
-			policyContent, statErr = os.ReadFile(filepath.Join(staging, policyBundleName))
-			if statErr != nil {
-				return 0, fmt.Errorf("read staged %s: %w", policyBundleName, statErr)
-			}
+		if bundleName != policyBundleName {
+			continue
 		}
+		// Stat-first bound on the buffered content, mirroring the restore
+		// import: the egress caps recorded policy files well below this, so
+		// a larger file is corrupt and is never buffered.
+		if info.Size() > maxPolicyBundleBytes {
+			klog.ErrorS(errPolicyBundleMismatch, "staged policy file exceeds the bundle bound; publishing it unverified (files track only)",
+				"file", filepath.Join(staging, bundleName), "stagedBytes", info.Size(), "maxBytes", int64(maxPolicyBundleBytes))
+			continue
+		}
+		policyContent, statErr := os.ReadFile(filepath.Join(staging, policyBundleName))
+		if statErr != nil {
+			return 0, fmt.Errorf("read staged %s: %w", policyBundleName, statErr)
+		}
+		// Binding-track eligibility: the name must be resolvable (a guess
+		// could be undeclared by the target Pool and silently dropped at
+		// clone-create) and the content must fit the CRD's per-binding
+		// input bound. Either miss keeps the files track only — the resume
+		// import still carries the relayed policy.
+		if policyHandler == "" {
+			klog.InfoS("staged policy file not recorded as a manifest binding: the transfer handler name is unknown; the resume import still carries it",
+				"file", filepath.Join(staging, policyBundleName), "stagedBytes", info.Size())
+			continue
+		}
+		if len(policyContent) > runtimecontract.MaxPolicyBindingInputBytes {
+			klog.InfoS("staged policy file exceeds the CRD binding-input bound; not recorded as a manifest binding (the resume import still carries it)",
+				"file", filepath.Join(staging, policyBundleName), "stagedBytes", info.Size(),
+				"bindingInputBound", runtimecontract.MaxPolicyBindingInputBytes)
+			continue
+		}
+		policyBindingInput, policyBindingOK = string(policyContent), true
 	}
 
 	cache := map[string]string{}
@@ -1038,35 +1079,38 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindi
 	}
 	document["format"] = "native"
 	document["validation"] = map[string]any{"booted": true, "restored": false}
+	// The actionBindings and the egress vault marker describe THIS dump: a
+	// source checkpoint's inherited entries must never ride forward — stale
+	// bindings would publish the previous dump's policy (possibly
+	// relay-DELETEd since) as this snapshot's authoritative record, and a
+	// stale vault marker would claim vault state this bundle does not carry.
+	delete(document, "actionBindings")
+	delete(document, "egressVault")
 	// Durable policy provenance: the artifact set outlives the
 	// SandboxSnapshot CR (deleting the CR keeps the artifacts), so the
 	// source Sandbox's action bindings ride in the manifest itself.
 	// Optional field — every existing consumer (pull reads `files`,
 	// restore reads machine/guestNetwork) ignores it. A staged policy dump
-	// overrides the egress entry: the relayed record is authoritative over
-	// the CRD replay (the driver prefers the dump when it happened), while
-	// the remaining CRD bindings stay the graceful fallback for handlers
-	// that skipped the transfer.
-	if len(actionBindings) > 0 || policyStaged {
+	// overrides the binding of the transfer handler: the relayed record is
+	// authoritative over the CRD replay (the driver prefers the dump when
+	// it happened), while the remaining CRD bindings stay the graceful
+	// fallback for handlers that skipped the transfer.
+	if len(actionBindings) > 0 || policyBindingOK {
 		recorded := make([]map[string]string, 0, len(actionBindings)+1)
 		for _, binding := range actionBindings {
-			if policyStaged && binding.Handler == policyBindingHandler {
+			if policyBindingOK && binding.Handler == policyHandler {
 				continue
 			}
 			recorded = append(recorded, map[string]string{"handler": binding.Handler, "input": binding.Input})
 		}
-		if policyStaged {
-			recorded = append(recorded, map[string]string{"handler": policyBindingHandler, "input": string(policyContent)})
+		if policyBindingOK {
+			recorded = append(recorded, map[string]string{"handler": policyHandler, "input": policyBindingInput})
 		}
 		if len(recorded) > 0 {
 			document["actionBindings"] = recorded
 		}
 	}
-	// The egress vault marker describes THIS dump: a source checkpoint's
-	// inherited marker must never ride forward — it would claim vault state
-	// this bundle does not carry and publish the previous subject's vault
-	// fingerprint into shared, world-readable template manifests.
-	delete(document, "egressVault")
+	// The egress vault marker describes THIS dump (see the delete above).
 	if vaultEntry, ok := files[vaultBundleName]; ok {
 		document["egressVault"] = vaultEntry
 	}

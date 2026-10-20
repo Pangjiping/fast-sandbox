@@ -30,14 +30,15 @@ import (
 // uploaded in this order before the manifest.
 var publishArtifacts = []string{"rootfs.ext4", manifestVMStateName, manifestMemoryName}
 
-// publishVaultName is the optional vault bundle file of a checkpoint set:
-// uploaded when staged next to the manifest.
-const publishVaultName = "vault.json"
-
-// publishPolicyName is the optional recorded-policy bundle file of any
-// snapshot set (checkpoint or template): uploaded when staged next to the
-// manifest.
-const publishPolicyName = "policy.json"
+// publishVaultName / publishPolicyName are the optional state bundle files
+// of a snapshot set (checkpoint vault; recorded policy on checkpoint AND
+// template sets): uploaded when staged next to the manifest. The names are
+// owned by the shared protocol package — the driver stages and the pull
+// layer materializes the same bytes under the same names.
+const (
+	publishVaultName  = agentprotocol.VaultBundleName
+	publishPolicyName = agentprotocol.PolicyBundleName
+)
 
 // publishManifestName is the commit-point document of the artifact set.
 const publishManifestName = "manifest.json"

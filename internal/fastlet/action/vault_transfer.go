@@ -62,6 +62,15 @@ func VaultHandlerFromEnv() string {
 
 var _ runtimecontract.StateMover = (*Manager)(nil)
 
+// StateHandlerName reports the Pool-declared Action Handler that serves the
+// egress state transfer surfaces (vault and policy) — the name the driver
+// uses to address dump-recorded policy bindings in snapshot manifests. An
+// empty name means the transfers are disabled and the driver skips the
+// binding track.
+func (m *Manager) StateHandlerName() string {
+	return m.VaultHandler()
+}
+
 // ExportState copies the subject's state file of kind into the driver-provided
 // bundle target (the StateMover entry point the driver invokes per kind).
 func (m *Manager) ExportState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
@@ -136,6 +145,19 @@ func stateTransferCapable(status actionapi.HandlerStatus, operation actionapi.Op
 	}
 }
 
+// stateKindOfOperation names the state kind an operation pair belongs to
+// (log lines use it; unknown operations degrade to the operation string).
+func stateKindOfOperation(operation actionapi.Operation) string {
+	switch operation {
+	case actionapi.OperationVaultExport, actionapi.OperationVaultImport:
+		return string(runtimecontract.StateKindVault)
+	case actionapi.OperationPolicyExport, actionapi.OperationPolicyImport:
+		return string(runtimecontract.StateKindPolicy)
+	default:
+		return string(operation)
+	}
+}
+
 // invokeStateTransfer sends one state-transfer invocation on the actions
 // channel. Transfer is disabled (a silent no-op) without a configured
 // handler or when the Pool does not declare it; a Sandbox without a
@@ -166,7 +188,8 @@ func (m *Manager) invokeStateTransfer(ctx context.Context, operation actionapi.O
 		return fmt.Errorf("%s state transfer capability probe for Sandbox %s: %w", operation, sandboxUID, err)
 	}
 	if !stateTransferCapable(status, operation) {
-		klog.Infof("state transfer skipped: Action Handler %s carries no %s state (%s transfer not declared); proceeding without it", name, operation, operation)
+		klog.Infof("state transfer skipped: Action Handler %s carries no %s state (%s transfer not declared); proceeding without it",
+			name, stateKindOfOperation(operation), operation)
 		return nil
 	}
 	if err := m.caller.Invoke(ctx, handler.TargetHTTPPort, invocation); err != nil {

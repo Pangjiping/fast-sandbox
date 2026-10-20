@@ -3084,18 +3084,20 @@ test_egress_ip_denied() { # sandbox ip
 #
 # Requires opensandbox/egress:latest in local docker (like verify-snapshot /
 # verify-pause). Reuses the pause flow's image roll + egress pool staging;
-# PAUSE_SKIP_IMAGE_REBUILD (or POLICY_SKIP_IMAGE_REBUILD) skips the roll.
+# POLICY_SKIP_IMAGE_REBUILD (falls back to PAUSE_SKIP_IMAGE_REBUILD) skips
+# the roll.
 POLICY_SANDBOX="${POLICY_SANDBOX:-sandbox-policy-e2e}"
 POLICY_CLONE="${POLICY_CLONE:-sandbox-policy-clone}"
 POLICY_SNAPSHOT_NAME="${POLICY_SNAPSHOT_NAME:-e2e-policy-snapshot}"
 POLICY_TEMPLATE="${POLICY_TEMPLATE:-e2e-policy-snapshot}"
 POLICY_TIMEOUT_S="${POLICY_TIMEOUT_S:-900}"
-POLICY_SKIP_IMAGE_REBUILD="${POLICY_SKIP_IMAGE_REBUILD:-0}"
+# Falls back to PAUSE_SKIP_IMAGE_REBUILD so the documented
+# "PAUSE_SKIP_IMAGE_REBUILD=1 skips the image roll" keeps holding here.
+POLICY_SKIP_IMAGE_REBUILD="${POLICY_SKIP_IMAGE_REBUILD:-${PAUSE_SKIP_IMAGE_REBUILD:-0}}"
 POLICYCTL_BIN="$WORK/bin/policyctl"
 POLICY_E2E_DIR=""
 POLICY_CHECKPOINT_ID=""
 POLICY_CHECKPOINT_REF=""
-POLICY_RELAY_STATUS=""
 
 # write_policyctl_source emits the generated handler-relay helper (the
 # snapshotctl generation pattern: one per-run source under $GEN_DIR).
@@ -3130,13 +3132,13 @@ func dial(endpoint string) fastpathv2.FastPathServiceClient {
 }
 
 func main() {
-	if len(os.Args) < 7 || len(os.Args) > 8 || os.Args[1] != "invoke" {
+	if len(os.Args) < 8 || len(os.Args) > 9 || os.Args[1] != "invoke" {
 		fmt.Fprintln(os.Stderr, "usage: policyctl invoke <endpoint> <ns> <sandbox> <handler> <method> <path> [body-file]")
 		os.Exit(1)
 	}
 	var payload []byte
-	if len(os.Args) == 8 {
-		data, err := os.ReadFile(os.Args[7])
+	if len(os.Args) == 9 {
+		data, err := os.ReadFile(os.Args[8])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -3182,12 +3184,13 @@ policy_path() { # sandbox -> /policy/{uid}
 }
 
 # policy_relay relays one request to the egress policy surface through the
-# full InvokeHandlerAction chain. Sets POLICY_RELAY_STATUS and prints the
-# handler body on stdout; rc 0 iff the RPC itself succeeded (any handler
-# HTTP status is a result).
+# full InvokeHandlerAction chain. Prints the raw policyctl output on stdout
+# (first line "status=<http code>", then the handler body); rc 0 iff the RPC
+# itself succeeded — any handler HTTP status is a result, so callers parse
+# the status line from the captured output (a command substitution runs the
+# callee in a subshell: assignments inside it never reach the caller).
 policy_relay() { # sandbox method path [body-json]
 	local sbx="$1" method="$2" path="$3" body="${4:-}" out body_file=""
-	POLICY_RELAY_STATUS=""
 	local args=(invoke "$FASTPATH_LOCAL" "$NS" "$sbx" egress "$method" "$path")
 	if [[ -n "$body" ]]; then
 		body_file="$WORK/policy-relay-body.json"
@@ -3199,13 +3202,15 @@ policy_relay() { # sandbox method path [body-json]
 		printf '%s\n' "$out" >&2
 		return 1
 	fi
-	POLICY_RELAY_STATUS="$(sed -n 's/^status=//p' <<<"$out" | tail -1)"
-	if [[ -z "$POLICY_RELAY_STATUS" ]]; then
-		printf '%s\n' "$out" >&2
-		return 1
-	fi
-	# The body lines (everything below the status line) go to stdout.
-	sed '1d' <<<"$out"
+	printf '%s\n' "$out"
+}
+
+policy_relay_status() { # raw-output -> HTTP status of the handler answer
+	sed -n 's/^status=//p' <<<"$1" | tail -1
+}
+
+policy_relay_body() { # raw-output -> handler body (everything below the status line)
+	tail -n +2 <<<"$1"
 }
 
 policy_source_up() {
@@ -3221,19 +3226,22 @@ policy_source_up() {
 }
 
 policy_relay_update() {
-	local body revision spec_input
+	local raw status body revision spec_input
 	# Mutate the live subject through the relay: PUT /policy/{uid} with the
 	# allow policy. The CR binding stays the bootstrap deny — from here on
 	# the CRD record is deliberately stale.
-	body="$(policy_relay "$POLICY_SANDBOX" PUT "$(policy_path "$POLICY_SANDBOX")" "$EGRESS_ALLOW_POLICY")" \
+	raw="$(policy_relay "$POLICY_SANDBOX" PUT "$(policy_path "$POLICY_SANDBOX")" "$EGRESS_ALLOW_POLICY")" \
 		|| fail "handler relay PUT failed"
-	[[ "$POLICY_RELAY_STATUS" == 2* ]] || fail "handler relay PUT answered HTTP $POLICY_RELAY_STATUS: ${body:-<empty>}"
-	pass "PUT /policy/{uid} -> HTTP $POLICY_RELAY_STATUS (relayed policy accepted)"
+	status="$(policy_relay_status "$raw")"
+	[[ "$status" == 2* ]] || fail "handler relay PUT answered HTTP ${status:-<none>}: $(policy_relay_body "$raw")"
+	pass "PUT /policy/{uid} -> HTTP $status (relayed policy accepted)"
 
 	# The relayed record carries a revision the GET surface exposes.
-	body="$(policy_relay "$POLICY_SANDBOX" GET "$(policy_path "$POLICY_SANDBOX")")" \
+	raw="$(policy_relay "$POLICY_SANDBOX" GET "$(policy_path "$POLICY_SANDBOX")")" \
 		|| fail "handler relay GET failed"
-	[[ "$POLICY_RELAY_STATUS" == 2* ]] || fail "handler relay GET answered HTTP $POLICY_RELAY_STATUS"
+	status="$(policy_relay_status "$raw")"
+	[[ "$status" == 2* ]] || fail "handler relay GET answered HTTP ${status:-<none>}"
+	body="$(policy_relay_body "$raw")"
 	revision="$(jq -r '.revision // empty' <<<"$body" 2>/dev/null)"
 	[[ -n "$revision" && "$revision" != "null" ]] || fail "GET /policy/{uid} returned no revision (body: ${body:0:200})"
 	pass "GET /policy/{uid} -> revision $revision"
@@ -5219,14 +5227,14 @@ EOF
 	exit 1
 }
 
-	for arg in "$@"; do
-		case "$arg" in
-			--cleanup) ACTION="down" ;;
-			--auto-clean) AUTO_CLEAN=1 ;;
-			up|down|status|verify|verify-all|verify-snapshot|verify-pause|verify-p2p|verify-execd-api|verify-egress|verify-policy) ACTION="$arg" ;;
-			*) usage ;;
-		esac
-	done
+for arg in "$@"; do
+	case "$arg" in
+		--cleanup) ACTION="down" ;;
+		--auto-clean) AUTO_CLEAN=1 ;;
+		up|down|status|verify|verify-all|verify-snapshot|verify-pause|verify-p2p|verify-execd-api|verify-egress|verify-policy) ACTION="$arg" ;;
+		*) usage ;;
+	esac
+done
 [[ -n "$ACTION" ]] || usage
 
 mkdir -p "$WORK" "$LOGS_DIR"

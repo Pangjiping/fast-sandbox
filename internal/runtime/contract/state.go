@@ -2,7 +2,19 @@ package contract
 
 import (
 	"context"
+
+	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
+
+// MaxPolicyBindingInputBytes mirrors the Sandbox CRD's per-binding input
+// bound (apiv1alpha2.MaxActionBindingInputBytes): a recorded-policy dump
+// larger than this can never ride a snapshot manifest's actionBindings
+// track — a recorded binding would fail CRD validation on every
+// clone-create, with the failure far from the root cause. The assembly
+// skips the binding track for such dumps (the files/SHA256SUMS track is
+// unaffected and keeps serving the resume import, which accepts the full
+// ~68 KiB encoded policies).
+const MaxPolicyBindingInputBytes = apiv1alpha2.MaxActionBindingInputBytes
 
 // StateKind names the egress-owned state slice a StateMover carries across
 // pause/resume. Each kind maps onto one Sandbox Actions operation pair

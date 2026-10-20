@@ -364,7 +364,7 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	size, err := assembleSnapshotManifest(fixture.stateRoot, staging, dir, nil)
+	size, err := assembleSnapshotManifest(fixture.stateRoot, staging, dir, nil, "")
 	require.NoError(t, err)
 	require.Positive(t, size)
 
@@ -383,7 +383,8 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
 
 	// The Sandbox is itself a resume from a checkpoint whose manifest carries
-	// an egressVault entry; this dump stages no vault file of its own.
+	// an egressVault entry and a stale actionBindings record; this dump
+	// stages no vault or policy file of its own.
 	dir := filepath.Join(fixture.stateRoot, sandboxStateDir, sandboxID)
 	state, err := loadState(dir)
 	require.NoError(t, err)
@@ -398,6 +399,9 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
 		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
 		"egressVault":  map[string]any{"sha256": "stale", "sizeBytes": 7},
+		"actionBindings": []map[string]string{
+			{"handler": "egress", "input": `{"defaultAction":"allow"}`},
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
@@ -406,7 +410,7 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	_, err = assembleSnapshotManifest(fixture.stateRoot, staging, dir, nil)
+	_, err = assembleSnapshotManifest(fixture.stateRoot, staging, dir, nil, "")
 	require.NoError(t, err)
 
 	payload, err := os.ReadFile(filepath.Join(staging, "manifest.json"))
@@ -415,6 +419,8 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	require.NoError(t, json.Unmarshal(payload, &document))
 	require.NotContains(t, document, "egressVault",
 		"a source checkpoint's vault marker must not ride forward into a vault-less dump")
+	require.NotContains(t, document, "actionBindings",
+		"a source checkpoint's recorded bindings must not ride forward into a dump that records none")
 }
 
 func TestCreateSnapshotPublishesWithTemplateKind(t *testing.T) {
@@ -479,11 +485,17 @@ func TestCreateTemplateSnapshotDoesNotCommitCheckpointCache(t *testing.T) {
 // kind" answer).
 type fakeStateMover struct {
 	mu          sync.Mutex
+	handlerName string
 	exportData  map[runtimecontract.StateKind][]byte
 	exportErr   error
 	exportCalls []string
 	imports     []string
 }
+
+// StateHandlerName mirrors the action manager's mover capability: the
+// Pool-declared handler the dump-recorded policy binding addresses ("" =
+// unknown, the driver skips the binding track).
+func (f *fakeStateMover) StateHandlerName() string { return f.handlerName }
 
 func (f *fakeStateMover) ExportState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
 	f.mu.Lock()
@@ -604,6 +616,7 @@ func TestCreateTemplateSnapshotStagesAndRecordsPolicy(t *testing.T) {
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
 	policy := []byte(`{"egress":[{"action":"allow","target":"example.com"}],"defaultAction":"deny"}`)
 	mover := policyMoverWith(policy)
+	mover.handlerName = "egress"
 	fixture.driver.SetStateMover(mover)
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
@@ -633,6 +646,74 @@ func TestCreateTemplateSnapshotStagesAndRecordsPolicy(t *testing.T) {
 	}
 	require.Equal(t, string(policy), byHandler["egress"], "the dump is authoritative over the CRD binding")
 	require.Equal(t, `{"audit":true}`, byHandler["audit"])
+}
+
+// When the transfer handler name is unresolvable (a mover without
+// StateHandlerName, a differently named Pool handler), the binding track is
+// skipped rather than guessing "egress": the policy file still rides the
+// bundle (the resume import source) but the CRD bindings stay untouched — a
+// guessed name the target Pool does not declare would be dropped at
+// clone-create, silently reverting the clone to the stale bootstrap while
+// the resume path keeps the relayed policy.
+func TestCreateTemplateSnapshotSkipsPolicyBindingWhenHandlerUnknown(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := policyMoverWith([]byte(`{"defaultAction":"allow"}`))
+	fixture.driver.SetStateMover(mover)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
+		ActionBindings: []runtimecontract.SnapshotActionBinding{
+			{Handler: "egress-eu", Input: `{"defaultAction":"deny"}`},
+		},
+	})
+	require.NoError(t, err)
+
+	files := agent.manifest["files"].(map[string]any)
+	require.Len(t, files, 4)
+	require.Contains(t, files, "policy.json", "the files track must not depend on the handler name")
+	require.Contains(t, agent.sums, "policy.json")
+
+	recorded, ok := agent.manifest["actionBindings"].([]any)
+	require.True(t, ok)
+	require.Len(t, recorded, 1)
+	require.Equal(t, "egress-eu", recorded[0].(map[string]any)["handler"],
+		"the CRD binding must ride through untouched when the handler name is unknown")
+}
+
+// A dump over the CRD's per-binding input bound cannot ride the binding
+// track (a recorded binding would fail every clone-create's validation far
+// from the root cause); the files track keeps serving the resume import.
+func TestCreateTemplateSnapshotSkipsPolicyBindingOverInputBound(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := policyMoverWith(make([]byte, runtimecontract.MaxPolicyBindingInputBytes+1))
+	mover.handlerName = "egress"
+	fixture.driver.SetStateMover(mover)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
+		ActionBindings: []runtimecontract.SnapshotActionBinding{
+			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
+		},
+	})
+	require.NoError(t, err)
+
+	files := agent.manifest["files"].(map[string]any)
+	require.Len(t, files, 4)
+	require.Contains(t, files, "policy.json")
+	recorded := agent.manifest["actionBindings"].([]any)
+	require.Len(t, recorded, 1)
+	require.Equal(t, `{"defaultAction":"deny"}`, recorded[0].(map[string]any)["input"],
+		"the CRD binding must ride through when the dump cannot be recorded as a binding")
+}
+
+func TestPolicyBindingHandlerOf(t *testing.T) {
+	fixture := newSnapshotDriverFixture(t)
+	require.Empty(t, fixture.driver.policyBindingHandlerOf(), "no mover wired: no name")
+	mover := &fakeStateMover{handlerName: "egress-eu"}
+	fixture.driver.SetStateMover(mover)
+	require.Equal(t, "egress-eu", fixture.driver.policyBindingHandlerOf())
 }
 
 // A staged policy file rides the checkpoint cache commit like the vault file.
