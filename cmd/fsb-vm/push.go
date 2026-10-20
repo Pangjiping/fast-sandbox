@@ -14,7 +14,7 @@ import (
 
 func newPushCommand() *cobra.Command {
 	var dir, destination, metadata, authFile string
-	cmd := &cobra.Command{Use: "push", Short: "Publish a built template pair and metadata to an OCI registry", RunE: func(cmd *cobra.Command, _ []string) error {
+	cmd := &cobra.Command{Use: "push", Short: "Publish rootfs and snapfiles images to an OCI registry", RunE: func(cmd *cobra.Command, _ []string) error {
 		raw, err := os.ReadFile(authFile)
 		if err != nil {
 			return err
@@ -46,7 +46,7 @@ func newPushCommand() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&dir, "artifact-dir", "", "local build artifact directory")
 	f.StringVar(&destination, "destination", "", "registry/repository:tag")
-	f.StringVar(&metadata, "metadata-file", "", "template metadata JSON")
+	f.StringVar(&metadata, "metadata-file", "", "platform metadata JSON stored in snapfiles manifest annotations")
 	f.StringVar(&authFile, "auth-file", "", "Docker authentication JSON")
 	for _, name := range []string{"artifact-dir", "destination", "metadata-file", "auth-file"} {
 		if err := cmd.MarkFlagRequired(name); err != nil {

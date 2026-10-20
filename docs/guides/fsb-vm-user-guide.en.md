@@ -344,7 +344,7 @@ registry.example.com/team/application:v1_snapfiles
 
 The publishing process must upload every `blobs/sha256/*` object referenced by the two manifests before uploading the rootfs and snapfiles manifests under their tags. `manifest/index.json` records their filenames and digests for a publishing script.
 
-`fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It uploads blobs and the template pair before committing the metadata manifest with immutable pair references, then returns `manifestRef` and `artifactDigest`. The OCI `SandboxTemplate` builder runs this step automatically. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
+`fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It publishes only `<tag>_rootfs` and `<tag>_snapfiles`, uploading rootfs first and snapfiles last. Platform metadata and checkpoint owner annotations live on the snapfiles manifest; no third metadata image is created. The returned `manifestRef` and `artifactDigest` identify the snapfiles manifest. The two images are paired by ID, so IDs must be immutable; the publisher rejects overwriting a tag with different contents. Previously published three-image entries remain readable. The OCI `SandboxTemplate` builder runs this step automatically. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
 
 ## 6. Prepare template.json
 

@@ -338,7 +338,7 @@ registry.example.com/team/application:v1_snapfiles
 
 发布工具必须先上传这两个 manifest 引用的全部 `blobs/sha256/*`，再按对应 tag 上传 rootfs 和 snapfiles manifest。`manifest/index.json` 记录了 manifest 文件名和 digest，可供发布脚本读取。
 
-`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，先上传 blob 和模板对，再提交带不可变模板对引用的元数据 manifest，返回 `manifestRef` 与 `artifactDigest`。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
+`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，携带平台元数据和 checkpoint owner annotations 的 snapfiles 最后发布，不再生成第三份元数据入口。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。历史三产物入口仍可读取。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
 
 ## 6. 准备 template.json
 

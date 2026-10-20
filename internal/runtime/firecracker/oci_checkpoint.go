@@ -95,7 +95,7 @@ func checkpointCredentials(destination string) (ocitemplate.CredentialFunc, erro
 }
 
 // publishOCICheckpoint runs inside the existing asynchronous snapshot worker.
-// Success means the immutable metadata commit point is visible in ACR.
+// Success means the snapfiles manifest publication point is visible in ACR.
 func (d *Driver) publishOCICheckpoint(ctx context.Context, plan dumpPlan, sizeBytes int64, onPublishing func()) (*runtimecontract.SnapshotResult, error) {
 	defer func() {
 		if _, err := os.Stat(filepath.Join(plan.staging, ".pack-resources-active")); err == nil {

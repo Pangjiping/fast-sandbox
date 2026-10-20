@@ -53,6 +53,7 @@ func TestDecodeRequiresImmutablePair(t *testing.T) {
 // resolving a template never fetches its rootfs or snapshot layer blobs.
 func TestPublishResolveMetadataOnly(t *testing.T) {
 	var blockReads atomic.Int32
+	var published []string
 	handler := registrytest.New()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && strings.Contains(r.URL.Path, "/blobs/") && r.URL.Path != "" {
@@ -60,6 +61,9 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 			if strings.HasSuffix(r.URL.Path, digest.FromString("layer").String()) {
 				blockReads.Add(1)
 			}
+		}
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/manifests/") {
+			published = append(published, r.URL.Path)
 		}
 		handler.ServeHTTP(w, r)
 	}))
@@ -90,6 +94,30 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	ref, sum, err := Push(context.Background(), dir, dest, []byte(`{"machine":{"vcpu":"1","memory":"512Mi"}}`), nil)
 	require.NoError(t, err)
 	require.Contains(t, ref, "@sha256:"+sum)
+	require.Equal(t, []string{"/v2/ns/template/manifests/build_rootfs", "/v2/ns/template/manifests/build_snapfiles"}, published, "only two data images, with snapfiles last")
+	repo, _, err := Repository(ref, nil)
+	require.NoError(t, err)
+	desc, err := repo.Resolve(context.Background(), "build_snapfiles")
+	require.NoError(t, err)
+	require.Equal(t, "sha256:"+sum, desc.Digest.String())
+	snapRaw, err := fetchSmall(context.Background(), repo, desc)
+	require.NoError(t, err)
+	var snapManifest oci.Manifest
+	require.NoError(t, json.Unmarshal(snapRaw, &snapManifest))
+	require.Equal(t, "build", snapManifest.Annotations[AnnotationTemplateID])
+	require.Len(t, snapManifest.Layers, 1)
+	require.Equal(t, oci.MediaTypeImageConfig, snapManifest.Config.MediaType)
+	for _, logical := range []string{dest, strings.TrimSuffix(dest, "build") + "build_snapfiles"} {
+		_, err = Resolve(context.Background(), logical, nil)
+		require.NoError(t, err, "resolve paired tags without a third image")
+	}
+	// The same immutable publication can be retried, but not overwritten.
+	repeated, _, err := Push(context.Background(), dir, dest, []byte(`{"machine":{"vcpu":"1","memory":"512Mi"}}`), nil)
+	require.NoError(t, err)
+	require.Equal(t, ref, repeated)
+	_, _, err = Push(context.Background(), dir, dest, []byte(`{"machine":{"vcpu":"2"}}`), nil)
+	require.ErrorContains(t, err, "refusing to overwrite")
+
 	payload, err := Resolve(context.Background(), ref, nil)
 	require.NoError(t, err)
 	pair, err := Decode(payload)
@@ -122,7 +150,7 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	require.Error(t, err)
 	repo, parsed, err := Repository(strings.TrimSuffix(dest, "build")+"broken", nil)
 	require.NoError(t, err)
-	_, err = repo.Resolve(context.Background(), parsed.Reference)
+	_, err = repo.Resolve(context.Background(), parsed.Reference+"_snapfiles")
 	require.Error(t, err)
 }
 

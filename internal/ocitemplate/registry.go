@@ -3,7 +3,6 @@
 package ocitemplate
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,9 +14,9 @@ import (
 	"strings"
 
 	"github.com/opencontainers/go-digest"
-	specs "github.com/opencontainers/image-spec/specs-go"
 	oci "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/content"
+	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
@@ -25,6 +24,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
+// ConfigMediaType identifies legacy metadata-only entries; new writes use snapfiles annotations.
 const ConfigMediaType = "application/vnd.fast-sandbox.template.v1+json"
 const Prefix = "oci://"
 
@@ -87,14 +87,18 @@ func Decode(payload []byte) (*Pair, error) {
 	return document.OCI, nil
 }
 
-// Resolve verifies the metadata config and both pair descriptors without
-// downloading any layer. Digest references make tag changes harmless.
+// Resolve reads a snapfiles manifest and resolves its rootfs by the shared ID.
+// The returned node-local metadata pins both images by digest; no data layers
+// are downloaded. Old metadata-only entry manifests remain readable.
 func Resolve(ctx context.Context, reference string, credentials CredentialFunc) ([]byte, error) {
 	repo, ref, err := Repository(reference, credentials)
 	if err != nil {
 		return nil, err
 	}
 	desc, err := repo.Resolve(ctx, ref.Reference)
+	if errors.Is(err, errdef.ErrNotFound) && !strings.HasPrefix(ref.Reference, "sha256:") {
+		desc, err = repo.Resolve(ctx, ref.Reference+"_snapfiles")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +114,9 @@ func Resolve(ctx context.Context, reference string, credentials CredentialFunc) 
 		return nil, err
 	}
 	if manifest.Config.MediaType != ConfigMediaType {
-		return nil, fmt.Errorf("not a fast-sandbox OCI template")
+		return resolvePair(ctx, repo, desc, manifest)
 	}
+	// Compatibility for existing three-image publications.
 	payload, err := fetchSmall(ctx, repo, manifest.Config)
 	if err != nil {
 		return nil, err
@@ -145,8 +150,8 @@ func fetchSmall(ctx context.Context, repo *remote.Repository, desc oci.Descripto
 	return content.FetchAll(ctx, repo, desc)
 }
 
-// Push uploads referenced blobs before pair manifests, and commits the template
-// metadata manifest last. A failed push never publishes a usable template tag.
+// Push publishes exactly two images. Rootfs is uploaded first; the snapfiles
+// manifest carries metadata annotations and is the final publication point.
 func Push(ctx context.Context, dir, destination string, metadata []byte, credentials CredentialFunc) (string, string, error) {
 	repo, ref, err := Repository(destination, credentials)
 	if err != nil {
@@ -179,52 +184,40 @@ func Push(ctx context.Context, dir, destination string, metadata []byte, credent
 	} else if !os.IsNotExist(e) {
 		return "", "", e
 	}
-	pair := Pair{}
-	for _, image := range index.Images {
-		suffix, immutable, e := pushLocalImage(ctx, repo, dir, ref.Reference, image, sources, credentials)
-		if e != nil {
-			return "", "", e
+	annotations, err := pairAnnotations(ref.Reference, metadata)
+	if err != nil {
+		return "", "", err
+	}
+	var root, snap *localImage
+	for i := range index.Images {
+		image := &index.Images[i]
+		switch {
+		case strings.HasSuffix(image.Name, "_rootfs"):
+			if root != nil {
+				return "", "", fmt.Errorf("duplicate rootfs image")
+			}
+			root = image
+		case strings.HasSuffix(image.Name, "_snapfiles"):
+			if snap != nil {
+				return "", "", fmt.Errorf("duplicate snapfiles image")
+			}
+			snap = image
+		default:
+			return "", "", fmt.Errorf("unknown pair image %q", image.Name)
 		}
-		if suffix == "_rootfs" {
-			pair.Rootfs = immutable
-		} else {
-			pair.Snapfiles = immutable
-		}
 	}
-
-	var doc map[string]any
-	if err = json.Unmarshal(metadata, &doc); err != nil {
+	if root == nil || snap == nil {
+		return "", "", fmt.Errorf("template requires rootfs and snapfiles")
+	}
+	if _, _, err = pushLocalImage(ctx, repo, dir, ref.Reference, *root, sources, credentials, nil); err != nil {
 		return "", "", err
 	}
-	doc["oci"] = pair
-	payload, err := json.Marshal(doc)
+	_, immutable, err := pushLocalImage(ctx, repo, dir, ref.Reference, *snap, sources, credentials, annotations)
 	if err != nil {
 		return "", "", err
 	}
-	if _, err = Decode(payload); err != nil {
-		return "", "", err
-	}
-	cfg := content.NewDescriptorFromBytes(ConfigMediaType, payload)
-	if err = repo.Blobs().Push(ctx, cfg, bytes.NewReader(payload)); err != nil {
-		return "", "", err
-	}
-	manifest := oci.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: oci.MediaTypeImageManifest, Config: cfg, Layers: []oci.Descriptor{}}
-	raw, err = json.Marshal(manifest)
-	if err != nil {
-		return "", "", err
-	}
-	desc := content.NewDescriptorFromBytes(oci.MediaTypeImageManifest, raw)
-	if err = repo.Manifests().PushReference(ctx, desc, bytes.NewReader(raw), ref.Reference); err != nil {
-		return "", "", err
-	}
-	got, err := repo.Resolve(ctx, ref.Reference)
-	if err != nil {
-		return "", "", err
-	}
-	if got.Digest != desc.Digest {
-		return "", "", fmt.Errorf("remote template digest mismatch")
-	}
-	return Prefix + ref.Registry + "/" + ref.Repository + "@" + desc.Digest.String(), desc.Digest.Encoded(), nil
+	sum := strings.SplitN(immutable, "@", 2)[1]
+	return Prefix + immutable, strings.TrimPrefix(sum, "sha256:"), nil
 }
 
 // ValidateDigestReference binds a checkpoint's immutable address to its durable
@@ -284,7 +277,7 @@ type localImage struct {
 	Digest string `json:"manifest_digest"`
 }
 
-func pushLocalImage(ctx context.Context, repo *remote.Repository, dir, tag string, image localImage, sources map[string]string, credentials CredentialFunc) (string, string, error) {
+func pushLocalImage(ctx context.Context, repo *remote.Repository, dir, tag string, image localImage, sources map[string]string, credentials CredentialFunc, annotations map[string]string) (string, string, error) {
 	if filepath.Base(image.File) != image.File {
 		return "", "", fmt.Errorf("invalid manifest file")
 	}
@@ -298,6 +291,24 @@ func pushLocalImage(ctx context.Context, repo *remote.Repository, dir, tag strin
 	var manifest oci.Manifest
 	if err = json.Unmarshal(raw, &manifest); err != nil {
 		return "", "", err
+	}
+	if len(annotations) != 0 {
+		if manifest.Annotations == nil {
+			manifest.Annotations = make(map[string]string)
+		}
+		for _, key := range []string{AnnotationSandboxUID, AnnotationNamespace, AnnotationCheckpointID} {
+			delete(manifest.Annotations, key)
+		}
+		for key, value := range annotations {
+			manifest.Annotations[key] = value
+		}
+		raw, err = json.Marshal(manifest)
+		if err != nil {
+			return "", "", err
+		}
+		if len(raw) > 1<<20 {
+			return "", "", fmt.Errorf("snapfiles manifest exceeds 1 MiB metadata limit")
+		}
 	}
 	for _, desc := range append([]oci.Descriptor{manifest.Config}, manifest.Layers...) {
 		if err = pushLocalBlob(ctx, repo, dir, desc, sources, credentials); err != nil {
@@ -314,7 +325,7 @@ func pushLocalImage(ctx context.Context, repo *remote.Repository, dir, tag strin
 		return "", "", fmt.Errorf("unknown pair image %q", image.Name)
 	}
 	desc := content.NewDescriptorFromBytes(oci.MediaTypeImageManifest, raw)
-	if err = repo.Manifests().PushReference(ctx, desc, bytes.NewReader(raw), tag+suffix); err != nil {
+	if err = pushImmutableManifest(ctx, repo, tag+suffix, desc, raw); err != nil {
 		return "", "", err
 	}
 	immutable := repo.Reference.Registry + "/" + repo.Reference.Repository + "@" + desc.Digest.String()

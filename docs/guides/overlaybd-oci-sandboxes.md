@@ -119,6 +119,25 @@ TEMPLATE_REF=$(kubectl -n fast-sandbox get sandboxtemplate alpine-oci \
 
 `TEMPLATE_REF` should look like `oci://registry.example.com/sandbox/templates@sha256:...`. Use this reference when creating Sandboxes, rather than the source image `alpine:3.19` or the resource name `alpine-oci`.
 
+### Registry artifact format
+
+New publications contain exactly two image tags, following fsb-vm's existing naming rule:
+
+```text
+repository:<id>_rootfs
+repository:<id>_snapfiles
+```
+
+No third metadata image is published. Both images describe their own layers in their OCI manifests. The snapfiles filesystem retains `vmstate.bin`, `memfile`, and `metadata.json`. Its OCI manifest carries these annotations:
+
+- `io.fast-sandbox.template.id`: the shared tag prefix used to find `<id>_rootfs` in the same repository.
+- `io.fast-sandbox.metadata`: the small platform metadata JSON (machine, compatibility, guest network, policy and lineage), available before mounting snapshot data.
+- For checkpoints, `io.fast-sandbox.sandbox.uid`, `io.fast-sandbox.sandbox.namespace`, and `io.fast-sandbox.checkpoint.id`: owner and runtime snapshot ID. The latter is the runtime snapshot UUID used as the tag prefix; the control-plane checkpoint task ID is unchanged.
+
+The publisher uploads rootfs first and snapfiles last. It rejects replacing an existing tag with different content; configure registry tag immutability as well, since the two images are paired by ID rather than a third manifest containing both digests. Use a fresh ID for every new checkpoint. A retry with identical contents is allowed.
+
+`manifestRef` and `artifactDigest` identify the snapfiles manifest. On first resolution, the runtime resolves `<id>_rootfs` and caches the pair as digest references. A logical `oci://repository:<id>` input also resolves the pair. Previously published three-image metadata entries remain readable, but new publications only write the two-image format. Existing publications are not rewritten or deleted. Upgrade the Controller/FastPath and runtime-agent readers before enabling new publications from upgraded Fastlets or Builders. Older readers do not understand the new snapfiles entry format.
+
 ## 4. Create, pause, and resume through FastPath
 
 Run the examples in Bash from the repository root, with `grpcurl` and `jq` installed. First, forward FastPath in one terminal:
