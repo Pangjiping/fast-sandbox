@@ -1,2 +1,0 @@
-# A unified diff uses a space-only context line to represent an empty line.
-build/oci/overlaybd-identitytoken.patch whitespace=-blank-at-eol

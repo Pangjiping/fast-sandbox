@@ -10,10 +10,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/artifacts"
+	"fast-sandbox/internal/ocitemplate"
 )
 
 const ociMemoryField = "memory"
@@ -42,6 +45,9 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 		return err
 	}
 	if err = os.Setenv("DOCKER_CONFIG", dockerDir); err != nil {
+		return err
+	}
+	if err = stageOCICredentials(spec, dockerDir); err != nil {
 		return err
 	}
 	sourceDigest, err := pullOCILayout(ctx, spec, workdir)
@@ -117,4 +123,42 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 		return fmt.Errorf("fsb-vm push returned incomplete publication")
 	}
 	return patchPodAnnotations(ctx, result.ManifestRef, result.ArtifactDigest)
+}
+
+// Keep the builder's private Docker config on the same basic-only contract as
+// fsb-vm. go-containerregistry otherwise prefers an identity token over basic auth.
+func stageOCICredentials(spec apiv1alpha2.SandboxTemplateSpec, dockerDir string) error {
+	config := struct {
+		Auths map[string]authn.AuthConfig `json:"auths"`
+	}{Auths: map[string]authn.AuthConfig{}}
+	for _, value := range []string{spec.Image, spec.Execd, strings.TrimPrefix(spec.Output.Publish, ocitemplate.Prefix)} {
+		if value == "" {
+			continue
+		}
+		ref, err := name.ParseReference(value)
+		if err != nil {
+			return err
+		}
+		authenticator, err := authn.DefaultKeychain.Resolve(ref.Context())
+		if err != nil {
+			return err
+		}
+		credential, err := authenticator.Authorization()
+		if err != nil {
+			return err
+		}
+		basic, err := ocitemplate.BasicCredential(credential.Username, credential.Password, credential.IdentityToken)
+		if err != nil {
+			return fmt.Errorf("OCI credentials for %s: %w", ref.Context(), err)
+		}
+		if basic.Username == "" && basic.Password == "" {
+			continue
+		}
+		config.Auths[ref.Context().String()] = authn.AuthConfig{Username: basic.Username, Password: basic.Password}
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dockerDir, "config.json"), raw, 0600)
 }

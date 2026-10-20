@@ -32,11 +32,10 @@ func TestOverlaybdCredentialsReplaceRevokedAndRotatedRepository(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, credential.Username)
 	require.Empty(t, credential.Password)
-	handoff, err = overlaybdCredentials(dockerConfig{Auths: map[string]authEntry{"registry.example/team": {IdentityToken: "rotated-token"}}}, refs...)
+	handoff, err = overlaybdCredentials(dockerConfig{Auths: map[string]authEntry{"registry.example/team": {Username: "rotated", Password: "new-secret"}}}, refs...)
 	require.NoError(t, err)
 	require.NoError(t, mergeCredentials(path, handoff))
 	current, err = readCredentials(path)
 	require.NoError(t, err)
-	require.Equal(t, "rotated-token", current.Auths["registry.example/team/template"].IdentityToken)
-	require.Empty(t, current.Auths["registry.example/team/template"].Auth)
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("rotated:new-secret")), current.Auths["registry.example/team/template"].Auth)
 }

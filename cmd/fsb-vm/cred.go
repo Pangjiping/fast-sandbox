@@ -32,10 +32,6 @@ func overlaybdCredentials(config dockerConfig, imageRefs ...string) (dockerConfi
 		// An explicit anonymous entry replaces a previously installed credential
 		// and masks less-specific host entries without touching other repositories.
 		key := canonicalRegistryHost(ref.Registry) + "/" + ref.Repository
-		if credential.RefreshToken != "" {
-			handoff.Auths[key] = authEntry{IdentityToken: credential.RefreshToken}
-			continue
-		}
 		handoff.Auths[key] = authEntry{
 			Auth: base64.StdEncoding.EncodeToString([]byte(credential.Username + ":" + credential.Password)),
 		}

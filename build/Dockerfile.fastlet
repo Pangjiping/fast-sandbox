@@ -2,7 +2,7 @@
 # All binaries are compiled in Docker; no host-built .build/ artifacts are used.
 FROM ubuntu:22.04 AS overlaybd-build
 ARG OVERLAYBD_REV
-COPY build/oci/build-overlaybd.sh build/oci/overlaybd-identitytoken.patch build/sandboxtemplate-builder/overlaybd-import-raw.cpp /build-tools/
+COPY build/oci/build-overlaybd.sh build/sandboxtemplate-builder/overlaybd-import-raw.cpp /build-tools/
 RUN sh /build-tools/build-overlaybd.sh /out
 
 FROM --platform=$BUILDPLATFORM golang:1.25 AS fastlet-build

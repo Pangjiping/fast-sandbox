@@ -45,6 +45,8 @@ The examples below assume a Pool named `firecracker-pool` in namespace `fast-san
 
 ## 2. Configure registry credentials
 
+OCI registry access supports anonymous or username/password authentication. Docker config `auth` entries are supported; identity-token-only credentials are rejected. A token supplied as a username/password credential is treated as a password. Existing public credential fields and other runtimes are unchanged.
+
 For the simplest setup, use one repository for templates and checkpoints, with one account that has pull and push permissions. Set `REGISTRY_USER` and `REGISTRY_PASSWORD`, then run:
 
 ```bash

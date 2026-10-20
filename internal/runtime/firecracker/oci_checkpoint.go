@@ -63,6 +63,13 @@ func checkpointCredentials(destination string) (ocitemplate.CredentialFunc, erro
 	if err != nil {
 		return nil, err
 	}
+	if credential.WriteUsername != "" {
+		credential.Username, credential.Password = credential.WriteUsername, credential.WritePassword
+		credential.IdentityToken = ""
+	}
+	if _, err := ocitemplate.BasicCredential(credential.Username, credential.Password, credential.IdentityToken); err != nil {
+		return nil, err
+	}
 	target, err := registry.ParseReference(destination)
 	if err != nil {
 		return nil, err
@@ -79,11 +86,11 @@ func checkpointCredentials(destination string) (ocitemplate.CredentialFunc, erro
 				path = registryconfig.MountPath
 			}
 			value, _, err = registryconfig.NewFileProvider(path).Credentials(reference)
-		} else if value.WriteUsername != "" {
-			value.Username, value.Password = value.WriteUsername, value.WritePassword
-			value.IdentityToken = ""
 		}
-		return auth.Credential{Username: value.Username, Password: value.Password, RefreshToken: value.IdentityToken}, err
+		if err != nil {
+			return auth.EmptyCredential, err
+		}
+		return ocitemplate.BasicCredential(value.Username, value.Password, value.IdentityToken)
 	}, nil
 }
 

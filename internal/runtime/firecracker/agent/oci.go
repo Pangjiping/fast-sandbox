@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"os"
+	"strings"
 	"sync"
 
 	"oras.land/oras-go/v2/registry/remote/auth"
@@ -16,9 +17,16 @@ func readOCI(ctx context.Context, image string, provider registryconfig.Provider
 	if provider == nil {
 		provider = registryconfig.NewFileProvider(registryconfig.MountPath)
 	}
+	value, _, err := provider.Credentials(strings.TrimPrefix(image, ocitemplate.Prefix))
+	if err != nil {
+		return nil, err
+	}
+	credential, err := ocitemplate.BasicCredential(value.Username, value.Password, value.IdentityToken)
+	if err != nil {
+		return nil, err
+	}
 	return ocitemplate.Resolve(ctx, image, func(_ context.Context, reference string) (auth.Credential, error) {
-		value, _, err := provider.Credentials(reference)
-		return auth.Credential{Username: value.Username, Password: value.Password, RefreshToken: value.IdentityToken}, err
+		return credential, nil
 	})
 }
 

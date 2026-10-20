@@ -32,7 +32,7 @@ func installOCIRegistryConfig(t *testing.T, credentials ...registryconfig.Creden
 func TestCheckpointCredentialsSeparateParentReadAndDestinationWrite(t *testing.T) {
 	installOCIRegistryConfig(t,
 		registryconfig.Credential{Host: "r.example", RepositoryPrefix: "templates", Username: "parent-reader", Password: "read-secret"},
-		registryconfig.Credential{Host: "other.example", RepositoryPrefix: "templates", IdentityToken: "parent-token"},
+		registryconfig.Credential{Host: "other.example", RepositoryPrefix: "templates", Username: "other-reader", Password: "other-secret"},
 		registryconfig.Credential{Host: "r.example", RepositoryPrefix: "checkpoints", IdentityToken: "checkpoint-read-token", WriteUsername: "writer", WritePassword: "write-secret"},
 	)
 	credentials, err := checkpointCredentials("r.example/checkpoints/sandbox:pause")
@@ -43,7 +43,7 @@ func TestCheckpointCredentialsSeparateParentReadAndDestinationWrite(t *testing.T
 	}{
 		{"r.example/checkpoints/sandbox:pause_rootfs", auth.Credential{Username: "writer", Password: "write-secret"}},
 		{"r.example/templates/base:rootfs", auth.Credential{Username: "parent-reader", Password: "read-secret"}},
-		{"other.example/templates/base:rootfs", auth.Credential{RefreshToken: "parent-token"}},
+		{"other.example/templates/base:rootfs", auth.Credential{Username: "other-reader", Password: "other-secret"}},
 		{"public.example/base:rootfs", auth.EmptyCredential},
 	} {
 		got, err := credentials(context.Background(), test.reference)
@@ -54,7 +54,7 @@ func TestCheckpointCredentialsSeparateParentReadAndDestinationWrite(t *testing.T
 	require.ErrorContains(t, err, "no registry credential")
 }
 
-func TestAttachOCIPreservesTokenAndCleansPartialResources(t *testing.T) {
+func TestAttachOCIPreservesBasicAuthAndCleansPartialResources(t *testing.T) {
 	for _, mode := range []string{"success", "create-failed", "missing-state", "corrupt-state", "empty-device", "cleanup-failed", "existing-home"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
@@ -63,7 +63,7 @@ func TestAttachOCIPreservesTokenAndCleansPartialResources(t *testing.T) {
 			manifest := cachedManifestPath(root, image)
 			require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0750))
 			require.NoError(t, os.WriteFile(manifest, []byte(`{"oci":{"rootfs":"r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapfiles":"r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), 0600))
-			installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", RepositoryPrefix: "templates", IdentityToken: "refresh-secret"})
+			installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", RepositoryPrefix: "templates", Username: "reader", Password: "read-secret"})
 			t.Setenv("TEST_OCI_MODE", mode)
 			t.Setenv("TEST_OCI_ROOT", root)
 			bin := t.TempDir()
@@ -125,11 +125,15 @@ esac
 			require.NoError(t, json.Unmarshal(raw, &input))
 			var docker struct {
 				Auths map[string]struct {
-					Token string `json:"identitytoken"`
+					Username string `json:"username"`
+					Password string `json:"password"`
+					Token    string `json:"identitytoken"`
 				} `json:"auths"`
 			}
 			require.NoError(t, json.Unmarshal([]byte(input.Template.Auth.DockerAuth), &docker))
-			require.Equal(t, "refresh-secret", docker.Auths["r.example/templates"].Token)
+			require.Equal(t, "reader", docker.Auths["r.example/templates"].Username)
+			require.Equal(t, "read-secret", docker.Auths["r.example/templates"].Password)
+			require.Empty(t, docker.Auths["r.example/templates"].Token)
 			require.NoFileExists(t, filepath.Join(root, "oci/inputs/sandbox-1.json"))
 		})
 	}
@@ -142,6 +146,22 @@ func TestDeliverGuestInfraMountsOCIDeviceDirectly(t *testing.T) {
 	for _, command := range runner.commands {
 		require.NotContains(t, command, "loop")
 	}
+}
+
+func TestOCITokenOnlyCredentialsFailBeforeAttachmentOrPacking(t *testing.T) {
+	root := t.TempDir()
+	d := &Driver{config: firecrackerConfigForTest(t, root)}
+	image := "oci://r.example/templates/base:build"
+	manifest := cachedManifestPath(root, image)
+	require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0750))
+	require.NoError(t, os.WriteFile(manifest, []byte(`{"oci":{"rootfs":"r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapfiles":"r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), 0600))
+	installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", IdentityToken: "private-token"})
+	_, _, _, err := d.attachOCI(context.Background(), "sandbox-1", image)
+	require.ErrorIs(t, err, ErrInvalidConfig)
+	require.ErrorContains(t, err, "identitytoken-only credentials are not supported")
+	require.NoDirExists(t, filepath.Join(root, "oci/inputs"))
+	_, err = checkpointCredentials("r.example/checkpoints/sandbox:pause")
+	require.ErrorContains(t, err, "identitytoken-only credentials are not supported")
 }
 
 func TestSnapshotStagingRecoveryBeforeRetryAndDelete(t *testing.T) {

@@ -156,7 +156,7 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 `SandboxTemplate` 的标准 Builder 镜像包含 OCI 所需的 `fsb-vm`、convertor 和 OverlayBD 工具。Builder 仅在输出为 `oci://` 时启动 ublkd，并通过本机只读 registry 复用已暂存的 OCI layout；`SANDBOX_TEMPLATE_IMAGE_TAR` 也使用这一条路径，不会再次从源仓库拉取。发布目标仍需要网络访问。
 
-`build/Dockerfile.fastlet` 生成的标准 Fastlet 镜像包含 OCI 运行工具；OCI Firecracker Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启动 ublkd。默认不启动，普通运行模式不需要 ublk。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。镜像内的 OverlayBD registry v2 支持 Docker `identitytoken` 的 OAuth refresh-token 认证，包括后续按需读块时重新获取访问 token。外部 OverlayBD 安装需包含 `build/oci/overlaybd-identitytoken.patch`。
+`build/Dockerfile.fastlet` 生成的标准 Fastlet 镜像包含 OCI 运行工具；OCI Firecracker Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启动 ublkd。默认不启动，普通运行模式不需要 ublk。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。OCI 仓库访问支持匿名或用户名密码认证，包括 Docker config 的 `auth` 字段；仅含 `identitytoken` 的凭据会被明确拒绝，同时存在用户名密码时使用用户名密码。原有公共凭据字段及其他运行时行为保持不变。
 
 Checkpoint 默认写回源模板仓库；可用 `FAST_SANDBOX_OCI_SNAPSHOT_REPOSITORY=registry/repository` 指定其他目标。目标凭证需具备 push 权限，独立写账号通过 registry rule 的 `writeSecretRef` 配置。Checkpoint 发布按完整仓库路径分别选择父层读凭证和目标写凭证；跨仓库时需在 Pool 中配置两者。OCI GuestCopy 直接挂载 ublk 块设备，普通 rootfs 镜像文件仍使用 loop 挂载。
 

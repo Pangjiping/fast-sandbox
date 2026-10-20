@@ -105,3 +105,14 @@ func TestReadOCIUsesLiveRepositoryCredentials(t *testing.T) {
 	_, err = readOCI(context.Background(), image, provider)
 	require.Error(t, err, "removed credentials must fail closed")
 }
+
+func TestReadOCIRejectsTokenOnlyBeforeRegistryAccess(t *testing.T) {
+	compiled, err := registryconfig.NewCompiled([]registryconfig.Credential{{Host: "registry.invalid", IdentityToken: "private-token"}})
+	require.NoError(t, err)
+	raw, err := compiled.Marshal()
+	require.NoError(t, err)
+	file := filepath.Join(t.TempDir(), "registries.json")
+	require.NoError(t, os.WriteFile(file, raw, 0600))
+	_, err = readOCI(context.Background(), "oci://registry.invalid/team/template:build", registryconfig.NewFileProvider(file))
+	require.ErrorContains(t, err, "identitytoken-only credentials are not supported")
+}

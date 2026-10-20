@@ -44,11 +44,14 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 	if err != nil {
 		return "", "", "", err
 	}
+	if _, err := ocitemplate.BasicCredential(credential.Username, credential.Password, credential.IdentityToken); err != nil {
+		return "", "", "", fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
 	key := credential.Host
 	if credential.RepositoryPrefix != "" {
 		key += "/" + strings.Trim(credential.RepositoryPrefix, "/")
 	}
-	auth, err := json.Marshal(map[string]any{"auths": map[string]any{key: map[string]string{"username": credential.Username, "password": credential.Password, "identitytoken": credential.IdentityToken}}})
+	auth, err := json.Marshal(map[string]any{"auths": map[string]any{key: map[string]string{"username": credential.Username, "password": credential.Password}}})
 	if err != nil {
 		return "", "", "", err
 	}

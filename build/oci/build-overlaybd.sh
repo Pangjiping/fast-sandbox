@@ -16,7 +16,6 @@ rm -rf /var/lib/apt/lists/*
 git clone https://github.com/containerd/overlaybd.git /src/overlaybd
 cd /src/overlaybd
 git checkout --detach "$revision"
-git apply "$tools_dir/overlaybd-identitytoken.patch"
 install -m 0644 "$tools_dir/overlaybd-import-raw.cpp" src/tools/overlaybd-import-raw.cpp
 sed -i '/add_executable(overlaybd-create/i add_executable(overlaybd-import-raw overlaybd-import-raw.cpp)\ntarget_include_directories(overlaybd-import-raw PUBLIC ${PHOTON_INCLUDE_DIR})\ntarget_link_libraries(overlaybd-import-raw photon_static overlaybd_lib)\n' src/tools/CMakeLists.txt
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \

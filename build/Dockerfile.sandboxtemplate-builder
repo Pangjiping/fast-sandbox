@@ -24,7 +24,7 @@ RUN git clone https://github.com/arcboxlabs/oci2rootfs.git /src/oci2rootfs \
 FROM ubuntu:22.04 AS overlaybd-build
 
 ARG OVERLAYBD_REV
-COPY build/oci/build-overlaybd.sh build/oci/overlaybd-identitytoken.patch build/sandboxtemplate-builder/overlaybd-import-raw.cpp /build-tools/
+COPY build/oci/build-overlaybd.sh build/sandboxtemplate-builder/overlaybd-import-raw.cpp /build-tools/
 RUN sh /build-tools/build-overlaybd.sh /out
 
 FROM golang:1.26.3 AS convertor-build
