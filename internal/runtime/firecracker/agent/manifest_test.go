@@ -2,11 +2,37 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestOverlayBDObjectStoreManifestRejectedIncludingCachedCopy(t *testing.T) {
+	payload := testManifest(map[string][]byte{
+		"rootfs.ext4": []byte("rootfs"), "vmstate.snap": []byte("vmstate"), "memory.snap": []byte("memory"),
+	})
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(payload, &doc))
+	doc["format"] = "overlaybd"
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	_, err = parseManifest(raw)
+	require.ErrorContains(t, err, "OverlayBD object-store artifacts are unsupported")
+
+	// A complete legacy file set must not bypass the format check as a cache hit.
+	dir := t.TempDir()
+	for name, data := range map[string][]byte{
+		"rootfs.img": []byte("rootfs"), "vmstate.snap": []byte("vmstate"), "memory.snap": []byte("memory"), "manifest.json": raw,
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0600))
+	}
+	ready, err := cacheComplete(dir)
+	require.NoError(t, err)
+	require.False(t, ready)
+}
 
 func TestParseManifest(t *testing.T) {
 	payload := testManifest(map[string][]byte{

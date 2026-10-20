@@ -5,6 +5,11 @@ artifact store. SandboxTemplate builds, SandboxSnapshots, and pause
 checkpoints all share one schema; the SHA-256 of the whole document is the
 set's `artifactDigest` — changing any byte produces a different artifact set.
 
+This file-set schema describes the **native object-store path**. OverlayBD
+templates and checkpoints are supported only in OCI registries, with rootfs
+and snapfiles images; see [OverlayBD OCI](overlaybd-oci-sandboxes.md). Old
+OverlayBD + S3 manifests are rejected, including previously cached copies.
+
 ## Complete example
 
 ```json
@@ -48,13 +53,11 @@ set's `artifactDigest` — changing any byte produces a different artifact set.
     "netmask": "255.255.255.0",
     "mtu": 1500
   },
-  "format": "overlaybd",
+  "format": "native",
   "files": {
     "rootfs.ext4":  { "sha256": "a1b2…", "sizeBytes": 32212254720 },
     "vmstate.snap": { "sha256": "c3d4…", "sizeBytes": 1835008 },
-    "memory.snap":  { "sha256": "e5f6…", "sizeBytes": 2147483648 },
-    "overlaybd/rootfs/layer.lsmt":  { "sha256": "…", "sizeBytes": … },
-    "overlaybd/memory/layer.lsmt":  { "sha256": "…", "sizeBytes": … }
+    "memory.snap":  { "sha256": "e5f6…", "sizeBytes": 2147483648 }
   },
   "validation": { "booted": true, "restored": true }
 }
@@ -78,8 +81,8 @@ set's `artifactDigest` — changing any byte produces a different artifact set.
 | `machine` | The snapshot's resource triad: `vcpu` and `memory` are resource quantities (e.g. `"2"`, `"2Gi"`); `rootfs` is the actual rootfs capacity (the declared minimum rounded up to whole GiB, e.g. `"30Gi"`, matching `files["rootfs.ext4"].sizeBytes`). `vcpu`/`memory` are the restore-authoritative configuration — Firecracker refuses to restore with a memory size different from the one the vmstate was created with, so the create request's cpu/mem are only validated: a request below the snapshot memory is rejected explicitly. Snapshots inherit `vcpu`/`memory` verbatim from the source image; `rootfs` is rewritten per capture from the actual artifacts |
 | `compatibility` | Snapshot CPU provenance and capture environment. `vendor`/`cpuFamily`/`cpuModel` are the structured CPUID identity of the first `/proc/cpuinfo` processor — the fields consumers match before restoring (8163 and 8269CY share family 6 model 85); `cpuModelName` is the marketing string, display-only. `cpuTemplate` records how the snapshot was CPUID-masked: `"T2"` (Intel) / `"T2A"` (AMD) — portable across the template's allowlist — or `"none"` when the host refused the pinned template and the raw host CPUID was baked in (such artifacts are host-CPU specific by construction). `firecrackerVersion` (the Firecracker binary version) and `hostKernel` (host `uname -r`) complete the capture environment. Template builds record the build host; snapshots and checkpoints carry `compatibility` forward **verbatim from the source manifest** — the dumped vmstate carries the source's CPU state, so its compatibility is the source's. **Restore-time admission** enforces these fields before staging: a template-masked snapshot restores on any CPU in that template's allowlist for the recorded Firecracker version; an unmasked (`none`) snapshot restores only on the identical CPUID identity (vendor/family/model/stepping — the 8163/8269CY pair differs in stepping and is NOT interchangeable unmasked); an unresolved identity on either side fails closed; the node's Firecracker version must equal the recorded one in every tier; manifests without the structured fields (or with a pre-structured string `cpuModel`) are admitted with a warning, and an agent-delivered set with no committed manifest retries as not-ready |
 | `guestNetwork` | The guest static network baked into the snapshot (clone networking model): `iface`/`mac`/`ip`/`gateway`/`netmask`/`mtu`. At restore the guest side is unchanged (it lives in the memory image); the node replaces only the host tap. Consumers read `ip`/`gateway`/`netmask`/`mtu` — `mtu` 0 means an older manifest, falling back to the kernel default. Inherited verbatim |
-| `format` | `native` or `overlaybd`; both formats contain the complete snapshot set, differing in the extra LSMT layers (for on-demand loading). Snapshots/checkpoints are always `native` |
-| `files` | Per-artifact list: keys are publish-relative names, values are `{sha256, sizeBytes}` — sparse-aware digests and logical sizes. The pull side downloads each file and verifies its digest (already-verified files are skipped; corrupt ones are re-pulled). Fixed members: `rootfs.ext4` (renamed `rootfs.img` in the local cache), `vmstate.snap`, `memory.snap`; template builds with `format=overlaybd` add `overlaybd/rootfs/layer.lsmt` and `overlaybd/memory/layer.lsmt` |
+| `format` | `native` for object-store templates, snapshots and checkpoints. `overlaybd` is supported only by the OCI image-pair path |
+| `files` | Per-artifact list: keys are publish-relative names, values are `{sha256, sizeBytes}` — sparse-aware digests and logical sizes. The pull side downloads each file and verifies its digest (already-verified files are skipped; corrupt ones are re-pulled). Fixed members: `rootfs.ext4` (renamed `rootfs.img` in the local cache), `vmstate.snap`, `memory.snap`; no OverlayBD LSMT files are published to object storage |
 | `validation` | Capture-time validation flags: `booted` — the image/snapshot started successfully; `restored` — an additional restore verification ran (true for template builds, always false for live dumps — the vmstate itself is the running evidence). Informational |
 
 See also: [SandboxTemplate golden images](sandboxtemplate-golden-images.md),

@@ -21,8 +21,9 @@ type manifestFile struct {
 // manifest is the consumer-side view of manifest.json; only the file list
 // is needed by the pull layer.
 type manifest struct {
-	OCI   *ocitemplate.Pair       `json:"oci,omitempty"`
-	Files map[string]manifestFile `json:"files"`
+	Format string                  `json:"format"`
+	OCI    *ocitemplate.Pair       `json:"oci,omitempty"`
+	Files  map[string]manifestFile `json:"files"`
 }
 
 // parseManifest decodes a downloaded manifest document.
@@ -36,6 +37,9 @@ func parseManifest(payload []byte) (manifest, error) {
 			return manifest{}, err
 		}
 		return document, nil
+	}
+	if document.Format == "overlaybd" {
+		return manifest{}, fmt.Errorf("OverlayBD object-store artifacts are unsupported; rebuild as native or publish to an OCI registry")
 	}
 	if len(document.Files) == 0 {
 		return manifest{}, fmt.Errorf("manifest has no files")
@@ -63,8 +67,7 @@ const (
 // nativeArtifactNames maps published artifact names to the local cache
 // names. rootfs.ext4 is renamed to rootfs.img so
 // the existing resolveRootfsImage consumer needs no change; the rest keep
-// their published names. OverlayBD layers are deliberately absent: they
-// arrive with the overlaybd stage.
+// their published names. OverlayBD images use the separate OCI path.
 var nativeArtifactNames = []struct{ publish, cache string }{
 	{"rootfs.ext4", nativeRootfsCacheName},
 	{manifestVMStateName, manifestVMStateName},

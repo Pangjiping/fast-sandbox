@@ -36,7 +36,7 @@ func newSandboxTemplate(namespace, name string) *apiv1alpha2.SandboxTemplate {
 			Readiness: apiv1alpha2.ReadinessSpec{WarmupSeconds: 60},
 			Output: apiv1alpha2.OutputSpec{
 				RootfsSize: "30Gi",
-				Format:     apiv1alpha2.ArtifactFormatOverlayBD,
+				Format:     apiv1alpha2.ArtifactFormatNative,
 				Publish:    "s3://bucket/sandbox-images/",
 			},
 		},
@@ -1079,6 +1079,7 @@ func TestSandboxTemplateReconcileDefaultsMitmCertificateKey(t *testing.T) {
 
 func TestSandboxTemplateOCIOutputAndDeviceMount(t *testing.T) {
 	template := newSandboxTemplate("default", "oci-template")
+	template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
 	template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine:build"
 	template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: "registry"}
 	r := newSandboxTemplateReconciler(t, template)
@@ -1108,10 +1109,38 @@ func TestSandboxTemplateOCIOutputAndDeviceMount(t *testing.T) {
 	}
 }
 
+func TestOverlayBDObjectStoreFailsBeforeCreatingPod(t *testing.T) {
+	for _, publish := range []string{"s3://bucket/sandbox-images/", ""} {
+		t.Run(publish, func(t *testing.T) {
+			template := newSandboxTemplate("default", "overlaybd-s3")
+			template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
+			template.Spec.Output.Publish = publish
+			r := newSandboxTemplateReconciler(t, template)
+			reconcileOnce(t, r, client.ObjectKeyFromObject(template))
+			var current apiv1alpha2.SandboxTemplate
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(template), &current); err != nil {
+				t.Fatal(err)
+			}
+			condition := findBuildCondition(t, &current)
+			if current.Status.Phase != apiv1alpha2.SandboxTemplatePhaseFailed || condition.Reason != "InvalidOutput" || !strings.Contains(condition.Message, "overlaybd requires output.publish=oci://") {
+				t.Fatalf("expected invalid output failure: %+v", current.Status)
+			}
+			var pods corev1.PodList
+			if err := r.List(context.Background(), &pods); err != nil {
+				t.Fatal(err)
+			}
+			if len(pods.Items) != 0 {
+				t.Fatal("unsupported OverlayBD object-store output launched a Pod")
+			}
+		})
+	}
+}
+
 func TestOCIMissingPublishSecretFailsBeforeCreatingPod(t *testing.T) {
 	for _, name := range []string{"nil", "", "  "} {
 		t.Run(name, func(t *testing.T) {
 			template := newSandboxTemplate("default", "oci-no-secret")
+			template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
 			template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine:build"
 			if name != "nil" {
 				template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: name}

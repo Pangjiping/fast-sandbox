@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +62,22 @@ func resolveRootfsImage(stateRoot, image string) (string, error) {
 	}
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
 		return "", fmt.Errorf("%w: %q", ErrImageNotReady, image)
+	}
+	// Local and agent-unreachable restores must not bypass the removal of
+	// OverlayBD object-store templates by reusing an old raw-file cache.
+	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
+	if err == nil {
+		var document struct {
+			Format string `json:"format"`
+		}
+		if err := json.Unmarshal(payload, &document); err != nil {
+			return "", fmt.Errorf("%w: decode cached image manifest: %w", ErrInvalidConfig, err)
+		}
+		if document.Format == "overlaybd" {
+			return "", fmt.Errorf("%w: OverlayBD object-store artifacts are unsupported; rebuild as native or publish to an OCI registry", ErrInvalidConfig)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
 	}
 	return path, nil
 }

@@ -199,7 +199,7 @@ spec:
     warmupSeconds: 60
   output:
     rootfsSize: "30Gi"
-    format: overlaybd
+    format: native
     publish: s3://sandbox-images/publish
     publishSecretRef:
       name: sandbox-images-readwrite
@@ -221,9 +221,9 @@ spec:
 | `readiness.warmupSeconds` | Yes | `60` | Fallback time-based warmup |
 | `readiness.healthCheck` | No | — | Fallback health command; empty uses image `CMD-SHELL` |
 | `output.rootfsSize` | Yes | `"30Gi"` | Logical rootfs capacity (minimum, rounded up to SI GiB) |
-| `output.format` | Yes | `overlaybd` | `native` or `overlaybd` (both contain the full snapshot set) |
-| `output.publish` | Yes | — | S3-compatible digest-addressed publish target, e.g. `s3://bucket/prefix` |
-| `output.publishSecretRef` | No | — | Write-credential Secret name in the template's namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`) |
+| `output.format` | Yes | `overlaybd` | `native` for S3-compatible storage; `overlaybd` requires `output.publish: oci://...` |
+| `output.publish` | No | platform store for native | `native`: S3-compatible target, e.g. `s3://bucket/prefix`, or omit to use the platform store. `overlaybd`: explicit `oci://registry/repository:id` required; S3 is rejected |
+| `output.publishSecretRef` | No for native; yes for OCI | — | Secret in the template's namespace: S3 keys for native; `.dockerconfigjson` for OCI |
 | `output.prime` | No | — | Reserved: seed-node cache priming; not yet implemented |
 
 Readiness precedence: custom `probe` → execd `/ping` → `warmupSeconds` +

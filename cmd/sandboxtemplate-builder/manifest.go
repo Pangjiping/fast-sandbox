@@ -11,7 +11,7 @@ import (
 
 // Published artifact and execd asset names shared by the build stages.
 const (
-	// rootfsDirName is the rootfs drive id and the OverlayBD layer directory.
+	// rootfsDirName is the rootfs drive id.
 	rootfsDirName = "rootfs"
 	// rootfsImageName is the rootfs image file staged in the workdir.
 	rootfsImageName = "rootfs.ext4"
@@ -34,13 +34,13 @@ const (
 // snapshot driver, runtime-agent) emits byte-identical layouts. cpuTemplate
 // is what the snapshot stage reported (see compatibilityCPUTemplate); mitmCA
 // carries the baked egress MITM CA lineage (nil when none).
-func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, layers []string, workdir, cpuTemplate string, mitmCA []mitmCALineage) ([]byte, error) {
+func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory, workdir, cpuTemplate string, mitmCA []mitmCALineage) ([]byte, error) {
 	cache := map[string]string{}
 	rootfsGiB, err := sizeGiB(spec.Output.RootfsSize)
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := buildManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, layers, cache, rootfsGiB, cpuTemplate, mitmCA)
+	manifest, err := buildManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, cache, rootfsGiB, cpuTemplate, mitmCA)
 	if err != nil {
 		return nil, err
 	}
@@ -63,20 +63,12 @@ func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 // declared minimum with the real artifact size. The lineage object records
 // where the set came from and what was baked in at build time; snapshot
 // and checkpoint producers carry it forward verbatim across generations.
-func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, layers []string, cache map[string]string, rootfsGiB int, cpuTemplate string, mitmCA []mitmCALineage) (map[string]any, error) {
+func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, cache map[string]string, rootfsGiB int, cpuTemplate string, mitmCA []mitmCALineage) (map[string]any, error) {
 	files := map[string]any{}
 	staged := []struct{ name, path string }{
 		{rootfsImageName, rootfs},
 		{vmstateFileName, vmstate},
 		{memoryFileName, memory},
-	}
-	if len(layers) > 0 {
-		staged = append(staged,
-			struct{ name, path string }{"overlaybd/rootfs/layer.lsmt", layers[0]})
-		if len(layers) > 1 {
-			staged = append(staged,
-				struct{ name, path string }{"overlaybd/memory/layer.lsmt", layers[1]})
-		}
 	}
 	for _, artifact := range staged {
 		entry, err := artifacts.FileEntry(artifact.path, cache)
@@ -169,21 +161,10 @@ func compatibilityCPUTemplate(cpuTemplate string) string {
 }
 
 // writeChecksums writes SHA256SUMS covering only the published artifact set
-// (rootfs/vmstate/memory/layers), reusing the checksums already computed for
+// (rootfs/vmstate/memory), reusing the checksums already computed for
 // the manifest. Intermediate build files (OCI layout, console logs, etc.) are
 // deliberately excluded.
 func writeChecksums(workdir string, cache map[string]string) error {
 	files := []string{rootfsImageName, vmstateFileName, memoryFileName}
-	layers, err := filepath.Glob(filepath.Join(workdir, "overlaybd", "*", "layer.lsmt"))
-	if err != nil {
-		return fmt.Errorf("glob overlaybd layers: %w", err)
-	}
-	for _, layer := range layers {
-		relative, err := filepath.Rel(workdir, layer)
-		if err != nil {
-			return err
-		}
-		files = append(files, relative)
-	}
 	return artifacts.WriteSHA256SUMS(workdir, files, cache)
 }

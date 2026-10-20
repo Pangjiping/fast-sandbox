@@ -1,11 +1,11 @@
 # sandboxtemplate-builder — golden-image build pipeline (SandboxTemplate).
 #
 # Contains the platform toolchain (oci2rootfs, firecracker, e2fsprogs,
-# overlaybd-import-raw, aws CLI) plus the embedded guest kernel, and executes
-# the convert → validate-boot → snapshot → package pipeline driven by
-# cmd/sandboxtemplate-builder. The snapshot stage entry is the same binary
-# under a symlinked name. OverlayBD packaging is always built in from source
-# (overlaybd-import-raw, see the overlaybd-build stage below).
+# fsb-vm, OverlayBD tools, aws CLI) plus the embedded guest kernel.
+# Native output uses oci2rootfs → snapshot → object-store publication;
+# OverlayBD output uses fsb-vm build → OCI publication. The snapshot stage
+# entry is the same binary under a symlinked name. OverlayBD tools are built
+# from source for the fsb-vm OCI path.
 
 ARG OCI2ROOTFS_REV=76d3f4648a591066a4419f972e4118f2d1d68a35
 ARG FIRECRACKER_VERSION=v1.16.1

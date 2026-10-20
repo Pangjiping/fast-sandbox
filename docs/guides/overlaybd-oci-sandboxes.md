@@ -2,7 +2,7 @@
 
 This guide uses the FastPath gRPC API to create, pause, and resume Sandboxes on an existing Firecracker cluster.
 
-**Enable this path with a Firecracker Pool, an OCI-capable Fastlet image, and an `oci://` template.** Although `output.format` defaults to `overlaybd`, the OCI path described here requires `output.publish: oci://...`.
+**Enable this path with a Firecracker Pool, an OCI-capable Fastlet image, and an `oci://` template.** `output.format: overlaybd` requires `output.publish: oci://...`; OverlayBD + S3 is unsupported. To retain S3-compatible storage, explicitly use `output.format: native` and rebuild the template. Old OverlayBD + S3 artifacts, including cached manifests, are rejected.
 
 ## 1. Prepare the Pool
 

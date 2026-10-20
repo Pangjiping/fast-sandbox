@@ -78,17 +78,17 @@ type ReadinessSpec struct {
 }
 
 // ArtifactFormat selects the storage encoding of the produced snapshot set.
-// Both formats contain the full artifacts (rootfs.ext4, vmstate.snap,
-// memory.snap); a rootfs-only output is not supported.
+// Native publishes raw snapshots to object storage; OverlayBD publishes a
+// rootfs/snapfiles image pair to an OCI registry.
 // +kubebuilder:validation:Enum=native;overlaybd
 // +kubebuilder:default=overlaybd
 type ArtifactFormat string
 
 const (
-	// ArtifactFormatNative keeps the raw snapshot files as-is.
+	// ArtifactFormatNative keeps the raw snapshot files in object storage.
 	ArtifactFormatNative ArtifactFormat = "native"
-	// ArtifactFormatOverlayBD converts rootfs and memory into OverlayBD
-	// LSMT commit layers for lazy loading; vmstate.snap stays a plain file.
+	// ArtifactFormatOverlayBD publishes OverlayBD rootfs and snapfiles images
+	// to an OCI registry for lazy loading. Object storage is not supported.
 	ArtifactFormatOverlayBD ArtifactFormat = "overlaybd"
 )
 
@@ -104,6 +104,7 @@ type PrimeSpec struct {
 }
 
 // OutputSpec describes the artifacts to produce and where to publish them.
+// +kubebuilder:validation:XValidation:rule="(self.format == 'overlaybd') == (has(self.publish) && self.publish.startsWith('oci://'))",message="overlaybd requires an explicit oci:// publish target; object-store output requires format=native"
 type OutputSpec struct {
 	// RootfsSize is the logical size of the converted rootfs.ext4 — the
 	// capacity the guest sees as its root drive. A Kubernetes resource
@@ -112,14 +113,15 @@ type OutputSpec struct {
 	// +kubebuilder:default="30Gi"
 	RootfsSize string `json:"rootfsSize"`
 
-	// Format selects the storage encoding of the snapshot set.
+	// Format selects the storage encoding. Native requires object storage;
+	// OverlayBD requires an explicit oci:// publish target.
 	// +kubebuilder:default=overlaybd
 	Format ArtifactFormat `json:"format"`
 
 	// Publish selects the destination. oci://registry/namespace/repo:tag
 	// invokes fsb-vm and publishes an OverlayBD OCI template pair;
 	// PublishSecretRef then requires .dockerconfigjson.
-	// Otherwise Publish is the S3-compatible object store target, e.g.
+	// For format=native, Publish is the S3-compatible object store target, e.g.
 	// s3://bucket/sandbox-images/ (digest-addressed publication). When
 	// empty, the controller defaults it to the platform artifact store
 	// (the fast-sandbox-artifact-store ConfigMap); when set it must equal

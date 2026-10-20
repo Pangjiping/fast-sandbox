@@ -516,6 +516,9 @@ func (r *SandboxTemplateReconciler) effectiveOutput(output apiv1alpha2.OutputSpe
 		}
 		return output, nil
 	}
+	if output.Format != apiv1alpha2.ArtifactFormatNative {
+		return output, fmt.Errorf("object-store templates require output.format=native; overlaybd requires output.publish=oci://...")
+	}
 	if output.Publish == "" {
 		if storeRoot == "" {
 			return output, fmt.Errorf("%w: spec.output.publish is empty (set output.publish or configure the controller artifact store)", errArtifactStoreUnconfigured)
@@ -532,7 +535,7 @@ func (r *SandboxTemplateReconciler) effectiveOutput(output apiv1alpha2.OutputSpe
 // createBuildPod launches the builder Pod that executes the pipeline. The
 // template spec — with the effective (platform-defaulted) output — is
 // serialized into the environment; the builder image runs the stages
-// (convert → validate-boot → snapshot → package) and publishes the
+// (native object-store build or OverlayBD OCI build) and publishes the
 // artifacts. The Pod runs in the template's namespace (so it can carry
 // an owner reference and the publish secret can be SecretKeyRef'd from the
 // same namespace) and has a deterministic name (<template>-build-<gen>) so

@@ -416,7 +416,7 @@ while IFS= read -r name; do
         echo "warning: mc cp download of $name skipped (tool limitation); upload covered by local digest + stored size" >&2
     fi
     rm -f "$WORK/verify-$name"
-done < <(printf '%s' "$MANIFEST_JSON" | jq -r '.files | keys[]' | grep -v '^overlaybd/')
+done < <(printf '%s' "$MANIFEST_JSON" | jq -r '.files | keys[]')
 pass "verification point 1: publish layout (index + digest16 build + SHA256SUMS)"
 
 # --- runtime-agent -----------------------------------------------------------

@@ -6,7 +6,14 @@ object store. The Firecracker runtime consumes the artifacts on demand
 (`SandboxSpec.Image` → index → manifest → digest-verified pull → restore), so
 the template is the build-time half of on-demand loading.
 
-This guide covers operating the resource end to end.
+This guide covers the `format: native` object-store pipeline. OverlayBD templates
+require `output.publish: oci://...` and use the [OverlayBD OCI guide](overlaybd-oci-sandboxes.md).
+
+Only two combinations are supported: `native` + S3-compatible storage, and
+`overlaybd` + OCI registry. The default format remains `overlaybd`, so S3
+templates must explicitly set `format: native`. OverlayBD + S3 builds and
+artifacts are rejected. Rebuild an old S3 template as native, or rebuild and
+publish it to OCI; changing a format label does not convert its artifacts.
 
 ## End-to-end workflow
 
@@ -16,7 +23,6 @@ SandboxTemplate CR (spec)
   → convert: OCI layers → sparse ext4 rootfs + runtime injection (execd/init/envs)
   → validate-boot: cold boot + guest readiness
   → snapshot: pause → full snapshot (vmstate.snap + memory.snap) → restore validation
-  → package (format=overlaybd): rootfs/memory → LSMT layers
   → manifest.json + SHA256SUMS (content-addressed)
   → publish: s3://<publish>/<sha256(manifest)[:16]>/… + index/<sha256(image)>.json
   → status.manifestRef / status.artifactDigest recorded on the CR
@@ -63,7 +69,7 @@ spec:
     warmupSeconds: 60
   output:
     rootfsSize: "30Gi"
-    format: overlaybd
+    format: native
     # publish is optional when the platform artifact store is configured
     publish: s3://sandbox-images/publish
     publishSecretRef:
@@ -210,8 +216,8 @@ Precedence: custom `probe` → execd `/ping` (when execd is injected) →
 | Field | Required | Default | Meaning |
 | --- | ---: | --- | --- |
 | `output.rootfsSize` | Yes | `"30Gi"` | Logical capacity of the produced `rootfs.ext4` (Kubernetes quantity). Rounded **up** to SI GiB for oci2rootfs (`30Gi` → 33G → ~30.7 GiB sparse file) |
-| `output.format` | Yes | `overlaybd` | `native` (raw snapshot files only) or `overlaybd` (plus LSMT layers for on-demand range reads); both contain the full artifact set |
-| `output.publish` | No | platform store | S3-compatible target, e.g. `s3://sandbox-images/publish`. Empty defaults to the platform artifact store (`fast-sandbox-artifact-store` ConfigMap); a non-empty value must equal that store or the build fails with an `InvalidOutput` condition, so a template cannot silently publish where no node agent reads. Digest-addressed publication; the builder itself refuses to run with an empty target unless `SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1` |
+| `output.format` | Yes | `overlaybd` | `native` for S3-compatible storage; `overlaybd` requires an explicit `oci://` target |
+| `output.publish` | No | platform store | S3-compatible target for `format: native`, e.g. `s3://sandbox-images/publish`. OverlayBD requires `oci://registry/repository:id` and a registry credential Secret. For native output, empty defaults to the platform artifact store (`fast-sandbox-artifact-store` ConfigMap); a non-empty value must equal that store or the build fails with an `InvalidOutput` condition, so a template cannot silently publish where no node agent reads. Digest-addressed publication; the builder itself refuses to run with an empty target unless `SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1` |
 | `output.publishSecretRef` | No | — | Name of the write-credential Secret in the template's namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`); the controller mounts it into the build Pod and the builder reads the keys as files (never env-injected). Without it the build relies on platform-level credentials (IRSA/node metadata). Runtime nodes read with a **separate** read-only credential — write keys never reach them |
 | `output.prime` | No | — | Reserved: seed-node cache priming after a successful build; not yet implemented |
 
@@ -240,7 +246,7 @@ what the node agents pull.
 - **Diagnostics**: failed builds surface the container exit reason/message in
   the condition; the Pod logs (`kubectl -n <namespace> logs <build-pod>`)
   carry per-stage timings (`pullMs`, `bootToReadyMs`, `snapshotCreateMs`,
-  `restoreToHeartbeatMs`, `importRootfsMs`, …).
+  `restoreToHeartbeatMs`, `manifestMs`, …).
 
 ## Published artifacts
 
@@ -250,7 +256,6 @@ s3://sandbox-images/publish/
 │   ├── rootfs.ext4                   # sparse ext4 (native filename: rootfs.img)
 │   ├── vmstate.snap
 │   ├── memory.snap
-│   ├── overlaybd/{rootfs,memory}/layer.lsmt   # format=overlaybd only
 │   ├── SHA256SUMS                    # audit copy
 │   └── manifest.json                 # uploaded last (commit point)
 └── index/<sha256(image)>.json        # image → latest manifestRef, last-writer-wins

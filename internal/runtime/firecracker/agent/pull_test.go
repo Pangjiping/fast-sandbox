@@ -184,6 +184,30 @@ func TestPullImageFullFlow(t *testing.T) {
 	require.ElementsMatch(t, expected, store.requested())
 }
 
+func TestPullImageRejectsOverlayBDObjectStoreBeforeDownloadingFiles(t *testing.T) {
+	store, client, original, _ := publishFixture(t)
+	var document map[string]any
+	require.NoError(t, json.Unmarshal(original, &document))
+	document["format"] = "overlaybd"
+	payload, err := json.Marshal(document)
+	require.NoError(t, err)
+	manifestKey := sha256Hex(original)[:16] + "/manifest.json"
+	indexKey := "index/" + imageKey(testImage) + ".json"
+	var index imageIndex
+	require.NoError(t, json.Unmarshal(store.objects[indexKey], &index))
+	index.ArtifactDigest = sha256Hex(payload)
+	indexPayload, err := json.Marshal(index)
+	require.NoError(t, err)
+	store.objects[manifestKey] = payload
+	store.objects[indexKey] = indexPayload
+
+	root := t.TempDir()
+	err = (&Client{s3: client}).PullImage(context.Background(), root, testImage)
+	require.ErrorContains(t, err, "OverlayBD object-store artifacts are unsupported")
+	require.ElementsMatch(t, []string{indexKey, manifestKey}, store.requested())
+	require.NoFileExists(t, filepath.Join(imageDir(root, testImage), manifestName))
+}
+
 func TestPullImageIdempotent(t *testing.T) {
 	store, client, _, _ := publishFixture(t)
 	root := t.TempDir()

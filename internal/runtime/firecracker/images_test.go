@@ -45,6 +45,26 @@ func TestResolveRootfsImage(t *testing.T) {
 	require.Equal(t, path, resolved)
 }
 
+func TestLocalCacheRejectsOverlayBDObjectStore(t *testing.T) {
+	root, image := t.TempDir(), "example.com/legacy-overlaybd:v1"
+	path, err := imageCachePath(root, image)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0750))
+	for _, name := range []string{rootfsImageName, vmstateSnapshotName, memorySnapshotName} {
+		require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(path), name), []byte(name), 0640))
+	}
+	manifest := cachedManifestPath(root, image)
+	require.NoError(t, os.WriteFile(manifest, []byte(`{"format":"overlaybd"}`), 0640))
+	require.ErrorIs(t, verifyRestorableImage(root, image), ErrInvalidConfig)
+	driver := &Driver{config: firecrackerConfigForTest(t, root)}
+	require.ErrorIs(t, driver.PullImage(context.Background(), image), ErrInvalidConfig)
+
+	// The supported native cache remains usable without a runtime-agent.
+	require.NoError(t, os.WriteFile(manifest, []byte(`{"format":"native"}`), 0640))
+	require.NoError(t, verifyRestorableImage(root, image))
+	require.NoError(t, driver.PullImage(context.Background(), image))
+}
+
 func TestListCachedImagesAndDriverSurfaces(t *testing.T) {
 	root := t.TempDir()
 	driver := &Driver{config: firecrackerConfigForTest(t, root)}

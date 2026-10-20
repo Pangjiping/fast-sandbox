@@ -305,8 +305,9 @@ spec:
                 properties:
                   format:
                     default: overlaybd
-                    description: Format selects the storage encoding of the snapshot
-                      set.
+                    description: |-
+                      Format selects the storage encoding. Native requires object storage;
+                      OverlayBD requires an explicit oci:// publish target.
                     enum:
                     - native
                     - overlaybd
@@ -330,7 +331,7 @@ spec:
                       Publish selects the destination. oci://registry/namespace/repo:tag
                       invokes fsb-vm and publishes an OverlayBD OCI template pair;
                       PublishSecretRef then requires .dockerconfigjson.
-                      Otherwise Publish is the S3-compatible object store target, e.g.
+                      For format=native, Publish is the S3-compatible object store target, e.g.
                       s3://bucket/sandbox-images/ (digest-addressed publication). When
                       empty, the controller defaults it to the platform artifact store
                       (the fast-sandbox-artifact-store ConfigMap); when set it must equal
@@ -373,6 +374,10 @@ spec:
                 - format
                 - rootfsSize
                 type: object
+                x-kubernetes-validations:
+                - message: overlaybd requires an explicit oci:// publish target; object-store
+                    output requires format=native
+                  rule: (self.format == 'overlaybd') == (has(self.publish) && self.publish.startsWith('oci://'))
               readiness:
                 description: Readiness defines when the guest is considered ready.
                 properties:

@@ -5,7 +5,7 @@
 // variable, injected by the controller when it creates the build Pod. The
 // builder runs inside a privileged Pod with /dev/kvm and shells out to the
 // platform toolchain (oci2rootfs, firecracker, e2fsprogs,
-// overlaybd-import-raw, aws CLI). On success it patches its own Pod
+// fsb-vm, aws CLI). On success it patches its own Pod
 // annotations so the controller can surface manifestRef and artifactDigest
 // on the template status.
 //
@@ -14,9 +14,9 @@
 //	oci.go      — pull the source image into an OCI layout (+ execd extraction)
 //	convert.go  — materialize the layout into a sparse ext4 rootfs and inject the runtime
 //	snapshot.go — drive firecracker to boot, snapshot, and restore-validate
-//	package.go  — encode the snapshot artifacts as OverlayBD layers
 //	manifest.go — assemble manifest.json and SHA256SUMS
 //	publish.go  — upload artifacts and report the outcome on the Pod
+//	oci_template.go — build and publish OverlayBD OCI images through fsb-vm
 //
 // In addition, the builder image ships the same binary under the symlinked
 // name sandbox-snapshot-stage; that entry point runs the snapshot helper
@@ -49,11 +49,10 @@ const (
 
 // Tool paths inside the builder image.
 const (
-	oci2rootfsBin      = "oci2rootfs"
-	firecrackerBin     = "firecracker"
-	overlaybdImportBin = "overlaybd-import-raw"
-	awsBin             = "aws"
-	kernelDir          = "/usr/local/share/firecracker"
+	oci2rootfsBin  = "oci2rootfs"
+	firecrackerBin = "firecracker"
+	awsBin         = "aws"
+	kernelDir      = "/usr/local/share/firecracker"
 )
 
 func main() {
@@ -88,6 +87,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if !strings.HasPrefix(spec.Output.Publish, "oci://") && spec.Output.Format != apiv1alpha2.ArtifactFormatNative {
+		return fmt.Errorf("object-store templates require output.format=native; overlaybd requires output.publish=oci://...")
+	}
 	kernel, err := resolveKernel(spec.Kernel)
 	if err != nil {
 		return err
@@ -120,7 +122,7 @@ func buildObjectStoreTemplate(ctx context.Context, spec apiv1alpha2.SandboxTempl
 	}
 	convertMs := time.Since(convertStarted).Milliseconds()
 
-	// Stage 2+3: validate-boot and snapshot (mandatory for every format).
+	// Stage 2+3: validate-boot and snapshot.
 	bootStarted := time.Now()
 	vmstate, memory, phases, err := stageBootAndSnapshot(spec, workdir, kernel, rootfs)
 	if err != nil {
@@ -128,26 +130,16 @@ func buildObjectStoreTemplate(ctx context.Context, spec apiv1alpha2.SandboxTempl
 	}
 	bootMs := time.Since(bootStarted).Milliseconds()
 
-	// Stage 4: package — OverlayBD encoding (overlaybd format only).
-	var layers []string
-	importRootfsMs, importMemoryMs := int64(0), int64(0)
-	if spec.Output.Format == apiv1alpha2.ArtifactFormatOverlayBD {
-		layers, importRootfsMs, importMemoryMs, err = stagePackage(workdir, rootfs, memory)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Stage 5: manifest + checksums, recording the CPU template the
+	// Stage 4: manifest + checksums, recording the CPU template the
 	// snapshot stage actually booted with.
 	manifestStarted := time.Now()
-	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, layers, workdir, phases.CPUTemplate, mitmCA)
+	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, workdir, phases.CPUTemplate, mitmCA)
 	if err != nil {
 		return err
 	}
 	manifestMs := time.Since(manifestStarted).Milliseconds()
 
-	// Stage 6: publish to the object store; the manifest is uploaded last so
+	// Stage 5: publish to the object store; the manifest is uploaded last so
 	// consumers never observe a half-published artifact set.
 	publishMs := int64(0)
 	manifestRef := ""
@@ -174,8 +166,6 @@ func buildObjectStoreTemplate(ctx context.Context, spec apiv1alpha2.SandboxTempl
 		"snapshotCreateMs", phases.SnapshotCreateMs,
 		"restoreToHeartbeatMs", phases.RestoreToHeartbeatMs,
 		"bootMs", bootMs,
-		"importRootfsMs", importRootfsMs,
-		"importMemoryMs", importMemoryMs,
 		"manifestMs", manifestMs,
 		"publishMs", publishMs,
 		"totalMs", time.Since(started).Milliseconds())

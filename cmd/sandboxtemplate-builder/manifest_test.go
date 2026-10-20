@@ -1,13 +1,41 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
+
+func TestNativeManifestExcludesStaleOverlayBDLayers(t *testing.T) {
+	spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
+	workdir := filepath.Dir(rootfs)
+	for _, kind := range []string{"rootfs", "memory"} {
+		dir := filepath.Join(workdir, "overlaybd", kind)
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "layer.lsmt"), []byte("stale-layer"), 0600))
+	}
+	raw, err := stageManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory, workdir, "", nil)
+	require.NoError(t, err)
+	var manifest struct {
+		Format string         `json:"format"`
+		Files  map[string]any `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &manifest))
+	require.Equal(t, "native", manifest.Format)
+	require.Len(t, manifest.Files, 3)
+	for _, name := range []string{rootfsImageName, vmstateFileName, memoryFileName} {
+		require.Contains(t, manifest.Files, name)
+	}
+	sums, err := os.ReadFile(filepath.Join(workdir, "SHA256SUMS"))
+	require.NoError(t, err)
+	require.NotContains(t, string(sums), "overlaybd")
+}
 
 // TestCompatibilityCPUTemplate: the manifest records the template the
 // snapshot stage actually booted with; an empty effective template (the raw
@@ -56,7 +84,7 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 	spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
 
 	manifest, err := buildManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory,
-		nil, map[string]string{}, 1, "", nil)
+		map[string]string{}, 1, "", nil)
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}
@@ -74,7 +102,7 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 		NotAfter:   "2036-01-01T00:00:00Z",
 	}
 	manifest, err = buildManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory,
-		nil, map[string]string{}, 1, "", []mitmCALineage{wantEntry})
+		map[string]string{}, 1, "", []mitmCALineage{wantEntry})
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}
