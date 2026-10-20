@@ -17,8 +17,10 @@ const (
 	// into every clone.
 	StateKindVault StateKind = "vault"
 	// StateKindPolicy is the recorded egress network policy file: desired
-	// state, not a secret. Checkpoint and template snapshots alike carry it
-	// — a template clone must inherit the relayed policy, and the imported
+	// state, not a secret. Checkpoint snapshots carry it (the export seals
+	// the subject on the egress, so a template export would lock the
+	// still-running source out of its policy CRUD — templates never export,
+	// and a clone inherits the create-time CRD seed instead). The imported
 	// record stays authoritative over later binding replays (the binding
 	// input only ever seeds a fresh subject).
 	//
@@ -36,12 +38,11 @@ const (
 	//     they bypass the CRD (no re-delivery, no durability across a Pod
 	//     recreation) and never leak into clones.
 	//   - Snapshot/pause: persistence rides the egress dump — POLICY_EXPORT
-	//     copies the subject's persisted policy record into the bundle as
-	//     policy.json, an OPAQUE artifact (the manifest only references it;
-	//     the driver never parses it) whose only consumer is the resume
-	//     POLICY_IMPORT, which re-stamps it before data-plane-ready. A
-	//     clone-create does not read it: the clone inherits the CRD
-	//     binding seed recorded in the manifest's actionBindings.
+	//     copies the subject's persisted policy record into the checkpoint
+	//     bundle as policy.json, an OPAQUE artifact (the manifest only
+	//     references it; the driver never parses it) whose only consumer is
+	//     the resume POLICY_IMPORT, which re-stamps it before
+	//     data-plane-ready.
 	StateKindPolicy StateKind = "policy"
 )
 

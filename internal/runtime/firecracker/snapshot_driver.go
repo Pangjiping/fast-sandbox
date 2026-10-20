@@ -147,20 +147,29 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	// NEVER export: the vault belongs to one sandbox instance, and a shared
 	// boot image would leak it to every sandbox booted from the template.
 	if kind == fastletapi.SnapshotKindCheckpoint {
+		// Checkpoint snapshots carry BOTH egress-owned state files in the
+		// bundle: the exports run here — inside the pause flow, strictly
+		// before the control plane releases the runtime (the release is
+		// what sends REMOVE_BINDING and purges the egress-local files). An
+		// export failure fails the checkpoint, so the egress-local files
+		// survive for the retry. Template snapshots NEVER export — neither
+		// state kind:
+		//   - the vault belongs to one sandbox instance, and a shared boot
+		//     image would leak it to every sandbox booted from the template;
+		//   - the policy export durably SEALS the subject on the egress
+		//     (relay GET/PUT/DELETE answer 409 until an import re-owns the
+		//     record), and a template's completion path never imports — the
+		//     still-running source would lose policy CRUD forever. A clone
+		//     inherits the create-time CRD seed through the manifest's
+		//     actionBindings, which need no export at all.
 		if err := d.stageCheckpointVault(ctx, input.SandboxID, plan.staging); err != nil {
 			_ = os.RemoveAll(plan.staging)
 			return nil, err
 		}
-	}
-	// The recorded egress policy rides EVERY snapshot bundle (checkpoint and
-	// template alike) — the deliberate asymmetry vs the vault: the policy is
-	// desired state rather than a secret, and a template clone must inherit
-	// the relayed policy, not just the bootstrap binding input. Same failure
-	// posture as the vault: an export failure fails the snapshot so the
-	// egress-local file survives for the retry.
-	if err := d.stageCheckpointPolicy(ctx, input.SandboxID, plan.staging); err != nil {
-		_ = os.RemoveAll(plan.staging)
-		return nil, err
+		if err := d.stageCheckpointPolicy(ctx, input.SandboxID, plan.staging); err != nil {
+			_ = os.RemoveAll(plan.staging)
+			return nil, err
+		}
 	}
 
 	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, input.ActionBindings)
@@ -689,12 +698,12 @@ func (d *Driver) stageCheckpointVault(ctx context.Context, sandboxUID, staging s
 }
 
 // stageCheckpointPolicy exports the subject's egress-recorded network policy
-// into the snapshot staging directory (no-op without a mover). Exported for
-// BOTH checkpoint and template snapshots (the caller stages it outside the
-// kind gate): the policy is desired state, not a secret, and a template
-// clone must inherit the relayed policy. Same failure posture as the vault:
-// a transfer failure fails the snapshot so the egress-local file survives
-// for the retry.
+// into the checkpoint staging directory (no-op without a mover). Checkpoint
+// snapshots only — the export seals the subject on the egress side, and a
+// template's completion path never imports, so a template export would
+// leave the still-running source without policy CRUD. Same failure posture
+// as the vault: a transfer failure fails the checkpoint so the egress-local
+// file survives for the retry.
 func (d *Driver) stageCheckpointPolicy(ctx context.Context, sandboxUID, staging string) error {
 	d.mu.RLock()
 	mover := d.stateMover

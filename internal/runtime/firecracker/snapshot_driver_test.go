@@ -484,17 +484,21 @@ func TestCreateTemplateSnapshotDoesNotCommitCheckpointCache(t *testing.T) {
 // no staged payload exports nothing (the "subject held no state of this
 // kind" answer).
 type fakeStateMover struct {
-	mu          sync.Mutex
-	exportData  map[runtimecontract.StateKind][]byte
-	exportErr   error
-	exportCalls []string
-	imports     []string
+	mu              sync.Mutex
+	exportData      map[runtimecontract.StateKind][]byte
+	exportErr       error
+	exportErrByKind map[runtimecontract.StateKind]error
+	exportCalls     []string
+	imports         []string
 }
 
 func (f *fakeStateMover) ExportState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.exportCalls = append(f.exportCalls, sandboxUID+":"+string(kind)+":"+bundlePath)
+	if err, ok := f.exportErrByKind[kind]; ok {
+		return err
+	}
 	if f.exportErr != nil {
 		return f.exportErr
 	}
@@ -594,61 +598,40 @@ func TestCreateTemplateSnapshotNeverExportsVault(t *testing.T) {
 	})
 	require.NoError(t, err)
 	exports, _ := mover.snapshot()
-	require.NotEmpty(t, exports, "the policy export is attempted for templates too")
-	for _, call := range exports {
-		require.NotContains(t, call, "vault:", "a shared boot image must never carry one sandbox's credentials")
-	}
+	require.Empty(t, exports, "a template exports neither state kind: the vault would leak credentials, the policy export would seal the source")
 	require.Len(t, agent.manifest["files"].(map[string]any), 3)
 	require.NotContains(t, agent.manifest, "egressVault")
 }
 
-// The recorded policy rides EVERY snapshot bundle — template snapshots
-// included (the deliberate asymmetry vs the vault) — but ONLY as the opaque
-// bundle file (files + SHA256SUMS, the resume import's artifact). The
-// manifest's actionBindings stay the CRD desired state verbatim: the driver
-// never parses the policy record and never embeds its content, and relay
-// mutations are subject-local (they must not leak into clones).
-func TestCreateTemplateSnapshotStagesPolicyOpaqueAndKeepsCrdBindings(t *testing.T) {
+// The recorded policy rides CHECKPOINT bundles only. A template snapshot
+// must not export it: the export seals the subject on the egress (relay
+// CRUD answers 409 until an import), and a template's completion path
+// never imports — the still-running source would lose policy CRUD forever.
+func TestCreateTemplateSnapshotNeverExportsPolicy(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-	// The egress persists the recorded policy as a sealed record (v/
-	// incarnation/attachmentId/revision/policy) and POLICY_EXPORT copies it
-	// verbatim; the driver treats it as opaque bytes either way.
-	record := []byte(`{"v":1,"incarnation":"e54b3433","attachmentId":"sha256:6afb","revision":2,"policy":{"egress":[{"action":"allow","target":"example.com"}],"defaultAction":"deny"}}`)
-	mover := policyMoverWith(record)
+	mover := policyMoverWith([]byte(`{"defaultAction":"allow"}`))
 	fixture.driver.SetStateMover(mover)
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
 		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
 		ActionBindings: []runtimecontract.SnapshotActionBinding{
 			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
-			{Handler: "audit", Input: `{"audit":true}`},
 		},
 	})
 	require.NoError(t, err)
-
-	// The opaque file rides files + SHA256SUMS byte-for-byte (the resume
-	// import re-stamps it; no one reads it here).
-	files := agent.manifest["files"].(map[string]any)
-	require.Len(t, files, 4)
-	require.Contains(t, files, "policy.json")
-	require.EqualValues(t, len(record), files["policy.json"].(map[string]any)["sizeBytes"],
-		"the bundle keeps the sealed record bytes")
-	require.Contains(t, agent.sums, "policy.json")
-
-	// The actionBindings stay the CRD desired state — the dump content is
-	// never embedded.
-	recorded, ok := agent.manifest["actionBindings"].([]any)
-	require.True(t, ok, "manifest lacks actionBindings")
-	require.Len(t, recorded, 2)
-	byHandler := map[string]string{}
-	for _, entry := range recorded {
-		item := entry.(map[string]any)
-		byHandler[item["handler"].(string)] = item["input"].(string)
+	exports, _ := mover.snapshot()
+	for _, call := range exports {
+		require.NotContains(t, call, "policy:", "a template export would seal the still-running source")
 	}
-	require.Equal(t, `{"defaultAction":"deny"}`, byHandler["egress"],
-		"the manifest binding stays the CRD seed; the dump rides the opaque file only")
-	require.Equal(t, `{"audit":true}`, byHandler["audit"])
+	// The manifest stays the CRD desired state; no policy file, no embed.
+	require.Len(t, agent.manifest["files"].(map[string]any), 3)
+	require.NotContains(t, agent.manifest["files"], "policy.json")
+	recorded, ok := agent.manifest["actionBindings"].([]any)
+	require.True(t, ok)
+	require.Len(t, recorded, 1)
+	require.Equal(t, `{"defaultAction":"deny"}`, recorded[0].(map[string]any)["input"],
+		"the CRD seed rides through untouched")
 }
 
 // A staged policy file rides the checkpoint cache commit like the vault file.
@@ -668,18 +651,20 @@ func TestCreateCheckpointStagesPolicyIntoNodeLocalCache(t *testing.T) {
 	require.Equal(t, int64(len(policy)), cached.Size())
 }
 
-func TestCreateSnapshotFailsWhenPolicyExportFails(t *testing.T) {
+func TestCreateCheckpointFailsWhenPolicyExportFails(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-	mover := &fakeStateMover{exportErr: errors.New("handler unreachable")}
+	mover := &fakeStateMover{exportErrByKind: map[runtimecontract.StateKind]error{
+		runtimecontract.StateKindPolicy: errors.New("handler unreachable"),
+	}}
 	fixture.driver.SetStateMover(mover)
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
-		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
+		SandboxID: sandboxID, SnapshotID: "ckpt-1", Kind: fastletapi.SnapshotKindCheckpoint,
 	})
 	require.ErrorContains(t, err, "export egress policy")
 	require.Empty(t, agent.fakeAgentClient.publishes, "nothing is published on a failed export")
-	_, statErr := os.Stat(filepath.Join(fixture.stateRoot, snapshotStagingDir, "snap-1"))
+	_, statErr := os.Stat(filepath.Join(fixture.stateRoot, snapshotStagingDir, "ckpt-1"))
 	require.True(t, os.IsNotExist(statErr), "failed staging is discarded")
 }
 

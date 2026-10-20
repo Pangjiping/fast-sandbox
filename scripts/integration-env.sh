@@ -3132,7 +3132,8 @@ test_egress_ip_denied() { # sandbox ip
 #   data-plane-ready; the RELAYED allow policy — not the CRD bootstrap —
 #   is enforced in-guest) -> egress worker restart (the subject recovers
 #   from the persisted file; the SET_BINDING replay only re-registers) ->
-#   template snapshot + clone: relay mutations are SUBJECT-LOCAL, so the
+#   template snapshot + clone: checkpoints alone export (a template export
+#   would seal the source), and relay mutations are SUBJECT-LOCAL, so the
 #   clone inherits the create-time CRD seed (deny), never the relayed
 #   policy.
 #
@@ -3425,24 +3426,26 @@ policy_snapshot_gone() {
 
 policy_clone() {
 	local out manifest_input clone_input
-	# Template snapshot of the running source: POLICY_EXPORT stages the
-	# opaque policy record into the bundle (templates included — the policy
-	# is desired state, and the RESUME of this very sandbox needs it); the
-	# manifest's actionBindings stay the CRD seed.
+	# Template snapshot of the running source: NO policy export (checkpoint
+	# snapshots only — an export seals the subject on the egress, and a
+	# template's completion path never imports, which would lock the
+	# still-running source out of its policy CRUD); the manifest's
+	# actionBindings stay the CRD seed.
 	kubectl -n "$NS" delete sandboxsnapshot "$POLICY_SNAPSHOT_NAME" --ignore-not-found >/dev/null 2>&1 || true
 	wait_for "leftover policy snapshot CR gone" 90 policy_snapshot_gone
 	out="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$POLICY_SANDBOX" "$POLICY_SNAPSHOT_NAME" "$POLICY_TEMPLATE" 2>&1)" \
 		|| fail "template snapshot create failed: $out"
 	log "CreateSandboxSnapshot: $out"
 	wait_for "snapshot CR Succeeded" "$POLICY_TIMEOUT_S" policy_snapshot_succeeded
-	# The manifest binding stays the CRD seed; the record rides the opaque
-	# file only.
+	# The manifest binding stays the CRD seed; the bundle carries NO policy
+	# file (the export seals the source — checkpoint snapshots only).
 	manifest_input="$(mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##')" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
 	[[ "$manifest_input" == "$EGRESS_DENY_POLICY" ]] \
 		|| fail "template manifest binding is '${manifest_input:-<none>}' (want the CRD seed deny — the policy record is never embedded)"
-	mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)/policy.json" >/dev/null 2>&1 \
-		|| fail "template bundle does not carry the opaque policy.json"
-	pass "template snapshot: opaque policy.json in the bundle, CRD seed binding in the manifest"
+	if mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)/policy.json" >/dev/null 2>&1; then
+		fail "template bundle carries policy.json (a template export seals the still-running source)"
+	fi
+	pass "template snapshot: CRD seed binding only, no policy export (source policy CRUD intact)"
 
 	# Clone-create WITHOUT an explicit action: the clone inherits the
 	# create-time CRD seed (deny). Relay mutations are SUBJECT-LOCAL — they

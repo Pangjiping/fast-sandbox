@@ -61,12 +61,14 @@ published artifact set. See the
 created with a bootstrap deny binding is mutated in place through the
 handler relay (`PUT /policy/{uid}` over the full fastpath
 `InvokeHandlerAction` chain, then `GET` for the revision), paused and
-resumed — the checkpoint bundle carries the **relayed** policy file
-(`POLICY_EXPORT`), the restore lands it before data-plane-ready
-(`POLICY_IMPORT`), and the relayed allow policy (not the CRD bootstrap
-deny) is enforced afterwards, survives an egress worker restart, and is
-inherited by a clone created from the template snapshot without an explicit
-binding (the manifest's dual-track dump recording). Requires
+resumed — the checkpoint bundle carries the persisted policy record as an
+**opaque** `policy.json` (`POLICY_EXPORT`; the manifest's actionBindings
+stay the CRD seed), the restore lands it before data-plane-ready
+(`POLICY_IMPORT` re-stamps the record), and the relayed allow policy (not
+the CRD bootstrap) is enforced afterwards and survives an egress worker
+restart. Relay mutations are subject-local: a clone created from the
+template snapshot inherits the create-time CRD seed only, and template
+snapshots never export (an export seals the source). Requires
 `opensandbox/egress:latest` in local docker; evidence lands in
 `logs/policy-e2e-<ts>/`.
 

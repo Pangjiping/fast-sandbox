@@ -24,10 +24,18 @@ import (
 )
 
 const (
-	requestPath     = "/_fastlet/v1/actions"
-	statusPath      = "/_fastlet/v1/actions/status"
-	defaultTimeout  = 5 * time.Second
+	requestPath    = "/_fastlet/v1/actions"
+	statusPath     = "/_fastlet/v1/actions/status"
+	defaultTimeout = 5 * time.Second
+	// maxResponseSize bounds the management/status responses of the Sandbox
+	// Actions channel (status documents, invocation acks).
 	maxResponseSize = 32 << 10
+	// maxRelayResponseSize bounds the generic handler-relay responses: the
+	// relayed surface's bodies are handler-owned documents (the egress
+	// policy record alone can reach ~68 KiB encoded), so the bound sits
+	// well above the supported policy size plus its response envelope.
+	// Status/Invoke keep the smaller management bound.
+	maxRelayResponseSize = 128 << 10
 )
 
 type Caller interface {
@@ -106,13 +114,15 @@ func (c *HTTPCaller) Invoke(ctx context.Context, port int32, invocation actionap
 // Relay performs the relay hop of the FastPath handler-relay channel: it
 // sends the payload verbatim as the request body to the Handler's declared
 // loopback port and returns the Handler's HTTP status and body verbatim.
-// The bounded client timeout and the 32 KiB bounded read are the same
-// delivery machinery the Sandbox Actions calls use; redirects are surfaced
-// as the Handler's response instead of being followed. A non-empty body is
-// always delivered as Content-Type: application/json — the fixed relay
-// body contract. SandboxUID is injected as the trusted actionapi.HeaderSandboxUID
-// header so the Handler can scope per-subject state by the fence-validated
-// identity instead of caller-controlled path segments.
+// The bounded client timeout is the same delivery machinery the Sandbox
+// Actions calls use; the response bound is the relay's own (larger) limit —
+// handler-owned documents dwarf the management responses. Redirects are
+// surfaced as the Handler's response instead of being followed. A non-empty
+// body is always delivered as Content-Type: application/json — the fixed
+// relay body contract. SandboxUID is injected as the trusted
+// actionapi.HeaderSandboxUID header so the Handler can scope per-subject
+// state by the fence-validated identity instead of caller-controlled path
+// segments.
 func (c *HTTPCaller) Relay(ctx context.Context, port int32, sandboxUID, method, path string, body []byte) (int, []byte, error) {
 	if method == "" {
 		method = http.MethodPost
@@ -132,7 +142,7 @@ func (c *HTTPCaller) Relay(ctx context.Context, port int32, sandboxUID, method, 
 		return 0, nil, err
 	}
 	defer response.Body.Close()
-	responseBody, err := readBounded(response.Body)
+	responseBody, err := readBoundedLimit(response.Body, maxRelayResponseSize)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -140,12 +150,16 @@ func (c *HTTPCaller) Relay(ctx context.Context, port int32, sandboxUID, method, 
 }
 
 func readBounded(reader io.Reader) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, maxResponseSize+1))
+	return readBoundedLimit(reader, maxResponseSize)
+}
+
+func readBoundedLimit(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > maxResponseSize {
-		return nil, errors.New("Action Handler response exceeds 32 KiB")
+	if len(body) > int(limit) {
+		return nil, fmt.Errorf("Action Handler response exceeds %d bytes", limit)
 	}
 	return body, nil
 }
