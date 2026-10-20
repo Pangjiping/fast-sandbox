@@ -82,24 +82,25 @@ func main() {
 	}
 }
 
-// run executes the build pipeline and logs the per-stage durations.
+// run selects the build pipeline by publication destination.
 func run(ctx context.Context) error {
 	spec, workdir, err := loadSpecAndWorkdir()
 	if err != nil {
 		return err
 	}
-	if strings.HasPrefix(spec.Output.Publish, "oci://") {
-		kernel, err := resolveKernel(spec.Kernel)
-		if err != nil {
-			return err
-		}
-		return buildOCITemplate(ctx, spec, workdir, kernel)
-	}
-	credentials, err := loadPublishCredentials(os.Getenv(publishCredentialsDirEnv))
+	kernel, err := resolveKernel(spec.Kernel)
 	if err != nil {
 		return err
 	}
-	kernel, err := resolveKernel(spec.Kernel)
+	if strings.HasPrefix(spec.Output.Publish, "oci://") {
+		return buildOCITemplate(ctx, spec, workdir, kernel)
+	}
+	return buildObjectStoreTemplate(ctx, spec, workdir, kernel)
+}
+
+// buildObjectStoreTemplate retains the local OCI layout / oci2rootfs pipeline.
+func buildObjectStoreTemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir, kernel string) error {
+	credentials, err := loadPublishCredentials(os.Getenv(publishCredentialsDirEnv))
 	if err != nil {
 		return err
 	}

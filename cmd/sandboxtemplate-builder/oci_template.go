@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
@@ -27,6 +28,9 @@ const ociGuestInterface = "eth0"
 func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir, kernel string) error {
 	if spec.Output.Format != apiv1alpha2.ArtifactFormatOverlayBD {
 		return fmt.Errorf("OCI templates require output.format=overlaybd")
+	}
+	if os.Getenv("SANDBOX_TEMPLATE_IMAGE_TAR") != "" {
+		return fmt.Errorf("SANDBOX_TEMPLATE_IMAGE_TAR is supported only for object-store output; OCI templates require a registry source")
 	}
 	authDir := os.Getenv(publishCredentialsDirEnv)
 	authFile := filepath.Join(authDir, ".dockerconfigjson")
@@ -50,15 +54,10 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	if err = stageOCICredentials(spec, dockerDir); err != nil {
 		return err
 	}
-	sourceDigest, err := pullOCILayout(ctx, spec, workdir)
+	source, sourceDigest, err := prepareOCISource(ctx, spec, workdir)
 	if err != nil {
 		return err
 	}
-	source, closeSource, err := serveOCILayout(workdir)
-	if err != nil {
-		return err
-	}
-	defer closeSource()
 	inject := filepath.Join(workdir, "inject")
 	if err = os.MkdirAll(filepath.Join(inject, "etc"), 0755); err != nil {
 		return err
@@ -86,7 +85,7 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 		return err
 	}
 	defer deleteBuildTap()
-	args := []string{"--plain-http", "--firecracker", firecrackerBin, "--overlaybd-convertor", "/usr/local/bin/convertor", "--build-work-dir", filepath.Join(workdir, "builds"), "--build-output-dir", filepath.Join(workdir, "artifacts"), "build", "--source", source, "--output", "template:build", "--kernel", kernel, "--kernel-version", strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), "--vcpu", strconv.FormatInt(vcpu.Value(), 10), "--memory-mb", strconv.FormatInt((memory.Value()+(1<<20)-1)/(1<<20), 10), "--disk-size-gb", strconv.Itoa(size), "--inject-dir", inject, "--init-path", guestInitPath(spec), "--init-script-file", filepath.Join(inject, strings.TrimPrefix(guestInitPath(spec), "/")), "--boot-args", bakedNetworkBootArgs("console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 random.trust_cpu=on root=/dev/vda rw init=" + guestInitPath(spec)), "--tap-name", tap, "--guest-mac", bakedGuestMAC, "--ready-pattern", "SANDBOX_READY", "--ready-timeout", readinessTimeout(spec).String(), "--auth-file", authFile}
+	args := []string{"--firecracker", firecrackerBin, "--overlaybd-convertor", "/usr/local/bin/convertor", "--build-work-dir", filepath.Join(workdir, "builds"), "--build-output-dir", filepath.Join(workdir, "artifacts"), "build", "--source", source, "--output", "template:build", "--kernel", kernel, "--kernel-version", strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), "--vcpu", strconv.FormatInt(vcpu.Value(), 10), "--memory-mb", strconv.FormatInt((memory.Value()+(1<<20)-1)/(1<<20), 10), "--disk-size-gb", strconv.Itoa(size), "--inject-dir", inject, "--init-path", guestInitPath(spec), "--init-script-file", filepath.Join(inject, strings.TrimPrefix(guestInitPath(spec), "/")), "--boot-args", bakedNetworkBootArgs("console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 random.trust_cpu=on root=/dev/vda rw init=" + guestInitPath(spec)), "--tap-name", tap, "--guest-mac", bakedGuestMAC, "--ready-pattern", "SANDBOX_READY", "--ready-timeout", readinessTimeout(spec).String(), "--auth-file", authFile}
 	cmd := exec.CommandContext(ctx, "fsb-vm", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -123,6 +122,36 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 		return fmt.Errorf("fsb-vm push returned incomplete publication")
 	}
 	return patchPodAnnotations(ctx, result.ManifestRef, result.ArtifactDigest)
+}
+
+// prepareOCISource reads only the source metadata. fsb-vm downloads the layers
+// directly from this pinned platform reference instead of a staged OCI layout.
+func prepareOCISource(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec, workdir string) (string, string, error) {
+	ref, err := name.ParseReference(spec.Image)
+	if err != nil {
+		return "", "", fmt.Errorf("parse image %q: %w", spec.Image, err)
+	}
+	descriptor, err := remote.Get(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithPlatform(linuxAMD64))
+	if err != nil {
+		return "", "", fmt.Errorf("read source manifest %q: %w", spec.Image, err)
+	}
+	image, err := descriptor.Image()
+	if err != nil {
+		return "", "", err
+	}
+	sum, err := image.Digest()
+	if err != nil {
+		return "", "", err
+	}
+	if err := writeImageEnv(image, workdir); err != nil {
+		return "", "", err
+	}
+	if spec.Execd != "" {
+		if err := extractExecd(ctx, spec.Execd, filepath.Join(workdir, "execd-root")); err != nil {
+			return "", "", err
+		}
+	}
+	return ref.Context().Digest(sum.String()).Name(), sum.String(), nil
 }
 
 // Keep the builder's private Docker config on the same basic-only contract as

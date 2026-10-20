@@ -154,7 +154,7 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 ## 4. 构建模板
 
-`SandboxTemplate` 的标准 Builder 镜像包含 OCI 所需的 `fsb-vm`、convertor 和 OverlayBD 工具。Builder 仅在输出为 `oci://` 时启动 ublkd，并通过本机只读 registry 复用已暂存的 OCI layout；`SANDBOX_TEMPLATE_IMAGE_TAR` 也使用这一条路径，不会再次从源仓库拉取。发布目标仍需要网络访问。
+`SandboxTemplate` 的标准 Builder 镜像包含 OCI 所需的 `fsb-vm`、convertor 和 OverlayBD 工具。输出为 `oci://` 时，Builder 启动 ublkd，读取源镜像的 manifest/config 以固定 linux/amd64 镜像 digest 并准备环境变量和运行时注入文件，然后将远端 digest 引用直接传给 `fsb-vm build`。源镜像层由 `fsb-vm` 的构建流程读取，不预先写入 OCI layout，也不启动本地 registry。非 OCI 的对象存储路径保留 `pullOCILayout → oci2rootfs` 流程；`SANDBOX_TEMPLATE_IMAGE_TAR` 仅支持该对象存储路径，OCI 路径设置此变量会报错。OCI 构建需要访问源和目标 registry。
 
 `build/Dockerfile.fastlet` 生成的标准 Fastlet 镜像包含 OCI 运行工具；OCI Firecracker Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启动 ublkd。默认不启动，普通运行模式不需要 ublk。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。OCI 仓库访问支持匿名或用户名密码认证，包括 Docker config 的 `auth` 字段；仅含 `identitytoken` 的凭据会被明确拒绝，同时存在用户名密码时使用用户名密码。原有公共凭据字段及其他运行时行为保持不变。
 
