@@ -62,15 +62,6 @@ func VaultHandlerFromEnv() string {
 
 var _ runtimecontract.StateMover = (*Manager)(nil)
 
-// StateHandlerName reports the Pool-declared Action Handler that serves the
-// egress state transfer surfaces (vault and policy) — the name the driver
-// uses to address dump-recorded policy bindings in snapshot manifests. An
-// empty name means the transfers are disabled and the driver skips the
-// binding track.
-func (m *Manager) StateHandlerName() string {
-	return m.VaultHandler()
-}
-
 // ExportState copies the subject's state file of kind into the driver-provided
 // bundle target (the StateMover entry point the driver invokes per kind).
 func (m *Manager) ExportState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {

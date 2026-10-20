@@ -163,7 +163,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 
-	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, input.ActionBindings, d.policyBindingHandlerOf())
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, input.ActionBindings)
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
 		return nil, err
@@ -708,27 +708,6 @@ func (d *Driver) stageCheckpointPolicy(ctx context.Context, sandboxUID, staging 
 	return nil
 }
 
-// policyBindingHandlerOf resolves the Pool-declared handler name the
-// dump-recorded policy binding must address in the manifest: the same
-// handler that serves the state transfers (StateHandlerName, implemented by
-// the Fastlet action manager). An unknown name ("") skips the binding track
-// rather than guessing — a hardcoded name the target Pool may not declare
-// would be dropped at clone-create, silently reverting the clone to the
-// stale bootstrap while the resume path keeps the relayed policy.
-func (d *Driver) policyBindingHandlerOf() string {
-	d.mu.RLock()
-	mover := d.stateMover
-	d.mu.RUnlock()
-	if mover == nil {
-		return ""
-	}
-	namer, ok := mover.(interface{ StateHandlerName() string })
-	if !ok {
-		return ""
-	}
-	return namer.StateHandlerName()
-}
-
 // maxVaultBundleBytes bounds the vault bundle file buffered for provenance
 // verification. The vault is decoupled from the binding-input cap, so the
 // bound is its own (generous) limit; nothing larger is ever legitimate.
@@ -958,94 +937,44 @@ func policyManifestMarker(bundleDir string) (*fileMarker, bool, error) {
 // (PublishImage): only absence skips a file, any other stat failure fails
 // the assembly — a transient error here would otherwise produce a manifest
 // that omits a staged file while the publish still uploads the orphaned
-// bytes. The staged policy content is read stat-first (driver-staged, not
-// guest-written) for the actionBindings track; policyBindingOK reports
-// whether the dump may ride that track, which requires a resolvable
-// transfer handler (a guess could be undeclared by the target Pool and
-// silently dropped at clone-create) and CRD-fitting content — either miss
-// keeps the files track only, and the resume import still carries the
-// relayed policy.
-func stagedBundleFiles(staging, policyHandler string) (bundleFiles []string, policyBindingInput string, policyBindingOK bool, resultErr error) {
-	bundleFiles = []string{publishedRootfsName, vmstateSnapshotName, memorySnapshotName}
+// bytes. The state files ride the bundle OPAQUELY: the manifest only
+// references them (files + SHA256SUMS), the driver never parses their
+// content, and the egress import re-stamps them at restore.
+func stagedBundleFiles(staging string) ([]string, error) {
+	bundleFiles := []string{publishedRootfsName, vmstateSnapshotName, memorySnapshotName}
 	for _, bundleName := range []string{vaultBundleName, policyBundleName} {
-		info, statErr := os.Stat(filepath.Join(staging, bundleName))
-		if errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := os.Stat(filepath.Join(staging, bundleName)); errors.Is(statErr, os.ErrNotExist) {
 			continue
-		}
-		if statErr != nil {
-			return nil, "", false, fmt.Errorf("stat staged %s: %w", bundleName, statErr)
+		} else if statErr != nil {
+			return nil, fmt.Errorf("stat staged %s: %w", bundleName, statErr)
 		}
 		bundleFiles = append(bundleFiles, bundleName)
-		if bundleName != policyBundleName {
-			continue
-		}
-		// Stat-first bound on the buffered content, mirroring the restore
-		// import: the egress caps recorded policy files well below this, so
-		// a larger file is corrupt and is never buffered.
-		if info.Size() > maxPolicyBundleBytes {
-			klog.ErrorS(errPolicyBundleMismatch, "staged policy file exceeds the bundle bound; publishing it unverified (files track only)",
-				"file", filepath.Join(staging, bundleName), "stagedBytes", info.Size(), "maxBytes", int64(maxPolicyBundleBytes))
-			continue
-		}
-		policyContent, readErr := os.ReadFile(filepath.Join(staging, policyBundleName))
-		if readErr != nil {
-			return nil, "", false, fmt.Errorf("read staged %s: %w", policyBundleName, readErr)
-		}
-		if policyHandler == "" {
-			klog.InfoS("staged policy file not recorded as a manifest binding: the transfer handler name is unknown; the resume import still carries it",
-				"file", filepath.Join(staging, policyBundleName), "stagedBytes", info.Size())
-			continue
-		}
-		if len(policyContent) > runtimecontract.MaxPolicyBindingInputBytes {
-			klog.InfoS("staged policy file exceeds the CRD binding-input bound; not recorded as a manifest binding (the resume import still carries it)",
-				"file", filepath.Join(staging, policyBundleName), "stagedBytes", info.Size(),
-				"bindingInputBound", runtimecontract.MaxPolicyBindingInputBytes)
-			continue
-		}
-		policyBindingInput, policyBindingOK = string(policyContent), true
 	}
-	return bundleFiles, policyBindingInput, policyBindingOK, nil
+	return bundleFiles, nil
 }
 
 // recordActionBindings writes THIS dump's actionBindings record into the
-// manifest: the CRD bindings of the snapshot request, with an eligible
-// staged policy dump overriding the transfer handler's entry (the relayed
-// record is authoritative over the CRD replay — relay policy mutations are
-// invisible to the CRD), the remaining CRD bindings staying the graceful
-// fallback for handlers that skipped the transfer. The source manifest's
-// inherited record is dropped unconditionally first: stale bindings must
-// never ride forward — they would publish the previous dump's policy
-// (possibly relay-DELETEd since) as this snapshot's authoritative record.
-func recordActionBindings(document map[string]any, actionBindings []runtimecontract.SnapshotActionBinding, policyHandler, policyBindingInput string, policyBindingOK bool) {
+// manifest: the CRD bindings of the snapshot request — the desired state the
+// control plane compiled at trigger time, and the ONLY policy channel into
+// a clone-create (a fresh subject has no egress record to import; the
+// staged policy.json is an opaque resume-only artifact and is deliberately
+// never embedded here). The source manifest's inherited record is dropped
+// unconditionally first: stale bindings must never ride forward — they
+// would publish the previous dump's policy (possibly relay-DELETEd since)
+// as this snapshot's authoritative record.
+func recordActionBindings(document map[string]any, actionBindings []runtimecontract.SnapshotActionBinding) {
 	delete(document, "actionBindings")
-	if len(actionBindings) == 0 && !policyBindingOK {
+	if len(actionBindings) == 0 {
 		return
 	}
-	recorded := make([]map[string]string, 0, len(actionBindings)+1)
+	recorded := make([]map[string]string, 0, len(actionBindings))
 	for _, binding := range actionBindings {
-		if policyBindingOK && binding.Handler == policyHandler {
-			continue
-		}
 		recorded = append(recorded, map[string]string{"handler": binding.Handler, "input": binding.Input})
 	}
-	if policyBindingOK {
-		recorded = append(recorded, map[string]string{"handler": policyHandler, "input": policyBindingInput})
-	}
-	if len(recorded) > 0 {
-		document["actionBindings"] = recorded
-	}
+	document["actionBindings"] = recorded
 }
 
-// assembleSnapshotManifest builds the restore-compatible manifest of the
-// dumped set. lineage, machine (vcpu/memory), guestNetwork, and
-// compatibility ride forward from the SOURCE manifest verbatim — the dumped
-// vmstate carries the source snapshot's CPU state, so its compatibility
-// identity is the source's. Only files, machine.rootfs, format, and
-// validation describe this dump. Returns the total logical artifact size.
-// A staged vault bundle file joins files, SHA256SUMS, and the egressVault
-// manifest marker. A staged policy file is recorded dual-track (see
-// stagedBundleFiles / recordActionBindings).
-func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindings []runtimecontract.SnapshotActionBinding, policyHandler string) (int64, error) {
+func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindings []runtimecontract.SnapshotActionBinding) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
@@ -1063,7 +992,7 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindi
 		return 0, err
 	}
 
-	bundleFiles, policyBindingInput, policyBindingOK, err := stagedBundleFiles(staging, policyHandler)
+	bundleFiles, err := stagedBundleFiles(staging)
 	if err != nil {
 		return 0, err
 	}
@@ -1114,7 +1043,7 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindi
 	// vault state this bundle does not carry and publish the previous
 	// subject's vault fingerprint into shared, world-readable template
 	// manifests.
-	recordActionBindings(document, actionBindings, policyHandler, policyBindingInput, policyBindingOK)
+	recordActionBindings(document, actionBindings)
 	delete(document, "egressVault")
 	if vaultEntry, ok := files[vaultBundleName]; ok {
 		document["egressVault"] = vaultEntry

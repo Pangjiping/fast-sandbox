@@ -2,19 +2,7 @@ package contract
 
 import (
 	"context"
-
-	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 )
-
-// MaxPolicyBindingInputBytes mirrors the Sandbox CRD's per-binding input
-// bound (apiv1alpha2.MaxActionBindingInputBytes): a recorded-policy dump
-// larger than this can never ride a snapshot manifest's actionBindings
-// track — a recorded binding would fail CRD validation on every
-// clone-create, with the failure far from the root cause. The assembly
-// skips the binding track for such dumps (the files/SHA256SUMS track is
-// unaffected and keeps serving the resume import, which accepts the full
-// ~68 KiB encoded policies).
-const MaxPolicyBindingInputBytes = apiv1alpha2.MaxActionBindingInputBytes
 
 // StateKind names the egress-owned state slice a StateMover carries across
 // pause/resume. Each kind maps onto one Sandbox Actions operation pair
@@ -34,23 +22,26 @@ const (
 	// record stays authoritative over later binding replays (the binding
 	// input only ever seeds a fresh subject).
 	//
-	// Usage contract for the recorded policy — three channels, one
-	// authority order:
+	// Usage contract for the recorded policy — three channels, each with a
+	// distinct role:
 	//
 	//   - Create: initialize the policy with the Sandbox spec's ActionBinding
 	//     (handler=egress, input=<policy JSON>). SET_BINDING seeds the
-	//     subject's bootstrap policy from the CRD — the channel that is
-	//     durable and restart-safe by construction.
-	//   - Runtime: perform every other mutation through the generic handler
-	//     relay (PUT / GET / DELETE /policy/{sandboxUid} over fastpath
+	//     subject's bootstrap policy from the CRD. This is a create-time
+	//     seed only — nothing maintains it afterward.
+	//   - Runtime: perform every mutation through the generic handler relay
+	//     (PUT / GET / DELETE /policy/{sandboxUid} over fastpath
 	//     InvokeHandlerAction), i.e. the egress' native policy semantics
-	//     with revision preconditions. Relay mutations intentionally bypass
-	//     the CRD, so the binding input goes stale from then on.
+	//     with revision preconditions. Relay mutations are SUBJECT-LOCAL:
+	//     they bypass the CRD (no re-delivery, no durability across a Pod
+	//     recreation) and never leak into clones.
 	//   - Snapshot/pause: persistence rides the egress dump — POLICY_EXPORT
-	//     copies the relayed policy file into the bundle as policy.json, and
-	//     the dumped content becomes the manifest's egress ActionBinding,
-	//     authoritative over the (stale) CRD replay at restore and
-	//     clone-create.
+	//     copies the subject's persisted policy record into the bundle as
+	//     policy.json, an OPAQUE artifact (the manifest only references it;
+	//     the driver never parses it) whose only consumer is the resume
+	//     POLICY_IMPORT, which re-stamps it before data-plane-ready. A
+	//     clone-create does not read it: the clone inherits the CRD
+	//     binding seed recorded in the manifest's actionBindings.
 	StateKindPolicy StateKind = "policy"
 )
 
