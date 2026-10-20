@@ -2586,9 +2586,13 @@ egress_set_binding_count() {
 #     handler applies the new input in place.
 egress_patch_policy() { # sandbox policy-json
 	if egress_relay_capable; then
-		local uid raw status
+		local uid raw body status
 		uid="$(sandbox_uid "$1")" || fail "cannot resolve the uid of $1 for the policy relay"
-		raw="$(policy_relay "$1" PUT "/policy/$uid" "$2")" || fail "policy relay PUT failed for $1"
+		# The relay PUT body is the wrapped relay document (egress
+		# policyRelayDocument: {policy: <binding-input shape>, expectedRevision?}),
+		# decoded with DisallowUnknownFields — the bare binding input answers 400.
+		body="$(jq -nc --argjson p "$2" '{policy: $p}')" || fail "invalid policy JSON for $1"
+		raw="$(policy_relay "$1" PUT "/policy/$uid" "$body")" || fail "policy relay PUT failed for $1"
 		status="$(policy_relay_status "$raw")"
 		[[ "$status" == 2* ]] || fail "policy relay PUT for $1 answered HTTP $status: $(policy_relay_body "$raw")"
 		log "policy switch via relay: $1 -> HTTP $status (policyTransfer=true); converging the CR desired state next"
@@ -3274,9 +3278,12 @@ policy_source_up() {
 policy_relay_update() {
 	local raw status body revision spec_input
 	# Mutate the live subject through the relay: PUT /policy/{uid} with the
-	# allow policy. The CR binding stays the bootstrap deny — from here on
-	# the CRD record is deliberately stale.
-	raw="$(policy_relay "$POLICY_SANDBOX" PUT "$(policy_path "$POLICY_SANDBOX")" "$EGRESS_ALLOW_POLICY")" \
+	# allow policy. The relay body is the wrapped relay document
+	# (policyRelayDocument: {policy: <binding-input shape>}, decoded with
+	# DisallowUnknownFields). The CR binding stays the bootstrap deny — from
+	# here on the CRD record is deliberately stale.
+	raw="$(policy_relay "$POLICY_SANDBOX" PUT "$(policy_path "$POLICY_SANDBOX")" \
+		"$(jq -nc --argjson p "$EGRESS_ALLOW_POLICY" '{policy: $p}')")" \
 		|| fail "handler relay PUT failed"
 	status="$(policy_relay_status "$raw")"
 	[[ "$status" == 2* ]] || fail "handler relay PUT answered HTTP ${status:-<none>}: $(policy_relay_body "$raw")"
