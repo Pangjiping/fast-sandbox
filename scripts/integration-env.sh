@@ -2571,16 +2571,19 @@ egress_set_binding_count() {
 # egress_patch_policy switches the Sandbox's egress policy, speaking the
 # contract of the LIVE egress image:
 #   - relay-native egress (policyTransfer=true): PUT /policy/{uid} through
-#     the full InvokeHandlerAction chain FIRST — it is the only honored
-#     mutation path (binding-input updates are seed-only and would leave
-#     the enforcement stale). The subsequent fastctl update converges the
-#     CR desired state; its SET_BINDING replay carries the same input the
-#     relay just enforced, so it is a no-op on the handler.
+#     the full InvokeHandlerAction chain — the only honored LIVE mutation
+#     path (binding-input updates are seed-only and would leave the
+#     enforcement stale). The subsequent fastctl update converges the CR
+#     desired state to the enforced policy. That convergence is NOT the
+#     restart-recovery source — the egress recovers a live subject from its
+#     persisted policy file across a worker/sidecar restart (the file is
+#     the truth; SET_BINDING replay only re-registers). The CR input is the
+#     FALLBACK authority whenever no record exists: a fresh subject, a
+#     relay DELETE, or a recreated Pod whose emptyDir (and with it every
+#     policy file) is gone — without the convergence those would silently
+#     fall back to the stale pre-switch policy.
 #   - legacy egress: fastctl update alone re-delivers SET_BINDING and the
 #     handler applies the new input in place.
-# Both paths end with the CR binding matching the enforced policy, so a
-# later SET_BINDING replay (egress or fastlet restart) re-seeds the same
-# policy deterministically.
 egress_patch_policy() { # sandbox policy-json
 	if egress_relay_capable; then
 		local uid raw status
@@ -2588,7 +2591,7 @@ egress_patch_policy() { # sandbox policy-json
 		raw="$(policy_relay "$1" PUT "/policy/$uid" "$2")" || fail "policy relay PUT failed for $1"
 		status="$(policy_relay_status "$raw")"
 		[[ "$status" == 2* ]] || fail "policy relay PUT for $1 answered HTTP $status: $(policy_relay_body "$raw")"
-		log "policy switch via relay: $1 -> HTTP $status (policyTransfer=true); converging the CR binding next"
+		log "policy switch via relay: $1 -> HTTP $status (policyTransfer=true); converging the CR desired state next"
 	fi
 	# Output is kept: a silent update failure otherwise stalls the policy
 	# wait below for no reason.
