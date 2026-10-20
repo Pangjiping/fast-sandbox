@@ -93,6 +93,31 @@ func TestReleasedPackMissingWorkIsIdempotentButOtherPhasesAreRetained(t *testing
 	}
 }
 
+func TestPackRecoveryRejectsInvalidStateBeforeCleanup(t *testing.T) {
+	for _, mode := range []string{"invalid-json", "missing-phase"} {
+		t.Run(mode, func(t *testing.T) {
+			previous := global
+			t.Cleanup(func() { global = previous })
+			global.buildWorkDir = t.TempDir()
+			work := filepath.Join(global.buildWorkDir, "snapshot_test")
+			require.NoError(t, os.MkdirAll(work, 0750))
+			marker := filepath.Join(t.TempDir(), packActiveMarker)
+			raw := `{"work":` + strconv.Quote(work) + `}`
+			if mode == "invalid-json" {
+				raw += "invalid"
+			}
+			require.NoError(t, os.WriteFile(marker, []byte(raw), 0600))
+			err := recoverPack(context.Background(), filepath.Dir(marker), nil, func(string) error {
+				t.Fatal("invalid state must not start cleanup")
+				return nil
+			})
+			require.Error(t, err)
+			require.DirExists(t, work)
+			require.FileExists(t, marker)
+		})
+	}
+}
+
 type fenceTransport func(*http.Request) (*http.Response, error)
 
 func (f fenceTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -100,7 +125,7 @@ func fenceReply(code int, body string) *http.Response {
 	return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
 }
 func TestPackRecoveryFencesLateAddBeforeReleasingFiles(t *testing.T) {
-	for _, mode := range []string{"never-sent", "legacy", "late-add", "disconnect", "unknown-reply", "timeout"} {
+	for _, mode := range []string{"never-sent", "late-add", "disconnect", "unknown-reply", "timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			previous := global
 			t.Cleanup(func() { global = previous })
@@ -114,9 +139,6 @@ func TestPackRecoveryFencesLateAddBeforeReleasingFiles(t *testing.T) {
 			require.NoError(t, os.WriteFile(backing, []byte("must retain until Del"), 0600))
 			marker := filepath.Join(bundle, packActiveMarker)
 			require.NoError(t, writePackResources(marker, work, packPhaseAdding))
-			if mode == "legacy" {
-				require.NoError(t, os.WriteFile(marker, []byte(work), 0600))
-			}
 			calls, deleted := 0, false
 			c := &ublkdClient{httpClient: &http.Client{Transport: fenceTransport(func(req *http.Request) (*http.Response, error) {
 				require.FileExists(t, backing)
@@ -167,7 +189,7 @@ func TestPackRecoveryFencesLateAddBeforeReleasingFiles(t *testing.T) {
 				defer cancel()
 			}
 			err := recoverPack(ctx, bundle, c, func(string) error { return nil })
-			if mode == "never-sent" || mode == "legacy" || mode == "late-add" {
+			if mode == "never-sent" || mode == "late-add" {
 				require.NoError(t, err)
 				require.NoDirExists(t, work)
 				require.NoFileExists(t, marker)

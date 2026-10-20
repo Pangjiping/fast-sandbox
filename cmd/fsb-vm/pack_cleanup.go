@@ -68,11 +68,9 @@ func recoverPack(ctx context.Context, bundle string, devices deviceReleaser, unm
 		return err
 	}
 	// Never let a corrupted marker select another build's devices or directories.
-	record := packResources{Work: string(raw), Phase: packPhaseAdding}
-	if strings.HasPrefix(string(raw), "{") {
-		if err := json.Unmarshal(raw, &record); err != nil {
-			return err
-		}
+	var record packResources
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return err
 	}
 	switch record.Phase {
 	case packPhasePrepared, packPhaseAdding, packPhaseAttached, packPhaseReleased:

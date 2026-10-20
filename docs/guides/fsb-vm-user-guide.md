@@ -156,7 +156,7 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 `SandboxTemplate` 的标准 Builder 镜像包含 OCI 所需的 `fsb-vm`、convertor 和 OverlayBD 工具。Builder 仅在输出为 `oci://` 时启动 ublkd，并通过本机只读 registry 复用已暂存的 OCI layout；`SANDBOX_TEMPLATE_IMAGE_TAR` 也使用这一条路径，不会再次从源仓库拉取。发布目标仍需要网络访问。
 
-`build/Dockerfile.oci` 生成的 Fastlet 镜像默认启动 ublkd；显式设置 `FAST_SANDBOX_OCI_ENABLED=false` 可关闭它。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。镜像内的 OverlayBD registry v2 支持 Docker `identitytoken` 的 OAuth refresh-token 认证，包括后续按需读块时重新获取访问 token。外部 OverlayBD 安装需包含 `build/oci/overlaybd-identitytoken.patch`。
+`build/Dockerfile.fastlet` 生成的标准 Fastlet 镜像包含 OCI 运行工具；OCI Firecracker Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启动 ublkd。默认不启动，普通运行模式不需要 ublk。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。镜像内的 OverlayBD registry v2 支持 Docker `identitytoken` 的 OAuth refresh-token 认证，包括后续按需读块时重新获取访问 token。外部 OverlayBD 安装需包含 `build/oci/overlaybd-identitytoken.patch`。
 
 Checkpoint 默认写回源模板仓库；可用 `FAST_SANDBOX_OCI_SNAPSHOT_REPOSITORY=registry/repository` 指定其他目标。目标凭证需具备 push 权限，独立写账号通过 registry rule 的 `writeSecretRef` 配置。Checkpoint 发布按完整仓库路径分别选择父层读凭证和目标写凭证；跨仓库时需在 Pool 中配置两者。OCI GuestCopy 直接挂载 ublk 块设备，普通 rootfs 镜像文件仍使用 loop 挂载。
 
@@ -494,4 +494,4 @@ OCI Fastlet 使用宿主机 `/dev`，以访问运行期间新增的 ublk 设备�
 
 快照打包中断后，重试或删除 staging 前会先按 config 路径恢复并释放 pack 设备；清理失败时保留 backing files。仓库凭据按实际 rootfs/snapfiles 仓库同步到 OverlayBD：匿名访问会覆盖该仓库的旧凭据，不会删除其他仓库的凭据。此同步不承诺立即撤销已经运行的 VM 的访问。
 
-构建支持 OCI 的 Fastlet 镜像使用 `make images-oci OCI_FASTLET_IMAGE=opensandbox/fsb-fastlet:dev-oci`，然后自行推送并在 Pool 中使用该镜像。此 tag 是本地构建示例，不表示已发布版本。缺少 native 工具时，该目标会调用 `make oci-tools`；首次构建需要 Linux amd64 主机及 `scripts/build-oci-tools.sh` 列出的依赖。已有工具可复用，修改 native 工具源码或补丁后用 `make oci-tools` 强制重建。普通 `make images COMPONENT=fastlet` 保留原镜像路径。无 extent seek 支持时，upper 复制会扫描零块并保留稀疏空间，但扫描耗时可能高于 reflink/extent copy。
+构建 Fastlet 镜像使用 `make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev`，然后自行推送并在 Pool 中使用该镜像。此 tag 是构建示例，不表示已发布版本。Go 与 native 工具均在 Docker 内编译，无需宿主机编译器或预先生成 `.build/` 产物。Fastlet 与 Builder 使用同一份容器内 OverlayBD 构建脚本。OCI Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启用 ublkd。无 extent seek 支持时，upper 复制会扫描零块并保留稀疏空间，但扫描耗时可能高于 reflink/extent copy。

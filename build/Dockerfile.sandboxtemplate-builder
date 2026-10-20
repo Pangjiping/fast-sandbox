@@ -20,43 +20,12 @@ RUN git clone https://github.com/arcboxlabs/oci2rootfs.git /src/oci2rootfs \
     && git checkout --detach "$OCI2ROOTFS_REV" \
     && cargo build --release --locked -p oci2rootfs-cli
 
-# --- overlaybd-import-raw (raw image → LSMT commit layer) ------------------
+# --- OverlayBD native tools (shared recipe with Fastlet) ------------------
 FROM ubuntu:22.04 AS overlaybd-build
 
-ARG OVERLAYBD_REV=5119193d540010e09c0af98add1ef2b0f4a51bc0
-
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        autoconf automake build-essential ca-certificates cmake git \
-        libaio-dev libcurl4-openssl-dev libext2fs-dev libgflags-dev \
-        libnl-3-dev libnl-genl-3-dev libssl-dev libtool libzstd-dev libglib2.0-dev \
-        pkg-config uuid-dev zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN git clone https://github.com/containerd/overlaybd.git /src/overlaybd \
-    && cd /src/overlaybd \
-    && git checkout --detach "$OVERLAYBD_REV"
-
-COPY build/oci/overlaybd-identitytoken.patch /tmp/overlaybd-identitytoken.patch
-RUN cd /src/overlaybd \
-    && git apply /tmp/overlaybd-identitytoken.patch \
-    && cmake -S . -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_TESTING=0 \
-        -DBUILD_STREAM_CONVERTOR=0 \
-        -DBUILD_UBLK_FRONTEND=ON \
-        -DORIGIN_EXT2FS=OFF \
-    && cmake --build build --target overlaybd-ublkd overlaybd-create overlaybd-apply overlaybd-commit overlaybd-resize --parallel "$(nproc)"
-COPY build/sandboxtemplate-builder/overlaybd-import-raw.cpp /tmp/overlaybd-import-raw.cpp
-RUN cd /src/overlaybd \
-    && install -m 0644 /tmp/overlaybd-import-raw.cpp src/tools/overlaybd-import-raw.cpp \
-    && sed -i '/add_executable(overlaybd-create/i add_executable(overlaybd-import-raw overlaybd-import-raw.cpp)\ntarget_include_directories(overlaybd-import-raw PUBLIC ${PHOTON_INCLUDE_DIR})\ntarget_link_libraries(overlaybd-import-raw photon_static overlaybd_lib)\n' src/tools/CMakeLists.txt \
-    && cmake -S . -B build \
-    && cmake --build build --target overlaybd-import-raw --parallel "$(nproc)"
-RUN cd /src/overlaybd \
-    && mkdir -p /out/bin /out/lib \
-    && cp build/output/overlaybd-* /out/bin/ \
-    && cp -L build/_deps/e2fsprogs-src/build/libext2fs/lib/libext2fs.so /out/lib/libext2fs.so.2
+ARG OVERLAYBD_REV
+COPY build/oci/build-overlaybd.sh build/oci/overlaybd-identitytoken.patch build/sandboxtemplate-builder/overlaybd-import-raw.cpp /build-tools/
+RUN sh /build-tools/build-overlaybd.sh /out
 
 FROM golang:1.26.3 AS convertor-build
 ARG CONVERTOR_REV=a00e366f9bfc970ec4aaa00887541c4c1d9f9dab

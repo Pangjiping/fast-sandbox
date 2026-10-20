@@ -1,25 +1,50 @@
-# Keep the Go toolchain in the development image for the existing debugging
-# workflow, while using Alpine's small network tooling layer.
-FROM golang:1.25-alpine
-# for debug
-# RUN GOPROXY=https://goproxy.cn,direct go install github.com/go-delve/delve/cmd/dlv@latest
-# EXPOSE 2345
+# The standard Fastlet supports ordinary runtimes and OCI Firecracker templates.
+# All binaries are compiled in Docker; no host-built .build/ artifacts are used.
+FROM ubuntu:22.04 AS overlaybd-build
+ARG OVERLAYBD_REV
+COPY build/oci/build-overlaybd.sh build/oci/overlaybd-identitytoken.patch build/sandboxtemplate-builder/overlaybd-import-raw.cpp /build-tools/
+RUN sh /build-tools/build-overlaybd.sh /out
 
-WORKDIR /workspace
-# tcpdump: per-slot dataplane diagnosis from inside the fastlet netns
-# (kubectl exec ... -- ip netns exec <slot> tcpdump -i vmtap0)
-# Firecracker calls cp --reflink=always for writable rootfs/snapshot clones.
-# BusyBox cp cannot perform that clone, even on a reflink-capable StateRoot.
-RUN apk add --no-cache iproute2 iptables e2fsprogs tcpdump coreutils
-COPY .build/linux-amd64/fastlet .
-COPY .build/linux-amd64/sandbox-init /opt/fast-sandbox/bin/sandbox-init
+FROM --platform=$BUILDPLATFORM golang:1.25 AS fastlet-build
+ARG TARGETOS
+ARG TARGETARCH
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY api ./api
+COPY cmd ./cmd
+COPY internal ./internal
+COPY pkg ./pkg
+ARG DEBUG=0
+RUN case "$DEBUG" in 0) set -- ;; 1) set -- '-gcflags=all=-N -l' ;; *) exit 2 ;; esac \
+    && mkdir -p /out \
+    && for binary in fastlet sandbox-init fsb-vm; do \
+         CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build "$@" -o "/out/$binary" "./cmd/$binary" || exit $?; \
+       done
 
-# Default envs; can be overridden by Pod spec
+FROM ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates coreutils curl e2fsprogs iproute2 iptables libaio1 libcurl4 \
+    libgflags2.2 libglib2.0-0 libnl-3-200 libnl-genl-3-200 libssl3 libzstd1 \
+    mount tcpdump util-linux \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=overlaybd-build /out/bin/overlaybd-ublkd /out/bin/overlaybd-create /out/bin/overlaybd-commit /out/bin/overlaybd-import-raw /opt/overlaybd/bin/
+COPY --from=overlaybd-build /out/lib/ /opt/overlaybd/lib/
+COPY --from=fastlet-build /out/fastlet /workspace/fastlet
+COPY --from=fastlet-build /out/fsb-vm /usr/local/bin/fsb-vm
+COPY --from=fastlet-build /out/sandbox-init /opt/fast-sandbox/bin/sandbox-init
+COPY build/oci/overlaybd.json /etc/overlaybd/ublkd.json
+COPY build/oci/entrypoint.sh /usr/local/bin/oci-entrypoint
+RUN sed 's/"enable": true, "uriPrefix"/"enable": false, "uriPrefix"/' /etc/overlaybd/ublkd.json > /etc/overlaybd/overlaybd.json \
+    && chmod 0755 /usr/local/bin/oci-entrypoint
+ENV LD_LIBRARY_PATH=/opt/overlaybd/lib
+ENV PATH=/opt/overlaybd/bin:${PATH}
+ENV FAST_SANDBOX_OCI_ENABLED=false
 ENV FASTLET_CONTROL_PORT=":5758"
 ENV FAST_SANDBOX_RUNTIME="container"
 ENV RUNTIME_SOCKET="/run/containerd/containerd.sock"
-
+WORKDIR /workspace
 EXPOSE 5758
-ENTRYPOINT ["./fastlet"]
-# debug
-# ENTRYPOINT ["/go/bin/dlv", "--listen=:2345", "--headless=true", "--api-version=2", "--accept-multiclient", "exec", "/workspace/fastlet"]
+ENTRYPOINT ["/usr/local/bin/oci-entrypoint", "/workspace/fastlet"]

@@ -20,7 +20,8 @@ func TestEntrypointDaemonPolicyAndFailure(t *testing.T) {
 		name, mode, spec string
 		start, fail      bool
 	}{
-		{"runtime-default", "", "", true, false},
+		{"runtime-default", "", "", false, false},
+		{"oci-runtime", "true", "", true, false},
 		{"disabled", "false", "", false, false},
 		{"native-builder", "auto", `{"output":{"publish":"s3://bucket/template"}}`, false, false},
 		{"oci-builder", "auto", `{"output":{"publish":"oci://registry/template:build"}}`, true, false},

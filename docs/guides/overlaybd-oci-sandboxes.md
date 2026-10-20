@@ -13,18 +13,18 @@ Deploy OpenSandbox images that include OCI support, on nodes with KVM and ublk s
 | Controller / FastPath | `opensandbox/fsb-controller:release-<version>` |
 | Runtime agent | `opensandbox/fsb-firecracker-runtime:release-<version>` |
 | Builder | `opensandbox/fsb-sandboxtemplate-builder:release-<version>` |
-| Fastlet | `opensandbox/fsb-fastlet:release-<version>-oci` |
+| Fastlet | `opensandbox/fsb-fastlet:release-<version>` |
 | execd | `opensandbox/execd:release-<version>` |
 
-The OCI-capable Fastlet image starts ublkd by default. Use a published OCI variant when available; the tags above illustrate the release naming and do not assert that a particular release has been published. To build and publish your own OCI Fastlet:
+The standard Fastlet image includes the OCI runtime tools. Enable ublkd with `FAST_SANDBOX_OCI_ENABLED=true` on OCI Firecracker Pools; it is disabled by default so ordinary runtime deployments do not require ublk. The tags above illustrate the release naming and do not assert that a particular release has been published. To build and publish your own Fastlet:
 
 ```bash
-# On a Linux amd64 build host; native tool dependencies are listed in scripts/build-oci-tools.sh.
-make images-oci OCI_FASTLET_IMAGE=opensandbox/fsb-fastlet:dev-oci
-docker push opensandbox/fsb-fastlet:dev-oci
+# All Go and native-tool compilation runs inside Docker.
+make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev
+docker push opensandbox/fsb-fastlet:dev
 ```
 
-Select that image in the Pool. The ordinary `make images COMPONENT=fastlet` builds the existing non-OCI image. `make images-oci` builds missing native tools automatically; use `make oci-tools` to rebuild them after changing native sources or patches.
+Select that image in the Pool. `build/Dockerfile.fastlet` compiles the runtime tools inside Docker, using the same OverlayBD build script as the Builder. Docker manages rebuilds when sources or patches change; no host C/C++ toolchain or prebuilt `.build/` artifacts are required for the Fastlet image.
 
 Configure these fields on an existing Firecracker Pool, retaining its node settings, agent socket, and storage mounts. This is a configuration fragment; see the [Firecracker sample](../../config/samples/pool-firecracker.yaml) for a complete Pool.
 
@@ -35,7 +35,10 @@ spec:
     spec:
       containers:
       - name: fastlet
-        image: opensandbox/fsb-fastlet:release-<version>-oci
+        image: opensandbox/fsb-fastlet:release-<version>
+        env:
+        - name: FAST_SANDBOX_OCI_ENABLED
+          value: "true"
 ```
 
 The examples below assume a Pool named `firecracker-pool` in namespace `fast-sandbox`, with a per-Sandbox profile of 1 CPU and 512Mi memory.

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 export LD_LIBRARY_PATH="/opt/overlaybd/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-needs_oci=${FAST_SANDBOX_OCI_ENABLED:-true}
+needs_oci=${FAST_SANDBOX_OCI_ENABLED:-false}
 if [ "$needs_oci" = auto ]; then
   needs_oci=false
   case "${SANDBOX_TEMPLATE_SPEC:-}" in *'oci://'*) needs_oci=true;; esac

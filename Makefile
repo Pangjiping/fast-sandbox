@@ -2,7 +2,6 @@
 
 REGISTRY ?= fast-sandbox
 FASTLET_IMAGE ?= $(REGISTRY)/fastlet:dev
-OCI_FASTLET_IMAGE ?= $(REGISTRY)/fastlet:dev-oci
 FASTLET_PROXY_IMAGE ?= $(REGISTRY)/fastlet-proxy:dev
 SANDBOX_PROXY_IMAGE ?= $(REGISTRY)/sandbox-proxy:dev
 CONTROLLER_IMAGE ?= $(REGISTRY)/controller:dev
@@ -12,7 +11,7 @@ FIRECRACKER_RUNTIME_IMAGE ?= $(REGISTRY)/firecracker-runtime:dev
 
 GO ?= go
 PYTHON ?= python3
-GOPROXY ?= $(shell $(GO) env GOPROXY)
+GOPROXY ?= https://proxy.golang.org,direct
 DOCKER_BUILD_FLAGS ?=
 DEBUG ?= 0
 COMPONENT ?= all
@@ -96,8 +95,6 @@ help:
 	@echo "  make quickstart-forward"
 	@echo "      Forward Fast-Path and Sandbox Proxy until Ctrl-C."
 	@echo ""
-	@echo "  make images-oci OCI_FASTLET_IMAGE=<registry>/fsb-fastlet:<version>-oci"
-	@echo "      Build the OCI Fastlet; missing native tools are built on a Linux host."
 	@echo "  make lint"
 	@echo "      Run gofmt/gci checks and golangci-lint (execd rule set)."
 	@echo ""
@@ -135,14 +132,14 @@ images:
 			*) echo "unknown image COMPONENT=$(COMPONENT)" >&2; exit 2 ;; \
 		   esac ;; \
 	esac; \
-	mkdir -p "$(LINUX_BIN_DIR)"; \
 	for component in $$components; do \
 		case "$$component" in \
-			fastlet) binaries="fastlet sandbox-init" ;; \
+			fastlet) binaries="" ;; \
 			sandbox-action-fixture) binaries="sandbox-action-fixture" ;; \
 			*) binaries="$$component" ;; \
 		esac; \
 		for binary in $$binaries; do \
+			mkdir -p "$(LINUX_BIN_DIR)"; \
 			echo "==> build linux/amd64 $$binary"; \
 			CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(GO_BUILD_FLAGS) \
 				-o "$(LINUX_BIN_DIR)/$$binary" "./cmd/$$binary" || exit $$?; \
@@ -150,7 +147,9 @@ images:
 		echo "==> image $$component"; \
 		case "$$component" in \
 			controller) docker build $(DOCKER_BUILD_FLAGS) -t "$(CONTROLLER_IMAGE)" -f build/Dockerfile.controller . ;; \
-			fastlet) docker build $(DOCKER_BUILD_FLAGS) -t "$(FASTLET_IMAGE)" -f build/Dockerfile.fastlet . ;; \
+			fastlet) docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 \
+				--build-arg GOPROXY="$(GOPROXY)" --build-arg DEBUG="$(DEBUG)" \
+				-t "$(FASTLET_IMAGE)" -f build/Dockerfile.fastlet . ;; \
 			fastlet-proxy) docker build $(DOCKER_BUILD_FLAGS) -t "$(FASTLET_PROXY_IMAGE)" -f build/Dockerfile.fastlet-proxy . ;; \
 			sandbox-proxy) docker build $(DOCKER_BUILD_FLAGS) -t "$(SANDBOX_PROXY_IMAGE)" -f build/Dockerfile.sandbox-proxy . ;; \
 			janitor) docker build $(DOCKER_BUILD_FLAGS) -t "$(JANITOR_IMAGE)" -f build/Dockerfile.janitor . ;; \
@@ -159,28 +158,6 @@ images:
 				-t "$(FIRECRACKER_RUNTIME_IMAGE)" -f build/Dockerfile.firecracker-runtime . ;; \
 		esac || exit $$?; \
 	done
-
-# OCI runtime images use glibc and native OverlayBD tools. Keep the ordinary
-# Fastlet image available for existing container/native deployments.
-.PHONY: oci-tools images-oci
-oci-tools:
-	@./scripts/build-oci-tools.sh
-
-images-oci:
-	@ready=true; \
-	for tool in overlaybd-import-raw overlaybd-ublkd overlaybd-create overlaybd-apply overlaybd-commit overlaybd-resize; do \
-		test -x ".build/oci-tools/bin/$$tool" || ready=false; \
-	done; \
-	test -f .build/oci-tools/lib/libext2fs.so.2 || ready=false; \
-	test -x "$(LINUX_BIN_DIR)/convertor" || ready=false; \
-	if [ "$$ready" = false ]; then $(MAKE) oci-tools || exit $$?; fi
-	@mkdir -p "$(LINUX_BIN_DIR)"
-	@for binary in fastlet sandbox-init fsb-vm; do \
-		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(GO_BUILD_FLAGS) \
-			-o "$(LINUX_BIN_DIR)/$$binary" "./cmd/$$binary" || exit $$?; \
-	done
-	@docker build $(DOCKER_BUILD_FLAGS) --build-arg COMPONENT=fastlet \
-		-t "$(OCI_FASTLET_IMAGE)" -f build/Dockerfile.oci .
 
 $(PROTOC):
 	@mkdir -p $(TOOLS_DIR) $(PROTOC_ROOT)
