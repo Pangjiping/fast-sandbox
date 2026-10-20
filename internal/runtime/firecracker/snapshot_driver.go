@@ -783,50 +783,36 @@ func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.Sandbo
 	bundleDir := filepath.Join(stateRoot, imageCacheDir, imageKey(restoreRef))
 	for _, state := range []struct {
 		kind      runtimecontract.StateKind
-		name      string
+		bundle    string
+		maxBytes  int64
 		marker    func(string) (*fileMarker, bool, error)
 		sentinelM error
 		sentinelU error
 	}{
-		{runtimecontract.StateKindVault, "vault", vaultManifestMarker, errVaultBundleMissing, errVaultBundleUnlisted},
-		{runtimecontract.StateKindPolicy, "policy", policyManifestMarker, errPolicyBundleMissing, errPolicyBundleUnlisted},
+		{runtimecontract.StateKindVault, vaultBundleName, maxVaultBundleBytes, vaultManifestMarker, errVaultBundleMissing, errVaultBundleUnlisted},
+		{runtimecontract.StateKindPolicy, policyBundleName, maxPolicyBundleBytes, policyManifestMarker, errPolicyBundleMissing, errPolicyBundleUnlisted},
 	} {
+		bundlePath := filepath.Join(bundleDir, state.bundle)
 		marker, markerPresent, markerErr := state.marker(bundleDir)
 		if markerErr != nil {
-			klog.ErrorS(markerErr, "read the template manifest for the "+state.name+" provenance failed; the clone degrades to the CRD seed",
+			klog.ErrorS(markerErr, "read the template manifest for the "+string(state.kind)+" provenance failed; the clone degrades to the CRD seed",
 				"sandboxID", sandboxUID, "template", restoreRef)
 			continue
 		}
 		importRestoreBundle(ctx, importPlan{
 			sandboxUID: sandboxUID,
-			restoreRef: restoreRef, path: filepath.Join(bundleDir, bundleNameFor(state.name)), marker: marker, markerPresent: markerPresent,
-			maxBytes: maxTemplateBundleBytes(state.name),
-			subject:  "template " + state.name,
+			restoreRef: restoreRef, path: bundlePath, marker: marker, markerPresent: markerPresent,
+			maxBytes: state.maxBytes,
+			subject:  "template " + string(state.kind),
 			degrade:  "the clone degrades to the CRD seed",
 			importIt: func() error {
-				return carrier.ImportTemplateState(ctx, sandboxUID, state.kind, filepath.Join(bundleDir, bundleNameFor(state.name)))
+				return carrier.ImportTemplateState(ctx, sandboxUID, state.kind, bundlePath)
 			},
 			sentinelMissing:  state.sentinelM,
 			sentinelUnlisted: state.sentinelU,
 			sentinelMismatch: errPolicyBundleMismatch,
 		})
 	}
-}
-
-// bundleNameFor maps a state kind's display name onto its bundle file name.
-func bundleNameFor(name string) string {
-	if name == "vault" {
-		return vaultBundleName
-	}
-	return policyBundleName
-}
-
-// maxTemplateBundleBytes returns the provenance bound of a state kind.
-func maxTemplateBundleBytes(name string) int64 {
-	if name == "vault" {
-		return maxVaultBundleBytes
-	}
-	return maxPolicyBundleBytes
 }
 
 // maxVaultBundleBytes bounds the vault bundle file buffered for provenance
