@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	registrytest "github.com/google/go-containerregistry/pkg/registry"
+	"github.com/opencontainers/go-digest"
 	oci "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 	"oras.land/oras-go/v2/content"
@@ -18,6 +19,56 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 )
+
+type credentialTransport func(*http.Request) (*http.Response, error)
+
+func (f credentialTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestRepositoryCredentialsUseDockerHubEndpoint(t *testing.T) {
+	for _, test := range []struct{ registry, endpoint string }{
+		{"docker.io", "registry-1.docker.io"},
+		{"registry-1.docker.io", "registry-1.docker.io"},
+		{"registry.example", "registry.example"},
+	} {
+		t.Run(test.registry, func(t *testing.T) {
+			ctx := context.Background()
+			reference := test.registry + "/team/private:build"
+			credential := auth.Credential{Username: "reader", Password: "secret"}
+			calls := 0
+			repo, ref, err := Repository(reference, func(_ context.Context, selected string) (auth.Credential, error) {
+				require.Equal(t, reference, selected, "preserve the full repository scope")
+				calls++
+				return credential, nil
+			})
+			require.NoError(t, err)
+			client := repo.Client.(*auth.Client)
+			client.Client = &http.Client{Transport: credentialTransport(func(r *http.Request) (*http.Response, error) {
+				require.Equal(t, test.endpoint, r.URL.Host)
+				require.Equal(t, "/v2/team/private/manifests/build", r.URL.Path)
+				response := &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: r}
+				user, password, ok := r.BasicAuth()
+				if ok && user == credential.Username && password == credential.Password {
+					response.StatusCode = http.StatusOK
+					response.Header.Set("Content-Type", oci.MediaTypeImageManifest)
+					response.Header.Set("Content-Length", "8")
+					response.Header.Set("Docker-Content-Digest", digest.FromString("manifest").String())
+				} else {
+					response.Header.Set("WWW-Authenticate", `Basic realm="registry"`)
+				}
+				return response, nil
+			})}
+			_, err = repo.Resolve(ctx, ref.Reference)
+			require.NoError(t, err)
+			require.Equal(t, 1, calls)
+			other, err := client.Credential(ctx, "other.example")
+			require.NoError(t, err)
+			require.Equal(t, auth.EmptyCredential, other)
+			require.Equal(t, 1, calls, "do not resolve credentials for another host")
+		})
+	}
+}
 
 func TestInheritBlobUsesRepositoryScopedSourceCredentials(t *testing.T) {
 	for _, crossHost := range []bool{false, true} {

@@ -50,8 +50,13 @@ func Repository(reference string, credentials CredentialFunc) (*remote.Repositor
 	}
 	client := &auth.Client{Client: retry.DefaultClient, Cache: auth.NewCache()}
 	if credentials != nil {
+		credentialHost := ref.Registry
+		// ORAS sends Docker Hub requests to its distribution endpoint.
+		if credentialHost == "docker.io" {
+			credentialHost = "registry-1.docker.io"
+		}
 		client.Credential = func(ctx context.Context, host string) (auth.Credential, error) {
-			if host != ref.Registry {
+			if host != credentialHost {
 				return auth.EmptyCredential, nil
 			}
 			return credentials(ctx, ref.String())
