@@ -234,7 +234,7 @@ func TestPolicyTransferSurfacesHandlerFailure(t *testing.T) {
 // seal must never be asked for a template carry); with it, exports carry
 // Seal=false and imports reuse the transfer operations.
 func TestTemplateStateTransferCapabilityGated(t *testing.T) {
-	t.Run("no capability: silent no-op", func(t *testing.T) {
+	t.Run("no capability: loud failure, never a state-less template", func(t *testing.T) {
 		manager, caller := newVaultTransferManager(t)
 		caller.mu.Lock()
 		caller.policyTransfer = true
@@ -242,9 +242,10 @@ func TestTemplateStateTransferCapabilityGated(t *testing.T) {
 		caller.templateStateExport = false
 		caller.mu.Unlock()
 
-		require.NoError(t, manager.ExportTemplateState(context.Background(), "a", "policy", "/tmp/policy.json"))
-		require.NoError(t, manager.ImportTemplateState(context.Background(), "a", "vault", "/tmp/vault.json"))
-		require.Empty(t, stateCalls(caller))
+		err := manager.ExportTemplateState(context.Background(), "a", "policy", "/tmp/policy.json")
+		require.ErrorContains(t, err, "templateStateExport=false")
+		require.ErrorContains(t, err, "refused rather than published without its state")
+		require.Empty(t, stateCalls(caller), "a sealing handler is never asked for a template carry")
 	})
 	t.Run("capability declared: seal-free export + import", func(t *testing.T) {
 		manager, caller := newVaultTransferManager(t)

@@ -718,9 +718,11 @@ func (d *Driver) stageCheckpointPolicy(ctx context.Context, sandboxUID, staging 
 // subject — the HandlerStatus.TemplateStateExport semantics, so the
 // still-running source keeps full relay CRUD (a template's completion path
 // never imports). A silent no-op without a mover or when the mover carries
-// no template-carry capability (handlers without it always seal, which is
-// exactly what templates must not do). Any transfer failure fails the
-// template: the state is part of the complete capture.
+// no template-carry capability. A Handler WITHOUT the capability is a LOUD
+// failure (the mover surfaces it): a snapshot must be a complete capture,
+// and publishing a state-less template as if it were the source's state is
+// exactly the regression to avoid. Any transfer failure fails the template
+// with the handler's reason.
 func (d *Driver) stageTemplateState(ctx context.Context, sandboxUID, staging string) error {
 	d.mu.RLock()
 	mover := d.stateMover

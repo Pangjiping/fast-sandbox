@@ -2525,6 +2525,20 @@ egress_status_ready() {
 	[[ "$out" == *'"apiVersion":"sandbox.fast.io/actions/v1"'* && "$out" == *'"ready":true'* && "$out" == *'"instanceId":'* ]]
 }
 
+# egress_template_state_capable reports whether the live egress Handler
+# declares the TemplateStateExport capability (seal-free template carry +
+# land-for-next-registration, opensandbox#2312). Without it, template
+# snapshots REFUSE to publish state-less (by design, loud failure), so the
+# template+clone stage is skipped rather than failed.
+egress_template_state_capable() {
+	local pod out
+	pod="$(egress_fastlet_pod)"
+	[[ -n "$pod" ]] || return 1
+	out="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- \
+		curl -fsS -m 5 "http://127.0.0.1:18080/_fastlet/v1/actions/status" 2>/dev/null)" || return 1
+	jq -e '.templateStateExport == true' >/dev/null 2>&1 <<<"$out"
+}
+
 # egress_relay_capable reports whether the live egress Handler declares the
 # policyTransfer capability. A relay-native egress (policyTransfer=true)
 # honors runtime policy mutations ONLY through PUT /policy/{uid} — the
@@ -3132,10 +3146,11 @@ test_egress_ip_denied() { # sandbox ip
 #   data-plane-ready; the RELAYED allow policy — not the CRD bootstrap —
 #   is enforced in-guest) -> egress worker restart (the subject recovers
 #   from the persisted file; the SET_BINDING replay only re-registers) ->
-#   template snapshot + clone: checkpoints alone export (a template export
-#   would seal the source), and relay mutations are SUBJECT-LOCAL, so the
-#   clone inherits the create-time CRD seed (deny), never the relayed
-#   policy.
+#   template snapshot + clone: templates carry the state SEAL-FREE
+#   (capability-gated; skipped when the egress lacks templateStateExport —
+#   the snapshot would refuse to publish state-less by design), and the
+#   clone boots with the template's state: the landed record (the source's
+#   current policy) wins over the CRD seed at first registration.
 #
 # Requires opensandbox/egress:latest in local docker (like verify-snapshot /
 # verify-pause). Reuses the pause flow's image roll + egress pool staging;
@@ -3437,30 +3452,28 @@ policy_clone() {
 		|| fail "template snapshot create failed: $out"
 	log "CreateSandboxSnapshot: $out"
 	wait_for "snapshot CR Succeeded" "$POLICY_TIMEOUT_S" policy_snapshot_succeeded
-	# The manifest binding stays the CRD seed; the bundle carries NO policy
-	# file (the export seals the source — checkpoint snapshots only).
+	# The manifest binding stays the CRD seed (the record is never embedded);
+	# the bundle CARRIES the opaque policy record (seal-free template export).
 	manifest_input="$(mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##')" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
 	[[ "$manifest_input" == "$EGRESS_DENY_POLICY" ]] \
 		|| fail "template manifest binding is '${manifest_input:-<none>}' (want the CRD seed deny — the policy record is never embedded)"
-	if mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)/policy.json" >/dev/null 2>&1; then
-		fail "template bundle carries policy.json (a template export seals the still-running source)"
-	fi
-	pass "template snapshot: CRD seed binding only, no policy export (source policy CRUD intact)"
+	mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)/policy.json" 2>/dev/null | jq -e '.policy' >/dev/null \
+		|| fail "template bundle does not carry the opaque policy.json (complete-capture violation)"
+	pass "template snapshot: opaque policy.json in the bundle, CRD seed binding in the manifest"
 
-	# Clone-create WITHOUT an explicit action: the clone inherits the
-	# create-time CRD seed (deny). Relay mutations are SUBJECT-LOCAL — they
-	# must not leak into clones (the mirror image of the resume stage, where
-	# the imported record DOES win over the seed).
+	# Clone-create WITHOUT an explicit action: the clone boots with the
+	# template's state — the landed record (the template's CURRENT policy,
+	# allow) wins over the SET_BINDING seed (deny) at first registration.
 	snapshot_cleanup_sandbox "$POLICY_CLONE"
 	snapshot_policy_run "$POLICY_CLONE" "$POLICY_TEMPLATE"
 	wait_for "clone sandbox Ready (cold pull of the template set)" 900 sandbox_ready "$POLICY_CLONE"
 	wait_for "clone egress binding Ready" 120 egress_binding_ready "$POLICY_CLONE"
 	clone_input="$(kubectl -n "$NS" get sandbox "$POLICY_CLONE" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
 	[[ "$clone_input" == "$EGRESS_DENY_POLICY" ]] \
-		|| fail "clone spec binding is '${clone_input:-<none>}' (want the CRD seed deny)"
+		|| fail "clone spec binding is '${clone_input:-<none>}' (want the CRD seed deny — the seed is still delivered, the record wins on top)"
 	wait_for "clone execd control intact" 120 egress_execd_control "$POLICY_CLONE"
-	test_egress_denied "$POLICY_CLONE"
-	pass "clone inherits the CRD seed only (deny enforced; the relayed policy did not leak)"
+	wait_for "clone boots with the template's policy (allow; record wins over the seed)" 120 egress_guest_reachable "$POLICY_CLONE"
+	pass "clone boots with the template state (allow enforced; CRD seed delivered underneath)"
 }
 
 policy_cleanup() {
@@ -3516,7 +3529,11 @@ verify_policy() {
 	run_stage "policy 4: pause exports the relayed policy" policy_pause
 	run_stage "policy 5: resume enforces the relayed policy (not bootstrap)" policy_resume
 	run_stage "policy 6: egress restart keeps the relayed policy" policy_restart
-	run_stage "policy 7: template snapshot + clone inherits the dump" policy_clone
+	if egress_template_state_capable; then
+		run_stage "policy 7: template snapshot carries state + clone boots with it" policy_clone
+	else
+		log "policy 7 SKIPPED: the egress does not declare templateStateExport (opensandbox#2312 not landed); template snapshots refuse to publish state-less by design"
+	fi
 
 	policy_cleanup
 	trap - EXIT

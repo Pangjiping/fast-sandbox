@@ -124,9 +124,11 @@ func (m *Manager) ImportPolicy(ctx context.Context, sandboxUID, bundlePath strin
 // ExportTemplateState copies the subject's state file of kind into the
 // bundle target WITHOUT sealing the subject (the template-carry semantics:
 // the source keeps full relay CRUD — a template's completion path never
-// imports, so a sealed export would lock it out). A silent no-op unless the
-// Handler declares the TemplateStateExport capability; any Handler-side
-// failure fails the snapshot (the state is part of the complete capture).
+// imports, so a sealed export would lock it out). A Handler without the
+// TemplateStateExport capability is a LOUD failure, never a silent skip:
+// a snapshot must be a complete capture, and a state-less template must
+// not pass as the source's state. Any Handler-side failure fails the
+// snapshot for the same reason.
 func (m *Manager) ExportTemplateState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
 	switch kind {
 	case runtimecontract.StateKindVault:
@@ -141,8 +143,10 @@ func (m *Manager) ExportTemplateState(ctx context.Context, sandboxUID string, ki
 // ImportTemplateState lands a template-borne state record as the FRESH
 // subject's seed (land-for-next-registration): a clone booted from a
 // template whose bundle carries state starts with the template's state,
-// re-stamped to the clone's registration at first SET_BINDING. A silent
-// no-op unless the Handler declares the TemplateStateExport capability.
+// re-stamped to the clone's registration at first SET_BINDING. Against a
+// Handler without the capability the transfer fails and the CALLER decides
+// the landing posture (the driver degrades the clone to the CRD seed — the
+// bundle can only carry state when the exporting egress was capable).
 func (m *Manager) ImportTemplateState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
 	switch kind {
 	case runtimecontract.StateKindVault:
@@ -176,9 +180,13 @@ func (m *Manager) invokeTemplateTransfer(ctx context.Context, operation actionap
 		return fmt.Errorf("%s template state transfer capability probe for Sandbox %s: %w", operation, sandboxUID, err)
 	}
 	if !status.TemplateStateExport {
-		klog.Infof("template state transfer skipped: Action Handler %s declares no template state carry (templateStateExport=false); the template carries no %s state",
-			name, stateKindOfOperation(operation))
-		return nil
+		// Fail LOUD: a snapshot must be a complete capture. Silently
+		// skipping would publish a state-less template as if it were the
+		// source's state. The fix is an egress that honors
+		// SnapshotTransfer.Seal=false + land-for-next-registration and
+		// reports templateStateExport=true (opensandbox#2312).
+		return fmt.Errorf("%s template state transfer for Sandbox %s: Action Handler %s does not support seal-free template carry (templateStateExport=false); the template snapshot is refused rather than published without its state — upgrade the egress per opensandbox#2312",
+			operation, sandboxUID, name)
 	}
 	if seal {
 		falseValue := false
