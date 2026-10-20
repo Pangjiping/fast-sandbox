@@ -42,20 +42,21 @@ func (r *controllerRegistry) GetFastletByID(id placement.FastletID) (placement.F
 func (*controllerRegistry) RecordFeedback(placement.FastletID, placement.LocalFeedback) {}
 
 type controllerFastlet struct {
-	mu                   sync.Mutex
-	ensureErr            error
-	inspectErr           error
-	deleteErr            error
-	ensurePhase          string
-	runtimes             map[string]string
-	ensureCall           int
-	deleteCall           int
-	lastCreateRequest    *fastletapi.CreateSandboxRequest
-	snapshotCreateErr    error
-	snapshotInspectErr   error
-	snapshotInspectPhase fastletapi.SnapshotPhase
-	snapshotDeleteCall   int
-	lastSnapshotInspect  *fastletapi.SnapshotIdentity
+	mu                    sync.Mutex
+	ensureErr             error
+	inspectErr            error
+	deleteErr             error
+	ensurePhase           string
+	runtimes              map[string]string
+	ensureCall            int
+	deleteCall            int
+	lastCreateRequest     *fastletapi.CreateSandboxRequest
+	snapshotCreateErr     error
+	snapshotInspectErr    error
+	snapshotInspectPhase  fastletapi.SnapshotPhase
+	snapshotInspectStatus *fastletapi.SnapshotStatus
+	snapshotDeleteCall    int
+	lastSnapshotInspect   *fastletapi.SnapshotIdentity
 }
 
 func (f *controllerFastlet) CreateSandbox(_ context.Context, _ string, request *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
@@ -138,6 +139,10 @@ func (f *controllerFastlet) InspectSnapshot(_ context.Context, _ string, request
 	f.lastSnapshotInspect = &request.Identity
 	if f.snapshotInspectErr != nil {
 		return &fastletapi.InspectSnapshotResponse{}, f.snapshotInspectErr
+	}
+	if f.snapshotInspectStatus != nil {
+		observed := *f.snapshotInspectStatus
+		return &fastletapi.InspectSnapshotResponse{Snapshot: &observed}, nil
 	}
 	phase := f.snapshotInspectPhase
 	if phase == "" {

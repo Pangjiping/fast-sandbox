@@ -55,7 +55,7 @@ func TestOCICheckpointRestoreReferenceBoundToDigest(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-func TestPrepareOCICheckpointKeepsNativeFlowIndependentOfRegistry(t *testing.T) {
+func TestPrepareOCISnapshotKeepsNativeFlowIndependentOfRegistry(t *testing.T) {
 	dir := t.TempDir()
 	state := &SandboxState{}
 	state.Config.Identity.SandboxUID = "sandbox-1"
@@ -64,7 +64,7 @@ func TestPrepareOCICheckpointKeepsNativeFlowIndependentOfRegistry(t *testing.T) 
 	state.Config.Spec.Image = "native:golden"
 	require.NoError(t, saveState(dir, state))
 	plan := dumpPlan{sandboxDir: dir, snapshotID: "checkpoint-id"}
-	enabled, err := prepareOCICheckpoint(plan, fastletapi.SnapshotKindCheckpoint)
+	enabled, err := prepareOCISnapshot(plan)
 	require.NoError(t, err)
 	require.False(t, enabled)
 	state.Config.Spec.Image = "oci://registry.example/templates/alpine:build"
@@ -73,19 +73,53 @@ func TestPrepareOCICheckpointKeepsNativeFlowIndependentOfRegistry(t *testing.T) 
 	destination, err := checkpointDestinationForSource(state.Config.Spec.Image, plan.snapshotID)
 	require.NoError(t, err)
 	require.Equal(t, "registry.example/templates/alpine:checkpoint-id", destination)
-	enabled, err = prepareOCICheckpoint(plan, fastletapi.SnapshotKindCheckpoint)
+	enabled, err = prepareOCISnapshot(plan)
 	require.NoError(t, err)
 	require.True(t, enabled, "default OCI pause must not require an extra environment variable")
-	_, err = prepareOCICheckpoint(plan, fastletapi.SnapshotKindTemplate)
-	require.ErrorIs(t, err, runtimecontract.ErrSnapshotUnsupported)
 	t.Setenv(ociSnapshotRepositoryEnv, "registry.example/snapshots/checkpoints")
 	destination, err = checkpointDestinationForSource(state.Config.Spec.Image, plan.snapshotID)
 	require.NoError(t, err)
 	require.Equal(t, "registry.example/snapshots/checkpoints:checkpoint-id", destination)
-	enabled, err = prepareOCICheckpoint(plan, fastletapi.SnapshotKindCheckpoint)
+	enabled, err = prepareOCISnapshot(plan)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	t.Setenv(ociSnapshotRepositoryEnv, "registry.example/snapshots/checkpoints:mutable")
-	_, err = prepareOCICheckpoint(plan, fastletapi.SnapshotKindCheckpoint)
+	_, err = prepareOCISnapshot(plan)
 	require.ErrorIs(t, err, ErrInvalidConfig)
+}
+
+func TestOCISnapshotMetadataRemovesInheritedCheckpointOwner(t *testing.T) {
+	raw := []byte(`{"format":"native","oci":{"rootfs":"old"},"checkpoint":{"sandboxUID":"previous","namespace":"old"},"machine":{"vcpu":"2","memory":"1Gi"},"actionBindings":[{"handler":"egress","input":"deny"}]}`)
+	owner := fastletapi.SandboxIdentity{SandboxUID: "current", Namespace: "tenant"}
+	for _, kind := range []fastletapi.SnapshotKind{fastletapi.SnapshotKindTemplate, fastletapi.SnapshotKindCheckpoint} {
+		t.Run(string(kind), func(t *testing.T) {
+			data, err := ociSnapshotMetadata(raw, kind, owner)
+			require.NoError(t, err)
+			var document map[string]any
+			require.NoError(t, json.Unmarshal(data, &document))
+			require.Equal(t, "overlaybd", document["format"])
+			require.NotContains(t, document, "oci")
+			require.Contains(t, document, "machine")
+			require.Contains(t, document, "actionBindings")
+			if kind == fastletapi.SnapshotKindTemplate {
+				require.NotContains(t, document, "checkpoint")
+			} else {
+				require.Equal(t, map[string]any{"sandboxUID": "current", "namespace": "tenant"}, document["checkpoint"])
+			}
+		})
+	}
+}
+
+func TestDisabledOCIRejectsLiveSnapshotBeforeDump(t *testing.T) {
+	t.Setenv("FAST_SANDBOX_OCI_DISABLED", "true")
+	fixture := newSnapshotDriverFixture(t)
+	fixture.sandboxSpec.Spec.Image = "oci://r.example/ns/template:base"
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	_, err := fixture.driver.CreateSnapshot(t.Context(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "live-snapshot", Kind: fastletapi.SnapshotKindTemplate,
+	})
+	require.ErrorIs(t, err, ErrInvalidConfig)
+	require.ErrorContains(t, err, "FAST_SANDBOX_OCI_DISABLED=true")
+	require.Empty(t, fixture.server.snapshotDumps)
+	require.True(t, fixture.server.running)
 }

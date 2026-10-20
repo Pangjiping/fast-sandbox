@@ -94,9 +94,9 @@ func checkpointCredentials(destination string) (ocitemplate.CredentialFunc, erro
 	}, nil
 }
 
-// publishOCICheckpoint runs inside the existing asynchronous snapshot worker.
+// publishOCISnapshot runs inside the existing asynchronous snapshot worker.
 // Success means the snapfiles manifest publication point is visible in ACR.
-func (d *Driver) publishOCICheckpoint(ctx context.Context, plan dumpPlan, sizeBytes int64, onPublishing func()) (*runtimecontract.SnapshotResult, error) {
+func (d *Driver) publishOCISnapshot(ctx context.Context, plan dumpPlan, sizeBytes int64, kind fastletapi.SnapshotKind, onPublishing func()) (*runtimecontract.SnapshotResult, error) {
 	defer func() {
 		if _, err := os.Stat(filepath.Join(plan.staging, ".pack-resources-active")); err == nil {
 			klog.ErrorS(fmt.Errorf("pack resources may still be active"), "checkpoint backing files retained for recovery", "staging", plan.staging)
@@ -125,37 +125,53 @@ func (d *Driver) publishOCICheckpoint(ctx context.Context, plan dumpPlan, sizeBy
 	if err = copyFile(source, filepath.Join(plan.staging, "metadata.json")); err != nil {
 		return nil, err
 	}
+	manifestPath := filepath.Join(plan.staging, snapshotManifestName)
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	raw, err = ociSnapshotMetadata(raw, kind, state.Config.Identity)
+	if err != nil {
+		return nil, err
+	}
+	// Sanitize before packing too: a reusable template must not retain an
+	// inherited checkpoint owner inside snapfiles/manifest.json.
+	if err = os.WriteFile(manifestPath, raw, 0644); err != nil { //nolint:gosec // published metadata, world-readable by design
+		return nil, err
+	}
 	args := append(d.fsbArgs(), "--build-work-dir", filepath.Join(plan.staging, "pack-work"), "--build-output-dir", filepath.Join(plan.staging, "artifacts"), "pack", "--bundle-dir", plan.staging, "--output", "snapshot:"+plan.snapshotID)
 	if output, err := exec.CommandContext(ctx, "fsb-vm", args...).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("package OCI checkpoint: %w: %s", err, output)
-	}
-	raw, err := os.ReadFile(filepath.Join(plan.staging, "manifest.json"))
-	if err != nil {
-		return nil, err
-	}
-	var document map[string]any
-	if err = json.Unmarshal(raw, &document); err != nil {
-		return nil, err
-	}
-	delete(document, "oci")
-	document["format"] = "overlaybd"
-	document["checkpoint"] = map[string]string{"sandboxUID": state.Config.Identity.SandboxUID, "namespace": state.Config.Identity.Namespace}
-	raw, err = json.Marshal(document)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("package OCI snapshot: %w: %s", err, output)
 	}
 	if onPublishing != nil {
 		onPublishing()
 	}
 	ref, _, err := ocitemplate.Push(ctx, filepath.Join(plan.staging, "artifacts", "snapshot_"+plan.snapshotID), destination, raw, credentials)
 	if err != nil {
-		return nil, fmt.Errorf("publish OCI checkpoint: %w", err)
+		return nil, fmt.Errorf("publish OCI snapshot: %w", err)
 	}
 	parsed, err := registry.ParseReference(strings.TrimPrefix(ref, ocitemplate.Prefix))
 	if err != nil {
 		return nil, err
 	}
 	return &runtimecontract.SnapshotResult{SnapshotID: plan.snapshotID, ManifestRef: ref, ArtifactDigest: strings.TrimPrefix(parsed.Reference, "sha256:"), SizeBytes: sizeBytes}, nil
+}
+
+func ociSnapshotMetadata(raw []byte, kind fastletapi.SnapshotKind, owner fastletapi.SandboxIdentity) ([]byte, error) {
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	if document == nil {
+		return nil, fmt.Errorf("%w: snapshot metadata must be an object", ErrInvalidConfig)
+	}
+	delete(document, "oci")
+	delete(document, "checkpoint")
+	document["format"] = "overlaybd"
+	if kind == fastletapi.SnapshotKindCheckpoint {
+		document["checkpoint"] = map[string]string{"sandboxUID": owner.SandboxUID, "namespace": owner.Namespace}
+	}
+	return json.Marshal(document)
 }
 
 // Checkpoints are instance-private even though their bytes use an OCI envelope.
@@ -189,7 +205,7 @@ func validateOCIResumeOwner(stateRoot, reference string, config *fastletapi.Runt
 	return nil
 }
 
-func prepareOCICheckpoint(plan dumpPlan, kind fastletapi.SnapshotKind) (bool, error) {
+func prepareOCISnapshot(plan dumpPlan) (bool, error) {
 	state, err := loadState(plan.sandboxDir)
 	if err != nil {
 		return false, err
@@ -201,8 +217,8 @@ func prepareOCICheckpoint(plan dumpPlan, kind fastletapi.SnapshotKind) (bool, er
 	if !strings.HasPrefix(source, ocitemplate.Prefix) {
 		return false, nil
 	}
-	if kind != fastletapi.SnapshotKindCheckpoint {
-		return false, fmt.Errorf("%w: OCI live template publication is not a pause checkpoint", runtimecontract.ErrSnapshotUnsupported)
+	if err := validateOCISupport(source); err != nil {
+		return false, err
 	}
 	_, err = checkpointDestinationForSource(source, plan.snapshotID)
 	return true, err

@@ -27,9 +27,9 @@ import (
 )
 
 const (
-	// SandboxSnapshotFinalizerName gates object deletion on best-effort
-	// cleanup of node-local snapshot artifacts.
-	SandboxSnapshotFinalizerName = "sandbox.fast.io/snapshot-cleanup"
+	// SandboxSnapshotFinalizerName gates object deletion on published OCI
+	// artifact deletion and best-effort node-local cleanup.
+	SandboxSnapshotFinalizerName = assignment.SnapshotCleanupFinalizer
 	// SnapshotObservationPollInterval drives the observe loop of a running
 	// snapshot task.
 	SnapshotObservationPollInterval = time.Second
@@ -109,6 +109,17 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, request ctrl.
 		return *result, nil
 	}
 	ctx = enrichSnapshotIdentity(ctx, sandbox)
+	// Pin the credential scope before any publication can start. The source
+	// Sandbox may be deleted before the snapshot itself is deleted.
+	if snapshot.Annotations[assignment.AnnotationSnapshotPoolRef] == "" {
+		if snapshot.Annotations == nil {
+			snapshot.Annotations = map[string]string{}
+		}
+		snapshot.Annotations[assignment.AnnotationSnapshotPoolRef] = sandbox.Spec.PoolRef
+		if err := r.Update(ctx, &snapshot); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if snapshot.Status.SnapshotID == "" {
 		return r.reconcileTrigger(ctx, &snapshot, sandbox)
 	}
@@ -275,8 +286,13 @@ func (r *SandboxSnapshotReconciler) reconcileDeletion(ctx context.Context, snaps
 			return ctrl.Result{RequeueAfter: SnapshotObservationPollInterval}, err
 		}
 	}
-	// Best-effort artifact cleanup: stored objects are never unpublished and
-	// node-side leftovers are bounded by driver-local garbage collection.
+	// projectObservation updates this copy from the successful status write;
+	// a cached re-read here could still omit the just-published reference.
+	if err := r.deletePublishedOCISnapshot(ctx, snapshot); err != nil {
+		return ctrl.Result{RequeueAfter: SnapshotRetryInterval}, err
+	}
+	// Node-local leftovers remain best-effort; remote artifact deletion above
+	// is mandatory even when the source Sandbox or Fastlet no longer exists.
 	sandbox, result, resolveErr := r.resolveTarget(ctx, snapshot)
 	if resolveErr == nil && result == nil && sandbox != nil {
 		ctx = enrichSnapshotIdentity(ctx, sandbox)
@@ -384,14 +400,20 @@ func (r *SandboxSnapshotReconciler) patchStatus(ctx context.Context, snapshot *a
 		// the object (a deletion-time target recheck or a stale observation
 		// would otherwise roll a terminal object backwards).
 		if before.Phase.Terminal() {
+			*snapshot = current
 			return nil
 		}
 		mutate(&current.Status)
 		current.Status.ObservedGeneration = current.Generation
 		if reflect.DeepEqual(before, current.Status) {
+			*snapshot = current
 			return nil
 		}
-		return r.Status().Update(ctx, &current)
+		if err := r.Status().Update(ctx, &current); err != nil {
+			return err
+		}
+		*snapshot = current
+		return nil
 	})
 }
 

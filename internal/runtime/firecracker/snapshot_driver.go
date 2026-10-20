@@ -5,8 +5,8 @@ package firecracker
 // running microVM, dump the writable instance rootfs plus the vmstate/memory
 // pair, resume the VM on every path, assemble a restore-compatible manifest
 // (byte-format shared with the golden-image builder via internal/artifacts),
-// and publish the set through the node runtime-agent. Local mode (no agent)
-// refuses snapshots: publication requires the agent's store credentials.
+// and publish the set. Native publication requires the node runtime-agent
+// and its store credentials; OCI publication uses the Fastlet registry credentials.
 
 import (
 	"context"
@@ -78,8 +78,8 @@ var _ runtimecontract.Snapshotter = (*Driver)(nil)
 var snapshotMu sync.Mutex
 
 // CreateSnapshot snapshots a running Sandbox in place and publishes the
-// artifact set. Template snapshots publish under the template name so later
-// creates boot from them; checkpoint snapshots publish an instance-private
+// artifact set. Native template snapshots publish a name index; OCI templates
+// publish an immutable registry reference for later creates; checkpoint snapshots publish an instance-private
 // set (no index) that only the owning Sandbox resumes from. The VM is always
 // resumed; a failed dump leaves the Sandbox running and discards the staging
 // directory without publishing anything.
@@ -93,9 +93,6 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	}
 	switch kind {
 	case fastletapi.SnapshotKindTemplate:
-		if input.TemplateName == "" {
-			return nil, fmt.Errorf("%w: templateName is required for a template snapshot", ErrInvalidConfig)
-		}
 	case fastletapi.SnapshotKindCheckpoint:
 		if input.TemplateName != "" {
 			return nil, fmt.Errorf("%w: checkpoint snapshots publish no template index; templateName must be empty", ErrInvalidConfig)
@@ -118,9 +115,12 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	}
 	d.mu.RUnlock()
 	plan.sandboxDir = filepath.Join(plan.stateRoot, sandboxStateDir, plan.sandboxID)
-	ociCheckpoint, err := prepareOCICheckpoint(plan, kind)
+	ociSnapshot, err := prepareOCISnapshot(plan)
 	if err != nil {
 		return nil, err
+	}
+	if !ociSnapshot && kind == fastletapi.SnapshotKindTemplate && input.TemplateName == "" {
+		return nil, fmt.Errorf("%w: templateName is required for a native template snapshot", ErrInvalidConfig)
 	}
 	plan.staging = filepath.Join(plan.stateRoot, snapshotStagingDir, plan.snapshotID)
 	if err := d.cleanupSnapshotStaging(ctx, plan.staging); err != nil {
@@ -182,8 +182,8 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind,
 		"sizeBytes", sizeBytes, "staging", plan.staging)
 
-	if ociCheckpoint {
-		return d.publishOCICheckpoint(ctx, plan, sizeBytes, input.OnPublishing)
+	if ociSnapshot {
+		return d.publishOCISnapshot(ctx, plan, sizeBytes, kind, input.OnPublishing)
 	}
 	client, err := d.agentClientOrNil()
 	if err != nil {

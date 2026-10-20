@@ -209,7 +209,7 @@ func Push(ctx context.Context, dir, destination string, metadata []byte, credent
 	if root == nil || snap == nil {
 		return "", "", fmt.Errorf("template requires rootfs and snapfiles")
 	}
-	if _, _, err = pushLocalImage(ctx, repo, dir, ref.Reference, *root, sources, credentials, nil); err != nil {
+	if _, _, err = pushLocalImage(ctx, repo, dir, ref.Reference, *root, sources, credentials, map[string]string{AnnotationTemplateID: ref.Reference}); err != nil {
 		return "", "", err
 	}
 	_, immutable, err := pushLocalImage(ctx, repo, dir, ref.Reference, *snap, sources, credentials, annotations)

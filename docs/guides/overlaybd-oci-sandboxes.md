@@ -221,3 +221,21 @@ Use `registry/repository` without `oci://`, a tag, or a digest. The account must
 - Add `TEMPLATE_REF` to the Pool's `warmImages` for prewarming. This does not mean all data blocks are cached.
 - To measure warm creation latency, fix the template and Fastlet, warm them up, and use a gRPC client that reuses its connection. The `grpcurl` commands above open a new connection for each call and are intended for functional checks.
 - See the [FastPath integration guide](pause-resume-snapshot-integration.md) for the full pause/resume state model and concurrency fences.
+
+## Live Snapshot API
+
+Call the gRPC API directly; it creates and drives the `SandboxSnapshot` CR internally. Creating the CR yourself is an alternative entry point to the same flow.
+
+`CreateSandboxSnapshot` supports running OCI Sandboxes. Omit `template_name` on this path: Fastlet generates a random UUID `snapshot_id` and publishes `<snapshot_id>_rootfs` and `<snapshot_id>_snapfiles` to `FAST_SANDBOX_OCI_SNAPSHOT_REPOSITORY`, or to the source repository when that setting is absent. No third OCI artifact or name index is written.
+
+```text
+CreateSandboxSnapshot(request_id="capture-001", sandbox=<running sandbox>)
+GetSandboxSnapshot(snapshot=<capture-001>)  # wait for Succeeded
+CreateSandbox(image=<snapshot.manifest_ref>, pool_ref=<firecracker pool>)
+```
+
+`manifest_ref` is the immutable `oci://repository@sha256:...` snapfiles reference. Use it to create one or more new Sandboxes. The API returns `snapshot_id` after Fastlet admits the task. The source VM resumes after the dump and continues running through publication. Its disk and memory state are captured together; inherited rootfs layers are reused and one new layer carries the captured writes.
+
+The byte format is shared with pause checkpoints. Live template snapshots omit checkpoint-owner annotations and instance-private vault data, allowing a new Sandbox UID to boot from them. Pause checkpoints retain their owner annotations and remain restricted to the original Sandbox. `DeleteSandboxSnapshot` (or deleting the Snapshot CR) deletes the published rootfs and snapfiles manifests before removing the CR. The controller uses the source Pool's compiled registry credentials even if the source VM is gone. Keep those credentials available until deletion finishes. Registry deletion permission is required; a failed deletion keeps the CR terminating and is retried. Both image manifests carry their UUID pair ID, so snapshots with identical layer contents can still be deleted independently. Shared layer blobs are not deleted directly: registry garbage collection reclaims blobs no longer referenced by any image. Before allowing those blobs to be reclaimed, delete VMs still using this snapshot or move them to an independently published checkpoint: running OCI VMs can still fetch uncached disk or memory blocks.
+
+Native + S3 snapshots keep their existing `template_name` requirement and image-index behavior. OCI snapshots require OCI support to be enabled and registry credentials with permission to read the parent layers and publish to the destination repository.

@@ -3,7 +3,7 @@
 A SandboxSnapshot takes a live checkpoint of a **running** Sandbox and
 publishes it as a bootable image. After the snapshot succeeds, starting a
 new Sandbox from it is an ordinary create whose `image` is the snapshot's
-template name — same as any golden image.
+template name for native + S3, or the returned immutable OCI `manifest_ref` for OverlayBD + OCI. See [OCI live snapshots](overlaybd-oci-sandboxes.md#live-snapshot-api) for the UUID-based two-artifact flow.
 
 ```text
 your Sandbox (running)
@@ -19,10 +19,12 @@ During the snapshot the source Sandbox keeps running: the only interruption
 is a sub-second pause while the memory is dumped (zero observable `/ping`
 failures with a spill area configured).
 
+The source remains running for both publication paths. OCI snapshots use a random UUID `snapshot_id`; `template_name` is optional and no image-name index is published. Native snapshots retain the named-index behavior described below.
+
 ## Prerequisites
 
 - The target Sandbox is `Ready` on a Firecracker pool.
-- The node runtime-agent has a **write credential** for the artifact store
+- For native + S3, the node runtime-agent has a **write credential** for the artifact store
   (a `writeSecretRef` on the registry rule; without it snapshots fail with
   a Forbidden-family error and pulls keep working). Your platform operator
   provides this — on the integration environment `verify-snapshot` wires it
@@ -137,8 +139,10 @@ ready. That path never involves the control plane or the manifest.
 - **After `Failed`**: issue a new snapshot with a new `request_id` (the
   object is one-shot). Nothing was made addressable by the failed attempt.
 - **Deleting the snapshot** (`DeleteSandboxSnapshot` / `kubectl delete`)
-  removes the CR and node-local staging, but **never deletes the published
-  artifacts** — store lifecycle is managed out of band.
+  deletes the published rootfs and snapfiles manifests for OCI snapshots,
+  then removes the CR and node-local staging. Failures keep the CR terminating
+  for retry. Shared blobs are reclaimed by registry GC. Native + S3 retains
+  its existing out-of-band artifact lifecycle.
 - Template names are **global across namespaces**: two teams snapshotting to
   the same name overwrite each other's index (last writer wins).
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -42,6 +43,7 @@ func newSnapshotReconcilerHarnessWith(t *testing.T, snapshot *apiv1alpha2.Sandbo
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 	sandbox := snapshotTargetSandbox(t)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&apiv1alpha2.Sandbox{}, &apiv1alpha2.SandboxSnapshot{}).

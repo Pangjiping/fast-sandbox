@@ -312,7 +312,7 @@ The protobuf contract is
 | `ResolveEndpoint` | Non-blocking resolution of a named component or raw user port in central/direct mode; requires live aggregate Ready |
 | `CreateSandboxSnapshot` | One-shot live checkpoint of a Ready Sandbox; `request_id` is the idempotency key, sandbox fence until `Publishing`, template-name fence until terminal |
 | `GetSandboxSnapshot` | CR-backed phase/artifact/placement observation |
-| `DeleteSandboxSnapshot` | Deletes the object (`expected_uid` fenced); never unpublishes stored artifacts |
+| `DeleteSandboxSnapshot` | Accepts deletion (`expected_uid` fenced); for OCI, deletes both published manifests before the object disappears. Native store lifecycle is managed separately |
 | `PauseSandbox` | Persist `spec.state=Paused` (`expected_uid`/`expected_generation` fenced); completion (`PAUSED`, checkpoint durable) is observed via `GetSandbox` |
 | `ResumeSandbox` | Persist `spec.state=Running` and schedule the recorded checkpoint, possibly cross-host; `expected_checkpoint_id` fences against a re-pause between read and resume; completion (`READY`) is observed via `GetSandbox` |
 | `GetPool`, `ListPools` | Runtime, fixed resources, components, capacity, and warm-image discovery |

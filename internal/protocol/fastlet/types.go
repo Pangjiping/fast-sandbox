@@ -494,8 +494,9 @@ type SnapshotSpec struct {
 	// Kind selects the publish mode. Empty is treated as SnapshotKindTemplate
 	// so callers that predate checkpoints keep working.
 	Kind SnapshotKind `json:"kind,omitempty"`
-	// TemplateName is the artifact-store index key the artifact set is
-	// published under. Required for Template, must be empty for Checkpoint.
+	// TemplateName is required for native template snapshots and selects their
+	// artifact-store index key. OCI templates use SnapshotID instead and need
+	// no name index. Must be empty for Checkpoint.
 	TemplateName string `json:"templateName,omitempty"`
 }
 
