@@ -139,6 +139,20 @@ spec:
   - name: egress
     targetHTTPPort: 18080
     hooks: [sandbox.runtime-ready, sandbox.data-plane-ready]
+  # Recorded-policy usage contract (three channels, one authority order):
+  #   - create: initialize the policy with the Sandbox spec's ActionBinding
+  #     (actionBindings: [{handler: egress, input: <policy JSON>}]) —
+  #     SET_BINDING seeds the subject's bootstrap policy from the CRD; this
+  #     is the durable, restart-safe channel.
+  #   - runtime: make every other mutation through the generic handler
+  #     relay — fastpath InvokeHandlerAction with PUT / GET / DELETE
+  #     /policy/{sandboxUid} (the egress' native semantics, revision
+  #     preconditions). Relay mutations bypass the CRD, so the binding
+  #     input goes stale; the relayed record is the live truth.
+  #   - snapshot/pause: nothing to do — POLICY_EXPORT dumps the relayed
+  #     policy file into the bundle as policy.json and the manifest records
+  #     it as the egress ActionBinding, which is authoritative over the
+  #     stale CRD replay at restore and clone-create.
   sandboxResources:
     cpu: "1"
     memory: 512Mi

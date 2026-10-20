@@ -21,6 +21,24 @@ const (
 	// — a template clone must inherit the relayed policy, and the imported
 	// record stays authoritative over later binding replays (the binding
 	// input only ever seeds a fresh subject).
+	//
+	// Usage contract for the recorded policy — three channels, one
+	// authority order:
+	//
+	//   - Create: initialize the policy with the Sandbox spec's ActionBinding
+	//     (handler=egress, input=<policy JSON>). SET_BINDING seeds the
+	//     subject's bootstrap policy from the CRD — the channel that is
+	//     durable and restart-safe by construction.
+	//   - Runtime: perform every other mutation through the generic handler
+	//     relay (PUT / GET / DELETE /policy/{sandboxUid} over fastpath
+	//     InvokeHandlerAction), i.e. the egress' native policy semantics
+	//     with revision preconditions. Relay mutations intentionally bypass
+	//     the CRD, so the binding input goes stale from then on.
+	//   - Snapshot/pause: persistence rides the egress dump — POLICY_EXPORT
+	//     copies the relayed policy file into the bundle as policy.json, and
+	//     the dumped content becomes the manifest's egress ActionBinding,
+	//     authoritative over the (stale) CRD replay at restore and
+	//     clone-create.
 	StateKindPolicy StateKind = "policy"
 )
 
