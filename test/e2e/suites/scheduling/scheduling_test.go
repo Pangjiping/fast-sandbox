@@ -189,7 +189,6 @@ func createSchedulingPool(namespace, name string, min, max, maxPerPod int32) *ap
 					Containers: []corev1.Container{{
 						Name:  "fastlet",
 						Image: suiteenv.FastletImage(),
-						Env:   []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}},
 					}},
 				},
 			},

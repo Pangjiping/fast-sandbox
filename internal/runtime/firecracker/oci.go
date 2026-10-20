@@ -24,13 +24,13 @@ func validateOCISupport(image string) error {
 	if !strings.HasPrefix(image, ocitemplate.Prefix) {
 		return nil
 	}
-	switch os.Getenv("FAST_SANDBOX_OCI_DISABLED") {
-	case "", "false":
-		return nil
+	switch os.Getenv("FAST_SANDBOX_OCI_ENABLED") {
 	case "true":
-		return fmt.Errorf("%w: OCI templates and checkpoints are disabled by FAST_SANDBOX_OCI_DISABLED=true", ErrInvalidConfig)
+		return nil
+	case "", "false":
+		return fmt.Errorf("%w: OCI templates and checkpoints require FAST_SANDBOX_OCI_ENABLED=true", ErrInvalidConfig)
 	default:
-		return fmt.Errorf("%w: FAST_SANDBOX_OCI_DISABLED must be true or false", ErrInvalidConfig)
+		return fmt.Errorf("%w: FAST_SANDBOX_OCI_ENABLED must be true or false", ErrInvalidConfig)
 	}
 }
 

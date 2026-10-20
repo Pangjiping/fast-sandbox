@@ -428,7 +428,7 @@ func controlPlanePool(namespace, name string, capacity int32) *apiv1alpha2.Sandb
 				CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name: "fastlet", Image: suiteenv.FastletImage(), Env: []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}}, ImagePullPolicy: corev1.PullIfNotPresent,
+				Name: "fastlet", Image: suiteenv.FastletImage(), ImagePullPolicy: corev1.PullIfNotPresent,
 			}}}},
 		},
 	}

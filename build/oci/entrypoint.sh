@@ -1,26 +1,22 @@
 #!/bin/sh
 set -eu
 export LD_LIBRARY_PATH="/opt/overlaybd/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-oci_disabled=${FAST_SANDBOX_OCI_DISABLED:-false}
-case "$oci_disabled" in
-  true|false) ;;
-  *) echo 'FAST_SANDBOX_OCI_DISABLED must be true or false' >&2; exit 1;;
+needs_oci=${FAST_SANDBOX_OCI_ENABLED:-false}
+case "$needs_oci" in
+  true|false|auto) ;;
+  *) echo 'FAST_SANDBOX_OCI_ENABLED must be true, false or auto' >&2; exit 1;;
 esac
-# Builders know their output at startup; native publication needs no ublk.
-# Fastlet serves both storage paths and starts ublkd by default.
-case "${1:-}" in
-  sandboxtemplate-builder|*/sandboxtemplate-builder)
-    publish=$(printf '%s' "${SANDBOX_TEMPLATE_SPEC:-null}" | jq -r '.output.publish // ""')
-    case "$publish" in
-      oci://*)
-        if [ "$oci_disabled" = true ]; then
-          echo 'OCI publication is disabled by FAST_SANDBOX_OCI_DISABLED=true' >&2
-          exit 1
-        fi;;
-      *) exec "$@";;
-    esac;;
-esac
-if [ "$oci_disabled" = true ]; then exec "$@"; fi
+# The standard Builder opts into automatic selection by its output publication.
+# Fastlet remains opt-in, so ordinary runtimes do not require ublk.
+if [ "$needs_oci" = auto ]; then
+  needs_oci=false
+  case "${1:-}" in
+    sandboxtemplate-builder|*/sandboxtemplate-builder)
+      publish=$(printf '%s' "${SANDBOX_TEMPLATE_SPEC:-null}" | jq -r '.output.publish // ""')
+      case "$publish" in oci://*) needs_oci=true;; esac;;
+  esac
+fi
+if [ "$needs_oci" != true ]; then exec "$@"; fi
 
 daemon_pid=
 component_pid=

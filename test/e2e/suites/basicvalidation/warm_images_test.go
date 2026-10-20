@@ -135,7 +135,7 @@ func warmImagePool(namespace, image string) *apiv1alpha2.SandboxPool {
 			SandboxResources:   suiteenv.SmallSandboxResourceProfile(),
 			WarmImages:         []string{image},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name: "fastlet", Image: suiteenv.FastletImage(), Env: []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}}, ImagePullPolicy: corev1.PullIfNotPresent,
+				Name: "fastlet", Image: suiteenv.FastletImage(), ImagePullPolicy: corev1.PullIfNotPresent,
 			}}}},
 		},
 	}

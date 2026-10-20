@@ -17,20 +17,21 @@ import (
 
 func TestEntrypointDaemonPolicyAndFailure(t *testing.T) {
 	for _, test := range []struct {
-		name, disabled, spec, failure string
-		builder, start                bool
+		name, enabled, spec, failure string
+		builder, start               bool
 	}{
-		{name: "runtime-default", start: true},
-		{name: "runtime-explicit-default", disabled: "false", start: true},
-		{name: "disabled", disabled: "true"},
-		{name: "invalid-flag", disabled: "auto", failure: "must be true or false"},
-		{name: "native-builder", builder: true, spec: `{"output":{"publish":"s3://bucket/template"}}`},
-		{name: "native-builder-with-oci-source", builder: true, spec: `{"source":{"image":"oci://registry/source:tag"},"output":{"publish":"s3://bucket/template"}}`},
-		{name: "oci-builder", builder: true, spec: `{"output":{"publish":"oci://registry/template:build"}}`, start: true},
-		{name: "disabled-oci-builder", builder: true, disabled: "true", spec: `{"output":{"publish":"oci://registry/template:build"}}`, failure: "OCI publication is disabled"},
-		{name: "runtime-ignores-builder-spec", spec: `{"output":{"publish":"s3://bucket/template"}}`, start: true},
-		{name: "daemon-failure", failure: "daemon-start-failed", start: true},
-		{name: "readiness-timeout", failure: "ublkd startup timed out", start: true},
+		{name: "runtime-default"},
+		{name: "runtime-explicit-default", enabled: "false"},
+		{name: "oci-runtime", enabled: "true", start: true},
+		{name: "invalid-flag", enabled: "invalid", failure: "must be true, false or auto"},
+		{name: "native-builder", enabled: "auto", builder: true, spec: `{"output":{"publish":"s3://bucket/template"}}`},
+		{name: "native-builder-with-oci-source", enabled: "auto", builder: true, spec: `{"source":{"image":"oci://registry/source:tag"},"output":{"publish":"s3://bucket/template"}}`},
+		{name: "oci-builder", enabled: "auto", builder: true, spec: `{"output":{"publish":"oci://registry/template:build"}}`, start: true},
+		{name: "disabled-oci-builder", builder: true, enabled: "false", spec: `{"output":{"publish":"oci://registry/template:build"}}`},
+		{name: "runtime-ignores-builder-spec", spec: `{"output":{"publish":"oci://registry/template:build"}}`},
+		{name: "runtime-auto-ignores-builder-spec", enabled: "auto", spec: `{"output":{"publish":"oci://registry/template:build"}}`},
+		{name: "daemon-failure", enabled: "true", failure: "daemon-start-failed", start: true},
+		{name: "readiness-timeout", enabled: "true", failure: "ublkd startup timed out", start: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -54,7 +55,7 @@ exec /bin/sleep 30
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("TEST_OCI_DIR", dir)
 			t.Setenv("TEST_OCI_FAILURE", test.failure)
-			t.Setenv("FAST_SANDBOX_OCI_DISABLED", test.disabled)
+			t.Setenv("FAST_SANDBOX_OCI_ENABLED", test.enabled)
 			t.Setenv("SANDBOX_TEMPLATE_SPEC", test.spec)
 			t.Cleanup(func() {
 				if raw, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil {
@@ -99,7 +100,7 @@ func TestEntrypointSupervisesBothChildrenAndSignals(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0755))
 			}
 			command := exec.Command("sh", "entrypoint.sh", "component")
-			command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "TEST_OCI_DIR="+dir, "TEST_OCI_MODE="+mode, "FAST_SANDBOX_OCI_DISABLED=false")
+			command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "TEST_OCI_DIR="+dir, "TEST_OCI_MODE="+mode, "FAST_SANDBOX_OCI_ENABLED=true")
 			var output bytes.Buffer
 			command.Stdout = &output
 			command.Stderr = &output

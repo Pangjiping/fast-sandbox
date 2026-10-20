@@ -525,7 +525,6 @@ func newSecureRuntimePool(namespace, name string, runtimeName apiv1alpha2.Runtim
 					Containers: []corev1.Container{{
 						Name:  "fastlet",
 						Image: suiteenv.FastletImage(),
-						Env:   []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}},
 					}},
 				},
 			},

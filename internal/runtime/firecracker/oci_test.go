@@ -13,7 +13,7 @@ import (
 )
 
 func TestDisabledOCIRejectsCreateResumeAndWarmPull(t *testing.T) {
-	t.Setenv("FAST_SANDBOX_OCI_DISABLED", "true")
+	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "false")
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const image = "oci://r.example/ns/template@sha256:" + digest
 	for _, cached := range []bool{false, true} {
@@ -33,17 +33,17 @@ func TestDisabledOCIRejectsCreateResumeAndWarmPull(t *testing.T) {
 			}
 			_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 			require.ErrorIs(t, err, ErrInvalidConfig)
-			require.ErrorContains(t, err, "FAST_SANDBOX_OCI_DISABLED=true")
+			require.ErrorContains(t, err, "FAST_SANDBOX_OCI_ENABLED=true")
 			if resume {
 				_, err = fixture.driver.DeliverCheckpoint(context.Background(), restore)
 			} else {
 				_, err = fixture.driver.DeliverImage(context.Background(), image)
 			}
 			require.ErrorIs(t, err, ErrInvalidConfig)
-			require.ErrorContains(t, err, "FAST_SANDBOX_OCI_DISABLED=true")
+			require.ErrorContains(t, err, "FAST_SANDBOX_OCI_ENABLED=true")
 			err = fixture.driver.PullImage(context.Background(), image)
 			require.ErrorIs(t, err, ErrInvalidConfig)
-			require.ErrorContains(t, err, "FAST_SANDBOX_OCI_DISABLED=true")
+			require.ErrorContains(t, err, "FAST_SANDBOX_OCI_ENABLED=true")
 			require.Empty(t, fixture.driver.imageDeliveries)
 			require.Empty(t, fixture.launcher.started)
 			require.Zero(t, fixture.manager.Snapshot().Bound)
@@ -51,12 +51,12 @@ func TestDisabledOCIRejectsCreateResumeAndWarmPull(t *testing.T) {
 	}
 }
 
-func TestOCISupportDefaultsAndNativeOptOut(t *testing.T) {
-	for _, disabled := range []string{"", "false", "true"} {
-		t.Run(disabled, func(t *testing.T) {
-			t.Setenv("FAST_SANDBOX_OCI_DISABLED", disabled)
+func TestOCISupportDefaultsAndNativeIndependence(t *testing.T) {
+	for _, enabled := range []string{"", "false", "true", "invalid"} {
+		t.Run(enabled, func(t *testing.T) {
+			t.Setenv("FAST_SANDBOX_OCI_ENABLED", enabled)
 			err := validateOCISupport("oci://r.example/ns/template:build")
-			if disabled == "true" {
+			if enabled != "true" {
 				require.ErrorIs(t, err, ErrInvalidConfig)
 			} else {
 				require.NoError(t, err)
@@ -76,6 +76,7 @@ func TestOCISupportDefaultsAndNativeOptOut(t *testing.T) {
 }
 
 func TestOCIDeliveryNeedsNeitherAgentNorOuterCache(t *testing.T) {
+	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "true")
 	root := t.TempDir()
 	image := "oci://r.example/ns/template@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	require.NoError(t, verifyRestorableImage(root, image))

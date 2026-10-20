@@ -63,6 +63,7 @@ func TestPrepareOCISnapshotKeepsNativeFlowIndependentOfRegistry(t *testing.T) {
 	enabled, err := prepareOCISnapshot(plan)
 	require.NoError(t, err)
 	require.False(t, enabled)
+	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "true")
 	state.Config.Spec.Image = "oci://registry.example/templates/alpine:build"
 	require.NoError(t, saveState(dir, state))
 	t.Setenv(ociSnapshotRepositoryEnv, "")
@@ -107,7 +108,7 @@ func TestOCISnapshotMetadataRemovesInheritedCheckpointOwner(t *testing.T) {
 }
 
 func TestDisabledOCIRejectsLiveSnapshotBeforeDump(t *testing.T) {
-	t.Setenv("FAST_SANDBOX_OCI_DISABLED", "true")
+	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "false")
 	fixture := newSnapshotDriverFixture(t)
 	fixture.sandboxSpec.Spec.Image = "oci://r.example/ns/template:base"
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
@@ -115,7 +116,7 @@ func TestDisabledOCIRejectsLiveSnapshotBeforeDump(t *testing.T) {
 		SandboxID: sandboxID, SnapshotID: "live-snapshot", Kind: fastletapi.SnapshotKindTemplate,
 	})
 	require.ErrorIs(t, err, ErrInvalidConfig)
-	require.ErrorContains(t, err, "FAST_SANDBOX_OCI_DISABLED=true")
+	require.ErrorContains(t, err, "FAST_SANDBOX_OCI_ENABLED=true")
 	require.Empty(t, fixture.server.snapshotDumps)
 	require.True(t, fixture.server.running)
 }

@@ -10,9 +10,6 @@ spec:
       - image: fast-sandbox/fastlet:dev
         imagePullPolicy: IfNotPresent
         name: fastlet
-        env:
-        - name: FAST_SANDBOX_OCI_DISABLED
-          value: "true"
   capacity:
     poolMax: 1
     poolMin: 1
@@ -40,9 +37,6 @@ spec:
       - image: fast-sandbox/fastlet:dev
         imagePullPolicy: IfNotPresent
         name: fastlet
-        env:
-        - name: FAST_SANDBOX_OCI_DISABLED
-          value: "true"
   capacity:
     poolMax: 3
     poolMin: 1
@@ -68,9 +62,6 @@ spec:
       - image: fast-sandbox/fastlet:dev
         imagePullPolicy: IfNotPresent
         name: fastlet
-        env:
-        - name: FAST_SANDBOX_OCI_DISABLED
-          value: "true"
   capacity:
     poolMax: 2
     poolMin: 1

@@ -15,6 +15,7 @@ import (
 
 func installPreparedOCI(t *testing.T, fixture *driverFixture, metadata string) {
 	t.Helper()
+	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "true")
 	installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", Username: "pool-reader", Password: "pool-secret"})
 	t.Setenv("TEST_PREPARE_ROOT", fixture.stateRoot)
 	state, err := json.Marshal(map[string]any{"rootfs_device": map[string]string{"dev_path": "/dev/ublkb42"}, "template_metadata": json.RawMessage(metadata)})

@@ -54,7 +54,6 @@ func TestGracefulShutdown(t *testing.T) {
 							Containers: []corev1.Container{{
 								Name:  "fastlet",
 								Image: suiteenv.FastletImage(),
-								Env:   []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}},
 							}},
 						},
 					},

@@ -372,7 +372,7 @@ func actionPool(namespace string) *apiv1alpha2.SandboxPool {
 			{Name: "egress", TargetHTTPPort: 18080, Hooks: []apiv1alpha2.LifecycleHook{apiv1alpha2.LifecycleHookRuntimeReady, apiv1alpha2.LifecycleHookDataPlaneReady}},
 		},
 		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
-			{Name: "fastlet", Image: suiteenv.FastletImage(), Env: []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}}},
+			{Name: "fastlet", Image: suiteenv.FastletImage()},
 			{Name: "sandbox-action-fixture", Image: suiteenv.ActionFixtureImage(),
 				Env: []corev1.EnvVar{
 					{Name: "SANDBOX_ACTION_FIXTURE_ADDRESSES", Value: "127.0.0.1:18080,127.0.0.1:18081"},

@@ -211,6 +211,7 @@ touch "$TEST_PACK_STAGING/cleaned"
 }
 
 func TestOCIRecordsOwnershipBeforePrepareAndRecoversInterruptedAttachment(t *testing.T) {
+	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "true")
 	fixture := newDriverFixture(t)
 	fixture.sandboxSpec.Spec.Image = "oci://r.example/templates/base:build"
 	installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", Username: "reader", Password: "secret"})
