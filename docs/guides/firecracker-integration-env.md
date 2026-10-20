@@ -33,16 +33,17 @@ One-liners:
 ./scripts/integration-env.sh up        # two-node env + P2P/dart (tasks 1-8)
 ./scripts/integration-env.sh verify    # 2 + 5 sandboxes; verify 4 = P2P evidence
 ./scripts/integration-env.sh verify-snapshot  # live snapshot E2E (see below)
+./scripts/integration-env.sh verify-policy    # relayed-policy lifecycle E2E (see below)
 ./scripts/integration-env.sh verify-all       # every verify flow in one session
 ./scripts/integration-env.sh status    # component health + P2P block_source counters (dart metrics)
 ./scripts/integration-env.sh down      # host left clean
 ```
 
 `verify-all` runs the full battery in one go, ordered base delivery → P2P →
-execd API → snapshot → egress, fail-fast with the usual log dumps and
-one final stage-timings table. It assumes `up` has already built the golden
-image; the snapshot step rebuilds images and rolls the control plane, and the
-egress step recreates and finally removes its pool.
+execd API → snapshot → pause → egress → policy, fail-fast with the usual log
+dumps and one final stage-timings table. It assumes `up` has already built the
+golden image; the snapshot step rebuilds images and rolls the control plane,
+and the egress step recreates and finally removes its pool.
 
 `KIND_SINGLE=1` falls back to one node (cache-only, no peer traffic);
 `WARM_IMAGES=1` restores the preheat for fast delivery baselines.
@@ -55,6 +56,19 @@ inside the pause window, admitted during `Publishing`), and validates the
 published artifact set. See the
 [Sandbox Snapshots guide](sandbox-snapshots.md); evidence lands in
 `logs/snapshot-e2e-<ts>/`.
+
+`verify-policy` drives the relayed-policy lifecycle (issue #129): a sandbox
+created with a bootstrap deny binding is mutated in place through the
+handler relay (`PUT /policy/{uid}` over the full fastpath
+`InvokeHandlerAction` chain, then `GET` for the revision), paused and
+resumed — the checkpoint bundle carries the **relayed** policy file
+(`POLICY_EXPORT`), the restore lands it before data-plane-ready
+(`POLICY_IMPORT`), and the relayed allow policy (not the CRD bootstrap
+deny) is enforced afterwards, survives an egress worker restart, and is
+inherited by a clone created from the template snapshot without an explicit
+binding (the manifest's dual-track dump recording). Requires
+`opensandbox/egress:latest` in local docker; evidence lands in
+`logs/policy-e2e-<ts>/`.
 
 `up` and the plain `verify` only prove execd `/ping` delivery. For execd
 **protocol** usability in the guest (OpenSandbox issue #1695: `POST

@@ -34,6 +34,11 @@ var publishArtifacts = []string{"rootfs.ext4", manifestVMStateName, manifestMemo
 // uploaded when staged next to the manifest.
 const publishVaultName = "vault.json"
 
+// publishPolicyName is the optional recorded-policy bundle file of any
+// snapshot set (checkpoint or template): uploaded when staged next to the
+// manifest.
+const publishPolicyName = "policy.json"
+
 // publishManifestName is the commit-point document of the artifact set.
 const publishManifestName = "manifest.json"
 
@@ -75,17 +80,19 @@ func (c *Client) PublishImage(ctx context.Context, kind, key, dir string) (Publi
 	klog.InfoS("runtime-agent publish started", "kind", kind, "key", key, "digest", artifactDigest, "stagingDir", dir)
 
 	// Artifacts and SHA256SUMS first: the namespace stays incomplete (and
-	// unaddressable) until the manifest lands. The vault bundle file joins
-	// the artifact uploads when the checkpoint staged one — any stat failure
-	// other than absence fails the publish, since the staged manifest and
-	// SHA256SUMS already reference the file and a stranded member would
-	// break the cross-node resume.
+	// unaddressable) until the manifest lands. The optional state bundle
+	// files (vault, recorded policy) join the artifact uploads when staged —
+	// any stat failure other than absence fails the publish, since the
+	// staged manifest and SHA256SUMS already reference the files and a
+	// stranded member would break the cross-node resume.
 	entries := append([]string(nil), publishArtifacts...)
-	if _, err := os.Stat(filepath.Join(dir, publishVaultName)); err == nil {
-		entries = append(entries, publishVaultName)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		klog.ErrorS(err, "runtime-agent publish failed", "kind", kind, "key", key, "file", publishVaultName)
-		return PublishResult{}, fmt.Errorf("stat staged %s: %w", publishVaultName, err)
+	for _, bundleName := range []string{publishVaultName, publishPolicyName} {
+		if _, err := os.Stat(filepath.Join(dir, bundleName)); err == nil {
+			entries = append(entries, bundleName)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			klog.ErrorS(err, "runtime-agent publish failed", "kind", kind, "key", key, "file", bundleName)
+			return PublishResult{}, fmt.Errorf("stat staged %s: %w", bundleName, err)
+		}
 	}
 	entries = append(entries, artifacts.SHA256SUMSName)
 	for _, name := range entries {

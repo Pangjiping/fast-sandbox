@@ -3064,6 +3064,361 @@ test_egress_ip_denied() { # sandbox ip
 }
 
 
+# --- verify-policy: relayed-policy lifecycle across pause/resume ----------------
+#
+# Drives the egress policy contract end to end (issue fast-sandbox#129):
+#
+#   create with a bootstrap (deny) binding -> handler-relay
+#   PUT /policy/{uid} (allow; the FULL fastpath InvokeHandlerAction chain:
+#   ownership validation -> assignment resolution -> Fastlet -> egress on
+#   Pod loopback) -> GET /policy/{uid} revision -> fastctl pause (the
+#   checkpoint carries POLICY_EXPORT: the egress copies the RELAYED policy
+#   file into the bundle and logs it) -> fastctl resume (POLICY_IMPORT lands
+#   the re-stamped file before data-plane-ready; the egress reloads it from
+#   file) -> the RELAYED allow policy is enforced while the CR binding still
+#   says deny -> egress worker restart (the SET_BINDING replay re-seeds the
+#   bootstrap, the policy-dir volume keeps the relayed record: file is the
+#   truth) -> template snapshot (the dump is recorded dual-track: policy.json
+#   + egress action binding) -> clone-create WITHOUT an explicit binding
+#   auto-applies the dump-recorded policy.
+#
+# Requires opensandbox/egress:latest in local docker (like verify-snapshot /
+# verify-pause). Reuses the pause flow's image roll + egress pool staging;
+# PAUSE_SKIP_IMAGE_REBUILD (or POLICY_SKIP_IMAGE_REBUILD) skips the roll.
+POLICY_SANDBOX="${POLICY_SANDBOX:-sandbox-policy-e2e}"
+POLICY_CLONE="${POLICY_CLONE:-sandbox-policy-clone}"
+POLICY_SNAPSHOT_NAME="${POLICY_SNAPSHOT_NAME:-e2e-policy-snapshot}"
+POLICY_TEMPLATE="${POLICY_TEMPLATE:-e2e-policy-snapshot}"
+POLICY_TIMEOUT_S="${POLICY_TIMEOUT_S:-900}"
+POLICY_SKIP_IMAGE_REBUILD="${POLICY_SKIP_IMAGE_REBUILD:-0}"
+POLICYCTL_BIN="$WORK/bin/policyctl"
+POLICY_E2E_DIR=""
+POLICY_CHECKPOINT_ID=""
+POLICY_CHECKPOINT_REF=""
+POLICY_RELAY_STATUS=""
+
+# write_policyctl_source emits the generated handler-relay helper (the
+# snapshotctl generation pattern: one per-run source under $GEN_DIR).
+write_policyctl_source() {
+	mkdir -p "$GEN_DIR" "$WORK/bin"
+	cat > "$GEN_DIR/policyctl.go" <<'POLICYCTL_EOF'
+// Command policyctl drives the FastPath handler relay (InvokeHandlerAction)
+// for the E2E script: the full control-plane chain that lands one opaque
+// payload on a Pool-declared Action Handler through the assigned Fastlet.
+//
+//	invoke <endpoint> <ns> <sandbox> <handler> <method> <path> [body-file]
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	fastpathv2 "fast-sandbox/api/proto/v2"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+func dial(endpoint string) fastpathv2.FastPathServiceClient {
+	conn, err := grpc.Dial(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return fastpathv2.NewFastPathServiceClient(conn)
+}
+
+func main() {
+	if len(os.Args) < 7 || len(os.Args) > 8 || os.Args[1] != "invoke" {
+		fmt.Fprintln(os.Stderr, "usage: policyctl invoke <endpoint> <ns> <sandbox> <handler> <method> <path> [body-file]")
+		os.Exit(1)
+	}
+	var payload []byte
+	if len(os.Args) == 8 {
+		data, err := os.ReadFile(os.Args[7])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		payload = data
+	}
+	client := dial(os.Args[2])
+	response, err := client.InvokeHandlerAction(context.Background(), &fastpathv2.InvokeHandlerActionRequest{
+		Sandbox: &fastpathv2.SandboxReference{
+			NamespacedName: &fastpathv2.NamespacedName{Namespace: os.Args[3], Name: os.Args[4]},
+		},
+		Handler: os.Args[5],
+		Method:  os.Args[6],
+		Path:    os.Args[7],
+		Payload: payload,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	result := response.GetResult()
+	fmt.Printf("status=%d\n", result.GetStatus())
+	if len(result.GetBody()) > 0 {
+		fmt.Println(string(result.GetBody()))
+	}
+}
+POLICYCTL_EOF
+}
+
+policy_helpers_up() {
+	write_policyctl_source
+	log "building policyctl (handler relay helper)"
+	(cd "$REPO_ROOT" && GOTOOLCHAIN=local go build -o "$POLICYCTL_BIN" .integration-env-gen/policyctl.go)
+	pass "policyctl built"
+}
+
+sandbox_uid() { # sandbox -> cr uid
+	kubectl -n "$NS" get sandbox "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null
+}
+
+policy_path() { # sandbox -> /policy/{uid}
+	printf '/policy/%s' "$(sandbox_uid "$1")"
+}
+
+# policy_relay relays one request to the egress policy surface through the
+# full InvokeHandlerAction chain. Sets POLICY_RELAY_STATUS and prints the
+# handler body on stdout; rc 0 iff the RPC itself succeeded (any handler
+# HTTP status is a result).
+policy_relay() { # sandbox method path [body-json]
+	local sbx="$1" method="$2" path="$3" body="${4:-}" out body_file=""
+	POLICY_RELAY_STATUS=""
+	local args=(invoke "$FASTPATH_LOCAL" "$NS" "$sbx" egress "$method" "$path")
+	if [[ -n "$body" ]]; then
+		body_file="$WORK/policy-relay-body.json"
+		printf '%s' "$body" > "$body_file"
+		args+=("$body_file")
+	fi
+	log "policy relay: $method $path (sandbox $sbx)"
+	if ! out="$("$POLICYCTL_BIN" "${args[@]}" 2>&1)"; then
+		printf '%s\n' "$out" >&2
+		return 1
+	fi
+	POLICY_RELAY_STATUS="$(sed -n 's/^status=//p' <<<"$out" | tail -1)"
+	if [[ -z "$POLICY_RELAY_STATUS" ]]; then
+		printf '%s\n' "$out" >&2
+		return 1
+	fi
+	# The body lines (everything below the status line) go to stdout.
+	sed '1d' <<<"$out"
+}
+
+policy_source_up() {
+	wait_for "egress pool placement converged (idle fastlets >= 1)" 180 pool_idle_fastlets "$EGRESS_POOL"
+	snapshot_cleanup_sandbox "$POLICY_SANDBOX"
+	snapshot_cleanup_sandbox "$POLICY_CLONE"
+	snapshot_policy_run "$POLICY_SANDBOX" "$SBX_IMAGE" "$EGRESS_DENY_POLICY"
+	wait_for "policy source sandbox Ready" 600 sandbox_ready "$POLICY_SANDBOX"
+	wait_for "source egress binding Ready" 120 egress_binding_ready "$POLICY_SANDBOX"
+	wait_for "source execd control intact under deny" 120 egress_execd_control "$POLICY_SANDBOX"
+	test_egress_denied "$POLICY_SANDBOX"
+	pass "bootstrap deny policy in effect (CR binding seeded the subject)"
+}
+
+policy_relay_update() {
+	local body revision spec_input
+	# Mutate the live subject through the relay: PUT /policy/{uid} with the
+	# allow policy. The CR binding stays the bootstrap deny — from here on
+	# the CRD record is deliberately stale.
+	body="$(policy_relay "$POLICY_SANDBOX" PUT "$(policy_path "$POLICY_SANDBOX")" "$EGRESS_ALLOW_POLICY")" \
+		|| fail "handler relay PUT failed"
+	[[ "$POLICY_RELAY_STATUS" == 2* ]] || fail "handler relay PUT answered HTTP $POLICY_RELAY_STATUS: ${body:-<empty>}"
+	pass "PUT /policy/{uid} -> HTTP $POLICY_RELAY_STATUS (relayed policy accepted)"
+
+	# The relayed record carries a revision the GET surface exposes.
+	body="$(policy_relay "$POLICY_SANDBOX" GET "$(policy_path "$POLICY_SANDBOX")")" \
+		|| fail "handler relay GET failed"
+	[[ "$POLICY_RELAY_STATUS" == 2* ]] || fail "handler relay GET answered HTTP $POLICY_RELAY_STATUS"
+	revision="$(jq -r '.revision // empty' <<<"$body" 2>/dev/null)"
+	[[ -n "$revision" && "$revision" != "null" ]] || fail "GET /policy/{uid} returned no revision (body: ${body:0:200})"
+	pass "GET /policy/{uid} -> revision $revision"
+
+	# The relay mutates the LIVE subject in place (no Hook replay): the allow
+	# policy takes effect in-guest while the CR still holds the deny binding.
+	spec_input="$(kubectl -n "$NS" get sandbox "$POLICY_SANDBOX" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
+	[[ "$spec_input" == "$EGRESS_DENY_POLICY" ]] || fail "CR binding changed unexpectedly: $spec_input"
+	wait_for "relayed allow policy enforced in-guest" 120 egress_guest_reachable "$POLICY_SANDBOX"
+	pass "relay mutation enforced live (CR binding still the bootstrap deny)"
+}
+
+policy_pause() {
+	local t0 deadline_ns state out recorded
+	t0="$(now_ms)"
+	deadline_ns=$(( t0 + POLICY_TIMEOUT_S * 1000000000 ))
+	out="$(fastctl pause "$POLICY_SANDBOX" 2>&1)" || fail "PauseSandbox failed: $out"
+	log "PauseSandbox: $out"
+	# POLICY_EXPORT runs inside the pause flow, strictly before the runtime
+	# release: the egress copies the RELAYED policy file into the bundle.
+	wait_for "egress log: policy exported" 120 egress_log_has "policy exported"
+	until [[ "$(kubectl_get "sandbox/$POLICY_SANDBOX" '{.status.runtime.state}' 2>/dev/null || true)" == "Paused" ]]; do
+		state="$(kubectl_get "sandbox/$POLICY_SANDBOX" '{.status.runtime.state}' 2>/dev/null || true)"
+		case "$state" in Failed | Stopped) fail "pause terminated as $state" ;; esac
+		[[ "$(now_ms)" -gt "$deadline_ns" ]] && fail "pause did not reach Paused within ${POLICY_TIMEOUT_S}s (state=$state)"
+		sleep 2
+	done
+	POLICY_CHECKPOINT_ID="$(kubectl_get "sandbox/$POLICY_SANDBOX" '{.status.runtime.checkpoint.checkpointID}')"
+	POLICY_CHECKPOINT_REF="$(kubectl_get "sandbox/$POLICY_SANDBOX" '{.status.runtime.checkpoint.manifestRef}')"
+	[[ -n "$POLICY_CHECKPOINT_ID" && -n "$POLICY_CHECKPOINT_REF" ]] || fail "checkpoint facts missing after pause"
+	# The dump is authoritative over the CRD replay: the checkpoint manifest
+	# records the RELAYED allow policy as the egress binding, and the bundle
+	# carries policy.json.
+	recorded="$(mc cat "chain/${POLICY_CHECKPOINT_REF#s3://}" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
+	[[ "$recorded" == "$EGRESS_ALLOW_POLICY" ]] \
+		|| fail "checkpoint manifest recorded '${recorded:-<none>}' (want the relayed allow policy)"
+	mc cat "chain/${POLICY_CHECKPOINT_REF#s3://}" 2>/dev/null | jq -e '.files["policy.json"]' >/dev/null \
+		|| fail "checkpoint manifest does not list policy.json (POLICY_EXPORT missing)"
+	pass "pause exported the relayed policy (bundle policy.json + manifest binding = allow)"
+}
+
+policy_resume() {
+	local t0 deadline_ns out state
+	t0="$(now_ms)"
+	deadline_ns=$(( t0 + POLICY_TIMEOUT_S * 1000000000 ))
+	out="$(fastctl resume "$POLICY_SANDBOX" --checkpoint-id "$POLICY_CHECKPOINT_ID" 2>&1)" \
+		|| fail "ResumeSandbox failed: $out"
+	log "ResumeSandbox: $out"
+	# POLICY_IMPORT lands the re-stamped bundle before the data plane becomes
+	# ready; the egress reloads the record from the imported file.
+	wait_for "egress log: reloaded from file" 120 egress_log_has "reloaded from file"
+	until sandbox_ready "$POLICY_SANDBOX"; do
+		state="$(kubectl_get "sandbox/$POLICY_SANDBOX" '{.status.runtime.state}' 2>/dev/null || true)"
+		case "$state" in Failed | Stopped) fail "resume terminated as $state" ;; esac
+		[[ "$(now_ms)" -gt "$deadline_ns" ]] && fail "resume did not reach Ready within ${POLICY_TIMEOUT_S}s (state=$state)"
+		sleep 2
+	done
+	wait_for "resumed execd control intact" 120 egress_execd_control "$POLICY_SANDBOX"
+	# The record is authoritative over the SET_BINDING replay: the guest is
+	# allowed even though the CR binding still says deny.
+	if ! egress_guest_reachable "$POLICY_SANDBOX"; then
+		fail "relayed policy NOT enforced after resume (bootstrap deny won — POLICY_IMPORT ordering or authority broken)"
+	fi
+	pass "resume enforces the RELAYED policy (guest allowed; CR binding still deny)"
+}
+
+policy_restart() {
+	local pod binding_n
+	pod="$(egress_sandbox_pod "$POLICY_SANDBOX")"
+	[[ -n "$pod" ]] || fail "cannot resolve the policy sandbox's fastlet pod"
+	binding_n="$(egress_set_binding_count)"
+	egress_restart_worker "$pod"
+	wait_for "egress log: SET_BINDING replayed after restart" 30 egress_count_gt "$binding_n"
+	# The replay re-seeds the bootstrap binding, but the policy-dir volume
+	# keeps the relayed record: the file is the truth on top of the replay.
+	wait_for "relayed policy survived the egress restart" 120 egress_guest_reachable "$POLICY_SANDBOX"
+	pass "relayed policy survived the egress restart + SET_BINDING replay"
+}
+
+policy_snapshot_succeeded() {
+	[[ "$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.phase}' 2>/dev/null || true)" == "Succeeded" ]]
+}
+
+policy_snapshot_gone() {
+	! kubectl -n "$NS" get sandboxsnapshot "$POLICY_SNAPSHOT_NAME" >/dev/null 2>&1
+}
+
+policy_clone() {
+	local out manifest_input clone_input
+	# Template snapshot of the running source: POLICY_EXPORT stages the
+	# relayed policy into the bundle (templates included — the policy is
+	# desired state), and the manifest records it dual-track.
+	kubectl -n "$NS" delete sandboxsnapshot "$POLICY_SNAPSHOT_NAME" --ignore-not-found >/dev/null 2>&1 || true
+	wait_for "leftover policy snapshot CR gone" 90 policy_snapshot_gone
+	out="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$POLICY_SANDBOX" "$POLICY_SNAPSHOT_NAME" "$POLICY_TEMPLATE" 2>&1)" \
+		|| fail "template snapshot create failed: $out"
+	log "CreateSandboxSnapshot: $out"
+	wait_for "snapshot CR Succeeded" "$POLICY_TIMEOUT_S" policy_snapshot_succeeded
+	# Track 2 of the dual-track recording: the dump is the manifest's egress
+	# binding (authoritative over the CRD replay).
+	manifest_input="$(mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##')" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
+	[[ "$manifest_input" == "$EGRESS_ALLOW_POLICY" ]] \
+		|| fail "template manifest recorded '${manifest_input:-<none>}' (want the relayed allow policy)"
+	pass "template manifest records the relayed policy as the egress binding"
+
+	# Clone-create WITHOUT an explicit action: the dump-recorded bindings are
+	# auto-applied (explicit-wins-per-handler; nothing explicit here).
+	snapshot_cleanup_sandbox "$POLICY_CLONE"
+	snapshot_policy_run "$POLICY_CLONE" "$POLICY_TEMPLATE"
+	wait_for "clone sandbox Ready (cold pull of the template set)" 900 sandbox_ready "$POLICY_CLONE"
+	wait_for "clone egress binding Ready" 120 egress_binding_ready "$POLICY_CLONE"
+	clone_input="$(kubectl -n "$NS" get sandbox "$POLICY_CLONE" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
+	[[ "$clone_input" == "$EGRESS_ALLOW_POLICY" ]] \
+		|| fail "clone spec binding is '${clone_input:-<none>}' (want the dump-recorded allow policy auto-applied)"
+	wait_for "clone execd control intact" 120 egress_execd_control "$POLICY_CLONE"
+	wait_for "clone inherits the relayed policy (allow)" 120 egress_guest_reachable "$POLICY_CLONE"
+	pass "clone from the template inherited the relayed policy without an explicit binding"
+}
+
+policy_cleanup() {
+	snapshot_cleanup_sandbox "$POLICY_SANDBOX" || true
+	snapshot_cleanup_sandbox "$POLICY_CLONE" || true
+	kubectl -n "$NS" delete sandboxsnapshot "$POLICY_SNAPSHOT_NAME" --ignore-not-found >/dev/null 2>&1 || true
+}
+
+policy_evidence() {
+	{
+		echo "=== verify-policy evidence ($(date -u +%FT%TZ)) ==="
+		echo "sandbox=$POLICY_SANDBOX clone=$POLICY_CLONE template=$POLICY_TEMPLATE"
+		echo "checkpoint_id=$POLICY_CHECKPOINT_ID"
+		echo "checkpoint_manifest=$POLICY_CHECKPOINT_REF"
+	} > "$POLICY_E2E_DIR/summary.txt"
+	kubectl -n "$NS" get sandbox "$POLICY_SANDBOX" -o yaml > "$POLICY_E2E_DIR/sandbox.yaml" 2>&1 || true
+	kubectl -n "$NS" get sandbox "$POLICY_CLONE" -o yaml > "$POLICY_E2E_DIR/clone.yaml" 2>&1 || true
+	kubectl -n "$NS" get sandboxsnapshot "$POLICY_SNAPSHOT_NAME" -o yaml > "$POLICY_E2E_DIR/snapshot.yaml" 2>&1 || true
+	local pod
+	for pod in $(egress_pool_pods_live 2>/dev/null); do
+		kubectl -n "$NS" logs "pod/$pod" -c egress --tail=1000 > "$POLICY_E2E_DIR/egress-$pod.log" 2>&1 || true
+	done
+	kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=400 > "$POLICY_E2E_DIR/controller.log" 2>&1 || true
+	log "verify-policy evidence: $POLICY_E2E_DIR"
+}
+
+policy_on_error() {
+	[[ -n "$POLICY_E2E_DIR" ]] || return 0
+	mkdir "$POLICY_E2E_DIR/.on-error" 2>/dev/null || return 0
+	policy_evidence || true
+	failure_dump "verify-policy" || true
+	port_forward_down || true
+	resolve_daemon_down || true
+	printf '\033[1;31m[policy-e2e] FAILED; evidence: %s\033[0m\n' "$POLICY_E2E_DIR" >&2
+}
+
+verify_policy() {
+	POLICY_E2E_DIR="$LOGS_DIR/policy-e2e-$(date +%s)"
+	mkdir -p "$POLICY_E2E_DIR"
+
+	trap 'policy_on_error' EXIT
+	# Stage 1 rolls the policy/pause-capable images (shared with verify-pause)
+	# and brings up the egress pool; run it BEFORE the forward/daemon attach.
+	PAUSE_SKIP_IMAGE_REBUILD="$POLICY_SKIP_IMAGE_REBUILD" \
+		run_stage "policy 1: policy-capable images + egress pool" pause_env_up
+	snapshot_helpers_up
+	policy_helpers_up
+	port_forward_up
+	resolve_daemon_up
+
+	run_stage "policy 2: source sandbox Ready (bootstrap deny)" policy_source_up
+	run_stage "policy 3: handler relay PUT /policy/{uid} + GET revision" policy_relay_update
+	run_stage "policy 4: pause exports the relayed policy" policy_pause
+	run_stage "policy 5: resume enforces the relayed policy (not bootstrap)" policy_resume
+	run_stage "policy 6: egress restart keeps the relayed policy" policy_restart
+	run_stage "policy 7: template snapshot + clone inherits the dump" policy_clone
+
+	policy_cleanup
+	trap - EXIT
+	resolve_daemon_down
+	port_forward_down
+
+	policy_evidence
+	stage_summary
+	highlight "== verify-policy complete: relayed policy survived pause/resume + restart + clone =="
+}
+
+
 # --- verify-snapshot: live Sandbox snapshot E2E ---------------------------------
 #
 # Drives the full snapshot chain against the environment this script built:
@@ -4665,14 +5020,15 @@ pause_on_error() {
 verify_all() {
 	[[ -n "$(kubectl_get "sandboxtemplate/$SBX_TEMPLATE" '{.status.manifestRef}' 2>/dev/null)" ]] \
 		|| die "no built golden image (run 'integration-env.sh up' first)"
-	run_stage "verify-all 1/6: base delivery" verify
-	run_stage "verify-all 2/6: P2P evidence" verify_p2p
-	run_stage "verify-all 3/6: execd HTTP API battery" verify_execd_api
-	run_stage "verify-all 4/6: live snapshot + restore" verify_snapshot
-	run_stage "verify-all 5/6: cross-host pause/resume" verify_pause
-	run_stage "verify-all 6/6: egress policy matrix" verify_egress
+	run_stage "verify-all 1/7: base delivery" verify
+	run_stage "verify-all 2/7: P2P evidence" verify_p2p
+	run_stage "verify-all 3/7: execd HTTP API battery" verify_execd_api
+	run_stage "verify-all 4/7: live snapshot + restore" verify_snapshot
+	run_stage "verify-all 5/7: cross-host pause/resume" verify_pause
+	run_stage "verify-all 6/7: egress policy matrix" verify_egress
+	run_stage "verify-all 7/7: relayed-policy lifecycle" verify_policy
 	stage_summary
-	highlight "== verify-all complete: base + p2p + execd-api + snapshot + pause + egress green =="
+	highlight "== verify-all complete: base + p2p + execd-api + snapshot + pause + egress + policy green =="
 }
 
 # --- status --------------------------------------------------------------------------------------
@@ -4834,14 +5190,28 @@ usage: integration-env.sh [--cleanup|--auto-clean] {up|down|status|verify|verify
            no-proxy slot-netns controls; verdict: hang reproduced or not;
            auto-captures the guest console (execd logs from firecracker.log)
            before teardown
-  verify-egress
-           egress Actions-channel integration: pool apply, protocol
-           cross-verification, SET_BINDING -> hooks -> REMOVE_BINDING
-           lifecycle, restart replay, teardown (requires the egress image)
-  verify-all
-           run every verify flow in one session, ordered base -> p2p ->
-           execd-api -> snapshot -> pause -> egress; fail-fast with the
-           usual log dumps and a final stage-timings table
+   verify-egress
+            egress Actions-channel integration: pool apply, protocol
+            cross-verification, SET_BINDING -> hooks -> REMOVE_BINDING
+            lifecycle, restart replay, teardown (requires the egress image)
+   verify-policy
+            relayed-policy lifecycle (issue #129): create with a bootstrap
+            deny binding -> handler-relay PUT /policy/{uid} (allow) through
+            the full InvokeHandlerAction chain -> GET revision -> pause
+            (POLICY_EXPORT: the checkpoint bundle carries the RELAYED
+            policy and the manifest binding records it) -> resume
+            (POLICY_IMPORT before data-plane-ready; the relayed policy —
+            not the CRD bootstrap — is enforced) -> egress worker restart
+            (the relayed policy survives the SET_BINDING replay) ->
+            template snapshot (dual-track dump recording) -> clone-create
+            auto-applies the dump-recorded binding; evidence into
+            logs/policy-e2e-<ts>/ (env: POLICY_SANDBOX, POLICY_TIMEOUT_S,
+            POLICY_SKIP_IMAGE_REBUILD=1; requires opensandbox/egress:latest
+            in local docker)
+   verify-all
+            run every verify flow in one session, ordered base -> p2p ->
+            execd-api -> snapshot -> pause -> egress -> policy; fail-fast
+            with the usual log dumps and a final stage-timings table
 
   --cleanup     down after an interrupted run (same recovery as down)
   --auto-clean  on up failure, run down automatically before dumping logs
@@ -4849,14 +5219,14 @@ EOF
 	exit 1
 }
 
-for arg in "$@"; do
-	case "$arg" in
-		--cleanup) ACTION="down" ;;
-		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|verify|verify-all|verify-snapshot|verify-pause|verify-p2p|verify-execd-api|verify-egress) ACTION="$arg" ;;
-		*) usage ;;
-	esac
-done
+	for arg in "$@"; do
+		case "$arg" in
+			--cleanup) ACTION="down" ;;
+			--auto-clean) AUTO_CLEAN=1 ;;
+			up|down|status|verify|verify-all|verify-snapshot|verify-pause|verify-p2p|verify-execd-api|verify-egress|verify-policy) ACTION="$arg" ;;
+			*) usage ;;
+		esac
+	done
 [[ -n "$ACTION" ]] || usage
 
 mkdir -p "$WORK" "$LOGS_DIR"
@@ -4941,6 +5311,12 @@ case "$ACTION" in
 	verify-egress)
 		trap 'on_error verify_egress' ERR
 		verify_egress
+		trap - ERR
+		;;
+	verify-policy)
+		set -o errtrace
+		trap 'policy_on_error' ERR
+		verify_policy
 		trap - ERR
 		;;
 	verify-all)

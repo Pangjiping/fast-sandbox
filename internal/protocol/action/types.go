@@ -23,6 +23,17 @@ const (
 	// authorized incarnation transfer. Driver-invoked via the Fastlet.
 	OperationVaultExport Operation = "VAULT_EXPORT"
 	OperationVaultImport Operation = "VAULT_IMPORT"
+	// Policy snapshot transfer across pause/resume: export copies the
+	// subject's recorded network policy file into the snapshot bundle
+	// strictly before the runtime teardown (for checkpoint AND template
+	// snapshots — the policy is desired state, not a secret, so a template
+	// clone inherits it); import lands the re-stamped bundle file before
+	// data-plane-ready at restore, and the imported record stays
+	// authoritative over later binding replays. The envelope shape is the
+	// vault transfer's (SnapshotTransfer{Path}, registered fence), served by
+	// the same egress Handler.
+	OperationPolicyExport Operation = "POLICY_EXPORT"
+	OperationPolicyImport Operation = "POLICY_IMPORT"
 )
 
 type LifecycleHook string
@@ -101,4 +112,12 @@ type HandlerStatus struct {
 	// builds) decodes as false: vault transfer is skipped and the
 	// checkpoint proceeds without a vault — the pre-transfer semantics.
 	VaultTransfer bool `json:"vaultTransfer,omitempty"`
+	// PolicyTransfer reports that the Handler can carry a subject's
+	// recorded network policy file across pause/resume (POLICY_EXPORT /
+	// POLICY_IMPORT): it serves the policy operations and persists policy
+	// files. Absent (older Handler builds) decodes as false: policy
+	// transfer is skipped and the snapshot records the CRD binding input
+	// only — the pre-transfer semantics, where SET_BINDING is the only
+	// policy channel.
+	PolicyTransfer bool `json:"policyTransfer,omitempty"`
 }
