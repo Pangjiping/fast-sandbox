@@ -3146,11 +3146,13 @@ test_egress_ip_denied() { # sandbox ip
 #   data-plane-ready; the RELAYED allow policy — not the CRD bootstrap —
 #   is enforced in-guest) -> egress worker restart (the subject recovers
 #   from the persisted file; the SET_BINDING replay only re-registers) ->
-#   template snapshot + clone: templates carry the state SEAL-FREE
-#   (capability-gated; skipped when the egress lacks templateStateExport —
-#   the snapshot would refuse to publish state-less by design), and the
-#   clone boots with the template's state: the landed record (the source's
-#   current policy) wins over the CRD seed at first registration.
+#   CR convergence (fastctl update: make the relayed policy the durable
+#   desired state) -> template snapshot + clone WITHOUT an explicit
+#   binding: the clone inherits the converged policy through the manifest's
+#   actionBindings (works on every egress generation), and with the
+#   templateStateExport capability the bundle also carries the opaque
+#   record, landed on the clone for its first registration (revision
+#   preserved — the discriminator against a seed-only clone).
 #
 # Requires opensandbox/egress:latest in local docker (like verify-snapshot /
 # verify-pause). Reuses the pause flow's image roll + egress pool staging;
@@ -3467,40 +3469,68 @@ policy_snapshot_gone() {
 }
 
 policy_clone() {
-	local out manifest_input clone_input
-	# Template snapshot of the running source: NO policy export (checkpoint
-	# snapshots only — an export seals the subject on the egress, and a
-	# template's completion path never imports, which would lock the
-	# still-running source out of its policy CRUD); the manifest's
-	# actionBindings stay the CRD seed.
+	local out manifest_input clone_input manifest_dir
+	# Converge the CR desired state to the relayed policy BEFORE the
+	# snapshot: the manifest's actionBindings record is the create-time seed
+	# a clone inherits, so "the previous policy" must be the CRD's. This is
+	# the documented make-it-durable step — relay mutations are
+	# subject-local until converged. It works on EVERY egress generation.
+	fastctl update "$POLICY_SANDBOX" --action "egress=$EGRESS_ALLOW_POLICY" >/dev/null 2>&1 \
+		|| fail "CR convergence (fastctl update) failed before the snapshot"
+	wait_for "source CR converged to the relayed policy" 120 egress_binding_ready "$POLICY_SANDBOX"
+
+	# Template snapshot of the running source: NO policy export on egresses
+	# without the template-carry capability (an export seals the subject);
+	# WITH the capability the bundle also carries the opaque record.
 	kubectl -n "$NS" delete sandboxsnapshot "$POLICY_SNAPSHOT_NAME" --ignore-not-found >/dev/null 2>&1 || true
 	wait_for "leftover policy snapshot CR gone" 90 policy_snapshot_gone
 	out="$("$SNAPSHOTCTL_BIN" create "$FASTPATH_LOCAL" "$NS" "$POLICY_SANDBOX" "$POLICY_SNAPSHOT_NAME" "$POLICY_TEMPLATE" 2>&1)" \
 		|| fail "template snapshot create failed: $out"
 	log "CreateSandboxSnapshot: $out"
 	wait_for "snapshot CR Succeeded" "$POLICY_TIMEOUT_S" policy_snapshot_succeeded
-	# The manifest binding stays the CRD seed (the record is never embedded);
-	# the bundle CARRIES the opaque policy record (seal-free template export).
-	manifest_input="$(mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##')" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
-	[[ "$manifest_input" == "$EGRESS_DENY_POLICY" ]] \
-		|| fail "template manifest binding is '${manifest_input:-<none>}' (want the CRD seed deny — the policy record is never embedded)"
-	mc cat "chain/$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)/policy.json" 2>/dev/null | jq -e '.policy' >/dev/null \
-		|| fail "template bundle does not carry the opaque policy.json (complete-capture violation)"
-	pass "template snapshot: opaque policy.json in the bundle, CRD seed binding in the manifest"
 
-	# Clone-create WITHOUT an explicit action: the clone boots with the
-	# template's state — the landed record (the template's CURRENT policy,
-	# allow) wins over the SET_BINDING seed (deny) at first registration.
+	# The manifest's actionBindings carry the CONVERGED policy (allow): this
+	# is what a clone inherits — the record is never embedded.
+	manifest_dir="$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)"
+	manifest_input="$(mc cat "chain/$manifest_dir/manifest.json" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
+	[[ "$manifest_input" == "$EGRESS_ALLOW_POLICY" ]] \
+		|| fail "template manifest binding is '${manifest_input:-<none>}' (want the converged allow policy)"
+	pass "template manifest records the inherited policy (converged allow as the CRD seed)"
+
+	# Clone-create WITHOUT an explicit action: the clone inherits the
+	# snapshot's policy through the recorded bindings.
 	snapshot_cleanup_sandbox "$POLICY_CLONE"
 	snapshot_policy_run "$POLICY_CLONE" "$POLICY_TEMPLATE"
 	wait_for "clone sandbox Ready (cold pull of the template set)" 900 sandbox_ready "$POLICY_CLONE"
 	wait_for "clone egress binding Ready" 120 egress_binding_ready "$POLICY_CLONE"
 	clone_input="$(kubectl -n "$NS" get sandbox "$POLICY_CLONE" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
-	[[ "$clone_input" == "$EGRESS_DENY_POLICY" ]] \
-		|| fail "clone spec binding is '${clone_input:-<none>}' (want the CRD seed deny — the seed is still delivered, the record wins on top)"
+	[[ "$clone_input" == "$EGRESS_ALLOW_POLICY" ]] \
+		|| fail "clone spec binding is '${clone_input:-<none>}' (want the inherited allow policy)"
 	wait_for "clone execd control intact" 120 egress_execd_control "$POLICY_CLONE"
-	wait_for "clone boots with the template's policy (allow; record wins over the seed)" 120 egress_guest_reachable "$POLICY_CLONE"
-	pass "clone boots with the template state (allow enforced; CRD seed delivered underneath)"
+	policy_matrix "clone"
+	pass "clone created from the snapshot inherits the policy (exact record enforced)"
+
+	# Template-state carry (capability-gated, opensandbox#2312): the bundle
+	# ALSO carries the opaque sealed record, and the clone's landed record is
+	# re-stamped — discriminator vs a seed-only clone: the seed writes
+	# revision 1, the landed record preserves the SOURCE's revision.
+	if egress_template_state_capable; then
+		mc cat "chain/$manifest_dir/policy.json" 2>/dev/null | jq -e '.policy' >/dev/null \
+			|| fail "template bundle does not carry the opaque policy.json (complete-capture violation)"
+		local pod clone_record clone_revision
+		pod="$(egress_sandbox_pod "$POLICY_CLONE")"
+		clone_record="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- \
+			cat "/var/lib/opensandbox-egress/policy/$(sandbox_uid "$POLICY_CLONE").json" 2>/dev/null)"
+		[[ -n "$clone_record" ]] || fail "the clone has no egress policy record (template state did not land)"
+		clone_revision="$(jq -r '.revision // empty' <<<"$clone_record")"
+		[[ "$clone_revision" == "$POLICY_RECORD_REVISION" ]] \
+			|| fail "the clone's record revision is ${clone_revision:-<none>} (want the template's $POLICY_RECORD_REVISION — the landed record, not the revision-1 seed)"
+		highlight "  clone policy record (landed from the template, re-stamped):"
+		jq . <<<"$clone_record" | tee -a "$WORK/run.log" >&2
+		pass "template state landed on the clone (revision $clone_revision preserved from the source)"
+	else
+		log "template state carry SKIPPED: egress lacks templateStateExport (opensandbox#2312); the clone inherits via the CRD seed only"
+	fi
 }
 
 policy_cleanup() {
@@ -3556,11 +3586,7 @@ verify_policy() {
 	run_stage "policy 4: pause exports the relayed policy" policy_pause
 	run_stage "policy 5: resume enforces the relayed policy (not bootstrap)" policy_resume
 	run_stage "policy 6: egress restart keeps the relayed policy" policy_restart
-	if egress_template_state_capable; then
-		run_stage "policy 7: template snapshot carries state + clone boots with it" policy_clone
-	else
-		log "policy 7 SKIPPED: the egress does not declare templateStateExport (opensandbox#2312 not landed); template snapshots refuse to publish state-less by design"
-	fi
+	run_stage "policy 7: snapshot + clone inherits the policy" policy_clone
 
 	policy_cleanup
 	trap - EXIT
