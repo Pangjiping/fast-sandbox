@@ -3165,6 +3165,8 @@ POLICY_TIMEOUT_S="${POLICY_TIMEOUT_S:-900}"
 # "PAUSE_SKIP_IMAGE_REBUILD=1 skips the image roll" keeps holding here.
 POLICY_SKIP_IMAGE_REBUILD="${POLICY_SKIP_IMAGE_REBUILD:-${PAUSE_SKIP_IMAGE_REBUILD:-0}}"
 POLICYCTL_BIN="$WORK/bin/policyctl"
+POLICY_DENY_DOMAIN="example.org"
+POLICY_DENY_IP="8.8.8.8"
 POLICY_E2E_DIR=""
 POLICY_CHECKPOINT_ID=""
 POLICY_CHECKPOINT_REF=""
@@ -3286,6 +3288,32 @@ policy_relay_body() { # raw-output -> handler body (everything below the status 
 	tail -n +2 <<<"$1"
 }
 
+# egress_domain_denied asserts a NON-allowed domain is NXDOMAIN-denied by
+# the egress DNS proxy (the allow policy only admits its own entries).
+egress_domain_denied() { # sandbox domain
+	local out
+	if ! out="$(egress_execd_run "$1" \
+		"{\"command\":\"timeout 6 sh -c 'nslookup $2 2>&1 || /usr/local/lib/sandbox-busybox/busybox nslookup $2 2>&1'\"}" 12)"; then
+		return 1
+	fi
+	grep -q "can't find" <<<"$out"
+}
+
+# policy_matrix asserts the RELAYED policy is in effect EXACTLY: the
+# allowed domain resolves and the allowed IP accepts, while a non-allowed
+# domain and a non-allowed IP are still denied. Allow-only checks would
+# also pass for a policy that broke egress entirely — the deny side is
+# what proves the record CONTENT survived the channel being tested.
+policy_matrix() { # sandbox label
+	wait_for "$1: allowed domain resolves" 90 egress_guest_reachable "$1"
+	wait_for "$1: allowed IP $EGRESS_IP accepted" 90 egress_ip_reachable "$1" "$EGRESS_IP"
+	wait_for "$1: non-allowed domain $POLICY_DENY_DOMAIN denied" 60 egress_domain_denied "$1" "$POLICY_DENY_DOMAIN"
+	if egress_ip_reachable "$1" "$POLICY_DENY_IP"; then
+		fail "$1: non-allowed IP $POLICY_DENY_IP was NOT blocked (policy leak)"
+	fi
+	pass "$1: allowed domain+IP pass, non-allowed domain+IP denied (exact record in effect)"
+}
+
 policy_source_up() {
 	wait_for "egress pool placement converged (idle fastlets >= 1)" 180 pool_idle_fastlets "$EGRESS_POOL"
 	snapshot_cleanup_sandbox "$POLICY_SANDBOX"
@@ -3326,8 +3354,8 @@ policy_relay_update() {
 	# policy takes effect in-guest while the CR still holds the deny binding.
 	spec_input="$(kubectl -n "$NS" get sandbox "$POLICY_SANDBOX" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
 	[[ "$spec_input" == "$EGRESS_DENY_POLICY" ]] || fail "CR binding changed unexpectedly: $spec_input"
-	wait_for "relayed allow policy enforced in-guest" 120 egress_guest_reachable "$POLICY_SANDBOX"
-	pass "relay mutation enforced live (CR binding still the bootstrap deny)"
+	policy_matrix "relay applied"
+	pass "relay mutation enforced live, exact policy (CR binding still the bootstrap deny)"
 }
 
 policy_pause() {
@@ -3411,11 +3439,10 @@ policy_resume() {
 	pass "imported record re-stamped: incarnation $POLICY_RECORD_INCARNATION -> $after_incarnation, revision $after_revision preserved"
 
 	# The record is authoritative over the SET_BINDING replay: the guest is
-	# allowed even though the CR binding still says deny.
-	if ! egress_guest_reachable "$POLICY_SANDBOX"; then
-		fail "relayed policy NOT enforced after resume (bootstrap deny won — POLICY_IMPORT ordering or authority broken)"
-	fi
-	pass "resume enforces the RELAYED policy (guest allowed; CR binding still deny)"
+	# allowed even though the CR binding still says deny — and the deny
+	# side proves the WHOLE record landed, not just working DNS.
+	policy_matrix "resume"
+	pass "resume enforces the RELAYED policy, exact record (CR binding still deny)"
 }
 
 policy_restart() {
