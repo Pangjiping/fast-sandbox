@@ -228,3 +228,45 @@ func TestPolicyTransferSurfacesHandlerFailure(t *testing.T) {
 	err := manager.ExportPolicy(context.Background(), "a", "/tmp/policy.json")
 	require.ErrorContains(t, err, "POLICY_EXPORT state transfer")
 }
+
+// The template-carry channel is gated on the Handler's TemplateStateExport
+// flag: without it both directions are silent no-ops (handlers that always
+// seal must never be asked for a template carry); with it, exports carry
+// Seal=false and imports reuse the transfer operations.
+func TestTemplateStateTransferCapabilityGated(t *testing.T) {
+	t.Run("no capability: silent no-op", func(t *testing.T) {
+		manager, caller := newVaultTransferManager(t)
+		caller.mu.Lock()
+		caller.policyTransfer = true
+		caller.vaultTransfer = true
+		caller.templateStateExport = false
+		caller.mu.Unlock()
+
+		require.NoError(t, manager.ExportTemplateState(context.Background(), "a", "policy", "/tmp/policy.json"))
+		require.NoError(t, manager.ImportTemplateState(context.Background(), "a", "vault", "/tmp/vault.json"))
+		require.Empty(t, stateCalls(caller))
+	})
+	t.Run("capability declared: seal-free export + import", func(t *testing.T) {
+		manager, caller := newVaultTransferManager(t)
+		caller.mu.Lock()
+		caller.templateStateExport = true
+		caller.mu.Unlock()
+
+		require.NoError(t, manager.ExportTemplateState(context.Background(), "a", "policy", "/state/snap-1/policy.json"))
+		require.NoError(t, manager.ExportTemplateState(context.Background(), "a", "vault", "/state/snap-1/vault.json"))
+		require.NoError(t, manager.ImportTemplateState(context.Background(), "a", "policy", "/state/images/tpl/policy.json"))
+		requests := stateCalls(caller)
+		require.Len(t, requests, 3)
+		require.Equal(t, actionapi.OperationPolicyExport, requests[0].request.Operation)
+		require.NotNil(t, requests[0].request.Snapshot.Seal)
+		require.False(t, *requests[0].request.Snapshot.Seal, "template exports never seal the source")
+		require.Equal(t, actionapi.OperationVaultExport, requests[1].request.Operation)
+		require.False(t, *requests[1].request.Snapshot.Seal)
+		require.Equal(t, actionapi.OperationPolicyImport, requests[2].request.Operation)
+		require.Nil(t, requests[2].request.Snapshot.Seal, "imports carry no seal flag")
+	})
+	t.Run("unknown kind rejected", func(t *testing.T) {
+		manager, _ := newVaultTransferManager(t)
+		require.ErrorContains(t, manager.ExportTemplateState(context.Background(), "a", "bogus", "/tmp/x"), "unknown state kind")
+	})
+}

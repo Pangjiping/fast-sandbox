@@ -80,13 +80,22 @@ type LifecycleHookPayload struct {
 }
 
 // SnapshotTransfer names the driver-provided staging file for one subject's
-// vault snapshot (OSEP-0022): the export target inside the snapshot bundle,
-// or the bundle source at restore. One file per invocation; the path is
-// Pod-local and validated by the Handler (absolute, no parent traversal).
-// The bytes never cross the envelope: the Handler copies/reads the file
-// itself.
+// state snapshot: the export target inside the snapshot bundle, or the
+// bundle source at restore. One file per invocation; the path is Pod-local
+// and validated by the Handler (absolute, no parent traversal). The bytes
+// never cross the envelope: the Handler copies/reads the file itself.
 type SnapshotTransfer struct {
 	Path string `json:"path"`
+	// Seal governs the subject latch on export (absent = sealed, the
+	// checkpoint semantics): a sealed subject answers its relay surface
+	// with 409 until an import re-owns the record — the pause window must
+	// stay consistent. Template carries export with seal=false: the
+	// template's completion path never imports, so sealing would lock the
+	// still-running source out of its state CRUD; the record is copied
+	// verbatim and the source keeps mutating. Handlers without the
+	// template-carry capability ignore the field and always seal — callers
+	// gate seal=false on the HandlerStatus.TemplateStateExport flag.
+	Seal *bool `json:"seal,omitempty"`
 }
 
 type Request struct {
@@ -120,4 +129,13 @@ type HandlerStatus struct {
 	// only — the pre-transfer semantics, where SET_BINDING is the only
 	// policy channel.
 	PolicyTransfer bool `json:"policyTransfer,omitempty"`
+	// TemplateStateExport reports that the Handler supports the TEMPLATE
+	// state-carry semantics on top of the transfer operations: seal-free
+	// exports (SnapshotTransfer.Seal=false — the source keeps its relay
+	// CRUD; a template's completion path never imports) and imports that
+	// land a template-borne record for the NEXT registration of a fresh
+	// subject (a clone boots with the template's state). Absent decodes as
+	// false: template snapshots export nothing and clones carry no
+	// template-borne state.
+	TemplateStateExport bool `json:"templateStateExport,omitempty"`
 }

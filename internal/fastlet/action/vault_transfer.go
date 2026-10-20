@@ -121,6 +121,75 @@ func (m *Manager) ImportPolicy(ctx context.Context, sandboxUID, bundlePath strin
 	return m.invokeStateTransfer(ctx, actionapi.OperationPolicyImport, sandboxUID, bundlePath)
 }
 
+// ExportTemplateState copies the subject's state file of kind into the
+// bundle target WITHOUT sealing the subject (the template-carry semantics:
+// the source keeps full relay CRUD — a template's completion path never
+// imports, so a sealed export would lock it out). A silent no-op unless the
+// Handler declares the TemplateStateExport capability; any Handler-side
+// failure fails the snapshot (the state is part of the complete capture).
+func (m *Manager) ExportTemplateState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
+	switch kind {
+	case runtimecontract.StateKindVault:
+		return m.invokeTemplateTransfer(ctx, actionapi.OperationVaultExport, sandboxUID, bundlePath, true)
+	case runtimecontract.StateKindPolicy:
+		return m.invokeTemplateTransfer(ctx, actionapi.OperationPolicyExport, sandboxUID, bundlePath, true)
+	default:
+		return fmt.Errorf("export template state: unknown state kind %q", kind)
+	}
+}
+
+// ImportTemplateState lands a template-borne state record as the FRESH
+// subject's seed (land-for-next-registration): a clone booted from a
+// template whose bundle carries state starts with the template's state,
+// re-stamped to the clone's registration at first SET_BINDING. A silent
+// no-op unless the Handler declares the TemplateStateExport capability.
+func (m *Manager) ImportTemplateState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
+	switch kind {
+	case runtimecontract.StateKindVault:
+		return m.invokeTemplateTransfer(ctx, actionapi.OperationVaultImport, sandboxUID, bundlePath, false)
+	case runtimecontract.StateKindPolicy:
+		return m.invokeTemplateTransfer(ctx, actionapi.OperationPolicyImport, sandboxUID, bundlePath, false)
+	default:
+		return fmt.Errorf("import template state: unknown state kind %q", kind)
+	}
+}
+
+// invokeTemplateTransfer sends one template-carry transfer invocation. The
+// shape mirrors invokeStateTransfer, but the capability gate is the
+// Handler's TemplateStateExport flag (the envelope's Seal=false and the
+// land-for-next-registration import semantics only exist on handlers that
+// declare it) and template exports carry Seal=false.
+func (m *Manager) invokeTemplateTransfer(ctx context.Context, operation actionapi.Operation, sandboxUID, bundlePath string, seal bool) error {
+	m.mu.RLock()
+	name := m.vaultHandler
+	handler, declared := m.byName[name]
+	m.mu.RUnlock()
+	if name == "" || !declared {
+		return nil
+	}
+	invocation, err := m.stateInvocation(ctx, operation, name, sandboxUID, bundlePath)
+	if err != nil {
+		return err
+	}
+	status, err := m.caller.Status(ctx, handler.TargetHTTPPort)
+	if err != nil {
+		return fmt.Errorf("%s template state transfer capability probe for Sandbox %s: %w", operation, sandboxUID, err)
+	}
+	if !status.TemplateStateExport {
+		klog.Infof("template state transfer skipped: Action Handler %s declares no template state carry (templateStateExport=false); the template carries no %s state",
+			name, stateKindOfOperation(operation))
+		return nil
+	}
+	if seal {
+		falseValue := false
+		invocation.Snapshot.Seal = &falseValue
+	}
+	if err := m.caller.Invoke(ctx, handler.TargetHTTPPort, invocation); err != nil {
+		return fmt.Errorf("%s template state transfer for Sandbox %s: %w", operation, sandboxUID, err)
+	}
+	return nil
+}
+
 // stateTransferCapable reports whether a Handler status declares the
 // capability of one state kind's operation pair. Each kind probes its own
 // flag: a Handler may serve the policy surface without vault persistence

@@ -724,6 +724,11 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	// state file at registration.
 	d.importRestoreVault(ctx, spec, restoreRef, vmstatePath, identity.SandboxUID)
 	d.importRestorePolicy(ctx, spec, restoreRef, vmstatePath, identity.SandboxUID)
+	// A fresh boot from a template whose bundle carries state files starts
+	// with the template's state: land the records for the clone's first
+	// registration (re-stamped to the clone's fence) — same pre-
+	// data-plane-ready ordering, same degrade-don't-fail posture.
+	d.importTemplateCarry(ctx, spec, restoreRef, stateRoot, identity.SandboxUID)
 
 	state.Phase = PhaseRunning
 	state.StageDurations = map[string]time.Duration{

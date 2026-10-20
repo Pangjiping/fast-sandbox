@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -492,6 +493,36 @@ type fakeStateMover struct {
 	imports         []string
 }
 
+// fakeTemplateCapableMover wraps a fakeStateMover with the template-carry
+// capability — the driver probes that capability by interface, so wrap only
+// the tests that exercise template carry.
+type fakeTemplateCapableMover struct {
+	*fakeStateMover
+	tmu             sync.Mutex
+	templateExports []string
+	templateImports []string
+}
+
+func (f *fakeTemplateCapableMover) ExportTemplateState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
+	f.tmu.Lock()
+	f.templateExports = append(f.templateExports, sandboxUID+":"+string(kind)+":"+bundlePath)
+	f.tmu.Unlock()
+	return f.ExportState(context.Background(), sandboxUID, kind, bundlePath)
+}
+
+func (f *fakeTemplateCapableMover) ImportTemplateState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
+	f.tmu.Lock()
+	f.templateImports = append(f.templateImports, sandboxUID+":"+string(kind)+":"+bundlePath)
+	f.tmu.Unlock()
+	return nil
+}
+
+func (f *fakeTemplateCapableMover) snapshotTemplate() ([]string, []string) {
+	f.tmu.Lock()
+	defer f.tmu.Unlock()
+	return append([]string(nil), f.templateExports...), append([]string(nil), f.templateImports...)
+}
+
 func (f *fakeStateMover) ExportState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -843,4 +874,104 @@ func TestImportRestorePolicyDeliversBundleBeforeDataPlane(t *testing.T) {
 	fixture.driver.importRestorePolicy(context.Background(), spec, "app-v1", vmstatePath, sandboxID)
 	_, imports := mover.snapshot()
 	require.Empty(t, imports)
+}
+
+// A capability-carrying mover stages BOTH state files into the template
+// bundle seal-free (the snapshot is a complete capture); the manifest's
+// actionBindings stay the CRD desired state — the record content is never
+// embedded.
+func TestCreateTemplateSnapshotStagesSealFreeState(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeTemplateCapableMover{fakeStateMover: &fakeStateMover{
+		exportData: map[runtimecontract.StateKind][]byte{
+			runtimecontract.StateKindVault:  []byte(`{"v":1,"policy":{},"sealed":false}`),
+			runtimecontract.StateKindPolicy: []byte(`{"v":1,"policy":{"defaultAction":"allow"}}`),
+		},
+	}}
+	fixture.driver.SetStateMover(mover)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
+		ActionBindings: []runtimecontract.SnapshotActionBinding{
+			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
+		},
+	})
+	require.NoError(t, err)
+
+	exports, _ := mover.snapshotTemplate()
+	require.Len(t, exports, 2, "vault and policy both ride the template bundle")
+	joined := strings.Join(exports, "\n")
+	require.Contains(t, joined, "vault.json")
+	require.Contains(t, joined, "policy.json")
+
+	files := agent.manifest["files"].(map[string]any)
+	require.Len(t, files, 5)
+	require.Contains(t, files, "vault.json")
+	require.Contains(t, files, "policy.json")
+	require.Contains(t, agent.sums, "vault.json")
+	require.Contains(t, agent.sums, "policy.json")
+	recorded, ok := agent.manifest["actionBindings"].([]any)
+	require.True(t, ok)
+	require.Len(t, recorded, 1)
+	require.Equal(t, `{"defaultAction":"deny"}`, recorded[0].(map[string]any)["input"])
+}
+
+// importTemplateCarry hands manifest-provenanced template state to the
+// mover for a fresh boot's first registration; restores take the restore
+// import path instead.
+func TestImportTemplateCarry(t *testing.T) {
+	fixture := newSnapshotDriverFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeTemplateCapableMover{fakeStateMover: &fakeStateMover{}}
+	fixture.driver.SetStateMover(mover)
+
+	vaultContent := []byte(`{"v":1,"vault":true}`)
+	policyContent := []byte(`{"v":1,"policy":{"defaultAction":"allow"}}`)
+	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Spec.Image))
+	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), vaultContent, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, policyBundleName), policyContent, 0o600))
+	document := map[string]any{
+		"schemaVersion": 1, "runtime": "firecracker",
+		"egressVault": map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
+		"files": map[string]any{
+			"vault.json":  map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
+			"policy.json": map[string]any{"sha256": artifacts.SHA256Of(policyContent), "sizeBytes": len(policyContent)},
+		},
+	}
+	payload, err := json.Marshal(document)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
+
+	spec := fixture.sandboxSpec.Spec // fresh boot from the fixture image
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	_, imports := mover.snapshotTemplate()
+	require.Len(t, imports, 2, "vault and policy both land for the clone's first registration")
+
+	// A restore takes the restore-import path instead.
+	spec.Restore = &fastletapi.RestoreSpec{ManifestRef: "s3://bucket/manifest.json", ArtifactDigest: "d"}
+	fixture.driver.importTemplateCarry(context.Background(), spec, "checkpoint:sha256:d", fixture.stateRoot, sandboxID)
+	_, imports = mover.snapshotTemplate()
+	require.Len(t, imports, 2, "the restore path never routes through the template carry")
+}
+
+// A template bundle without state files (or without a mover capability) is
+// a silent no-op: the clone degrades to the CRD seed.
+func TestImportTemplateCarryAbsent(t *testing.T) {
+	fixture := newSnapshotDriverFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeStateMover{} // no template-carry capability
+	fixture.driver.SetStateMover(mover)
+
+	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Spec.Image))
+	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
+	payload, err := json.Marshal(map[string]any{"schemaVersion": 1, "files": map[string]any{}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
+
+	spec := fixture.sandboxSpec.Spec
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	_, imports := mover.snapshot()
+	require.Empty(t, imports, "a mover without the template-carry capability is never invoked")
 }

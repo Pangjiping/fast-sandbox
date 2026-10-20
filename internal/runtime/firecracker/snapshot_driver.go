@@ -139,29 +139,22 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		"spilled", plan.spilled, "rootfsClone", plan.rootfsClone.String(), "rootfsCopy", plan.rootfsCopy.String(),
 		"pauseAPI", plan.pauseAPI.String(), "dumpAPI", plan.dumpAPI.String(), "resumeAPI", plan.resumeAPI.String())
 
-	// Checkpoints carry the egress-owned vault file in the bundle: the export
-	// runs here — inside the pause flow, strictly before the control plane
-	// releases the runtime (the release is what sends REMOVE_BINDING and
-	// purges the egress-local file). An export failure fails the checkpoint,
-	// so the egress-local file survives for the retry. Template snapshots
-	// NEVER export: the vault belongs to one sandbox instance, and a shared
-	// boot image would leak it to every sandbox booted from the template.
+	// Both snapshot kinds carry the egress-owned state files (vault,
+	// recorded policy) — the snapshot must be a COMPLETE capture:
+	//   - Checkpoints export with the subject SEALED: the exports run
+	//     inside the pause flow, strictly before the control plane releases
+	//     the runtime, and the import re-owns the record at restore. An
+	//     export failure fails the checkpoint, so the egress-local files
+	//     survive for the retry.
+	//   - Templates export SEAL-FREE (HandlerStatus.TemplateStateExport):
+	//     a template's completion path never imports, so a sealed export
+	//     would lock the still-running source out of its state CRUD — the
+	//     record is copied verbatim and the source keeps mutating. A clone
+	//     boots with the template's state (landed for its first
+	//     registration, re-stamped to the clone's fence). The vault record
+	//     rides encrypted at rest; key scoping is the clone-isolation
+	//     boundary.
 	if kind == fastletapi.SnapshotKindCheckpoint {
-		// Checkpoint snapshots carry BOTH egress-owned state files in the
-		// bundle: the exports run here — inside the pause flow, strictly
-		// before the control plane releases the runtime (the release is
-		// what sends REMOVE_BINDING and purges the egress-local files). An
-		// export failure fails the checkpoint, so the egress-local files
-		// survive for the retry. Template snapshots NEVER export — neither
-		// state kind:
-		//   - the vault belongs to one sandbox instance, and a shared boot
-		//     image would leak it to every sandbox booted from the template;
-		//   - the policy export durably SEALS the subject on the egress
-		//     (relay GET/PUT/DELETE answer 409 until an import re-owns the
-		//     record), and a template's completion path never imports — the
-		//     still-running source would lose policy CRUD forever. A clone
-		//     inherits the create-time CRD seed through the manifest's
-		//     actionBindings, which need no export at all.
 		if err := d.stageCheckpointVault(ctx, input.SandboxID, plan.staging); err != nil {
 			_ = os.RemoveAll(plan.staging)
 			return nil, err
@@ -170,6 +163,9 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 			_ = os.RemoveAll(plan.staging)
 			return nil, err
 		}
+	} else if err := d.stageTemplateState(ctx, input.SandboxID, plan.staging); err != nil {
+		_ = os.RemoveAll(plan.staging)
+		return nil, err
 	}
 
 	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, input.ActionBindings)
@@ -715,6 +711,120 @@ func (d *Driver) stageCheckpointPolicy(ctx context.Context, sandboxUID, staging 
 		return fmt.Errorf("export egress policy for the snapshot bundle: %w", err)
 	}
 	return nil
+}
+
+// stageTemplateState exports the subject's egress state files (vault,
+// recorded policy) into the template staging directory WITHOUT sealing the
+// subject — the HandlerStatus.TemplateStateExport semantics, so the
+// still-running source keeps full relay CRUD (a template's completion path
+// never imports). A silent no-op without a mover or when the mover carries
+// no template-carry capability (handlers without it always seal, which is
+// exactly what templates must not do). Any transfer failure fails the
+// template: the state is part of the complete capture.
+func (d *Driver) stageTemplateState(ctx context.Context, sandboxUID, staging string) error {
+	d.mu.RLock()
+	mover := d.stateMover
+	d.mu.RUnlock()
+	if mover == nil {
+		return nil //nolint:nilerr // no mover wired: state transfers disabled
+	}
+	carrier, ok := mover.(interface {
+		ExportTemplateState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error
+	})
+	if !ok {
+		return nil //nolint:nilerr // mover without the template-carry capability
+	}
+	for _, state := range []struct {
+		kind  runtimecontract.StateKind
+		name  string
+		stage func() error
+	}{
+		{runtimecontract.StateKindVault, "vault", func() error {
+			return carrier.ExportTemplateState(ctx, sandboxUID, runtimecontract.StateKindVault, filepath.Join(staging, vaultBundleName))
+		}},
+		{runtimecontract.StateKindPolicy, "policy", func() error {
+			return carrier.ExportTemplateState(ctx, sandboxUID, runtimecontract.StateKindPolicy, filepath.Join(staging, policyBundleName))
+		}},
+	} {
+		if err := state.stage(); err != nil {
+			return fmt.Errorf("export egress %s for the template bundle: %w", state.name, err)
+		}
+	}
+	return nil
+}
+
+// importTemplateCarry lands a template-borne state record as the fresh
+// subject's seed, for a fresh boot whose template bundle carries state files
+// (the clone boots with the template's state, re-stamped to the clone's
+// fence at its first registration). Resume restores take the restore-import
+// path instead; the landing is a silent no-op without a mover, without the
+// mover's template-carry capability, or when the template bundle carries no
+// state. Provenance is manifest-enforced exactly like the restore import
+// (sha256 + size, stat-first bounded); every rejected posture degrades the
+// clone to the CRD seed and never fails the create.
+func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.SandboxSpec, restoreRef, stateRoot, sandboxUID string) {
+	if spec.Restore != nil {
+		return //nolint:nilerr // restores take the restore-import path
+	}
+	d.mu.RLock()
+	mover := d.stateMover
+	d.mu.RUnlock()
+	if mover == nil {
+		return
+	}
+	carrier, ok := mover.(interface {
+		ImportTemplateState(ctx context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error
+	})
+	if !ok {
+		return //nolint:nilerr // mover without the template-carry capability
+	}
+	bundleDir := filepath.Join(stateRoot, imageCacheDir, imageKey(restoreRef))
+	for _, state := range []struct {
+		kind      runtimecontract.StateKind
+		name      string
+		marker    func(string) (*fileMarker, bool, error)
+		sentinelM error
+		sentinelU error
+	}{
+		{runtimecontract.StateKindVault, "vault", vaultManifestMarker, errVaultBundleMissing, errVaultBundleUnlisted},
+		{runtimecontract.StateKindPolicy, "policy", policyManifestMarker, errPolicyBundleMissing, errPolicyBundleUnlisted},
+	} {
+		marker, markerPresent, markerErr := state.marker(bundleDir)
+		if markerErr != nil {
+			klog.ErrorS(markerErr, "read the template manifest for the "+state.name+" provenance failed; the clone degrades to the CRD seed",
+				"sandboxID", sandboxUID, "template", restoreRef)
+			continue
+		}
+		importRestoreBundle(ctx, importPlan{
+			sandboxUID: sandboxUID,
+			restoreRef: restoreRef, path: filepath.Join(bundleDir, bundleNameFor(state.name)), marker: marker, markerPresent: markerPresent,
+			maxBytes: maxTemplateBundleBytes(state.name),
+			subject:  "template " + state.name,
+			degrade:  "the clone degrades to the CRD seed",
+			importIt: func() error {
+				return carrier.ImportTemplateState(ctx, sandboxUID, state.kind, filepath.Join(bundleDir, bundleNameFor(state.name)))
+			},
+			sentinelMissing:  state.sentinelM,
+			sentinelUnlisted: state.sentinelU,
+			sentinelMismatch: errPolicyBundleMismatch,
+		})
+	}
+}
+
+// bundleNameFor maps a state kind's display name onto its bundle file name.
+func bundleNameFor(name string) string {
+	if name == "vault" {
+		return vaultBundleName
+	}
+	return policyBundleName
+}
+
+// maxTemplateBundleBytes returns the provenance bound of a state kind.
+func maxTemplateBundleBytes(name string) int64 {
+	if name == "vault" {
+		return maxVaultBundleBytes
+	}
+	return maxPolicyBundleBytes
 }
 
 // maxVaultBundleBytes bounds the vault bundle file buffered for provenance
