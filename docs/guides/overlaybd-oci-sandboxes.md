@@ -16,13 +16,15 @@ Deploy OpenSandbox images that include OCI support, on nodes with KVM and ublk s
 | Fastlet | `opensandbox/fsb-fastlet:release-<version>` |
 | execd | `opensandbox/execd:release-<version>` |
 
-The standard Fastlet image includes the OCI runtime tools. Enable ublkd with `FAST_SANDBOX_OCI_ENABLED=true` on OCI Firecracker Pools; it is disabled by default so ordinary runtime deployments do not require ublk. The tags above illustrate the release naming and do not assert that a particular release has been published. To build and publish your own Fastlet:
+The standard Fastlet image includes the OCI runtime tools. OCI support is enabled by default (`FAST_SANDBOX_OCI_DISABLED=false`). The entrypoint starts ublkd, waits for its readiness probe, and supervises it alongside Fastlet; startup failure or an unexpected daemon exit terminates the container. Fastlet selects OCI or native storage from the template reference. Set `FAST_SANDBOX_OCI_DISABLED=true` in the Pool Fastlet environment when OCI is unnecessary or the host lacks ublk; this skips daemon startup and explicitly rejects OCI template and checkpoint requests, including cached ones. Remove the former opt-in environment variable when upgrading; it no longer controls startup. The tags above illustrate the release naming and do not assert that a particular release has been published. To build and publish your own Fastlet:
 
 ```bash
 # All Go and native-tool compilation runs inside Docker.
 make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev
 docker push opensandbox/fsb-fastlet:dev
 ```
+
+When OCI is disabled, OCI creation is rejected with an explicit error. Resume is asynchronous: the rejection is reported in the Sandbox `status.runtime.message` and `Ready=False` condition; `GetSandbox` may report `Unavailable` while no runtime is assigned.
 
 Select that image in the Pool. `build/Dockerfile.fastlet` compiles the runtime tools inside Docker, using the same OverlayBD build script as the Builder. Docker manages rebuilds when sources or patches change; no host C/C++ toolchain or prebuilt `.build/` artifacts are required for the Fastlet image.
 
@@ -37,8 +39,8 @@ spec:
       - name: fastlet
         image: opensandbox/fsb-fastlet:release-<version>
         env:
-        - name: FAST_SANDBOX_OCI_ENABLED
-          value: "true"
+        - name: FAST_SANDBOX_OCI_DISABLED
+          value: "false"
 ```
 
 The examples below assume a Pool named `firecracker-pool` in namespace `fast-sandbox`, with a per-Sandbox profile of 1 CPU and 512Mi memory.

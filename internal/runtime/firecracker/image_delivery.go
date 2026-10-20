@@ -99,6 +99,9 @@ func (d *Driver) DeliverCheckpoint(_ context.Context, restore *fastletapi.Restor
 // checkpoints. reference keys both the local cache and the single-flight
 // tracker; pin performs one background pull attempt.
 func (d *Driver) deliverReference(reference string, pin func(context.Context) error) (runtimecontract.ImageDeliveryStatus, error) {
+	if err := validateOCISupport(reference); err != nil {
+		return "", err
+	}
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
 	d.mu.RUnlock()

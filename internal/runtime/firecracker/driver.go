@@ -437,6 +437,9 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if err != nil {
 		return nil, err
 	}
+	if err := validateOCISupport(restoreRef); err != nil {
+		return nil, err
+	}
 
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot

@@ -156,7 +156,7 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 `SandboxTemplate` 的标准 Builder 镜像包含 OCI 所需的 `fsb-vm`、convertor 和 OverlayBD 工具。输出为 `oci://` 时，Builder 启动 ublkd，读取源镜像的 manifest/config 以固定 linux/amd64 镜像 digest 并准备环境变量和运行时注入文件，然后将远端 digest 引用直接传给 `fsb-vm build`。源镜像层由 `fsb-vm` 的构建流程读取，不预先写入 OCI layout，也不启动本地 registry。`format: native` 的对象存储路径保留 `pullOCILayout → oci2rootfs` 流程；OverlayBD 仅支持 OCI，不支持 S3；`SANDBOX_TEMPLATE_IMAGE_TAR` 仅支持该对象存储路径，OCI 路径设置此变量会报错。OCI 构建需要访问源和目标 registry。
 
-`build/Dockerfile.fastlet` 生成的标准 Fastlet 镜像包含 OCI 运行工具；OCI Firecracker Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启动 ublkd。默认不启动，普通运行模式不需要 ublk。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。OCI 仓库访问支持匿名或用户名密码认证，包括 Docker config 的 `auth` 字段；仅含 `identitytoken` 的凭据会被明确拒绝，同时存在用户名密码时使用用户名密码。原有公共凭据字段及其他运行时行为保持不变。
+`build/Dockerfile.fastlet` 生成的标准 Fastlet 镜像包含 OCI 运行工具；默认启用 OCI（`FAST_SANDBOX_OCI_DISABLED=false`），entrypoint 启动 ublkd、探活并监督进程；启动失败或运行中异常退出时容器退出。Fastlet 根据模板引用选择 OCI 或原有存储路径。不需要 OCI 或宿主机不支持 ublk 时，设置 `FAST_SANDBOX_OCI_DISABLED=true` 跳过 ublkd；此时 OCI 模板和 checkpoint 请求会明确报错，命中本地缓存也不能绕过。标准 Builder 仅在输出为 OCI 时启动 ublkd，native 构建不依赖 ublk。OCI 仓库访问支持匿名或用户名密码认证，包括 Docker config 的 `auth` 字段；仅含 `identitytoken` 的凭据会被明确拒绝，同时存在用户名密码时使用用户名密码。原有公共凭据字段及其他运行时行为保持不变。
 
 Checkpoint 默认写回源模板仓库；可用 `FAST_SANDBOX_OCI_SNAPSHOT_REPOSITORY=registry/repository` 指定其他目标。目标凭证需具备 push 权限，独立写账号通过 registry rule 的 `writeSecretRef` 配置。Checkpoint 发布按完整仓库路径分别选择父层读凭证和目标写凭证；跨仓库时需在 Pool 中配置两者。OCI GuestCopy 直接挂载 ublk 块设备，普通 rootfs 镜像文件仍使用 loop 挂载。
 
@@ -494,4 +494,4 @@ OCI Fastlet 使用宿主机 `/dev`，以访问运行期间新增的 ublk 设备�
 
 快照打包中断后，重试或删除 staging 前会先按 config 路径恢复并释放 pack 设备；清理失败时保留 backing files。仓库凭据按实际 rootfs/snapfiles 仓库同步到 OverlayBD：匿名访问会覆盖该仓库的旧凭据，不会删除其他仓库的凭据。此同步不承诺立即撤销已经运行的 VM 的访问。
 
-构建 Fastlet 镜像使用 `make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev`，然后自行推送并在 Pool 中使用该镜像。此 tag 是构建示例，不表示已发布版本。Go 与 native 工具均在 Docker 内编译，无需宿主机编译器或预先生成 `.build/` 产物。Fastlet 与 Builder 使用同一份容器内 OverlayBD 构建脚本。OCI Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启用 ublkd。无 extent seek 支持时，upper 复制会扫描零块并保留稀疏空间，但扫描耗时可能高于 reflink/extent copy。
+构建 Fastlet 镜像使用 `make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev`，然后自行推送并在 Pool 中使用该镜像。此 tag 是构建示例，不表示已发布版本。Go 与 native 工具均在 Docker 内编译，无需宿主机编译器或预先生成 `.build/` 产物。Fastlet 与 Builder 使用同一份容器内 OverlayBD 构建脚本。Fastlet 默认启动并监督 ublkd，设置 `FAST_SANDBOX_OCI_DISABLED=true` 可跳过启动并拒绝 OCI 请求。无 extent seek 支持时，upper 复制会扫描零块并保留稀疏空间，但扫描耗时可能高于 reflink/extent copy。

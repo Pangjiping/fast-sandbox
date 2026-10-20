@@ -114,7 +114,7 @@ RUN sed 's/"enable": true, "uriPrefix"/"enable": false, "uriPrefix"/' /etc/overl
     && ln -s /opt/overlaybd/bin/overlaybd-import-raw /usr/local/bin/overlaybd-import-raw
 ENV LD_LIBRARY_PATH=/opt/overlaybd/lib
 ENV PATH=/opt/overlaybd/bin:${PATH}
-ENV FAST_SANDBOX_OCI_ENABLED=auto
+ENV FAST_SANDBOX_OCI_DISABLED=false
 
 # Guest kernel, embedded in the builder image so builds do not download a
 # kernel at build time. Override KERNEL_URL to pin a specific build.

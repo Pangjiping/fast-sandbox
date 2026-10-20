@@ -14,6 +14,20 @@ import (
 	"fast-sandbox/internal/registryconfig"
 )
 
+func validateOCISupport(image string) error {
+	if !strings.HasPrefix(image, ocitemplate.Prefix) {
+		return nil
+	}
+	switch os.Getenv("FAST_SANDBOX_OCI_DISABLED") {
+	case "", "false":
+		return nil
+	case "true":
+		return fmt.Errorf("%w: OCI templates and checkpoints are disabled by FAST_SANDBOX_OCI_DISABLED=true", ErrInvalidConfig)
+	default:
+		return fmt.Errorf("%w: FAST_SANDBOX_OCI_DISABLED must be true or false", ErrInvalidConfig)
+	}
+}
+
 func ociPair(stateRoot, image string) (*ocitemplate.Pair, error) {
 	if !strings.HasPrefix(image, ocitemplate.Prefix) {
 		return nil, nil //nolint:nilnil // a nil pair selects the native restore path

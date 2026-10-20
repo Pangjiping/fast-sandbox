@@ -92,7 +92,7 @@ func registryRotationPool(namespace string) *apiv1alpha2.SandboxPool {
 				CPU: resource.MustParse("100m"), Memory: resource.MustParse("128Mi"), PIDs: 64,
 			},
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name: "fastlet", Image: suiteenv.FastletImage(), ImagePullPolicy: corev1.PullIfNotPresent,
+				Name: "fastlet", Image: suiteenv.FastletImage(), Env: []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}}, ImagePullPolicy: corev1.PullIfNotPresent,
 			}}}},
 		},
 	}

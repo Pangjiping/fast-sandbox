@@ -41,7 +41,7 @@ RUN sed 's/"enable": true, "uriPrefix"/"enable": false, "uriPrefix"/' /etc/overl
     && chmod 0755 /usr/local/bin/oci-entrypoint
 ENV LD_LIBRARY_PATH=/opt/overlaybd/lib
 ENV PATH=/opt/overlaybd/bin:${PATH}
-ENV FAST_SANDBOX_OCI_ENABLED=false
+ENV FAST_SANDBOX_OCI_DISABLED=false
 ENV FASTLET_CONTROL_PORT=":5758"
 ENV FAST_SANDBOX_RUNTIME="container"
 ENV RUNTIME_SOCKET="/run/containerd/containerd.sock"

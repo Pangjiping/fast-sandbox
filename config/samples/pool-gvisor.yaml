@@ -39,6 +39,9 @@ spec:
       containers:
         - name: fastlet
           image: fast-sandbox/fastlet:dev
+          env:
+          - name: FAST_SANDBOX_OCI_DISABLED
+            value: "true"
           resources:
             requests:
               cpu: "500m"

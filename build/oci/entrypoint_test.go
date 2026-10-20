@@ -17,34 +17,44 @@ import (
 
 func TestEntrypointDaemonPolicyAndFailure(t *testing.T) {
 	for _, test := range []struct {
-		name, mode, spec string
-		start, fail      bool
+		name, disabled, spec, failure string
+		builder, start                bool
 	}{
-		{"runtime-default", "", "", false, false},
-		{"oci-runtime", "true", "", true, false},
-		{"disabled", "false", "", false, false},
-		{"native-builder", "auto", `{"output":{"publish":"s3://bucket/template"}}`, false, false},
-		{"oci-builder", "auto", `{"output":{"publish":"oci://registry/template:build"}}`, true, false},
-		{"daemon-failure", "true", "", true, true},
+		{name: "runtime-default", start: true},
+		{name: "runtime-explicit-default", disabled: "false", start: true},
+		{name: "disabled", disabled: "true"},
+		{name: "invalid-flag", disabled: "auto", failure: "must be true or false"},
+		{name: "native-builder", builder: true, spec: `{"output":{"publish":"s3://bucket/template"}}`},
+		{name: "native-builder-with-oci-source", builder: true, spec: `{"source":{"image":"oci://registry/source:tag"},"output":{"publish":"s3://bucket/template"}}`},
+		{name: "oci-builder", builder: true, spec: `{"output":{"publish":"oci://registry/template:build"}}`, start: true},
+		{name: "disabled-oci-builder", builder: true, disabled: "true", spec: `{"output":{"publish":"oci://registry/template:build"}}`, failure: "OCI publication is disabled"},
+		{name: "runtime-ignores-builder-spec", spec: `{"output":{"publish":"s3://bucket/template"}}`, start: true},
+		{name: "daemon-failure", failure: "daemon-start-failed", start: true},
+		{name: "readiness-timeout", failure: "ublkd startup timed out", start: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
 			for name, script := range map[string]string{
-				"mkdir": "#!/bin/sh\nexit 0\n",
-				"curl":  "#!/bin/sh\ntest -e \"$TEST_OCI_DIR/ready\"\n",
+				"mkdir":                   "#!/bin/sh\nexit 0\n",
+				"curl":                    "#!/bin/sh\ntest -e \"$TEST_OCI_DIR/ready\"\n",
+				"sandboxtemplate-builder": "#!/bin/sh\necho runtime-started\n",
+				"sleep": `#!/bin/sh
+if [ "$TEST_OCI_FAILURE" = 'ublkd startup timed out' ] && [ "$1" = 0.1 ]; then exit 0; fi
+exec /bin/sleep "$@"
+`,
 				"overlaybd-ublkd": `#!/bin/sh
 echo $$ > "$TEST_OCI_DIR/pid"
-if [ "$TEST_OCI_FAIL" = true ]; then exit 7; fi
-touch "$TEST_OCI_DIR/ready"
-exec sleep 30
+if [ "$TEST_OCI_FAILURE" = daemon-start-failed ]; then echo daemon-start-failed; exit 7; fi
+if [ "$TEST_OCI_FAILURE" != 'ublkd startup timed out' ]; then touch "$TEST_OCI_DIR/ready"; fi
+exec /bin/sleep 30
 `,
 			} {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0755))
 			}
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("TEST_OCI_DIR", dir)
-			t.Setenv("TEST_OCI_FAIL", strconv.FormatBool(test.fail))
-			t.Setenv("FAST_SANDBOX_OCI_ENABLED", test.mode)
+			t.Setenv("TEST_OCI_FAILURE", test.failure)
+			t.Setenv("FAST_SANDBOX_OCI_DISABLED", test.disabled)
 			t.Setenv("SANDBOX_TEMPLATE_SPEC", test.spec)
 			t.Cleanup(func() {
 				if raw, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil {
@@ -55,11 +65,16 @@ exec sleep 30
 					}
 				}
 			})
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			output, err := exec.CommandContext(ctx, "sh", "entrypoint.sh", "sh", "-c", "echo runtime-started").CombinedOutput()
-			if test.fail {
+			args := []string{"entrypoint.sh", "sh", "-c", "echo runtime-started"}
+			if test.builder {
+				args = []string{"entrypoint.sh", filepath.Join(dir, "sandboxtemplate-builder")}
+			}
+			output, err := exec.CommandContext(ctx, "sh", args...).CombinedOutput()
+			if test.failure != "" {
 				require.Error(t, err)
+				require.Contains(t, string(output), test.failure)
 				require.NotContains(t, string(output), "runtime-started")
 			} else {
 				require.NoError(t, err, string(output))
@@ -84,13 +99,13 @@ func TestEntrypointSupervisesBothChildrenAndSignals(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0755))
 			}
 			command := exec.Command("sh", "entrypoint.sh", "component")
-			command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "TEST_OCI_DIR="+dir, "TEST_OCI_MODE="+mode, "FAST_SANDBOX_OCI_ENABLED=true")
+			command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "TEST_OCI_DIR="+dir, "TEST_OCI_MODE="+mode, "FAST_SANDBOX_OCI_DISABLED=false")
 			var output bytes.Buffer
 			command.Stdout = &output
 			command.Stderr = &output
 			require.NoError(t, command.Start())
 			t.Cleanup(func() { _ = command.Process.Kill() })
-			require.Eventually(t, func() bool { _, err := os.Stat(filepath.Join(dir, "component.pid")); return err == nil }, 3*time.Second, 10*time.Millisecond)
+			require.Eventually(t, func() bool { _, err := os.Stat(filepath.Join(dir, "component.pid")); return err == nil }, 15*time.Second, 10*time.Millisecond)
 			readPID := func(name string) int {
 				raw, err := os.ReadFile(filepath.Join(dir, name+".pid"))
 				require.NoError(t, err)

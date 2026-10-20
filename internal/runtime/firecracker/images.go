@@ -302,6 +302,9 @@ func (d *Driver) ListImages(_ context.Context) ([]string, error) {
 // unconverted reference is reported as ErrImageNotReady instead of blocking
 // the create path.
 func (d *Driver) PullImage(ctx context.Context, image string) error {
+	if err := validateOCISupport(image); err != nil {
+		return err
+	}
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
 	d.mu.RUnlock()

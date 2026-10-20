@@ -214,7 +214,7 @@ func drainPool(namespace string) *apiv1alpha2.SandboxPool {
 		Spec: apiv1alpha2.SandboxPoolSpec{
 			Capacity: apiv1alpha2.PoolCapacity{PoolMin: 2, PoolMax: 2}, MaxSandboxesPerPod: 5,
 			Runtime: apiv1alpha2.RuntimeContainer, SandboxResources: suiteenv.SmallSandboxResourceProfile(),
-			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage()}}}},
+			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage(), Env: []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}}}}}},
 		},
 	}
 }

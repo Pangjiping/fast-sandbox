@@ -200,7 +200,7 @@ func infraPool(namespace, name string) *apiv1alpha2.SandboxPool {
 				fixtures.OpenSandboxExecdComponent(),
 			},
 			SandboxResources: suiteenv.SmallSandboxResourceProfile(),
-			FastletTemplate:  corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage()}}}},
+			FastletTemplate:  corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage(), Env: []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}}}}}},
 		},
 	}
 }

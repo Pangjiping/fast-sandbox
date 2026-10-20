@@ -47,6 +47,9 @@ spec:
       containers:
       - name: fastlet
         image: fast-sandbox/fastlet:dev
+        env:
+        - name: FAST_SANDBOX_OCI_DISABLED
+          value: "true"
         imagePullPolicy: IfNotPresent
       - name: sandbox-action-fixture
         image: fast-sandbox/sandbox-action-fixture:dev

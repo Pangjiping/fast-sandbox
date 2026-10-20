@@ -170,6 +170,7 @@ func createCleanupPool(namespace, name string) *apiv1alpha2.SandboxPool {
 					Containers: []corev1.Container{{
 						Name:  "fastlet",
 						Image: suiteenv.FastletImage(),
+						Env:   []corev1.EnvVar{{Name: "FAST_SANDBOX_OCI_DISABLED", Value: "true"}},
 					}},
 				},
 			},
