@@ -279,8 +279,11 @@ sudo "$FSB_VM" --plain-http build ...
 under `<state-dir>/.manifest-cache/`. Later creates verify the local SHA256 and
 manifest descriptors before reuse, avoiding registry manifest requests and their
 authentication token requests on a hit. Entries are scoped by registry,
-repository, HTTP/HTTPS, and the current credential. Files contain only the raw
-manifest, not credentials. Deleting one sandbox preserves this shared cache.
+repository, HTTP/HTTPS, and the current credential; credentials are not stored.
+With `template.reference`, the same directory also caches the resolved immutable
+pair and platform metadata. The result is recorded in the sandbox's
+`state.json.template_metadata` for Fastlet admission and subsequent checkpoints.
+Deleting one sandbox preserves this shared cache.
 
 Missing or corrupt entries are fetched again and written atomically. Cache write
 failures do not prevent using a verified remote manifest. Mutable tags always
@@ -344,6 +347,8 @@ registry.example.com/team/application:v1_snapfiles
 
 The publishing process must upload every `blobs/sha256/*` object referenced by the two manifests before uploading the rootfs and snapfiles manifests under their tags. `manifest/index.json` records their filenames and digests for a publishing script.
 
+For a plain HTTP registry, use `fsb-vm --plain-http push ...`. The setting applies to the destination and remote parent-layer reads for incremental artifacts; HTTPS remains the default.
+
 `fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It publishes only `<tag>_rootfs` and `<tag>_snapfiles`, uploading rootfs first and snapfiles last. Platform metadata and checkpoint owner annotations live on the snapfiles manifest; no third metadata image is created. The returned `manifestRef` and `artifactDigest` identify the snapfiles manifest. The two images are paired by ID, so IDs must be immutable; the publisher rejects overwriting a tag with different contents. Previously published three-image entries remain readable. The OCI `SandboxTemplate` builder runs this step automatically. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
 
 ## 6. Prepare template.json
@@ -371,8 +376,14 @@ Fields:
 | `sandbox_id` | Host-unique sandbox ID and state/runtime directory name |
 | `template.repo` | Registry repository without a tag |
 | `template.template_id` | Template ID; the tool pulls `<id>_rootfs` and `<id>_snapfiles` |
+| `template.reference` | Platform `oci://repository@sha256:...` reference or logical tag; an alternative to repo/template_id or explicit rootfs/snapfiles |
 | `template.auth.dockerAuth` | Docker config JSON encoded as a string; use an empty string for anonymous access |
 | `metadata` | Reserved pass-through field; optional |
+
+Fastlet uses `template.reference` with `create --prepare-only`. The CLI resolves
+the pair and annotations, reuses its cache, and prepares devices without a prior
+node-agent OCI metadata query. In this mode, resolved platform metadata replaces
+the input `metadata`; the existing repo/template_id input remains supported.
 
 For a private registry, `dockerAuth` is a JSON **string**, not a nested object. Given this Docker config:
 
@@ -414,7 +425,7 @@ sudo "$FSB_VM" \
 3. creates `rootfs.dev` in the runtime directory and loads the snapshot with that cwd;
 4. resumes the VM and changes `state.json` to `running`.
 
-By default, it checks `/opt/fsb-vm/kernels/vmlinux-<version>` using `kernel_version` from template metadata. Override the path when necessary:
+By default, it checks `/opt/fsb-vm/kernels/vmlinux-<version>` using `kernel_version` from template metadata. When the standard Builder uses `vmlinux.bin`, that literal `kernel_version` selects `vmlinux.bin` in the same directory without adding the `vmlinux-` prefix. Override the path when necessary:
 
 ```bash
 sudo "$FSB_VM" \

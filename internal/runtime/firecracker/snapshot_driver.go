@@ -1120,7 +1120,7 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 	if err != nil {
 		return 0, err
 	}
-	document, err := readSourceManifest(stateRoot, sourceRef)
+	document, err := readSourceManifest(stateRoot, sourceRef, state.Config.Identity.SandboxUID)
 	if err != nil {
 		return 0, err
 	}
@@ -1202,12 +1202,18 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 	return sizeBytes, nil
 }
 
-// readSourceManifest loads the cached manifest of the image the Sandbox
-// boots from. machine and guestNetwork are required: restore validation
+// readSourceManifest loads source metadata from the prepared OCI CLI state or
+// the native image cache. machine and guestNetwork are required: restore validation
 // rejects a snapshot manifest without them, so a hand-seeded cache cannot
 // produce a restorable snapshot.
-func readSourceManifest(stateRoot, image string) (map[string]any, error) {
-	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
+func readSourceManifest(stateRoot, image, sandboxID string) (map[string]any, error) {
+	var payload []byte
+	var err error
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		payload, err = readPreparedOCIManifest(stateRoot, sandboxID)
+	} else {
+		payload, err = os.ReadFile(cachedManifestPath(stateRoot, image))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read source image manifest: %w", err)
 	}

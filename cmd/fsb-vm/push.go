@@ -37,7 +37,7 @@ func newPushCommand() *cobra.Command {
 			}
 			credential, _, err := credentialFor(cfg, ref)
 			return credential, err
-		})
+		}, ocitemplate.WithPlainHTTP(global.plainHTTP))
 		if err != nil {
 			return err
 		}

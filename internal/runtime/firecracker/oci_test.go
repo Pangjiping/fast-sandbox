@@ -75,31 +75,40 @@ func TestOCISupportDefaultsAndNativeOptOut(t *testing.T) {
 	}
 }
 
-func TestOCIReadyNeedsMetadataButNoNativeArtifacts(t *testing.T) {
+func TestOCIDeliveryNeedsNeitherAgentNorOuterCache(t *testing.T) {
 	root := t.TempDir()
 	image := "oci://r.example/ns/template@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	require.ErrorIs(t, verifyRestorableImage(root, image), ErrImageNotReady)
-	file := cachedManifestPath(root, image)
-	require.NoError(t, os.MkdirAll(filepath.Dir(file), 0750))
-	require.NoError(t, os.WriteFile(file, []byte(`{"oci":{"rootfs":"r.example/ns/t@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapfiles":"r.example/ns/t@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), 0640))
 	require.NoError(t, verifyRestorableImage(root, image))
-	_, err := os.Stat(filepath.Join(filepath.Dir(file), "rootfs.img"))
-	require.True(t, os.IsNotExist(err))
+	fixture := newDriverFixture(t)
+	agent := &fakeAgentClient{}
+	fixture.driver.newAgentClient = func(string) (AgentClient, error) {
+		t.Fatal("OCI delivery must not contact the node agent")
+		return agent, nil
+	}
+	fixture.driver.agentSocket = "/absent-agent.sock"
+	require.NoError(t, fixture.driver.PullImage(context.Background(), image))
+	status, err := fixture.driver.DeliverImage(context.Background(), image)
+	require.NoError(t, err)
+	require.Equal(t, runtimecontract.ImageDelivered, status)
+	status, err = fixture.driver.DeliverCheckpoint(context.Background(), &fastletapi.RestoreSpec{ManifestRef: image, ArtifactDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	require.NoError(t, err)
+	require.Equal(t, runtimecontract.ImageDelivered, status)
+	fixture.driver.releaseAgentSandbox(context.Background(), "sandbox-1", image)
+	require.NoDirExists(t, filepath.Join(fixture.stateRoot, imageCacheDir))
 }
 
-func TestEnsureSandboxRejectsInvalidOCICacheBeforeAcquiringSlot(t *testing.T) {
+func TestEnsureSandboxRejectsInvalidCLIMetadataBeforeAcquiringSlot(t *testing.T) {
 	for _, payload := range []string{`{broken`, `{}`, `{"oci":{"rootfs":"r.example/ns/t:mutable"}}`} {
 		t.Run(payload, func(t *testing.T) {
 			fixture := newDriverFixture(t)
 			require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
 			fixture.sandboxSpec.Spec.Image = "oci://r.example/ns/t@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-			file := cachedManifestPath(fixture.driver.config.StateRoot, fixture.sandboxSpec.Spec.Image)
-			require.NoError(t, os.MkdirAll(filepath.Dir(file), 0750))
-			require.NoError(t, os.WriteFile(file, []byte(payload), 0600))
+			installPreparedOCI(t, fixture, payload)
 			_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
-			require.ErrorIs(t, err, ErrImageNotReady)
+			require.Error(t, err)
 			require.Empty(t, fixture.launcher.started)
 			require.Equal(t, 0, fixture.manager.Snapshot().Bound)
+			require.NoDirExists(t, filepath.Join(fixture.stateRoot, "oci/sandboxes/sandbox-1"))
 		})
 	}
 }

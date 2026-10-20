@@ -176,23 +176,7 @@ func ociSnapshotMetadata(raw []byte, kind fastletapi.SnapshotKind, owner fastlet
 
 // Checkpoints are instance-private even though their bytes use an OCI envelope.
 // They cannot be used as golden templates to boot a different sandbox.
-func validateOCIResumeOwner(stateRoot, reference string, config *fastletapi.RuntimeSandboxConfig) error {
-	if !strings.HasPrefix(reference, ocitemplate.Prefix) {
-		return nil
-	}
-	raw, err := os.ReadFile(cachedManifestPath(stateRoot, reference))
-	if err != nil {
-		return err
-	}
-	var document struct {
-		Checkpoint *struct {
-			SandboxUID string `json:"sandboxUID"`
-			Namespace  string `json:"namespace"`
-		} `json:"checkpoint"`
-	}
-	if err = json.Unmarshal(raw, &document); err != nil {
-		return err
-	}
+func validateOCIResumeOwner(document ociRestoreMetadata, config *fastletapi.RuntimeSandboxConfig) error {
 	if config.Spec.Restore != nil && document.Checkpoint == nil {
 		return fmt.Errorf("%w: OCI resume reference is not a checkpoint", ErrInvalidConfig)
 	}

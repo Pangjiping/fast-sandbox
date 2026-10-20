@@ -33,10 +33,25 @@ type Pair struct {
 	Snapfiles string `json:"snapfiles"`
 }
 
+// MetadataRepository is the small registry surface needed to resolve a template.
+// A CLI may wrap it with its credential-scoped immutable manifest cache.
+type MetadataRepository interface {
+	Resolve(context.Context, string) (oci.Descriptor, error)
+	Fetch(context.Context, oci.Descriptor) (io.ReadCloser, error)
+}
+
 // CredentialFunc resolves a full registry/repository reference, not just a host.
 type CredentialFunc func(context.Context, string) (auth.Credential, error)
 
-func Repository(reference string, credentials CredentialFunc) (*remote.Repository, registry.Reference, error) {
+// RepositoryOption configures registry transport without changing HTTPS defaults.
+type RepositoryOption func(*remote.Repository)
+
+// WithPlainHTTP explicitly selects HTTP for registries without TLS.
+func WithPlainHTTP(enabled bool) RepositoryOption {
+	return func(repo *remote.Repository) { repo.PlainHTTP = enabled }
+}
+
+func Repository(reference string, credentials CredentialFunc, options ...RepositoryOption) (*remote.Repository, registry.Reference, error) {
 	ref, err := registry.ParseReference(strings.TrimPrefix(reference, Prefix))
 	if err != nil {
 		return nil, ref, err
@@ -47,6 +62,9 @@ func Repository(reference string, credentials CredentialFunc) (*remote.Repositor
 	repo, err := remote.NewRepository(ref.Registry + "/" + ref.Repository)
 	if err != nil {
 		return nil, ref, err
+	}
+	for _, option := range options {
+		option(repo)
 	}
 	client := &auth.Client{Client: retry.DefaultClient, Cache: auth.NewCache()}
 	if credentials != nil {
@@ -95,6 +113,11 @@ func Resolve(ctx context.Context, reference string, credentials CredentialFunc) 
 	if err != nil {
 		return nil, err
 	}
+	return ResolveFrom(ctx, ref, repo)
+}
+
+// ResolveFrom resolves the platform envelope through the caller's registry/cache.
+func ResolveFrom(ctx context.Context, ref registry.Reference, repo MetadataRepository) ([]byte, error) {
 	desc, err := repo.Resolve(ctx, ref.Reference)
 	if errors.Is(err, errdef.ErrNotFound) && !strings.HasPrefix(ref.Reference, "sha256:") {
 		desc, err = repo.Resolve(ctx, ref.Reference+"_snapfiles")
@@ -114,7 +137,7 @@ func Resolve(ctx context.Context, reference string, credentials CredentialFunc) 
 		return nil, err
 	}
 	if manifest.Config.MediaType != ConfigMediaType {
-		return resolvePair(ctx, repo, desc, manifest)
+		return resolvePair(ctx, repo, ref, desc, manifest)
 	}
 	// Compatibility for existing three-image publications.
 	payload, err := fetchSmall(ctx, repo, manifest.Config)
@@ -143,7 +166,7 @@ func Resolve(ctx context.Context, reference string, credentials CredentialFunc) 
 	return payload, nil
 }
 
-func fetchSmall(ctx context.Context, repo *remote.Repository, desc oci.Descriptor) ([]byte, error) {
+func fetchSmall(ctx context.Context, repo MetadataRepository, desc oci.Descriptor) ([]byte, error) {
 	if desc.Size < 0 || desc.Size > 1<<20 {
 		return nil, fmt.Errorf("template metadata exceeds 1 MiB")
 	}
@@ -152,8 +175,8 @@ func fetchSmall(ctx context.Context, repo *remote.Repository, desc oci.Descripto
 
 // Push publishes exactly two images. Rootfs is uploaded first; the snapfiles
 // manifest carries metadata annotations and is the final publication point.
-func Push(ctx context.Context, dir, destination string, metadata []byte, credentials CredentialFunc) (string, string, error) {
-	repo, ref, err := Repository(destination, credentials)
+func Push(ctx context.Context, dir, destination string, metadata []byte, credentials CredentialFunc, options ...RepositoryOption) (string, string, error) {
+	repo, ref, err := Repository(destination, credentials, options...)
 	if err != nil {
 		return "", "", err
 	}
@@ -245,7 +268,7 @@ func inheritBlob(ctx context.Context, destination *remote.Repository, desc oci.D
 	if err != nil || exists {
 		return err
 	}
-	from, parsed, err := Repository(source+"@"+desc.Digest.String(), credentials)
+	from, parsed, err := Repository(source+"@"+desc.Digest.String(), credentials, WithPlainHTTP(destination.PlainHTTP))
 	if err != nil {
 		return err
 	}

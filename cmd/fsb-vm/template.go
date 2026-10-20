@@ -14,9 +14,10 @@ type templateFile struct {
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
-// templateRef identifies the remote template: repo + template_id name the
-// image pair, and auth carries the registry credential.
+// templateRef accepts a platform reference or an explicit image pair.
+// Existing repo + template_id inputs name the pair by convention.
 type templateRef struct {
+	Reference  string       `json:"reference,omitempty"`
 	Rootfs     string       `json:"rootfs,omitempty"`
 	Snapfiles  string       `json:"snapfiles,omitempty"`
 	Repo       string       `json:"repo"`
@@ -72,6 +73,12 @@ func loadTemplate(path string) (templateFile, error) {
 	// The id names directories under the state and runtime roots.
 	if err := validateSandboxID(template.SandboxID); err != nil {
 		return templateFile{}, fmt.Errorf("template %s: %w", path, err)
+	}
+	if template.Template.Reference != "" {
+		if template.Template.Rootfs != "" || template.Template.Snapfiles != "" || template.Template.Repo != "" || template.Template.TemplateID != "" {
+			return templateFile{}, fmt.Errorf("template.reference cannot be combined with explicit pair references")
+		}
+		return template, nil
 	}
 	if template.Template.Rootfs != "" && template.Template.Snapfiles != "" {
 		return template, nil

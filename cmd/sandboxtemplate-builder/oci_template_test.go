@@ -32,8 +32,18 @@ import (
 )
 
 func TestOCIBuildUsesRemoteSourceWithoutDownloadingSourceLayers(t *testing.T) {
-	for _, private := range []bool{false, true} {
-		t.Run(map[bool]string{false: "anonymous", true: "basic-auth"}[private], func(t *testing.T) {
+	for _, test := range []struct {
+		private bool
+		kernel  string
+		version string
+	}{
+		{false, "/kernels/vmlinux-6.1.0", "6.1.0"},
+		{true, "/kernels/vmlinux-6.1.0", "6.1.0"},
+		{false, "/kernels/vmlinux.bin", "vmlinux.bin"},
+		{true, "/kernels/vmlinux.bin", "vmlinux.bin"},
+	} {
+		t.Run(map[bool]string{false: "anonymous", true: "basic-auth"}[test.private]+"/"+filepath.Base(test.kernel), func(t *testing.T) {
+			private := test.private
 			dir := t.TempDir()
 			t.Setenv("DOCKER_CONFIG", dir)
 			t.Setenv("SANDBOX_TEMPLATE_IMAGE_TAR", "")
@@ -96,7 +106,7 @@ func TestOCIBuildUsesRemoteSourceWithoutDownloadingSourceLayers(t *testing.T) {
 				Output:  apiv1alpha2.OutputSpec{Format: apiv1alpha2.ArtifactFormatOverlayBD, RootfsSize: "1Gi", Publish: "oci://" + host + "/template:build"},
 			}
 			spec.Readiness.WarmupSeconds = 600
-			err = buildOCITemplate(context.Background(), spec, dir, "/kernels/vmlinux-6.1.0")
+			err = buildOCITemplate(context.Background(), spec, dir, test.kernel)
 			require.ErrorContains(t, err, "fsb-vm build: exit status 9")
 			raw, err = os.ReadFile(filepath.Join(dir, "fsb-args"))
 			require.NoError(t, err)
@@ -115,7 +125,7 @@ func TestOCIBuildUsesRemoteSourceWithoutDownloadingSourceLayers(t *testing.T) {
 			require.Equal(t, tag.Context().Digest(sum.String()).Name(), value("--source"))
 			require.NotContains(t, args, "--plain-http")
 			require.Equal(t, filepath.Join(dir, ".dockerconfigjson"), value("--auth-file"))
-			require.Equal(t, "6.1.0", value("--kernel-version"))
+			require.Equal(t, test.version, value("--kernel-version"))
 			require.Equal(t, "11m0s", value("--ready-timeout"))
 			require.Equal(t, buildTap, value("--tap-name"))
 			require.Zero(t, sourceLayerReads.Load())

@@ -49,6 +49,8 @@ The examples below assume a Pool named `firecracker-pool` in namespace `fast-san
 
 OCI registry access supports anonymous or username/password authentication. Docker config `auth` entries are supported; identity-token-only credentials are rejected. A token supplied as a username/password credential is treated as a password. Existing public credential fields and other runtimes are unchanged.
 
+Fastlet passes its namespace/Pool registry credentials and the OCI reference directly to `fsb-vm create --prepare-only`. The CLI resolves the pair, caches immutable manifests within the registry credential scope, and returns the metadata needed for restore validation. OCI creation and resume do not require a separate registry account or metadata cache on the node runtime-agent. The native S3 delivery path continues to use the agent.
+
 For the simplest setup, use one repository for templates and checkpoints, with one account that has pull and push permissions. Set `REGISTRY_USER` and `REGISTRY_PASSWORD`, then run:
 
 ```bash
@@ -138,7 +140,7 @@ No third metadata image is published. Both images describe their own layers in t
 
 The publisher uploads rootfs first and snapfiles last. It rejects replacing an existing tag with different content; configure registry tag immutability as well, since the two images are paired by ID rather than a third manifest containing both digests. Use a fresh ID for every new checkpoint. A retry with identical contents is allowed.
 
-`manifestRef` and `artifactDigest` identify the snapfiles manifest. On first resolution, the runtime resolves `<id>_rootfs` and caches the pair as digest references. A logical `oci://repository:<id>` input also resolves the pair. Previously published three-image metadata entries remain readable, but new publications only write the two-image format. Existing publications are not rewritten or deleted. Upgrade the Controller/FastPath and runtime-agent readers before enabling new publications from upgraded Fastlets or Builders. Older readers do not understand the new snapfiles entry format.
+`manifestRef` and `artifactDigest` identify the snapfiles manifest. On first resolution, fsb-vm resolves `<id>_rootfs` and caches the pair as digest references. A logical `oci://repository:<id>` input also resolves the pair; mutable tag inputs are resolved remotely on each preparation. Previously published three-image metadata entries remain readable, but new publications only write the two-image format. Existing publications are not rewritten or deleted. Upgrade the Controller/FastPath and Fastlet/fsb-vm readers before enabling new publications from upgraded Fastlets or Builders. Older readers do not understand the new snapfiles entry format.
 
 ## 4. Create, pause, and resume through FastPath
 

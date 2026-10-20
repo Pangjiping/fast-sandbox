@@ -253,7 +253,7 @@ func (l *livePullClient) current() (*agentpull.Client, error) {
 // PullImage pulls one image with a client built from the current config.
 func (l *livePullClient) PullImage(ctx context.Context, stateRoot, image string) error {
 	if strings.HasPrefix(image, ocitemplate.Prefix) {
-		return agentpull.PullOCIImage(ctx, stateRoot, image, l.registry)
+		return fmt.Errorf("OCI storage must be prepared by fsb-vm with Fastlet registry credentials")
 	}
 	client, err := l.current()
 	if err != nil {

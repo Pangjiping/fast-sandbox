@@ -106,6 +106,9 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 	if err := ublkd.Ping(ctx); err != nil {
 		return err
 	}
+	if err := resolveTemplate(ctx, &template, dockerAuth); err != nil {
+		return err
+	}
 
 	release, err := lockSandbox(template.SandboxID)
 	if err != nil {
@@ -118,15 +121,16 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 		return err
 	}
 	state := &sandboxState{
-		SandboxID:    template.SandboxID,
-		Phase:        phaseCreating,
-		RootfsRef:    template.rootfsRef(),
-		SnapfilesRef: template.snapfilesRef(),
-		Network:      provider.Name(),
-		MountPoint:   layout.mountPoint,
-		APISocket:    layout.apiSocket,
-		SerialLog:    layout.serialLog,
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		SandboxID:        template.SandboxID,
+		Phase:            phaseCreating,
+		RootfsRef:        template.rootfsRef(),
+		SnapfilesRef:     template.snapfilesRef(),
+		TemplateMetadata: template.Metadata,
+		Network:          provider.Name(),
+		MountPoint:       layout.mountPoint,
+		APISocket:        layout.apiSocket,
+		SerialLog:        layout.serialLog,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	// The creating record is the first durable write: from here on a crash
 	// leaves state.json behind, and delete reclaims whatever was allocated.
@@ -335,7 +339,12 @@ func resumeVM(ctx context.Context, layout sandboxLayout, metadata vmMetadata, pr
 func resolveKernel(kernelDir, kernelVersion, override string) (string, error) {
 	path := override
 	if path == "" {
-		path = filepath.Join(kernelDir, "vmlinux-"+kernelVersion)
+		name := "vmlinux-" + kernelVersion
+		// The standard Builder records its unversioned default filename.
+		if kernelVersion == "vmlinux.bin" {
+			name = kernelVersion
+		}
+		path = filepath.Join(kernelDir, name)
 	}
 	if _, err := os.Stat(path); err != nil {
 		return "", fmt.Errorf("kernel %s not found (kernel_version %q): %w", path, kernelVersion, err)

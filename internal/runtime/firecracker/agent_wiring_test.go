@@ -245,7 +245,7 @@ func TestEnsureSandboxCachedImageNeverPins(t *testing.T) {
 	require.Empty(t, pins, "a cached image must not pin on create (warm pull pins once, delete unpins once)")
 }
 
-func TestDeleteOCIResumeUnpinsCheckpointInsteadOfTemplate(t *testing.T) {
+func TestDeleteOCIResumeDoesNotUnpinAgentImages(t *testing.T) {
 	fixture := newDriverFixture(t)
 	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
 	agent := &fakeAgentClient{}
@@ -261,7 +261,7 @@ func TestDeleteOCIResumeUnpinsCheckpointInsteadOfTemplate(t *testing.T) {
 	require.NoError(t, saveState(directory, state))
 	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), fixture.sandboxSpec.Identity.SandboxUID))
 	_, unpins, _ := agent.snapshot()
-	require.Equal(t, []string{checkpoint}, unpins)
+	require.Empty(t, unpins)
 }
 
 func TestReleaseAgentSandboxUnpinIDScopesEachResumeReference(t *testing.T) {

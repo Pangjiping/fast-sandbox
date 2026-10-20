@@ -2,8 +2,6 @@ package firecracker
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -22,23 +20,21 @@ func TestCheckpointDestination(t *testing.T) {
 	}
 }
 func TestOCIResumeRejectsAnotherSandboxAndTemplateUse(t *testing.T) {
-	root := t.TempDir()
 	ref := "oci://r.example/ns/r@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	config := &fastletapi.RuntimeSandboxConfig{}
 	config.Identity.Namespace = "test"
 	config.Identity.SandboxUID = "owner"
 	config.Spec.Restore = &fastletapi.RestoreSpec{ManifestRef: ref, ArtifactDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	file := cachedManifestPath(root, ref)
-	require.NoError(t, os.MkdirAll(filepath.Dir(file), 0750))
 	raw, err := json.Marshal(map[string]any{"checkpoint": map[string]string{"sandboxUID": "owner", "namespace": "test"}})
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(file, raw, 0640))
-	require.NoError(t, validateOCIResumeOwner(root, ref, config))
+	var metadata ociRestoreMetadata
+	require.NoError(t, json.Unmarshal(raw, &metadata))
+	require.NoError(t, validateOCIResumeOwner(metadata, config))
 	config.Identity.SandboxUID = "other"
-	require.ErrorIs(t, validateOCIResumeOwner(root, ref, config), ErrInvalidConfig)
+	require.ErrorIs(t, validateOCIResumeOwner(metadata, config), ErrInvalidConfig)
 	config.Identity.SandboxUID = "owner"
 	config.Spec.Restore = nil
-	require.ErrorIs(t, validateOCIResumeOwner(root, ref, config), ErrInvalidConfig)
+	require.ErrorIs(t, validateOCIResumeOwner(metadata, config), ErrInvalidConfig)
 }
 func TestOCICheckpointRestoreReferenceBoundToDigest(t *testing.T) {
 	sum := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

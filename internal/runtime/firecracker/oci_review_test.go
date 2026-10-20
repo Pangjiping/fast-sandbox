@@ -60,9 +60,6 @@ func TestAttachOCIPreservesBasicAuthAndCleansPartialResources(t *testing.T) {
 			root := t.TempDir()
 			d := &Driver{config: firecrackerConfigForTest(t, root)}
 			image := "oci://r.example/templates/base:build"
-			manifest := cachedManifestPath(root, image)
-			require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0750))
-			require.NoError(t, os.WriteFile(manifest, []byte(`{"oci":{"rootfs":"r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapfiles":"r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), 0600))
 			installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", RepositoryPrefix: "templates", Username: "reader", Password: "read-secret"})
 			t.Setenv("TEST_OCI_MODE", mode)
 			t.Setenv("TEST_OCI_ROOT", root)
@@ -117,12 +114,14 @@ esac
 			require.NoError(t, err)
 			var input struct {
 				Template struct {
-					Auth struct {
+					Reference string `json:"reference"`
+					Auth      struct {
 						DockerAuth string `json:"dockerAuth"`
 					} `json:"auth"`
 				} `json:"template"`
 			}
 			require.NoError(t, json.Unmarshal(raw, &input))
+			require.Equal(t, image, input.Template.Reference)
 			var docker struct {
 				Auths map[string]struct {
 					Username string `json:"username"`
@@ -214,16 +213,6 @@ touch "$TEST_PACK_STAGING/cleaned"
 func TestOCIRecordsOwnershipBeforePrepareAndRecoversInterruptedAttachment(t *testing.T) {
 	fixture := newDriverFixture(t)
 	fixture.sandboxSpec.Spec.Image = "oci://r.example/templates/base:build"
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
-	manifest := cachedManifestPath(fixture.stateRoot, fixture.sandboxSpec.Spec.Image)
-	raw, err := os.ReadFile(manifest)
-	require.NoError(t, err)
-	var doc map[string]any
-	require.NoError(t, json.Unmarshal(raw, &doc))
-	doc["oci"] = map[string]string{"rootfs": "r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "snapfiles": "r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
-	raw, err = json.Marshal(doc)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(manifest, raw, 0600))
 	installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", Username: "reader", Password: "secret"})
 	bin := t.TempDir()
 	t.Setenv("TEST_OCI_ROOT", fixture.stateRoot)
@@ -238,9 +227,9 @@ rm -rf "$TEST_OCI_ROOT/oci/sandboxes/sandbox-1"
 touch "$TEST_OCI_ROOT/recovered"
 `), 0755))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	_, err = fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.ErrorContains(t, err, "attach OCI template")
-	raw, err = os.ReadFile(filepath.Join(fixture.stateRoot, "at-prepare.json"))
+	raw, err := os.ReadFile(filepath.Join(fixture.stateRoot, "at-prepare.json"))
 	require.NoError(t, err)
 	var state SandboxState
 	require.NoError(t, json.Unmarshal(raw, &state))

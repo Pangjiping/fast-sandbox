@@ -82,8 +82,8 @@ func resolveRootfsImage(stateRoot, image string) (string, error) {
 	return path, nil
 }
 
-// verifyRestorableImage verifies the COMPLETE restore set of an image is
-// committed in the local cache: rootfs plus both golden snapshots. This is
+// verifyRestorableImage checks the native restore set in the local cache;
+// OCI references defer storage preparation to fsb-vm. For native images this is
 // the single readiness criterion shared by async delivery and EnsureSandbox,
 // so a partially delivered cache (rootfs committed while vmstate/memory are
 // still transferring) never reports ready. Without it, a parked boot worker
@@ -91,10 +91,9 @@ func resolveRootfsImage(stateRoot, image string) (string, error) {
 // network slot only to release-destroy it on the snapshot check — burning
 // the slot pool faster than replenishment and failing the cold create.
 func verifyRestorableImage(stateRoot, image string) error {
-	if pair, err := ociPair(stateRoot, image); err != nil {
-		return fmt.Errorf("%w: %w", ErrImageNotReady, err)
-	} else if pair != nil {
-		return nil
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		// OCI storage is prepared on demand by fsb-vm, not delivered by the agent.
+		return validateOCIReference(image)
 	}
 	if _, err := resolveRootfsImage(stateRoot, image); err != nil {
 		return err
@@ -294,7 +293,8 @@ func (d *Driver) ListImages(_ context.Context) ([]string, error) {
 	return listCachedImages(d.config.StateRoot)
 }
 
-// PullImage ensures the rootfs image is present in the local cache. With a
+// PullImage defers OCI preparation to fsb-vm and ensures native images are
+// present in the local cache. With a
 // runtime-agent configured, the pull proxies to the agent's PinImage (the
 // node-level pull chain image -> index -> manifest -> digest-verified
 // cache); an unreachable agent degrades to the local cache check so warm
@@ -304,6 +304,9 @@ func (d *Driver) ListImages(_ context.Context) ([]string, error) {
 func (d *Driver) PullImage(ctx context.Context, image string) error {
 	if err := validateOCISupport(image); err != nil {
 		return err
+	}
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		return validateOCIReference(image)
 	}
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot

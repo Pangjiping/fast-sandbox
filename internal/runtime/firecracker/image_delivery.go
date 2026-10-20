@@ -58,7 +58,9 @@ type imageDelivery struct {
 	failedAt  time.Time // when the last attempt failed
 }
 
-// DeliverImage implements runtimecontract.ImageDelivery. An image whose
+// DeliverImage implements runtimecontract.ImageDelivery. OCI requires no agent
+// transfer; its metadata and devices are prepared by fsb-vm at create time.
+// A native image whose
 // complete restore set is cached reports Delivered without touching the
 // agent. A missing image with no runtime-agent configured is an error (local
 // mode cannot deliver); otherwise one background delivery attempt per image
@@ -101,6 +103,14 @@ func (d *Driver) DeliverCheckpoint(_ context.Context, restore *fastletapi.Restor
 func (d *Driver) deliverReference(reference string, pin func(context.Context) error) (runtimecontract.ImageDeliveryStatus, error) {
 	if err := validateOCISupport(reference); err != nil {
 		return "", err
+	}
+	if strings.HasPrefix(reference, ocitemplate.Prefix) {
+		if err := validateOCIReference(reference); err != nil {
+			return "", err
+		}
+		// Delivered means no agent transfer is needed. fsb-vm prepares and
+		// validates the remote storage during EnsureSandbox using Pool auth.
+		return runtimecontract.ImageDelivered, nil
 	}
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot

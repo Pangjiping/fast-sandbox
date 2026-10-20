@@ -9,8 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"oras.land/oras-go/v2/registry"
+
+	"fast-sandbox/internal/artifacts"
+	"fast-sandbox/internal/observability"
 	"fast-sandbox/internal/ocitemplate"
+	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
 )
 
@@ -28,26 +34,18 @@ func validateOCISupport(image string) error {
 	}
 }
 
-func ociPair(stateRoot, image string) (*ocitemplate.Pair, error) {
-	if !strings.HasPrefix(image, ocitemplate.Prefix) {
-		return nil, nil //nolint:nilnil // a nil pair selects the native restore path
+func validateOCIReference(image string) error {
+	ref, err := registry.ParseReference(strings.TrimPrefix(image, ocitemplate.Prefix))
+	if err != nil || ref.Reference == "" {
+		return fmt.Errorf("%w: OCI template requires a registry reference with a tag or digest", ErrInvalidConfig)
 	}
-	raw, err := os.ReadFile(cachedManifestPath(stateRoot, image))
-	if err != nil {
-		return nil, err
-	}
-	pair, err := ocitemplate.Decode(raw)
-	if err == nil && pair == nil {
-		return nil, fmt.Errorf("OCI image has no pair")
-	}
-	return pair, err
+	return nil
 }
 func (d *Driver) fsbArgs() []string {
 	return []string{"--state-dir", filepath.Join(d.config.StateRoot, "oci/sandboxes"), "--runtime-dir", filepath.Join(d.config.StateRoot, "oci/runtime"), "--firecracker", d.config.BinaryPath}
 }
 func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmstate, memory string, resultErr error) {
-	pair, err := ociPair(d.config.StateRoot, image)
-	if err != nil {
+	if err := validateOCIReference(image); err != nil {
 		return "", "", "", err
 	}
 	registryPath := os.Getenv("FAST_SANDBOX_REGISTRY_CONFIG_PATH")
@@ -69,7 +67,7 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 	if err != nil {
 		return "", "", "", err
 	}
-	document := map[string]any{"sandbox_id": id, "template": map[string]any{"rootfs": pair.Rootfs, "snapfiles": pair.Snapfiles, "auth": map[string]string{"dockerAuth": string(auth)}}}
+	document := map[string]any{"sandbox_id": id, "template": map[string]any{"reference": image, "auth": map[string]string{"dockerAuth": string(auth)}}}
 	raw, err := json.Marshal(document)
 	if err != nil {
 		return "", "", "", err
@@ -115,6 +113,93 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 		return "", "", "", fmt.Errorf("OCI attachment state has no rootfs device")
 	}
 	return state.Rootfs.Path, filepath.Join(home, "mnt/vmstate.bin"), filepath.Join(home, "mnt/memfile"), nil
+}
+
+// Metadata comes from the CLI's prepared state, never a second agent cache.
+type ociRestoreMetadata struct {
+	Machine       manifestMachine                 `json:"machine"`
+	GuestNetwork  manifestGuestNetwork            `json:"guestNetwork"`
+	Compatibility artifacts.SnapshotCompatibility `json:"compatibility"`
+	Checkpoint    *struct {
+		SandboxUID string `json:"sandboxUID"`
+		Namespace  string `json:"namespace"`
+	} `json:"checkpoint"`
+}
+
+type ociAttachment struct {
+	rootfs, vmstate, memory string
+	metadata                ociRestoreMetadata
+	duration                time.Duration
+}
+
+func (d *Driver) prepareOCIRestore(ctx context.Context, directory, reference string, config *fastletapi.RuntimeSandboxConfig) (attachment ociAttachment, resultErr error) {
+	started := time.Now()
+	ctx, span := observability.Start(ctx, "fastlet.firecracker.oci.prepare")
+	defer func() {
+		attachment.duration = time.Since(started)
+		observability.End(span, resultErr)
+	}()
+	id := config.Identity.SandboxUID
+	// Record ownership before CLI side effects for crash recovery.
+	if err := saveState(directory, &SandboxState{Config: *config, Phase: PhaseStarting}); err != nil {
+		return attachment, err
+	}
+	var err error
+	attachment.rootfs, attachment.vmstate, attachment.memory, err = d.attachOCI(ctx, id, reference)
+	if err != nil {
+		return attachment, err
+	}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, d.releaseOCI(context.Background(), id))
+		}
+	}()
+	attachment.metadata, err = readPreparedOCIMetadata(d.config.StateRoot, id)
+	if err != nil {
+		return attachment, err
+	}
+	metadata := attachment.metadata
+	if err := validateOCIResumeOwner(metadata, config); err != nil {
+		return attachment, err
+	}
+	hasMachine := metadata.Machine.VCPU != "" && metadata.Machine.Memory != ""
+	if err := validateRestoreMachine(config.Spec, d.config, metadata.Machine, hasMachine); err != nil {
+		return attachment, err
+	}
+	if err := checkRestoreCompatibility(metadata.Compatibility, artifacts.HostCPUIdentity(), d.firecrackerVersion(), reference); err != nil {
+		return attachment, err
+	}
+	return attachment, nil
+}
+
+func readPreparedOCIMetadata(stateRoot, id string) (ociRestoreMetadata, error) {
+	var metadata ociRestoreMetadata
+	raw, err := readPreparedOCIManifest(stateRoot, id)
+	if err != nil {
+		return metadata, err
+	}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return metadata, err
+	}
+	return metadata, nil
+}
+
+func readPreparedOCIManifest(stateRoot, id string) ([]byte, error) {
+	raw, err := os.ReadFile(filepath.Join(stateRoot, "oci/sandboxes", id, "state.json"))
+	if err != nil {
+		return nil, err
+	}
+	var state struct {
+		Metadata json.RawMessage `json:"template_metadata"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil, err
+	}
+	pair, err := ocitemplate.Decode(state.Metadata)
+	if err != nil || pair == nil {
+		return nil, fmt.Errorf("%w: fsb-vm prepared state has no valid template metadata", ErrInvalidConfig)
+	}
+	return state.Metadata, nil
 }
 func (d *Driver) releaseOCI(ctx context.Context, id string) error {
 	home := filepath.Join(d.config.StateRoot, "oci/sandboxes", id)

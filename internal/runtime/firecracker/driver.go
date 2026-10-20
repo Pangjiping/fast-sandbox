@@ -464,9 +464,6 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	if err := verifyRestorableImage(stateRoot, restoreRef); err != nil {
 		return nil, err
 	}
-	if err := validateOCIResumeOwner(stateRoot, restoreRef, config); err != nil {
-		return nil, err
-	}
 
 	directory, err := ensureSandboxDir(stateRoot, identity.SandboxUID)
 	if err != nil {
@@ -498,8 +495,35 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		}
 	}
 
-	owner := d.networkOwner(config)
 	createStarted := time.Now()
+	isOCI := strings.HasPrefix(restoreRef, ocitemplate.Prefix)
+	var ociRootfs, vmstatePath, memoryPath string
+	var ociMetadata ociRestoreMetadata
+	var ociPrepareDur time.Duration
+	ociAttached := false
+	createdComplete := false
+	defer func() {
+		if ociAttached && !createdComplete {
+			d.removeJailRoot(identity.SandboxUID)
+			if releaseErr := d.releaseOCI(context.Background(), identity.SandboxUID); releaseErr != nil {
+				resultErr = errors.Join(resultErr, releaseErr)
+			}
+		}
+	}()
+	if isOCI {
+		// Let fsb-vm resolve/cache the OCI envelope before allocating networking.
+		attachment, prepareErr := d.prepareOCIRestore(ctx, directory, restoreRef, config)
+		ociAttached = prepareErr == nil
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		ociRootfs, vmstatePath, memoryPath = attachment.rootfs, attachment.vmstate, attachment.memory
+		ociMetadata = attachment.metadata
+		ociPrepareDur = attachment.duration
+	}
+
+	owner := d.networkOwner(config)
+	acquireStarted := time.Now()
 	acquireCtx, acquireSpan := observability.Start(ctx, "fastlet.firecracker.acquire")
 	slot, err := manager.Acquire(acquireCtx, owner)
 	observability.End(acquireSpan, err)
@@ -512,7 +536,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			"bound", snapshot.Bound, "destroying", snapshot.Destroying)
 		return nil, fmt.Errorf("%w: acquire Firecracker network slot: %w", ErrNetworkUnavailable, err)
 	}
-	acquireDur := time.Since(createStarted)
+	acquireDur := time.Since(acquireStarted)
 	releaseSlot := func() {
 		_ = manager.Release(context.Background(), owner)
 	}
@@ -522,7 +546,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	// comes from the cached manifest guestNetwork; the BakedGuestIP
 	// convention is the fallback for hand-seeded caches. Slots are prepared
 	// before the image is known, so the NAT rules are applied now.
-	guestIP, guestMTU, err := resolveBakedGuestIP(stateRoot, restoreRef, slot)
+	guestIP, guestMTU, err := resolveRestoreGuestIP(stateRoot, restoreRef, slot, ociMetadata)
 	if err != nil {
 		releaseSlot()
 		return nil, err
@@ -543,41 +567,20 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
-	isOCI := strings.HasPrefix(restoreRef, ocitemplate.Prefix)
-	var ociRootfs, vmstatePath, memoryPath string
-	ociAttached := false
-	createdComplete := false
-	defer func() {
-		if ociAttached && !createdComplete {
-			d.removeJailRoot(identity.SandboxUID)
-			if releaseErr := d.releaseOCI(context.Background(), identity.SandboxUID); releaseErr != nil {
-				resultErr = errors.Join(resultErr, releaseErr)
-			}
-		}
-	}()
-	if isOCI {
-		// Record ownership before fsb-vm can attach devices. Restart recovery
-		// can then release a prepare-only attachment even before VM launch.
-		if err := saveState(directory, &SandboxState{Config: *config, Phase: PhaseStarting}); err != nil {
-			releaseSlot()
-			return nil, err
-		}
-		ociRootfs, vmstatePath, memoryPath, err = d.attachOCI(ctx, identity.SandboxUID, restoreRef)
-		ociAttached = err == nil
-	} else {
+	if !isOCI {
 		vmstatePath, memoryPath, err = resolveRestoreSnapshotFiles(stateRoot, restoreRef)
 	}
 	// The machine tuple of the golden snapshot is baked in the vmstate
 	// (v1.16 restores it from the snapshot); the manifest values are only
 	// validated here, not applied via the API (any machine-config call
 	// before snapshot/load is rejected).
-	if err == nil {
+	if err == nil && !isOCI {
 		err = validateRestoreMachineConfig(spec, d.config, stateRoot, restoreRef)
 	}
 	// Compatibility admission before any staging: a snapshot whose CPU
 	// provenance or Firecracker version mismatches this node must fail with
 	// a structured error, not at snapshot/load with an MSR/XSTATE fault.
-	if err == nil {
+	if err == nil && !isOCI {
 		err = d.validateRestoreCompatibility(stateRoot, restoreRef)
 	}
 	var instanceRootfs, jailRoot, apiAddress string
@@ -611,7 +614,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			"sandboxID", identity.SandboxUID, "jailRoot", jailRoot)
 	}()
 	d.touchImage(restoreRef)
-	rootfsDur := time.Since(rootfsStarted)
+	rootfsDur := time.Since(rootfsStarted) + ociPrepareDur
 	rootfsMiB := float64(0)
 	if info, statErr := os.Stat(instanceRootfs); statErr == nil {
 		rootfsMiB = float64(info.Size()) / (1024 * 1024)
@@ -1121,9 +1124,22 @@ func netmaskBits(mask string) (int, bool) {
 // hand-seeded caches without a manifest guest network (such caches carry no
 // MTU and are inherently derived from the runtime CIDR).
 func resolveBakedGuestIP(stateRoot, image string, slot *fastletnetwork.Slot) (string, int, error) {
-	if guestNetwork, ok, err := readCachedManifestGuestNetwork(stateRoot, image); err != nil {
+	guestNetwork, ok, err := readCachedManifestGuestNetwork(stateRoot, image)
+	if err != nil {
 		return "", 0, fmt.Errorf("%w: read cached manifest guest network: %w", ErrImageNotReady, err)
-	} else if ok {
+	}
+	return bakedGuestIP(slot, guestNetwork, ok)
+}
+
+func resolveRestoreGuestIP(stateRoot, image string, slot *fastletnetwork.Slot, metadata ociRestoreMetadata) (string, int, error) {
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		return bakedGuestIP(slot, metadata.GuestNetwork, metadata.GuestNetwork.IP != "")
+	}
+	return resolveBakedGuestIP(stateRoot, image, slot)
+}
+
+func bakedGuestIP(slot *fastletnetwork.Slot, guestNetwork manifestGuestNetwork, ok bool) (string, int, error) {
+	if ok {
 		if err := validateManifestGuestNetwork(slot, guestNetwork); err != nil {
 			return "", 0, err
 		}

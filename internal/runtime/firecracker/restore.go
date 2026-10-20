@@ -138,6 +138,10 @@ func validateRestoreMachineConfig(spec fastletapi.SandboxSpec, config runtimecat
 	if err != nil {
 		return err
 	}
+	return validateRestoreMachine(spec, config, machine, ok)
+}
+
+func validateRestoreMachine(spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig, machine manifestMachine, ok bool) error {
 	if !ok {
 		_, err := resolveMachineConfig(spec, config)
 		return err

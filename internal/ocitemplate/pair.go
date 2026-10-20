@@ -71,7 +71,7 @@ func pairAnnotations(id string, metadata []byte) (map[string]string, error) {
 	return annotations, nil
 }
 
-func resolvePair(ctx context.Context, repo *remote.Repository, snap oci.Descriptor, manifest oci.Manifest) ([]byte, error) {
+func resolvePair(ctx context.Context, repo MetadataRepository, ref registry.Reference, snap oci.Descriptor, manifest oci.Manifest) ([]byte, error) {
 	annotations := manifest.Annotations
 	id := annotations[AnnotationTemplateID]
 	if err := validatePairID(id); err != nil {
@@ -105,7 +105,7 @@ func resolvePair(ctx context.Context, repo *remote.Repository, snap oci.Descript
 	if root.MediaType != oci.MediaTypeImageManifest {
 		return nil, fmt.Errorf("unexpected rootfs manifest media type %q", root.MediaType)
 	}
-	repository := repo.Reference.Registry + "/" + repo.Reference.Repository
+	repository := ref.Registry + "/" + ref.Repository
 	pair := Pair{Rootfs: repository + "@" + root.Digest.String(), Snapfiles: repository + "@" + snap.Digest.String()}
 	raw, err := json.Marshal(pair)
 	if err != nil {

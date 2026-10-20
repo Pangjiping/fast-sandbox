@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -60,4 +61,55 @@ func TestPushPackedPairWithCheckpointAnnotations(t *testing.T) {
 	require.Equal(t, "tenant", manifest.Annotations[ocitemplate.AnnotationNamespace])
 	require.Equal(t, "checkpoint-1", manifest.Annotations[ocitemplate.AnnotationCheckpointID])
 	require.Equal(t, []oci.Descriptor{snap}, manifest.Layers)
+}
+
+func TestPushPlainHTTP(t *testing.T) {
+	for _, private := range []bool{false, true} {
+		t.Run(map[bool]string{false: "anonymous", true: "basic-auth"}[private], func(t *testing.T) {
+			previous := global
+			flag := rootCmd.PersistentFlags().Lookup("plain-http")
+			changed := flag.Changed
+			t.Cleanup(func() { global = previous; flag.Changed = changed })
+			layout, _, err := createStagedArtifactLayout(t.TempDir(), "http")
+			require.NoError(t, err)
+			layer, err := layout.installBytes([]byte("snapshot data"), ocitemplate.OverlayBDLayerMediaType)
+			require.NoError(t, err)
+			names, err := parseOutput("snapshot:http-test")
+			require.NoError(t, err)
+			require.NoError(t, writePackedPair(layout, names, []oci.Descriptor{layer}, layer))
+			handler := registrytest.New()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if private {
+					username, password, ok := r.BasicAuth()
+					if !ok || username != "writer" || password != "secret" {
+						w.Header().Set("WWW-Authenticate", `Basic realm="registry"`)
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			host := strings.TrimPrefix(server.URL, "http://")
+			config := map[string]any{"auths": map[string]any{}}
+			if private {
+				config["auths"] = map[string]any{host: authEntry{Username: "writer", Password: "secret"}}
+			}
+			raw, err := json.Marshal(config)
+			require.NoError(t, err)
+			metadata, auth := filepath.Join(t.TempDir(), "metadata.json"), filepath.Join(t.TempDir(), "auth.json")
+			require.NoError(t, os.WriteFile(metadata, []byte(`{}`), 0600))
+			require.NoError(t, os.WriteFile(auth, raw, 0600))
+			args := []string{"--artifact-dir", layout.root, "--destination", host + "/snapshots/test:http-test", "--metadata-file", metadata, "--auth-file", auth}
+			// HTTP must be explicitly selected, even for a local registry.
+			global.plainHTTP = false
+			command := newPushCommand()
+			command.SetArgs(args)
+			require.Error(t, command.Execute())
+			require.NoError(t, rootCmd.PersistentFlags().Set("plain-http", "true"))
+			command = newPushCommand()
+			command.SetArgs(args)
+			require.NoError(t, command.Execute())
+		})
+	}
 }

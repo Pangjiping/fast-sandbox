@@ -278,8 +278,10 @@ sudo "$FSB_VM" --plain-http build ...
 `create` 将以 `@sha256:...` 引用的 rootfs 和 snapfiles 镜像 manifest 缓存在
 `<state-dir>/.manifest-cache/`。后续创建先校验本地文件的 SHA256 和 manifest 描述符，
 命中后直接使用，不再向 registry 请求这两份 manifest 或获取对应的认证 token。
-缓存按 registry、repository、HTTP/HTTPS 和当前凭证隔离；文件中只保存原始 manifest，
-不保存凭证。删除单个 sandbox 不会删除这份共享缓存。
+缓存按 registry、repository、HTTP/HTTPS 和当前凭证隔离，不保存凭证。
+使用 `template.reference` 时，同目录还缓存由平台入口解析出的不可变 pair 和元数据，
+并将解析结果记录到 sandbox 的 `state.json.template_metadata`，供 Fastlet 校验和后续 checkpoint 使用。
+删除单个 sandbox 不会删除这份共享缓存。
 
 缓存缺失或损坏时重新从 registry 获取并原子写入；缓存写入失败不会阻止使用已验证的
 远端 manifest。可变 tag 始终回源解析，指向多架构 index 的 digest 保持现有平台选择流程。
@@ -338,6 +340,8 @@ registry.example.com/team/application:v1_snapfiles
 
 发布工具必须先上传这两个 manifest 引用的全部 `blobs/sha256/*`，再按对应 tag 上传 rootfs 和 snapfiles manifest。`manifest/index.json` 记录了 manifest 文件名和 digest，可供发布脚本读取。
 
+对明文 HTTP registry，使用 `fsb-vm --plain-http push ...`；该参数同时用于目标仓库和增量产物的远端父层读取，默认仍使用 HTTPS。
+
 `fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，携带平台元数据和 checkpoint owner annotations 的 snapfiles 最后发布，不再生成第三份元数据入口。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。历史三产物入口仍可读取。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
 
 ## 6. 准备 template.json
@@ -365,8 +369,13 @@ registry.example.com/team/application:v1_snapfiles
 | `sandbox_id` | 本机唯一 sandbox ID，同时用于状态和 runtime 子目录 |
 | `template.repo` | registry repository，不带 tag |
 | `template.template_id` | 模板 ID；工具会拉取 `<id>_rootfs` 和 `<id>_snapfiles` |
+| `template.reference` | 平台返回的 `oci://repository@sha256:...` 或逻辑 tag；与 `repo/template_id`、显式 `rootfs/snapfiles` 二选一 |
 | `template.auth.dockerAuth` | Docker config JSON 的字符串形式；匿名 registry 使用空字符串 |
 | `metadata` | 预留透传字段，可省略 |
+
+Fastlet 集成使用 `template.reference`，直接执行 `create --prepare-only`。
+CLI 负责解析两产物引用及 annotations、复用缓存和准备设备；Fastlet 不再先通过节点 agent 查询 OCI 元数据。
+使用这种输入时，`metadata` 由解析后的平台元数据替换，原有 repo/template_id 输入仍可使用。
 
 私有 registry 的 `dockerAuth` 是 JSON **字符串**，不是嵌套对象。例如原始 Docker config：
 
@@ -408,7 +417,7 @@ sudo "$FSB_VM" \
 3. 在 runtime 目录建立 `rootfs.dev` 链接，以该目录为 cwd 加载 Firecracker snapshot；
 4. 恢复 VM，将 `state.json` 更新为 `running`。
 
-默认根据模板 metadata 中的 `kernel_version` 检查 `/opt/fsb-vm/kernels/vmlinux-<version>`。可显式覆盖：
+默认根据模板 metadata 中的 `kernel_version` 检查 `/opt/fsb-vm/kernels/vmlinux-<version>`。标准 Builder 使用 `vmlinux.bin` 时，`kernel_version` 为 `vmlinux.bin`，对应检查同目录下的 `vmlinux.bin`，不会添加 `vmlinux-` 前缀。可显式覆盖：
 
 ```bash
 sudo "$FSB_VM" \
