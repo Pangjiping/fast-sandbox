@@ -2525,6 +2525,22 @@ egress_status_ready() {
 	[[ "$out" == *'"apiVersion":"sandbox.fast.io/actions/v1"'* && "$out" == *'"ready":true'* && "$out" == *'"instanceId":'* ]]
 }
 
+# egress_relay_capable reports whether the live egress Handler declares the
+# policyTransfer capability. A relay-native egress (policyTransfer=true)
+# honors runtime policy mutations ONLY through PUT /policy/{uid} — the
+# binding-input update path (fastctl update -> SET_BINDING) seeds fresh
+# subjects only, so updating an existing subject through it silently leaves
+# the enforcement stale. Older egress builds (flag absent/false) keep the
+# legacy contract where SET_BINDING applies the new input in place.
+egress_relay_capable() {
+	local pod out
+	pod="$(egress_fastlet_pod)"
+	[[ -n "$pod" ]] || return 1
+	out="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- \
+		curl -fsS -m 5 "http://127.0.0.1:18080/_fastlet/v1/actions/status" 2>/dev/null)" || return 1
+	jq -e '.policyTransfer == true' >/dev/null 2>&1 <<<"$out"
+}
+
 egress_log_has() { # pattern
 	local pod found="" lines
 	for pod in $(egress_pool_pods_live); do
@@ -2552,12 +2568,28 @@ egress_set_binding_count() {
 	echo "$total"
 }
 
-# Update the Sandbox's egress ActionBinding input (policy update) via the
-# fastpath UpdateSandbox RPC: the Fastlet only reacts to RPCs, so a direct
-# kubectl patch of the Sandbox CR would never reach it. The RPC re-delivers
-# SET_BINDING with the new binding.input; an already-active subject applies
-# the policy in place (no Hook replay).
+# egress_patch_policy switches the Sandbox's egress policy, speaking the
+# contract of the LIVE egress image:
+#   - relay-native egress (policyTransfer=true): PUT /policy/{uid} through
+#     the full InvokeHandlerAction chain FIRST — it is the only honored
+#     mutation path (binding-input updates are seed-only and would leave
+#     the enforcement stale). The subsequent fastctl update converges the
+#     CR desired state; its SET_BINDING replay carries the same input the
+#     relay just enforced, so it is a no-op on the handler.
+#   - legacy egress: fastctl update alone re-delivers SET_BINDING and the
+#     handler applies the new input in place.
+# Both paths end with the CR binding matching the enforced policy, so a
+# later SET_BINDING replay (egress or fastlet restart) re-seeds the same
+# policy deterministically.
 egress_patch_policy() { # sandbox policy-json
+	if egress_relay_capable; then
+		local uid raw status
+		uid="$(sandbox_uid "$1")" || fail "cannot resolve the uid of $1 for the policy relay"
+		raw="$(policy_relay "$1" PUT "/policy/$uid" "$2")" || fail "policy relay PUT failed for $1"
+		status="$(policy_relay_status "$raw")"
+		[[ "$status" == 2* ]] || fail "policy relay PUT for $1 answered HTTP $status: $(policy_relay_body "$raw")"
+		log "policy switch via relay: $1 -> HTTP $status (policyTransfer=true); converging the CR binding next"
+	fi
 	# Output is kept: a silent update failure otherwise stalls the policy
 	# wait below for no reason.
 	fastctl update "$1" --action "egress=$2"
@@ -2907,6 +2939,17 @@ verify_egress() {
 	trap 'port_forward_down; resolve_daemon_down' EXIT
 	run_stage "egress 2: actions/status protocol cross-verification" egress_status_ready
 	pass "GET /_fastlet/v1/actions/status: apiVersion + ready + instanceId (protocol agreement)"
+
+	# The policy-switch stages below must speak the contract of the LIVE
+	# egress image: relay-native (policyTransfer=true) needs the live PUT
+	# first (binding-input updates are seed-only); legacy builds apply
+	# SET_BINDING input in place. egress_patch_policy branches on this and
+	# converges the CR binding either way. policyctl (the relay helper) is
+	# built unconditionally — a ~1s no-op rebuild on the warm Go cache.
+	run_stage "egress 3: policyctl relay helper" policy_helpers_up
+	if egress_relay_capable; then
+		log "egress is relay-native (policyTransfer=true): policy switches PUT /policy/{uid} first, then converge the CR binding"
+	fi
 
 	run_stage "egress 3: create A (deny) and B (allow) on the same fastlet" \
 		egress_run_sandbox "$sbx_a" "$EGRESS_DENY_POLICY"
