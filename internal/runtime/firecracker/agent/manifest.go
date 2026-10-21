@@ -88,15 +88,26 @@ func (m manifest) nativeFiles() ([]nativeFile, error) {
 // committed manifest lists the file, so silently skipping it would strand
 // the checkpoint's vault state.
 func (m manifest) vaultFile() (nativeFile, bool, error) {
-	entry, ok := m.Files[publishVaultName]
+	return m.bundleFile(publishVaultName)
+}
+
+// policyFile returns the optional recorded-policy bundle entry of a
+// snapshot set (checkpoint or template). Same contract as vaultFile().
+func (m manifest) policyFile() (nativeFile, bool, error) {
+	return m.bundleFile(publishPolicyName)
+}
+
+// bundleFile resolves one optional state bundle entry by published name.
+func (m manifest) bundleFile(name string) (nativeFile, bool, error) {
+	entry, ok := m.Files[name]
 	if !ok {
 		return nativeFile{}, false, nil
 	}
 	if !validSHA256(entry.SHA256) {
-		return nativeFile{}, false, fmt.Errorf("manifest artifact %s has an invalid sha256", publishVaultName)
+		return nativeFile{}, false, fmt.Errorf("manifest artifact %s has an invalid sha256", name)
 	}
 	return nativeFile{
-		publish: publishVaultName, cache: publishVaultName,
+		publish: name, cache: name,
 		sha256: entry.SHA256, sizeBytes: entry.SizeBytes,
 	}, true, nil
 }

@@ -54,9 +54,10 @@ type Driver struct {
 	checkStorage   func(context.Context, string) error
 	networkManager *fastletnetwork.Manager
 	infraMgr       *fastletinfra.Manager
-	// vaultMover carries the egress-owned vault file across pause/resume
-	// (OSEP-0022); nil disables the transfer.
-	vaultMover   runtimecontract.VaultMover
+	// stateMover carries the egress-owned state files (credential vault,
+	// recorded network policy) across pause/resume; nil disables the
+	// transfers.
+	stateMover   runtimecontract.StateMover
 	prepareInfra func(ctx context.Context, config *fastletapi.RuntimeSandboxConfig) (fastletinfra.PreparedInstance, error)
 	processes    map[string]Process
 	// agentSocket, newAgentClient, and agentClient wire the node-level
@@ -266,13 +267,13 @@ func (d *Driver) SetNetworkManager(manager *fastletnetwork.Manager) {
 	d.mu.Unlock()
 }
 
-// SetVaultMover wires the driver-invoked egress vault transfer: checkpoints
-// stage the subject's vault file into the bundle before the runtime release
-// purges it, and restores import it before the data plane becomes ready.
-// A nil mover (the default) disables vault transfer.
-func (d *Driver) SetVaultMover(mover runtimecontract.VaultMover) {
+// SetStateMover wires the driver-invoked egress state transfers: checkpoints
+// stage the subject's vault and policy files into the bundle before the
+// runtime release purges them, and restores import them before the data
+// plane becomes ready. A nil mover (the default) disables the transfers.
+func (d *Driver) SetStateMover(mover runtimecontract.StateMover) {
 	d.mu.Lock()
-	d.vaultMover = mover
+	d.stateMover = mover
 	d.mu.Unlock()
 }
 
@@ -714,13 +715,20 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	}
 	bootDur := time.Since(bootStarted)
 
-	// A resumed checkpoint may carry the egress-owned vault file: import it
-	// into egress here — before EnsureSandbox returns, so strictly before the
-	// Fastlet dispatches the data-plane-ready hook (OSEP-0022 import
-	// ordering). A failure degrades the subject's vault (fail-closed,
-	// observable on the handler) and must not fail the restore — the same
-	// posture as a corrupt vault file at registration.
+	// A resumed checkpoint may carry the egress-owned vault and policy
+	// files: import them into egress here — before EnsureSandbox returns, so
+	// strictly before the Fastlet dispatches the data-plane-ready hook
+	// (OSEP-0022 import ordering). A failure degrades the subject's state
+	// (fail-closed vault, binding-input fallback policy; observable on the
+	// handler) and must not fail the restore — the same posture as a corrupt
+	// state file at registration.
 	d.importRestoreVault(ctx, spec, restoreRef, vmstatePath, identity.SandboxUID)
+	d.importRestorePolicy(ctx, spec, restoreRef, vmstatePath, identity.SandboxUID)
+	// A fresh boot from a template whose bundle carries state files starts
+	// with the template's state: land the records for the clone's first
+	// registration (re-stamped to the clone's fence) — same pre-
+	// data-plane-ready ordering, same degrade-don't-fail posture.
+	d.importTemplateCarry(ctx, spec, restoreRef, stateRoot, identity.SandboxUID)
 
 	state.Phase = PhaseRunning
 	state.StageDurations = map[string]time.Duration{

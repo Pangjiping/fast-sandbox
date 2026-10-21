@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -383,7 +384,8 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
 
 	// The Sandbox is itself a resume from a checkpoint whose manifest carries
-	// an egressVault entry; this dump stages no vault file of its own.
+	// an egressVault entry and a stale actionBindings record; this dump
+	// stages no vault or policy file of its own.
 	dir := filepath.Join(fixture.stateRoot, sandboxStateDir, sandboxID)
 	state, err := loadState(dir)
 	require.NoError(t, err)
@@ -398,6 +400,9 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
 		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
 		"egressVault":  map[string]any{"sha256": "stale", "sizeBytes": 7},
+		"actionBindings": []map[string]string{
+			{"handler": "egress", "input": `{"defaultAction":"allow"}`},
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
@@ -415,6 +420,8 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	require.NoError(t, json.Unmarshal(payload, &document))
 	require.NotContains(t, document, "egressVault",
 		"a source checkpoint's vault marker must not ride forward into a vault-less dump")
+	require.NotContains(t, document, "actionBindings",
+		"a source checkpoint's recorded bindings must not ride forward into a dump that records none")
 }
 
 func TestCreateSnapshotPublishesWithTemplateKind(t *testing.T) {
@@ -472,48 +479,93 @@ func TestCreateTemplateSnapshotDoesNotCommitCheckpointCache(t *testing.T) {
 		"template snapshots keep discarding staging (same-node prewarm is issue #57)")
 }
 
-// fakeVaultMover plays the Handler side of the vault transfer: a successful
-// export writes the payload to the driver-provided bundle path (as the
-// egress copy would); imports record the handed-over path.
-type fakeVaultMover struct {
-	mu          sync.Mutex
-	exportData  []byte
-	exportErr   error
-	exportCalls []string
-	imports     []string
+// fakeStateMover plays the Handler side of the state transfers: a successful
+// export writes the per-kind payload to the driver-provided bundle path (as
+// the egress copy would); imports record the handed-over path. A kind with
+// no staged payload exports nothing (the "subject held no state of this
+// kind" answer).
+type fakeStateMover struct {
+	mu              sync.Mutex
+	exportData      map[runtimecontract.StateKind][]byte
+	exportErr       error
+	exportErrByKind map[runtimecontract.StateKind]error
+	exportCalls     []string
+	imports         []string
 }
 
-func (f *fakeVaultMover) ExportVault(_ context.Context, sandboxUID, bundlePath string) error {
+// fakeTemplateCapableMover wraps a fakeStateMover with the template-carry
+// capability — the driver probes that capability by interface, so wrap only
+// the tests that exercise template carry.
+type fakeTemplateCapableMover struct {
+	*fakeStateMover
+	tmu             sync.Mutex
+	templateExports []string
+	templateImports []string
+}
+
+func (f *fakeTemplateCapableMover) ExportTemplateState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
+	f.tmu.Lock()
+	f.templateExports = append(f.templateExports, sandboxUID+":"+string(kind)+":"+bundlePath)
+	f.tmu.Unlock()
+	return f.ExportState(context.Background(), sandboxUID, kind, bundlePath)
+}
+
+func (f *fakeTemplateCapableMover) ImportTemplateState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
+	f.tmu.Lock()
+	f.templateImports = append(f.templateImports, sandboxUID+":"+string(kind)+":"+bundlePath)
+	f.tmu.Unlock()
+	return nil
+}
+
+func (f *fakeTemplateCapableMover) snapshotTemplate() ([]string, []string) {
+	f.tmu.Lock()
+	defer f.tmu.Unlock()
+	return append([]string(nil), f.templateExports...), append([]string(nil), f.templateImports...)
+}
+
+func (f *fakeStateMover) ExportState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.exportCalls = append(f.exportCalls, sandboxUID+":"+bundlePath)
+	f.exportCalls = append(f.exportCalls, sandboxUID+":"+string(kind)+":"+bundlePath)
+	if err, ok := f.exportErrByKind[kind]; ok {
+		return err
+	}
 	if f.exportErr != nil {
 		return f.exportErr
 	}
-	if f.exportData != nil {
-		return os.WriteFile(bundlePath, f.exportData, 0o600)
+	if data, ok := f.exportData[kind]; ok {
+		return os.WriteFile(bundlePath, data, 0o600)
 	}
 	return nil
 }
 
-func (f *fakeVaultMover) ImportVault(_ context.Context, sandboxUID, bundlePath string) error {
+func (f *fakeStateMover) ImportState(_ context.Context, sandboxUID string, kind runtimecontract.StateKind, bundlePath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.imports = append(f.imports, sandboxUID+":"+bundlePath)
+	f.imports = append(f.imports, sandboxUID+":"+string(kind)+":"+bundlePath)
 	return nil
 }
 
-func (f *fakeVaultMover) snapshot() ([]string, []string) {
+func (f *fakeStateMover) snapshot() ([]string, []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.exportCalls...), append([]string(nil), f.imports...)
 }
 
+// vaultMoverWith stages vault content; policyMoverWith stages policy content.
+func vaultMoverWith(data []byte) *fakeStateMover {
+	return &fakeStateMover{exportData: map[runtimecontract.StateKind][]byte{runtimecontract.StateKindVault: data}}
+}
+
+func policyMoverWith(data []byte) *fakeStateMover {
+	return &fakeStateMover{exportData: map[runtimecontract.StateKind][]byte{runtimecontract.StateKindPolicy: data}}
+}
+
 func TestCreateCheckpointStagesAndPublishesVaultBundle(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-	mover := &fakeVaultMover{exportData: []byte(`{"v":1,"revision":3,"vault":{"token":"t"}}`)}
-	fixture.driver.SetVaultMover(mover)
+	mover := vaultMoverWith([]byte(`{"v":1,"revision":3,"vault":{"token":"t"}}`))
+	fixture.driver.SetStateMover(mover)
 
 	result, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
 		SandboxID: sandboxID, SnapshotID: "ckpt-1", Kind: fastletapi.SnapshotKindCheckpoint,
@@ -534,13 +586,13 @@ func TestCreateCheckpointStagesAndPublishesVaultBundle(t *testing.T) {
 	reference := artifacts.CheckpointReference(result.ArtifactDigest)
 	cached, statErr := os.Stat(filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(reference), "vault.json"))
 	require.NoError(t, statErr)
-	require.Equal(t, int64(len(mover.exportData)), cached.Size())
+	require.Equal(t, int64(len(mover.exportData[runtimecontract.StateKindVault])), cached.Size())
 }
 
 func TestCreateCheckpointWithoutVaultStagesNothing(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-	fixture.driver.SetVaultMover(&fakeVaultMover{})
+	fixture.driver.SetStateMover(&fakeStateMover{})
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
 		SandboxID: sandboxID, SnapshotID: "ckpt-1", Kind: fastletapi.SnapshotKindCheckpoint,
@@ -553,7 +605,7 @@ func TestCreateCheckpointWithoutVaultStagesNothing(t *testing.T) {
 func TestCreateCheckpointFailsWhenVaultExportFails(t *testing.T) {
 	fixture, _ := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-	fixture.driver.SetVaultMover(&fakeVaultMover{exportErr: errors.New("handler unreachable")})
+	fixture.driver.SetStateMover(&fakeStateMover{exportErr: errors.New("handler unreachable")})
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
 		SandboxID: sandboxID, SnapshotID: "ckpt-1", Kind: fastletapi.SnapshotKindCheckpoint,
@@ -569,17 +621,82 @@ func TestCreateCheckpointFailsWhenVaultExportFails(t *testing.T) {
 func TestCreateTemplateSnapshotNeverExportsVault(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-	mover := &fakeVaultMover{exportData: []byte(`{"secret":true}`)}
-	fixture.driver.SetVaultMover(mover)
+	mover := vaultMoverWith([]byte(`{"secret":true}`))
+	fixture.driver.SetStateMover(mover)
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
 		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
 	})
 	require.NoError(t, err)
 	exports, _ := mover.snapshot()
-	require.Empty(t, exports, "a shared boot image must never carry one sandbox's credentials")
+	require.Empty(t, exports, "a template exports neither state kind: the vault would leak credentials, the policy export would seal the source")
 	require.Len(t, agent.manifest["files"].(map[string]any), 3)
 	require.NotContains(t, agent.manifest, "egressVault")
+}
+
+// The recorded policy rides CHECKPOINT bundles only. A template snapshot
+// must not export it: the export seals the subject on the egress (relay
+// CRUD answers 409 until an import), and a template's completion path
+// never imports — the still-running source would lose policy CRUD forever.
+func TestCreateTemplateSnapshotNeverExportsPolicy(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := policyMoverWith([]byte(`{"defaultAction":"allow"}`))
+	fixture.driver.SetStateMover(mover)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
+		ActionBindings: []runtimecontract.SnapshotActionBinding{
+			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
+		},
+	})
+	require.NoError(t, err)
+	exports, _ := mover.snapshot()
+	for _, call := range exports {
+		require.NotContains(t, call, "policy:", "a template export would seal the still-running source")
+	}
+	// The manifest stays the CRD desired state; no policy file, no embed.
+	require.Len(t, agent.manifest["files"].(map[string]any), 3)
+	require.NotContains(t, agent.manifest["files"], "policy.json")
+	recorded, ok := agent.manifest["actionBindings"].([]any)
+	require.True(t, ok)
+	require.Len(t, recorded, 1)
+	require.Equal(t, `{"defaultAction":"deny"}`, recorded[0].(map[string]any)["input"],
+		"the CRD seed rides through untouched")
+}
+
+// A staged policy file rides the checkpoint cache commit like the vault file.
+func TestCreateCheckpointStagesPolicyIntoNodeLocalCache(t *testing.T) {
+	fixture, _ := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	policy := []byte(`{"defaultAction":"deny"}`)
+	fixture.driver.SetStateMover(policyMoverWith(policy))
+
+	result, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "ckpt-1", Kind: fastletapi.SnapshotKindCheckpoint,
+	})
+	require.NoError(t, err)
+	reference := artifacts.CheckpointReference(result.ArtifactDigest)
+	cached, statErr := os.Stat(filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(reference), "policy.json"))
+	require.NoError(t, statErr)
+	require.Equal(t, int64(len(policy)), cached.Size())
+}
+
+func TestCreateCheckpointFailsWhenPolicyExportFails(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeStateMover{exportErrByKind: map[runtimecontract.StateKind]error{
+		runtimecontract.StateKindPolicy: errors.New("handler unreachable"),
+	}}
+	fixture.driver.SetStateMover(mover)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "ckpt-1", Kind: fastletapi.SnapshotKindCheckpoint,
+	})
+	require.ErrorContains(t, err, "export egress policy")
+	require.Empty(t, agent.fakeAgentClient.publishes, "nothing is published on a failed export")
+	_, statErr := os.Stat(filepath.Join(fixture.stateRoot, snapshotStagingDir, "ckpt-1"))
+	require.True(t, os.IsNotExist(statErr), "failed staging is discarded")
 }
 
 // writeCheckpointManifest writes a committed checkpoint manifest with an
@@ -595,11 +712,24 @@ func writeCheckpointManifest(t *testing.T, dir string, content []byte, withMarke
 	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotManifestName), payload, 0o644))
 }
 
+// writeSnapshotManifestWithFiles writes a committed manifest whose files
+// list carries the given entries (name -> content).
+func writeSnapshotManifestWithFiles(t *testing.T, dir string, entries map[string][]byte) {
+	t.Helper()
+	files := map[string]any{}
+	for name, content := range entries {
+		files[name] = map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}
+	}
+	payload, err := json.Marshal(map[string]any{"schemaVersion": 1, "runtime": "firecracker", "files": files})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotManifestName), payload, 0o644))
+}
+
 func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	fixture := newSnapshotDriverFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-	mover := &fakeVaultMover{}
-	fixture.driver.SetVaultMover(mover)
+	mover := &fakeStateMover{}
+	fixture.driver.SetStateMover(mover)
 
 	restore := &fastletapi.RestoreSpec{ManifestRef: "s3://bucket/publish/abcdef/manifest.json", ArtifactDigest: "digest"}
 	cacheDir := t.TempDir()
@@ -616,7 +746,7 @@ func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	fixture.driver.importRestoreVault(context.Background(), spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
 	exports, imports := mover.snapshot()
 	require.Empty(t, exports)
-	require.Equal(t, []string{sandboxID + ":" + filepath.Join(cacheDir, vaultBundleName)}, imports)
+	require.Equal(t, []string{sandboxID + ":vault:" + filepath.Join(cacheDir, vaultBundleName)}, imports)
 
 	// A manifest without the egressVault marker never authorizes a delivery,
 	// and neither does a digest or size mismatch: unverified credential
@@ -662,4 +792,186 @@ func TestImportRestoreVaultDeliversBundleBeforeDataPlane(t *testing.T) {
 	fixture.driver.importRestoreVault(context.Background(), spec, "app-v1", vmstatePath, sandboxID)
 	_, imports = mover.snapshot()
 	require.Empty(t, imports)
+}
+
+// The recorded-policy import mirrors the vault's provenance gating, with the
+// manifest's policy.json files entry as the authorization.
+func TestImportRestorePolicyDeliversBundleBeforeDataPlane(t *testing.T) {
+	fixture := newSnapshotDriverFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeStateMover{}
+	fixture.driver.SetStateMover(mover)
+
+	fixture.sandboxSpec.Spec.Restore = &fastletapi.RestoreSpec{ManifestRef: "s3://bucket/publish/abcdef/manifest.json", ArtifactDigest: "digest"}
+	cacheDir := t.TempDir()
+	vmstatePath := filepath.Join(cacheDir, vmstateSnapshotName)
+	require.NoError(t, os.WriteFile(vmstatePath, []byte("vmstate"), 0o600))
+	policyContent := []byte(`{"egress":[{"action":"allow","target":"example.com"}],"defaultAction":"deny"}`)
+
+	importPolicy := func() []string {
+		fixture.driver.importRestorePolicy(context.Background(),
+			fixture.sandboxSpec.Spec, "checkpoint:sha256:digest", vmstatePath, sandboxID)
+		_, imports := mover.snapshot()
+		return imports
+	}
+
+	// A provenance-verified policy file is imported: the record lands before
+	// the data plane becomes ready and stays authoritative over the
+	// SET_BINDING replay.
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, policyBundleName), policyContent, 0o600))
+	writeSnapshotManifestWithFiles(t, cacheDir, map[string][]byte{"policy.json": policyContent})
+	require.Equal(t,
+		[]string{sandboxID + ":policy:" + filepath.Join(cacheDir, policyBundleName)}, importPolicy())
+
+	// A manifest without the policy.json entry authorizes nothing — the
+	// restored subject keeps the bootstrap binding policy.
+	mover.mu.Lock()
+	mover.imports = nil
+	mover.mu.Unlock()
+	writeSnapshotManifestWithFiles(t, cacheDir, map[string][]byte{"rootfs.ext4": []byte("x")})
+	require.Empty(t, importPolicy())
+
+	// Digest mismatch: never delivered.
+	mover.mu.Lock()
+	mover.imports = nil
+	mover.mu.Unlock()
+	writeSnapshotManifestWithFiles(t, cacheDir, map[string][]byte{"policy.json": []byte(`{"defaultAction":"deny"}`)})
+	require.Empty(t, importPolicy())
+
+	// Size mismatch: never delivered.
+	mover.mu.Lock()
+	mover.imports = nil
+	mover.mu.Unlock()
+	writeSnapshotManifestWithFiles(t, cacheDir, map[string][]byte{"policy.json": policyContent})
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, policyBundleName), append(policyContent, 'x'), 0o600))
+	require.Empty(t, importPolicy())
+
+	// Over-size bundle (beyond the ≈1 MiB bound): never delivered, even with
+	// a matching manifest entry.
+	mover.mu.Lock()
+	mover.imports = nil
+	mover.mu.Unlock()
+	huge := make([]byte, maxPolicyBundleBytes+1)
+	writeSnapshotManifestWithFiles(t, cacheDir, map[string][]byte{"policy.json": huge})
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, policyBundleName), huge, 0o600))
+	require.Empty(t, importPolicy())
+
+	// An authorized-but-missing file is a loud degradation, never a silent
+	// skip (it imports nothing either way).
+	mover.mu.Lock()
+	mover.imports = nil
+	mover.mu.Unlock()
+	writeSnapshotManifestWithFiles(t, cacheDir, map[string][]byte{"policy.json": policyContent})
+	require.NoError(t, os.Remove(filepath.Join(cacheDir, policyBundleName)))
+	require.Empty(t, importPolicy())
+
+	// A fresh boot never imports.
+	mover.mu.Lock()
+	mover.imports = nil
+	mover.mu.Unlock()
+	spec := fixture.sandboxSpec.Spec
+	spec.Restore = nil
+	fixture.driver.importRestorePolicy(context.Background(), spec, "app-v1", vmstatePath, sandboxID)
+	_, imports := mover.snapshot()
+	require.Empty(t, imports)
+}
+
+// A capability-carrying mover stages BOTH state files into the template
+// bundle seal-free (the snapshot is a complete capture); the manifest's
+// actionBindings stay the CRD desired state — the record content is never
+// embedded.
+func TestCreateTemplateSnapshotStagesSealFreeState(t *testing.T) {
+	fixture, agent := newSnapshotFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeTemplateCapableMover{fakeStateMover: &fakeStateMover{
+		exportData: map[runtimecontract.StateKind][]byte{
+			runtimecontract.StateKindVault:  []byte(`{"v":1,"policy":{},"sealed":false}`),
+			runtimecontract.StateKindPolicy: []byte(`{"v":1,"policy":{"defaultAction":"allow"}}`),
+		},
+	}}
+	fixture.driver.SetStateMover(mover)
+
+	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
+		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
+		ActionBindings: []runtimecontract.SnapshotActionBinding{
+			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
+		},
+	})
+	require.NoError(t, err)
+
+	exports, _ := mover.snapshotTemplate()
+	require.Len(t, exports, 2, "vault and policy both ride the template bundle")
+	joined := strings.Join(exports, "\n")
+	require.Contains(t, joined, "vault.json")
+	require.Contains(t, joined, "policy.json")
+
+	files := agent.manifest["files"].(map[string]any)
+	require.Len(t, files, 5)
+	require.Contains(t, files, "vault.json")
+	require.Contains(t, files, "policy.json")
+	require.Contains(t, agent.sums, "vault.json")
+	require.Contains(t, agent.sums, "policy.json")
+	recorded, ok := agent.manifest["actionBindings"].([]any)
+	require.True(t, ok)
+	require.Len(t, recorded, 1)
+	require.Equal(t, `{"defaultAction":"deny"}`, recorded[0].(map[string]any)["input"])
+}
+
+// importTemplateCarry hands manifest-provenanced template state to the
+// mover for a fresh boot's first registration; restores take the restore
+// import path instead.
+func TestImportTemplateCarry(t *testing.T) {
+	fixture := newSnapshotDriverFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeTemplateCapableMover{fakeStateMover: &fakeStateMover{}}
+	fixture.driver.SetStateMover(mover)
+
+	vaultContent := []byte(`{"v":1,"vault":true}`)
+	policyContent := []byte(`{"v":1,"policy":{"defaultAction":"allow"}}`)
+	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Spec.Image))
+	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), vaultContent, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, policyBundleName), policyContent, 0o600))
+	document := map[string]any{
+		"schemaVersion": 1, "runtime": "firecracker",
+		"egressVault": map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
+		"files": map[string]any{
+			"vault.json":  map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
+			"policy.json": map[string]any{"sha256": artifacts.SHA256Of(policyContent), "sizeBytes": len(policyContent)},
+		},
+	}
+	payload, err := json.Marshal(document)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
+
+	spec := fixture.sandboxSpec.Spec // fresh boot from the fixture image
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	_, imports := mover.snapshotTemplate()
+	require.Len(t, imports, 2, "vault and policy both land for the clone's first registration")
+
+	// A restore takes the restore-import path instead.
+	spec.Restore = &fastletapi.RestoreSpec{ManifestRef: "s3://bucket/manifest.json", ArtifactDigest: "d"}
+	fixture.driver.importTemplateCarry(context.Background(), spec, "checkpoint:sha256:d", fixture.stateRoot, sandboxID)
+	_, imports = mover.snapshotTemplate()
+	require.Len(t, imports, 2, "the restore path never routes through the template carry")
+}
+
+// A template bundle without state files (or without a mover capability) is
+// a silent no-op: the clone degrades to the CRD seed.
+func TestImportTemplateCarryAbsent(t *testing.T) {
+	fixture := newSnapshotDriverFixture(t)
+	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
+	mover := &fakeStateMover{} // no template-carry capability
+	fixture.driver.SetStateMover(mover)
+
+	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(fixture.sandboxSpec.Spec.Image))
+	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
+	payload, err := json.Marshal(map[string]any{"schemaVersion": 1, "files": map[string]any{}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
+
+	spec := fixture.sandboxSpec.Spec
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	_, imports := mover.snapshot()
+	require.Empty(t, imports, "a mover without the template-carry capability is never invoked")
 }
