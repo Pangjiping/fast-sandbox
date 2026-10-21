@@ -3307,13 +3307,14 @@ egress_domain_denied() { # sandbox domain
 # also pass for a policy that broke egress entirely — the deny side is
 # what proves the record CONTENT survived the channel being tested.
 policy_matrix() { # sandbox label
-	wait_for "$1: allowed domain resolves" 90 egress_guest_reachable "$1"
-	wait_for "$1: allowed IP $EGRESS_IP accepted" 90 egress_ip_reachable "$1" "$EGRESS_IP"
-	wait_for "$1: non-allowed domain $POLICY_DENY_DOMAIN denied" 60 egress_domain_denied "$1" "$POLICY_DENY_DOMAIN"
-	if egress_ip_reachable "$1" "$POLICY_DENY_IP"; then
-		fail "$1: non-allowed IP $POLICY_DENY_IP was NOT blocked (policy leak)"
+	local sbx="$1" label="$2"
+	wait_for "$label: allowed domain resolves" 90 egress_guest_reachable "$sbx"
+	wait_for "$label: allowed IP $EGRESS_IP accepted" 90 egress_ip_reachable "$sbx" "$EGRESS_IP"
+	wait_for "$label: non-allowed domain $POLICY_DENY_DOMAIN denied" 60 egress_domain_denied "$sbx" "$POLICY_DENY_DOMAIN"
+	if egress_ip_reachable "$sbx" "$POLICY_DENY_IP"; then
+		fail "$label: non-allowed IP $POLICY_DENY_IP was NOT blocked (policy leak)"
 	fi
-	pass "$1: allowed domain+IP pass, non-allowed domain+IP denied (exact record in effect)"
+	pass "$label: allowed domain+IP pass, non-allowed domain+IP denied (exact record in effect)"
 }
 
 policy_source_up() {
@@ -3356,7 +3357,7 @@ policy_relay_update() {
 	# policy takes effect in-guest while the CR still holds the deny binding.
 	spec_input="$(kubectl -n "$NS" get sandbox "$POLICY_SANDBOX" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
 	[[ "$spec_input" == "$EGRESS_DENY_POLICY" ]] || fail "CR binding changed unexpectedly: $spec_input"
-	policy_matrix "relay applied"
+	policy_matrix "$POLICY_SANDBOX" "relay applied"
 	pass "relay mutation enforced live, exact policy (CR binding still the bootstrap deny)"
 }
 
@@ -3443,7 +3444,7 @@ policy_resume() {
 	# The record is authoritative over the SET_BINDING replay: the guest is
 	# allowed even though the CR binding still says deny — and the deny
 	# side proves the WHOLE record landed, not just working DNS.
-	policy_matrix "resume"
+	policy_matrix "$POLICY_SANDBOX" "resume"
 	pass "resume enforces the RELAYED policy, exact record (CR binding still deny)"
 }
 
@@ -3507,7 +3508,7 @@ policy_clone() {
 	[[ "$clone_input" == "$EGRESS_ALLOW_POLICY" ]] \
 		|| fail "clone spec binding is '${clone_input:-<none>}' (want the inherited allow policy)"
 	wait_for "clone execd control intact" 120 egress_execd_control "$POLICY_CLONE"
-	policy_matrix "clone"
+	policy_matrix "$POLICY_CLONE" "clone"
 	pass "clone created from the snapshot inherits the policy (exact record enforced)"
 
 	# Template-state carry (capability-gated, opensandbox#2312): the bundle
