@@ -73,9 +73,17 @@ spec:
         # the file is the truth on top of it.
         - name: OPENSANDBOX_EGRESS_POLICY_DIR
           value: /var/lib/opensandbox-egress/policy
+        # Vault persistence (OSEP-0022): VAULT_EXPORT requires it — without
+        # the dir the egress vault store is nil and template snapshots fail
+        # their complete-capture export. Plaintext v1 posture; swap to
+        # medium: Memory (tmpfs) to keep vault files off node disk.
+        - name: OPENSANDBOX_EGRESS_VAULT_DIR
+          value: /var/lib/opensandbox-egress/vault
         volumeMounts:
         - name: egress-policy
           mountPath: /var/lib/opensandbox-egress/policy
+        - name: egress-vault
+          mountPath: /var/lib/opensandbox-egress
         # State bundle handoff (vault/policy export-import): the transfer
         # envelope carries the driver's staging path under the runtime state
         # root — mount the same runtime-injected volume so the path resolves
@@ -117,6 +125,12 @@ spec:
       - name: egress-policy
         emptyDir:
           sizeLimit: 16Mi
+      # Pod-scoped vault volume (OSEP-0022): survives egress container
+      # restarts (the reload path), dies with the Pod. Plaintext v1
+      # posture — medium: Memory would keep the plaintext vault files off
+      # node disk; encryption is the future fix for the storage side.
+      - name: egress-vault
+        emptyDir: {}
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
   capacity:
