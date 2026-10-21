@@ -31,24 +31,6 @@ type Client struct {
 	peer *peerGateway
 }
 
-// ReadImageManifest fetches the published manifest document of an image
-// reference WITHOUT touching the node cache: the index (byte-verified
-// image field) then the manifest (digest-verified). The control plane
-// uses it to resolve snapshot-recorded policy at sandbox create time; the
-// document itself is immutable per digest, so callers may cache forever
-// keyed by the manifest's digest namespace.
-func (c *Client) ReadImageManifest(ctx context.Context, image string) ([]byte, error) {
-	index, err := fetchIndex(ctx, c.s3, image)
-	if err != nil {
-		return nil, err
-	}
-	manifestKey, err := c.s3.resolveRef(index.ManifestRef)
-	if err != nil {
-		return nil, err
-	}
-	return c.fetchManifest(ctx, manifestKey, index.ArtifactDigest)
-}
-
 // peerGateway routes artifact GETs through a P2P peer gateway (the
 // node-local DART daemon, or an external provider) speaking
 // GET <base><routePrefix><presigned-url>.

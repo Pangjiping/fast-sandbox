@@ -3142,18 +3142,17 @@ test_egress_ip_denied() { # sandbox ip
 #   Pod loopback) -> GET /policy/{uid} revision -> fastctl pause (the
 #   checkpoint carries POLICY_EXPORT: the egress copies its persisted
 #   policy record into the bundle as an OPAQUE policy.json — the manifest
-#   only references it, and its actionBindings stay the CRD seed) ->
+#   only references it) ->
 #   fastctl resume (POLICY_IMPORT lands the re-stamped record before
 #   data-plane-ready; the RELAYED allow policy — not the CRD bootstrap —
 #   is enforced in-guest) -> egress worker restart (the subject recovers
 #   from the persisted file; the SET_BINDING replay only re-registers) ->
 #   CR convergence (fastctl update: make the relayed policy the durable
-#   desired state) -> template snapshot + clone WITHOUT an explicit
-#   binding: the clone inherits the converged policy through the manifest's
-#   actionBindings (works on every egress generation), and with the
-#   templateStateExport capability the bundle also carries the opaque
-#   record, landed on the clone for its first registration (revision
-#   preserved — the discriminator against a seed-only clone).
+#   desired state) -> template snapshot + clone with the OPPOSITE create
+#   binding (deny) as the channel discriminator: with the
+#   templateStateExport capability the bundle's landed record (allow,
+#   source revision preserved) beats the deny seed; without it the
+#   create-time deny seed is what the clone enforces.
 #
 # Requires opensandbox/egress:latest in local docker (like verify-snapshot /
 # verify-pause). Reuses the pause flow's image roll + egress pool staging;
@@ -3381,14 +3380,9 @@ policy_pause() {
 	POLICY_CHECKPOINT_REF="$(kubectl_get "sandbox/$POLICY_SANDBOX" '{.status.runtime.checkpoint.manifestRef}')"
 	[[ -n "$POLICY_CHECKPOINT_ID" && -n "$POLICY_CHECKPOINT_REF" ]] || fail "checkpoint facts missing after pause"
 	# The bundle carries the persisted policy record as an OPAQUE member
-	# (the manifest only references it; the actionBindings stay the CRD
-	# seed — the driver never parses the record).
+	# (the manifest only references it; the driver never parses the record).
 	mc cat "chain/${POLICY_CHECKPOINT_REF#s3://}" 2>/dev/null | jq -e '.files["policy.json"]' >/dev/null \
 		|| fail "checkpoint manifest does not list policy.json (POLICY_EXPORT missing)"
-	local recorded
-	recorded="$(mc cat "chain/${POLICY_CHECKPOINT_REF#s3://}" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
-	[[ "$recorded" == "$EGRESS_DENY_POLICY" ]] \
-		|| fail "checkpoint manifest binding is '${recorded:-<none>}' (want the CRD seed deny — the policy record is never embedded)"
 
 	# Cat the opaque record out of the bundle (store copy; byte-identical to
 	# the egress-local file and the node-local cache copy): the egress-sealed
@@ -3403,7 +3397,7 @@ policy_pause() {
 	highlight "  policy.json (opaque sealed record from the checkpoint bundle — v/incarnation/attachmentId/revision/policy):"
 	jq . <<<"$POLICY_RECORD" | tee -a "$WORK/run.log" >&2
 	printf '%s' "$POLICY_RECORD" > "$POLICY_E2E_DIR/policy-record.json" 2>/dev/null || true
-	pass "pause exported the policy record (opaque bundle policy.json; manifest binding stays the CRD seed)"
+	pass "pause exported the policy record (opaque bundle policy.json; the manifest only references it)"
 }
 
 policy_resume() {
@@ -3471,12 +3465,12 @@ policy_snapshot_gone() {
 }
 
 policy_clone() {
-	local out manifest_input clone_input manifest_dir
+	local out manifest_dir clone_input
 	# Converge the CR desired state to the relayed policy BEFORE the
-	# snapshot: the manifest's actionBindings record is the create-time seed
-	# a clone inherits, so "the previous policy" must be the CRD's. This is
-	# the documented make-it-durable step — relay mutations are
-	# subject-local until converged. It works on EVERY egress generation.
+	# snapshot: the CRD seed is what a clone's create request replays, so
+	# "the previous policy" must be the CRD's. This is the documented
+	# make-it-durable step — relay mutations are subject-local until
+	# converged. It works on EVERY egress generation.
 	fastctl update "$POLICY_SANDBOX" --action "egress=$EGRESS_ALLOW_POLICY" >/dev/null 2>&1 \
 		|| fail "CR convergence (fastctl update) failed before the snapshot"
 	wait_for "source CR converged to the relayed policy" 120 egress_binding_ready "$POLICY_SANDBOX"
@@ -3491,47 +3485,48 @@ policy_clone() {
 	log "CreateSandboxSnapshot: $out"
 	wait_for "snapshot CR Succeeded" "$POLICY_TIMEOUT_S" policy_snapshot_succeeded
 
-	# The manifest's actionBindings carry the CONVERGED policy (allow): this
-	# is what a clone inherits — the record is never embedded.
 	manifest_dir="$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)"
-	manifest_input="$(mc cat "chain/$manifest_dir/manifest.json" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
-	[[ "$manifest_input" == "$EGRESS_ALLOW_POLICY" ]] \
-		|| fail "template manifest binding is '${manifest_input:-<none>}' (want the converged allow policy)"
-	pass "template manifest records the inherited policy (converged allow as the CRD seed)"
 
-	# Clone-create WITHOUT an explicit action: the clone inherits the
-	# snapshot's policy through the recorded bindings.
+	# Clone-create with the OPPOSITE binding (deny) while the template's
+	# record is allow — this is the channel discriminator:
+	#   - egress WITH templateStateExport: the bundle's landed record wins
+	#     (the clone enforces the template's allow with the source's
+	#     revision; the deny seed never decides);
+	#   - egress WITHOUT it: the create-time deny seed is all there is.
 	snapshot_cleanup_sandbox "$POLICY_CLONE"
-	snapshot_policy_run "$POLICY_CLONE" "$POLICY_TEMPLATE"
+	snapshot_policy_run "$POLICY_CLONE" "$POLICY_TEMPLATE" "$EGRESS_DENY_POLICY"
 	wait_for "clone sandbox Ready (cold pull of the template set)" 900 sandbox_ready "$POLICY_CLONE"
 	wait_for "clone egress binding Ready" 120 egress_binding_ready "$POLICY_CLONE"
 	clone_input="$(kubectl -n "$NS" get sandbox "$POLICY_CLONE" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
-	[[ "$clone_input" == "$EGRESS_ALLOW_POLICY" ]] \
-		|| fail "clone spec binding is '${clone_input:-<none>}' (want the inherited allow policy)"
+	[[ "$clone_input" == "$EGRESS_DENY_POLICY" ]] \
+		|| fail "clone spec binding is '${clone_input:-<none>}' (want the create-time deny seed)"
 	wait_for "clone execd control intact" 120 egress_execd_control "$POLICY_CLONE"
-	policy_matrix "$POLICY_CLONE" "clone"
-	pass "clone created from the snapshot inherits the policy (exact record enforced)"
 
 	# Template-state carry (capability-gated, opensandbox#2312): the bundle
-	# ALSO carries the opaque sealed record, and the clone's landed record is
-	# re-stamped — discriminator vs a seed-only clone: the seed writes
-	# revision 1, the landed record preserves the SOURCE's revision.
+	# carries the opaque sealed record and lands it for the clone's first
+	# registration (pre-data-plane-ready) — authoritative over the deny seed.
 	if egress_template_state_capable; then
 		mc cat "chain/$manifest_dir/policy.json" 2>/dev/null | jq -e '.policy' >/dev/null \
 			|| fail "template bundle does not carry the opaque policy.json (complete-capture violation)"
-		local pod clone_record clone_revision
+		local pod clone_record clone_revision clone_action
 		pod="$(egress_sandbox_pod "$POLICY_CLONE")"
 		clone_record="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- \
 			cat "/var/lib/opensandbox-egress/policy/$(sandbox_uid "$POLICY_CLONE").json" 2>/dev/null)"
 		[[ -n "$clone_record" ]] || fail "the clone has no egress policy record (template state did not land)"
 		clone_revision="$(jq -r '.revision // empty' <<<"$clone_record")"
 		[[ "$clone_revision" == "$POLICY_RECORD_REVISION" ]] \
-			|| fail "the clone's record revision is ${clone_revision:-<none>} (want the template's $POLICY_RECORD_REVISION — the landed record, not the revision-1 seed)"
-		highlight "  clone policy record (landed from the template, re-stamped):"
+			|| fail "the clone's record revision is ${clone_revision:-<none>} (want the template's $POLICY_RECORD_REVISION — the landed record, not the revision-1 deny seed)"
+		clone_action="$(jq -r '.policy.egress[]? | select(.target=="example.com") | .action' <<<"$clone_record")"
+		[[ "$clone_action" == "allow" ]] \
+			|| fail "the clone's record action for example.com is '${clone_action:-<none>}' (want the template's allow — the landed record must beat the deny seed)"
+		highlight "  clone policy record (landed from the template, beat the deny create binding):"
 		jq . <<<"$clone_record" | tee -a "$WORK/run.log" >&2
-		pass "template state landed on the clone (revision $clone_revision preserved from the source)"
+		pass "template record beat the deny create binding (revision $clone_revision preserved from the source)"
+		policy_matrix "$POLICY_CLONE" "clone"
 	else
-		log "template state carry SKIPPED: egress lacks templateStateExport (opensandbox#2312); the clone inherits via the CRD seed only"
+		log "template state carry SKIPPED: egress lacks templateStateExport (opensandbox#2312)"
+		test_egress_denied "$POLICY_CLONE"
+		pass "no template state: the clone enforces the create-time deny seed"
 	fi
 }
 
@@ -4064,11 +4059,6 @@ snapshot_run() {
 	log "snapshotID=$snapshot_id fastlet=$fastlet"
 	snapshot_report_manifest "$SNAPSHOT_NAME"
 	ref="$(kubectl_get "sandboxsnapshot/$SNAPSHOT_NAME" '{.status.manifestRef}')"
-	dir="$(dirname "${ref#s3://$MINIO_BUCKET/}")"
-	recorded="$(mc cat "chain/$MINIO_BUCKET/$dir/manifest.json" | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
-	[[ "$recorded" == "$EGRESS_DENY_POLICY" ]] \
-		|| fail "manifest did not record the source deny policy verbatim (got: $recorded)"
-	pass "manifest records the source policy verbatim: $recorded"
 
 	# Driver timings: pause window + publish duration from the fastlet logs.
 	log "driver timings (fastlet $fastlet):"
@@ -4356,7 +4346,9 @@ snapshot_restore() {
 	snapshot_ensure_disk
 	local t0 elapsed=0 applied
 	t0="$(now_ms)"
-	snapshot_policy_run "$SNAPSHOT_RESTORE" "$SNAPSHOT_TEMPLATE"
+	# A clone from a snapshot image is a new policy subject: pass the deny
+	# binding explicitly on the create.
+	snapshot_policy_run "$SNAPSHOT_RESTORE" "$SNAPSHOT_TEMPLATE" "$EGRESS_DENY_POLICY"
 	snapshot_record "restore_run_cmd_ms" "$(( ($(now_ms) - t0) / 1000000 ))"
 	# The restored sandbox cold-pulls the just-published 3.5GiB artifact set
 	# through the agent (P2P with direct-S3 fallback): allow 10 minutes and
@@ -4381,24 +4373,22 @@ snapshot_restore() {
 	cache_key="$(printf '%s' "$SNAPSHOT_TEMPLATE" | sha256sum | awk '{print $1}')"
 	highlight "  restored manifest on the host (node cache): /var/lib/fast-sandbox/firecracker/images/$cache_key/manifest.json"
 
-	# The snapshot-recorded policy must have been auto-applied (fastpath
-	# resolves the manifest from the store at create time) and it must be
-	# EFFECTIVE on the restored sandbox.
+	# The create passed the deny binding explicitly; it must be EFFECTIVE on
+	# the restored sandbox.
 	applied="$(kubectl -n "$NS" get sandbox "$SNAPSHOT_RESTORE" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
 	[[ "$applied" == "$EGRESS_DENY_POLICY" ]] \
-		|| fail "restore did not auto-apply the recorded policy (spec actionBindings: ${applied:-<none>})"
+		|| fail "restored sandbox spec binding is '${applied:-<none>}' (want the create-time deny seed)"
 	wait_for "restored egress binding Ready" 120 egress_binding_ready "$SNAPSHOT_RESTORE"
 	wait_for "restored execd control intact under deny" 120 egress_execd_control "$SNAPSHOT_RESTORE"
 	test_egress_denied "$SNAPSHOT_RESTORE"
-	pass "restore auto-applied the manifest policy and it is effective"
+	pass "restore enforces the create-time deny policy"
 
-	# Explicit override: an allow binding on the create wins over the
-	# recorded deny (and doubles as a post-restore reachability control).
+	# An allow binding create doubles as a post-restore reachability control.
 	snapshot_policy_run "$SNAPSHOT_RESTORE_ALLOW" "$SNAPSHOT_TEMPLATE" "$EGRESS_ALLOW_POLICY"
 	wait_for "override sandbox Ready" 300 sandbox_ready "$SNAPSHOT_RESTORE_ALLOW"
 	wait_for "override egress binding Ready" 120 egress_binding_ready "$SNAPSHOT_RESTORE_ALLOW"
 	wait_for "override reachable in-guest" 180 egress_guest_reachable "$SNAPSHOT_RESTORE_ALLOW"
-	pass "explicit create binding overrides the recorded policy"
+	pass "allow-binding create is reachable in-guest"
 }
 
 snapshot_evidence() {
@@ -4766,13 +4756,7 @@ pause_run() {
 	mc stat "chain/${PAUSE_CHECKPOINT_REF#s3://}" >/dev/null 2>&1 \
 		|| fail "checkpoint manifest missing from the store: $PAUSE_CHECKPOINT_REF"
 	pause_record "checkpoint_size_bytes" "${size:-0}"
-	# The artifact set is self-contained: the source's egress binding must be
-	# recorded verbatim in the published manifest.
-	local recorded
-	recorded="$(mc cat "chain/${PAUSE_CHECKPOINT_REF#s3://}" 2>/dev/null | jq -r '.actionBindings[]? | select(.handler=="egress") | .input')"
-	[[ "$recorded" == "$EGRESS_DENY_POLICY" ]] \
-		|| fail "checkpoint manifest did not record the egress policy (got: ${recorded:-<none>})"
-	log "checkpoint manifest records the egress policy verbatim: $recorded"
+	log "checkpoint published: $PAUSE_CHECKPOINT_REF"
 	highlight "  checkpoint: $PAUSE_CHECKPOINT_REF"
 	highlight "  artifact store path: chain/$MINIO_BUCKET/$(dirname "${PAUSE_CHECKPOINT_REF#s3://$MINIO_BUCKET/}")/"
 	mc ls "chain/$MINIO_BUCKET/$(dirname "${PAUSE_CHECKPOINT_REF#s3://$MINIO_BUCKET/}")/" 2>/dev/null | tee -a "$WORK/run.log" >&2 || true

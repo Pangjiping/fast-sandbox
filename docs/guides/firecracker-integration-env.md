@@ -62,8 +62,8 @@ created with a bootstrap deny binding is mutated in place through the
 handler relay (`PUT /policy/{uid}` over the full fastpath
 `InvokeHandlerAction` chain, then `GET` for the revision), paused and
 resumed — the checkpoint bundle carries the persisted policy record as an
-**opaque** `policy.json` (`POLICY_EXPORT`; the manifest's actionBindings
-stay the CRD seed), the restore lands it before data-plane-ready
+**opaque** `policy.json` (`POLICY_EXPORT`), the restore lands it before
+data-plane-ready
 (`POLICY_IMPORT` re-stamps the record), and the relayed allow policy (not
 the CRD bootstrap) is enforced afterwards and survives an egress worker
 restart. Relay mutations are subject-local: a clone created from the
