@@ -834,3 +834,10 @@ func TestDeletionRetriesFailedDeleteWithoutReleasingFinalizer(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, fastlet.runtimes)
 }
+
+func (*controllerRegistry) ApplyHeartbeat(placement.FastletID, string, *fastletapi.HeartbeatResponse, time.Time) error {
+	return nil
+}
+func (*controllerFastlet) Heartbeat(context.Context, string, *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error) {
+	return &fastletapi.HeartbeatResponse{}, nil
+}

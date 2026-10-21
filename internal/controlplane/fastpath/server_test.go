@@ -970,3 +970,10 @@ func TestGetSandboxRunningInspectFailuresRemainUnavailable(t *testing.T) {
 		require.Equal(t, codes.Unavailable, status.Code(err))
 	}
 }
+
+func (*fastpathRegistry) ApplyHeartbeat(placement.FastletID, string, *fastletapi.HeartbeatResponse, time.Time) error {
+	return nil
+}
+func (*fastpathFastlet) Heartbeat(context.Context, string, *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error) {
+	return &fastletapi.HeartbeatResponse{}, nil
+}

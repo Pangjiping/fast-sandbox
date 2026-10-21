@@ -39,12 +39,25 @@ func (r *fakeRegistry) RecordFeedback(id placement.FastletID, _ placement.LocalF
 	r.feedback = append(r.feedback, id)
 }
 
+func (*fakeRegistry) ApplyHeartbeat(placement.FastletID, string, *fastletapi.HeartbeatResponse, time.Time) error {
+	return nil
+}
+
 type fakeFastletClient struct {
+	heartbeat func(string, *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error)
+
 	create       func(string, *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error)
 	inspect      func(string, *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error)
 	inspectCalls int
 	deleted      bool
 	actions      *fastletapi.ReconcileBindingsRequest
+}
+
+func (f *fakeFastletClient) Heartbeat(_ context.Context, ip string, request *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error) {
+	if f.heartbeat != nil {
+		return f.heartbeat(ip, request)
+	}
+	return &fastletapi.HeartbeatResponse{}, nil
 }
 
 func (f *fakeFastletClient) ReconcileBindings(_ context.Context, _ string, request *fastletapi.ReconcileBindingsRequest) (*fastletapi.ReconcileBindingsResponse, error) {
@@ -501,4 +514,96 @@ func TestRuntimeGoneRequiresExplicitAbsence(t *testing.T) {
 	gone, err = o.RuntimeGone(context.Background(), sandbox)
 	require.NoError(t, err)
 	require.True(t, gone)
+}
+
+func TestRuntimeGoneRefreshesCapacityAfterConfirmedDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		present      bool
+		heartbeatErr bool
+		stillFull    bool
+		newer        bool
+		replaced     bool
+	}{
+		{name: "freed slot is immediately eligible"},
+		{name: "deletion in progress", present: true},
+		{name: "heartbeat failure retains capacity", heartbeatErr: true},
+		{name: "another sandbox occupies slot", stillFull: true},
+		{name: "newer heartbeat wins", newer: true},
+		{name: "replacement pod is fenced", replaced: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _, f, sandbox := newHarness(t)
+			registry := placement.NewInMemoryRegistry()
+			o.Registry = registry
+			sandbox.UID = "sandbox-uid"
+			candidate := placement.FastletInfo{
+				ID: "fastlet-a", Namespace: sandbox.Namespace, PoolName: sandbox.Spec.PoolRef,
+				PodName: "fastlet-a", PodUID: "pod-a", PodIP: "10.0.0.1", PodReady: true,
+				RuntimeProfileHash: "runtime-a", ResourceProfileHash: "resources-a", InfraRevision: "infra-a",
+			}
+			registry.UpsertPod(candidate)
+			heartbeat := &fastletapi.HeartbeatResponse{
+				FastletStatus: fastletapi.FastletStatus{
+					FastletPodUID: candidate.PodUID, RuntimeReady: true, InfraReady: true,
+					RuntimeProfileHash: candidate.RuntimeProfileHash, ResourceProfileHash: candidate.ResourceProfileHash, InfraRevision: candidate.InfraRevision,
+					Admission: fastletapi.AdmissionStatus{Capacity: 1, Used: 1, Running: 1},
+				},
+				Sequence: 1, Cache: fastletapi.CacheSnapshot{Epoch: "boot-a", Revision: 7, Full: true, Complete: true},
+			}
+			require.NoError(t, registry.ApplyHeartbeat(candidate.ID, candidate.PodUID, heartbeat, time.Now()))
+			request := placement.CandidateRequest{Namespace: sandbox.Namespace, PoolName: sandbox.Spec.PoolRef}
+			require.Empty(t, registry.TopK(request, 1), "full Fastlet is initially filtered out")
+			envelope, err := AssignmentForCandidate(candidate, 1, 1, 1, "runtime-a")
+			require.NoError(t, err)
+			require.NoError(t, assignment.SetAssignmentAnnotation(sandbox, envelope))
+			f.inspect = func(string, *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error) {
+				if tc.present {
+					return &fastletapi.InspectSandboxResponse{Sandbox: &fastletapi.SandboxStatus{}}, nil
+				}
+				return nil, &fastletapi.FastletError{Code: fastletapi.ErrorNotFound}
+			}
+			calls := 0
+			f.heartbeat = func(ip string, req *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error) {
+				calls++
+				require.Equal(t, candidate.PodIP, ip)
+				require.Equal(t, fastletapi.CacheCursor{Epoch: "boot-a", Revision: 7}, req.Cache)
+				if tc.heartbeatErr {
+					return nil, errors.New("heartbeat unavailable")
+				}
+				heartbeat.Sequence = 2
+				heartbeat.Admission = fastletapi.AdmissionStatus{Capacity: 1}
+				if tc.newer {
+					heartbeat.Sequence = 3
+					require.NoError(t, registry.ApplyHeartbeat(candidate.ID, candidate.PodUID, heartbeat, time.Now()))
+					heartbeat.Sequence = 2
+				}
+				if tc.stillFull || tc.newer {
+					heartbeat.Admission = fastletapi.AdmissionStatus{Capacity: 1, Used: 1, Running: 1}
+				}
+				if tc.replaced {
+					replacement := candidate
+					replacement.PodUID = "replacement"
+					registry.UpsertPod(replacement)
+				}
+				return heartbeat, nil
+			}
+			gone, err := o.RuntimeGone(context.Background(), sandbox)
+			require.NoError(t, err)
+			require.Equal(t, !tc.present, gone)
+			if tc.present {
+				require.Zero(t, calls, "do not refresh before runtime deletion completes")
+			} else {
+				require.Equal(t, 1, calls)
+			}
+			eligible := !tc.present && !tc.heartbeatErr && !tc.stillFull && !tc.replaced
+			require.Equal(t, eligible, len(registry.TopK(request, 1)) == 1)
+			if tc.replaced {
+				current, ok := registry.GetFastletByID(candidate.ID)
+				require.True(t, ok)
+				require.Equal(t, "replacement", current.PodUID)
+				require.Zero(t, current.HeartbeatSequence)
+			}
+		})
+	}
 }
