@@ -93,9 +93,10 @@ EXECD="${EXECD:-opensandbox/execd:1.1.0}"
 # reference and ignores containerd/daemon mirrors. So the mirror host has to be
 # spelled into the reference itself. REGISTRY_MIRROR is that host and it only
 # rewrites implicit docker.io references (one that already names a registry is
-# left as is). Set REGISTRY_MIRROR= (empty) on hosts with direct Docker Hub
-# access -- same note as the kind mirror block.
-REGISTRY_MIRROR="${REGISTRY_MIRROR:-docker.m.daocloud.io}"
+# left as is). The mirror is OPT-IN: the default is direct Docker Hub; hosts
+# that need a mirror set it explicitly, e.g.
+#   REGISTRY_MIRROR=docker.m.daocloud.io ./scripts/integration-env.sh up
+REGISTRY_MIRROR="${REGISTRY_MIRROR-}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-2Gi}"
 SBX_TEMPLATE="ai-office-sandbox"
 SBX_POOL="firecracker-pool"
