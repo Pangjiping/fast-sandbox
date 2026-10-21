@@ -214,7 +214,7 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 	if infraErr != nil {
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil //nolint:nilerr // invalid configuration is reported through InfraReady and retried at a fixed interval
 	}
 	if err := r.ensureInfraPlanConfigMap(ctx, &pool, infraPlan); err != nil {
 		return ctrl.Result{}, err
