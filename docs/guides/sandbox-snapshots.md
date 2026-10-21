@@ -96,12 +96,29 @@ path); later creates on that node restore in milliseconds.
 
 ## Network policy on restore
 
-The published manifest carries no policy record. A fresh Sandbox created
-from a snapshot image is a new policy subject: it is seeded only by the
-`actionBindings` you pass on the create request (handlers the target Pool
-declares, validated as on any create). Pause the source Sandbox first if
-you need to replay its bindings — they are readable from the Sandbox spec
-until it is gone.
+The published manifest carries no policy record. What a Sandbox created
+from a snapshot image enforces is decided by two channels, in a fixed
+priority:
+
+1. **Template state carry (capability-gated).** When the egress handler
+   reports `templateStateExport`, the template bundle includes the source's
+   opaque, sealed `policy.json`. The node lands it for the clone's first
+   registration — strictly before the data plane becomes ready — and the
+   landed record is authoritative: its revision is the source's, not the
+   seed's. This is how a clone continues the source's converged policy.
+2. **The create-request `actionBindings` (the seed).** A clone is a new
+   policy subject; the bindings you pass are validated as on any create and
+   seed its first registration. They decide the effective policy when the
+   template bundle carries no state — the egress lacks the capability, or
+   the landing degraded (logged, never fails the create).
+
+`verify-policy` discriminates the channels by cloning with the *opposite*
+binding (deny) while the template record is allow: a capability-carrying
+egress must enforce the template's allow (source revision preserved); a
+seed-only egress must enforce the deny.
+
+Pause the source Sandbox first if you need to replay its bindings — they
+are readable from the Sandbox spec until it is gone.
 
 A resume of the *same* Sandbox (pause checkpoint) is different: its live,
 relay-mutated policy rides the checkpoint bundle as the opaque

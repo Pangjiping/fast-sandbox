@@ -3148,12 +3148,11 @@ test_egress_ip_denied() { # sandbox ip
 #   is enforced in-guest) -> egress worker restart (the subject recovers
 #   from the persisted file; the SET_BINDING replay only re-registers) ->
 #   CR convergence (fastctl update: make the relayed policy the durable
-#   desired state) -> template snapshot + clone with an EXPLICIT binding:
-#   a clone is a new policy subject seeded only by its create request
-#   (works on every egress generation), and with the
-#   templateStateExport capability the bundle also carries the opaque
-#   record, landed on the clone for its first registration (revision
-#   preserved — the discriminator against a seed-only clone).
+#   desired state) -> template snapshot + clone with the OPPOSITE create
+#   binding (deny) as the channel discriminator: with the
+#   templateStateExport capability the bundle's landed record (allow,
+#   source revision preserved) beats the deny seed; without it the
+#   create-time deny seed is what the clone enforces.
 #
 # Requires opensandbox/egress:latest in local docker (like verify-snapshot /
 # verify-pause). Reuses the pause flow's image roll + egress pool staging;
@@ -3488,39 +3487,46 @@ policy_clone() {
 
 	manifest_dir="$(kubectl_get "sandboxsnapshot/$POLICY_SNAPSHOT_NAME" '{.status.manifestRef}' | sed 's#^s3://##' | xargs dirname)"
 
-	# Clone-create with an EXPLICIT action: a clone is a new policy subject
-	# and is seeded only by its create request.
+	# Clone-create with the OPPOSITE binding (deny) while the template's
+	# record is allow — this is the channel discriminator:
+	#   - egress WITH templateStateExport: the bundle's landed record wins
+	#     (the clone enforces the template's allow with the source's
+	#     revision; the deny seed never decides);
+	#   - egress WITHOUT it: the create-time deny seed is all there is.
 	snapshot_cleanup_sandbox "$POLICY_CLONE"
-	snapshot_policy_run "$POLICY_CLONE" "$POLICY_TEMPLATE" "$EGRESS_ALLOW_POLICY"
+	snapshot_policy_run "$POLICY_CLONE" "$POLICY_TEMPLATE" "$EGRESS_DENY_POLICY"
 	wait_for "clone sandbox Ready (cold pull of the template set)" 900 sandbox_ready "$POLICY_CLONE"
 	wait_for "clone egress binding Ready" 120 egress_binding_ready "$POLICY_CLONE"
 	clone_input="$(kubectl -n "$NS" get sandbox "$POLICY_CLONE" -o jsonpath='{.spec.actionBindings[?(@.handler=="egress")].input}')"
-	[[ "$clone_input" == "$EGRESS_ALLOW_POLICY" ]] \
-		|| fail "clone spec binding is '${clone_input:-<none>}' (want the create-time allow seed)"
+	[[ "$clone_input" == "$EGRESS_DENY_POLICY" ]] \
+		|| fail "clone spec binding is '${clone_input:-<none>}' (want the create-time deny seed)"
 	wait_for "clone execd control intact" 120 egress_execd_control "$POLICY_CLONE"
-	policy_matrix "$POLICY_CLONE" "clone"
-	pass "clone created from the snapshot enforces the create-time policy (exact record enforced)"
 
 	# Template-state carry (capability-gated, opensandbox#2312): the bundle
-	# ALSO carries the opaque sealed record, and the clone's landed record is
-	# re-stamped — discriminator vs a seed-only clone: the seed writes
-	# revision 1, the landed record preserves the SOURCE's revision.
+	# carries the opaque sealed record and lands it for the clone's first
+	# registration (pre-data-plane-ready) — authoritative over the deny seed.
 	if egress_template_state_capable; then
 		mc cat "chain/$manifest_dir/policy.json" 2>/dev/null | jq -e '.policy' >/dev/null \
 			|| fail "template bundle does not carry the opaque policy.json (complete-capture violation)"
-		local pod clone_record clone_revision
+		local pod clone_record clone_revision clone_action
 		pod="$(egress_sandbox_pod "$POLICY_CLONE")"
 		clone_record="$(kubectl -n "$NS" exec "pod/$pod" -c egress -- \
 			cat "/var/lib/opensandbox-egress/policy/$(sandbox_uid "$POLICY_CLONE").json" 2>/dev/null)"
 		[[ -n "$clone_record" ]] || fail "the clone has no egress policy record (template state did not land)"
 		clone_revision="$(jq -r '.revision // empty' <<<"$clone_record")"
 		[[ "$clone_revision" == "$POLICY_RECORD_REVISION" ]] \
-			|| fail "the clone's record revision is ${clone_revision:-<none>} (want the template's $POLICY_RECORD_REVISION — the landed record, not the revision-1 seed)"
-		highlight "  clone policy record (landed from the template, re-stamped):"
+			|| fail "the clone's record revision is ${clone_revision:-<none>} (want the template's $POLICY_RECORD_REVISION — the landed record, not the revision-1 deny seed)"
+		clone_action="$(jq -r '.policy.egress[]? | select(.target=="example.com") | .action' <<<"$clone_record")"
+		[[ "$clone_action" == "allow" ]] \
+			|| fail "the clone's record action for example.com is '${clone_action:-<none>}' (want the template's allow — the landed record must beat the deny seed)"
+		highlight "  clone policy record (landed from the template, beat the deny create binding):"
 		jq . <<<"$clone_record" | tee -a "$WORK/run.log" >&2
-		pass "template state landed on the clone (revision $clone_revision preserved from the source)"
+		pass "template record beat the deny create binding (revision $clone_revision preserved from the source)"
+		policy_matrix "$POLICY_CLONE" "clone"
 	else
-		log "template state carry SKIPPED: egress lacks templateStateExport (opensandbox#2312); the clone runs on the create-time seed only"
+		log "template state carry SKIPPED: egress lacks templateStateExport (opensandbox#2312)"
+		test_egress_denied "$POLICY_CLONE"
+		pass "no template state: the clone enforces the create-time deny seed"
 	fi
 }
 
