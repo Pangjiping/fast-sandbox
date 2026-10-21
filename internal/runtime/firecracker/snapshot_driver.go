@@ -811,7 +811,7 @@ func (d *Driver) stageTemplateState(ctx context.Context, sandboxUID, staging str
 // state. Provenance is manifest-enforced exactly like the restore import
 // (sha256 + size, stat-first bounded); every rejected posture degrades the
 // clone to the CRD seed and never fails the create.
-func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.SandboxSpec, restoreRef, stateRoot, sandboxUID string) {
+func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.SandboxSpec, restoreRef, bundleDir, sandboxUID string) {
 	if spec.Restore != nil {
 		return //nolint:nilerr // restores take the restore-import path
 	}
@@ -827,7 +827,6 @@ func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.Sandbo
 	if !ok {
 		return //nolint:nilerr // mover without the template-carry capability
 	}
-	bundleDir := filepath.Join(stateRoot, imageCacheDir, imageKey(restoreRef))
 	for _, state := range []struct {
 		kind      runtimecontract.StateKind
 		bundle    string
@@ -848,12 +847,13 @@ func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.Sandbo
 		}
 		importRestoreBundle(ctx, importPlan{
 			sandboxUID: sandboxUID,
+			sharedDir:  d.stateImportDir(restoreRef, sandboxUID),
 			restoreRef: restoreRef, path: bundlePath, marker: marker, markerPresent: markerPresent,
 			maxBytes: state.maxBytes,
 			subject:  "template " + string(state.kind),
 			degrade:  "the clone degrades to the CRD seed",
-			importIt: func() error {
-				return carrier.ImportTemplateState(ctx, sandboxUID, state.kind, bundlePath)
+			importIt: func(path string) error {
+				return carrier.ImportTemplateState(ctx, sandboxUID, state.kind, path)
 			},
 			sentinelMissing:  state.sentinelM,
 			sentinelUnlisted: state.sentinelU,
@@ -903,11 +903,14 @@ func (d *Driver) importRestoreVault(ctx context.Context, spec fastletapi.Sandbox
 
 	importRestoreBundle(ctx, importPlan{
 		sandboxUID: sandboxUID,
+		sharedDir:  d.stateImportDir(restoreRef, sandboxUID),
 		restoreRef: restoreRef, path: vaultPath, marker: marker, markerPresent: markerPresent,
-		maxBytes:         maxVaultBundleBytes,
-		subject:          "vault",
-		degrade:          "the restored Sandbox vault degrades",
-		importIt:         func() error { return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindVault, vaultPath) },
+		maxBytes: maxVaultBundleBytes,
+		subject:  "vault",
+		degrade:  "the restored Sandbox vault degrades",
+		importIt: func(path string) error {
+			return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindVault, path)
+		},
 		sentinelMissing:  errVaultBundleMissing,
 		sentinelUnlisted: errVaultBundleUnlisted,
 		sentinelMismatch: errVaultBundleMismatch,
@@ -944,11 +947,14 @@ func (d *Driver) importRestorePolicy(ctx context.Context, spec fastletapi.Sandbo
 
 	importRestoreBundle(ctx, importPlan{
 		sandboxUID: sandboxUID,
+		sharedDir:  d.stateImportDir(restoreRef, sandboxUID),
 		restoreRef: restoreRef, path: policyPath, marker: marker, markerPresent: markerPresent,
-		maxBytes:         maxPolicyBundleBytes,
-		subject:          "policy",
-		degrade:          "the restored Sandbox keeps the bootstrap binding policy",
-		importIt:         func() error { return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindPolicy, policyPath) },
+		maxBytes: maxPolicyBundleBytes,
+		subject:  "policy",
+		degrade:  "the restored Sandbox keeps the bootstrap binding policy",
+		importIt: func(path string) error {
+			return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindPolicy, path)
+		},
 		sentinelMissing:  errPolicyBundleMissing,
 		sentinelUnlisted: errPolicyBundleUnlisted,
 		sentinelMismatch: errPolicyBundleMismatch,
@@ -958,6 +964,7 @@ func (d *Driver) importRestorePolicy(ctx context.Context, spec fastletapi.Sandbo
 // importPlan carries one restore-side state bundle delivery: the verified
 // hand-over of a manifest-provenanced bundle file to the mover.
 type importPlan struct {
+	sharedDir     string // OCI mounts are container-private; handlers need a shared file.
 	sandboxUID    string
 	restoreRef    string
 	path          string
@@ -970,7 +977,7 @@ type importPlan struct {
 	degrade string
 	// importIt performs the handler hand-over once provenance holds (the
 	// caller's closure captures the mover and the state kind).
-	importIt func() error
+	importIt func(string) error
 	// sentinels mark the degradation cause in the log line.
 	sentinelMissing, sentinelUnlisted, sentinelMismatch error
 }
@@ -1023,10 +1030,39 @@ func importRestoreBundle(ctx context.Context, plan importPlan) {
 			"sandboxID", plan.sandboxUID, "checkpoint", plan.restoreRef, "file", plan.path)
 		return //nolint:nilerr // unverified state bytes are never delivered
 	}
-	if importErr := plan.importIt(); importErr != nil {
+	if importErr := deliverStateBundle(plan, bundleData); importErr != nil {
 		klog.ErrorS(importErr, "egress "+plan.subject+" import failed; "+plan.degrade,
 			"sandboxID", plan.sandboxUID, "checkpoint", plan.restoreRef)
 	}
+}
+
+// stateImportDir selects an ordinary shared directory for OCI state handoff.
+// Native bundles already live on the shared filesystem.
+func (d *Driver) stateImportDir(reference, sandboxUID string) string {
+	if !strings.HasPrefix(reference, ocitemplate.Prefix) {
+		return ""
+	}
+	return filepath.Join(d.config.StateRoot, sandboxStateDir, sandboxUID)
+}
+
+func deliverStateBundle(plan importPlan, verified []byte) error {
+	if plan.sharedDir == "" {
+		return plan.importIt(plan.path)
+	}
+	staging, err := os.MkdirTemp(plan.sharedDir, "state-import-")
+	if err != nil {
+		return fmt.Errorf("stage verified state for handler: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(staging); err != nil {
+			klog.ErrorS(err, "remove temporary state import directory failed", "directory", staging)
+		}
+	}()
+	path := filepath.Join(staging, filepath.Base(plan.path))
+	if err := os.WriteFile(path, verified, 0600); err != nil {
+		return fmt.Errorf("write verified state for handler: %w", err)
+	}
+	return plan.importIt(path)
 }
 
 // fileMarker is a manifest provenance entry: a sha256 + size pair that

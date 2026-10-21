@@ -221,6 +221,34 @@ env:
 
 Use `registry/repository` without `oci://`, a tag, or a digest. The account must be able to read both repositories and push to the checkpoint repository. For separate read/write accounts, see [Private registries](private-registries.md) and [Sandbox snapshots](sandbox-snapshots.md).
 
+## Recorded policy and state in snapfiles
+
+OCI pause checkpoints and live snapshots use the same recorded-state layout as
+native snapshots. Fastlet exports the egress-owned `policy.json` record without
+parsing or rewriting it. The snapfiles filesystem carries `manifest.json`,
+`SHA256SUMS`, and the optional `policy.json` and `vault.json` files alongside
+`metadata.json`, `vmstate.bin`, and `memfile`. The manifest's
+`files["policy.json"]` entry records its SHA-256 and size; vault provenance keeps
+the native `egressVault` marker. Rootfs remains the other OCI image: no third
+artifact or separate policy format is introduced.
+
+Pause exports checkpoint state before releasing the runtime. A live template
+snapshot uses the handler's seal-free export capability so the source remains
+mutable; a declared handler that lacks this capability causes the snapshot to
+fail, matching the native path. On resume, Fastlet verifies the bundled state
+and imports it before data-plane readiness. A new VM created from a snapshot
+lands the verified state for its first handler registration, under the new VM's
+identity. The recorded policy takes precedence over the create-time binding
+seed; absent or invalid state follows the same observable fallback as native
+restore. As in the native path, FastPath may merge the manifest's
+`actionBindings` as create-time bootstrap inputs, including when a snapshot clone
+omits explicit bindings. OCI snapfiles mounts are private to the Fastlet container.
+For handler import, Fastlet copies the verified opaque record to a temporary
+directory under the shared `<stateRoot>/sandboxes/<uid>/`, then removes that
+directory after the handler returns. The egress container must mount the same
+state root at the same absolute path. Fastlet never unwraps `policy.json`: the verified
+record imported by Fastlet remains authoritative over those bootstrap inputs.
+
 ## Usage notes
 
 - Match the Pool's CPU and memory profile to the template. After updating a template, create instances with its new `status.manifestRef`.

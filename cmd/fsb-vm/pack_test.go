@@ -190,3 +190,42 @@ func TestValidatePackBundlePreservesMetadataAndChecksMachine(t *testing.T) {
 		})
 	}
 }
+
+func TestPackSnapshotExtrasPreservesOpaqueState(t *testing.T) {
+	bundle := t.TempDir()
+	payloads := map[string]string{
+		"manifest.json": `{"files":{"policy.json":{"sha256":"recorded"}}}`,
+		"policy.json":   `{"v":1,"incarnation":"source","revision":7,"policy":{"defaultAction":"deny"}}`,
+		"vault.json":    `{"opaque":"encrypted record"}`,
+		"SHA256SUMS":    "recorded  policy.json\n",
+	}
+	for name, content := range payloads {
+		require.NoError(t, os.WriteFile(filepath.Join(bundle, name), []byte(content), 0600))
+	}
+	extras, err := packSnapshotExtras(bundle)
+	require.NoError(t, err)
+	require.Len(t, extras, len(payloads))
+	// The exact exported records are packaged, without converting policy into bindings.
+	for name, want := range payloads {
+		raw, err := os.ReadFile(extras[name])
+		require.NoError(t, err)
+		require.Equal(t, want, string(raw))
+	}
+	for _, name := range []string{"policy.json", "vault.json", "SHA256SUMS"} {
+		require.NoError(t, os.Remove(filepath.Join(bundle, name)))
+	}
+	extras, err = packSnapshotExtras(bundle)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}, extras, "older stateless bundles remain packable")
+}
+
+func TestPackSnapshotExtrasRejectsUnreadableState(t *testing.T) {
+	for _, name := range []string{"policy.json", "vault.json", "SHA256SUMS"} {
+		t.Run(name, func(t *testing.T) {
+			bundle := t.TempDir()
+			require.NoError(t, os.Symlink(name, filepath.Join(bundle, name)))
+			_, err := packSnapshotExtras(bundle)
+			require.ErrorContains(t, err, name, "a state-file stat failure must not silently publish a stateless snapshot")
+		})
+	}
+}

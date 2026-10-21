@@ -883,13 +883,13 @@ func TestImportTemplateCarry(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
 
 	spec := fixture.sandboxSpec.Spec // fresh boot from the fixture image
-	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, cacheDir, sandboxID)
 	_, imports := mover.snapshotTemplate()
 	require.Len(t, imports, 2, "vault and policy both land for the clone's first registration")
 
 	// A restore takes the restore-import path instead.
 	spec.Restore = &fastletapi.RestoreSpec{ManifestRef: "s3://bucket/manifest.json", ArtifactDigest: "d"}
-	fixture.driver.importTemplateCarry(context.Background(), spec, "checkpoint:sha256:d", fixture.stateRoot, sandboxID)
+	fixture.driver.importTemplateCarry(context.Background(), spec, "checkpoint:sha256:d", cacheDir, sandboxID)
 	_, imports = mover.snapshotTemplate()
 	require.Len(t, imports, 2, "the restore path never routes through the template carry")
 }
@@ -909,7 +909,7 @@ func TestImportTemplateCarryAbsent(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
 
 	spec := fixture.sandboxSpec.Spec
-	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, cacheDir, sandboxID)
 	_, imports := mover.snapshot()
 	require.Empty(t, imports, "a mover without the template-carry capability is never invoked")
 }

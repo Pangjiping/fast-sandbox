@@ -518,8 +518,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			return nil, prepareErr
 		}
 		ociRootfs, vmstatePath, memoryPath = attachment.rootfs, attachment.vmstate, attachment.memory
-		ociMetadata = attachment.metadata
-		ociPrepareDur = attachment.duration
+		ociMetadata, ociPrepareDur = attachment.metadata, attachment.duration
 	}
 
 	owner := d.networkOwner(config)
@@ -765,7 +764,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	// with the template's state: land the records for the clone's first
 	// registration (re-stamped to the clone's fence) — same pre-
 	// data-plane-ready ordering, same degrade-don't-fail posture.
-	d.importTemplateCarry(ctx, spec, restoreRef, stateRoot, identity.SandboxUID)
+	d.importTemplateCarry(ctx, spec, restoreRef, filepath.Dir(vmstatePath), identity.SandboxUID)
 
 	state.Phase = PhaseRunning
 	state.StageDurations = map[string]time.Duration{

@@ -43,6 +43,10 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 	if err != nil {
 		return err
 	}
+	extras, err := packSnapshotExtras(bundle)
+	if err != nil {
+		return err
+	}
 	name := sanitizeFileName(outputName)
 	release, err := tryLock(global.buildOutputDir, name)
 	if err != nil {
@@ -72,12 +76,7 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 		return err
 	}
 	ublkd := newUblkdClient(global.ublkdSocket)
-	options := &buildOptions{snapshotMetadata: metadata, snapshotExtras: map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}, snapfilesProgress: func(phase string) error { return writePackResources(activeMarker, work, phase) }}
-	if _, err = os.Stat(filepath.Join(bundle, "vault.json")); err == nil {
-		options.snapshotExtras["vault.json"] = filepath.Join(bundle, "vault.json")
-	} else if !os.IsNotExist(err) {
-		return err
-	}
+	options := &buildOptions{snapshotMetadata: metadata, snapshotExtras: extras, snapfilesProgress: func(phase string) error { return writePackResources(activeMarker, work, phase) }}
 	// Preserve backing files if this process is killed or resource rollback fails.
 	if err = writePackResources(activeMarker, work, packPhasePrepared); err != nil {
 		return err
@@ -99,6 +98,21 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 	// kernel resource has been released, then discard only the scratch directory.
 	return nil
 }
+
+// State files keep the native snapshot names and opaque contents in snapfiles.
+func packSnapshotExtras(bundle string) (map[string]string, error) {
+	extras := map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}
+	for _, name := range []string{"vault.json", "policy.json", "SHA256SUMS"} {
+		path := filepath.Join(bundle, name)
+		if _, err := os.Stat(path); err == nil {
+			extras[name] = path
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("stat snapshot %s: %w", name, err)
+		}
+	}
+	return extras, nil
+}
+
 func writePackedPair(layout artifactLayout, output outputNames, root []ocispec.Descriptor, snap ocispec.Descriptor) error {
 	cfg, err := layout.installBytes(minimalImageConfig(), ocispec.MediaTypeImageConfig)
 	if err != nil {

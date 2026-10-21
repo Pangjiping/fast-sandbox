@@ -37,6 +37,9 @@ cp "$TEST_PREPARE_ROOT/oci/inputs/sandbox-1.json" "$TEST_PREPARE_ROOT/cli-input.
 mkdir -p "$home/mnt"
 printf '%s' "$TEST_PREPARE_STATE" > "$home/state.json"
 touch "$home/mnt/vmstate.bin" "$home/mnt/memfile"
+if [ -n "${TEST_PREPARE_BUNDLE:-}" ]; then
+  cp "$TEST_PREPARE_BUNDLE/"* "$home/mnt/"
+fi
 `), 0755))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
