@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 
@@ -97,17 +98,19 @@ func TestOCIBuildUsesRemoteSourceWithoutDownloadingSourceLayers(t *testing.T) {
 			bin := t.TempDir()
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("TEST_OCI_COMMANDS", dir)
+			buildID := uuid.NewString()
+			t.Setenv(buildIDEnvName, buildID)
 			require.NoError(t, os.WriteFile(filepath.Join(bin, "ip"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEST_OCI_COMMANDS/ip.log\"\n"), 0755))
-			require.NoError(t, os.WriteFile(filepath.Join(bin, "fsb-vm"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TEST_OCI_COMMANDS/fsb-args\"\nexit 9\n"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(bin, "fsb-vm"), []byte("#!/bin/sh\nif [ \"$1\" = push ]; then\n  printf '%s\\n' \"$@\" > \"$TEST_OCI_COMMANDS/push-args\"\n  exit 9\nfi\nprintf '%s\\n' \"$@\" > \"$TEST_OCI_COMMANDS/fsb-args\"\n"), 0755))
 			spec := apiv1alpha2.SandboxTemplateSpec{
 				Image: tag.String(), Execd: execdTag.String(),
 				Machine: apiv1alpha2.MachineSpec{VCPU: "1", Memory: "512Mi"},
 				Envs:    []corev1.EnvVar{{Name: "OVERRIDE", Value: "from-spec"}},
-				Output:  apiv1alpha2.OutputSpec{Format: apiv1alpha2.ArtifactFormatOverlayBD, RootfsSize: "1Gi", Publish: "oci://" + host + "/template:build"},
+				Output:  apiv1alpha2.OutputSpec{Format: apiv1alpha2.ArtifactFormatOverlayBD, RootfsSize: "1Gi", Publish: "oci://" + host + "/template"},
 			}
 			spec.Readiness.WarmupSeconds = 600
 			err = buildOCITemplate(context.Background(), spec, dir, test.kernel)
-			require.ErrorContains(t, err, "fsb-vm build: exit status 9")
+			require.ErrorContains(t, err, "fsb-vm push: exit status 9")
 			raw, err = os.ReadFile(filepath.Join(dir, "fsb-args"))
 			require.NoError(t, err)
 			args := strings.Split(strings.TrimSpace(string(raw)), "\n")
@@ -145,6 +148,11 @@ func TestOCIBuildUsesRemoteSourceWithoutDownloadingSourceLayers(t *testing.T) {
 			require.Equal(t, "link set dev "+buildTap+" address "+guestnetwork.GatewayMAC, commands[1])
 			require.Equal(t, "link set dev "+buildTap+" up", commands[2])
 			require.Equal(t, "link del "+buildTap, commands[3])
+			raw, err = os.ReadFile(filepath.Join(dir, "push-args"))
+			require.NoError(t, err)
+			args = strings.Split(strings.TrimSpace(string(raw)), "\n")
+			require.Equal(t, host+"/template:"+buildID, value("--destination"))
+			require.Equal(t, filepath.Join(dir, ".dockerconfigjson"), value("--auth-file"))
 		})
 	}
 }
@@ -202,4 +210,40 @@ func TestObjectStoreSourceStillStagesLocalTar(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(dir, imageEnvFileName))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), "SOURCE_ARCH=amd64")
+}
+
+func TestOCIBuildDestinationUsesSystemUUID(t *testing.T) {
+	repository := "oci://registry.example.com:5000/team/templates"
+	id := uuid.NewString()
+	destination, err := ociBuildDestination(repository, id)
+	require.NoError(t, err)
+	require.Equal(t, "registry.example.com:5000/team/templates:"+id, destination)
+	repeated, err := ociBuildDestination(repository, id)
+	require.NoError(t, err)
+	require.Equal(t, destination, repeated, "one build UUID must survive retries")
+	first, err := ociBuildDestination(repository, "")
+	require.NoError(t, err)
+	second, err := ociBuildDestination(repository, "")
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "separate local builds get separate pair IDs")
+	for _, target := range []string{first, second} {
+		generated, err := uuid.Parse(strings.TrimPrefix(target, "registry.example.com:5000/team/templates:"))
+		require.NoError(t, err)
+		require.Equal(t, uuid.Version(4), generated.Version())
+	}
+	_, err = ociBuildDestination(repository, "not-a-uuid")
+	require.ErrorContains(t, err, "invalid OCI build UUID")
+}
+
+func TestOCIBuilderRejectsTaggedOrInvalidPublishBeforeBuild(t *testing.T) {
+	for _, publish := range []string{"oci://r.example/templates:tag", "oci://r.example/templates@sha256:" + strings.Repeat("a", 64), "oci://r.example/", "oci://r.example/templates:"} {
+		t.Run(publish, func(t *testing.T) {
+			dir := t.TempDir()
+			spec := apiv1alpha2.SandboxTemplateSpec{Output: apiv1alpha2.OutputSpec{Format: apiv1alpha2.ArtifactFormatOverlayBD, Publish: publish}}
+			require.ErrorContains(t, buildOCITemplate(context.Background(), spec, dir, ""), "without a tag or digest")
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Empty(t, entries, "invalid output must fail before credentials, source pull or build setup")
+		})
+	}
 }

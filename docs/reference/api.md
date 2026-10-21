@@ -222,7 +222,7 @@ spec:
 | `readiness.healthCheck` | No | — | Fallback health command; empty uses image `CMD-SHELL` |
 | `output.rootfsSize` | Yes | `"30Gi"` | Logical rootfs capacity (minimum, rounded up to SI GiB) |
 | `output.format` | Yes | `overlaybd` | `native` for S3-compatible storage; `overlaybd` requires `output.publish: oci://...` |
-| `output.publish` | No | platform store for native | `native`: S3-compatible target, e.g. `s3://bucket/prefix`, or omit to use the platform store. `overlaybd`: explicit `oci://registry/repository:id` required; S3 is rejected |
+| `output.publish` | No for native; yes for OCI | platform store for native | `native`: S3-compatible target, e.g. `s3://bucket/prefix`, or omit to use the platform store. `overlaybd`: Repository-only `oci://registry/repository` required; tags and digests are rejected before starting a build Pod. The system generates a UUID per build; S3 is rejected |
 | `output.publishSecretRef` | No for native; yes for OCI | — | Secret in the template's namespace: S3 keys for native; `.dockerconfigjson` for OCI |
 | `output.prime` | No | — | Reserved: seed-node cache priming; not yet implemented |
 
@@ -235,7 +235,7 @@ Readiness precedence: custom `probe` → execd `/ping` → `warmupSeconds` +
 | --- | --- |
 | `phase` | `Pending`, `Building`, `Succeeded`, or `Failed` |
 | `conditions` | `BuildSucceeded` with reason/message on terminal states |
-| `manifestRef` | Published manifest URI (`s3://…/<sha256(manifest)[:16]>/manifest.json`) |
+| `manifestRef` | Published manifest URI: `s3://…/<sha256(manifest)[:16]>/manifest.json` for native output; immutable `oci://registry/repository@sha256:...` snapfiles reference for OCI output |
 | `artifactDigest` | sha256 of the manifest document itself |
 | `lastBuildTime` | When the latest build completed |
 | `observedGeneration` | Generation of the last applied build |
@@ -244,7 +244,12 @@ Build Pods run in the template's own namespace as
 `<template>-build-<generation>`, owned by the template (deleting the
 template cascades to its Pods via the garbage collector), pinned to
 `sandbox.fast.io/kvm=true` nodes; editing the spec triggers a rebuild
-(generation bump). Finished Pods are reaped after the build TTL (24 h).
+(generation bump). Finished Pods are reaped after the build TTL (24 h). For OCI
+output, the UUID is fixed in the build Pod: retries of that Pod reuse it,
+while a new generation or replacement build Pod receives a new UUID. The two
+tags are `<uuid>_rootfs` and `<uuid>_snapfiles`; `status.manifestRef` points to
+the latest successful build. Applying an unchanged spec does not rebuild.
+
 
 See the [SandboxTemplate guide](../guides/sandboxtemplate-golden-images.md)
 for the end-to-end workflow, artifact layout, and consumption contract.

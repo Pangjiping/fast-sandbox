@@ -13,6 +13,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
@@ -22,6 +23,7 @@ import (
 
 const ociMemoryField = "memory"
 const ociGuestInterface = "eth0"
+const buildIDEnvName = "SANDBOX_TEMPLATE_BUILD_ID"
 
 // buildOCITemplate delegates disk conversion, cold boot and snapshots to fsb-vm.
 // It shares the existing guest bootstrap contract with native templates.
@@ -31,6 +33,10 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	}
 	if os.Getenv("SANDBOX_TEMPLATE_IMAGE_TAR") != "" {
 		return fmt.Errorf("SANDBOX_TEMPLATE_IMAGE_TAR is supported only for object-store output; OCI templates require a registry source")
+	}
+	destination, err := ociBuildDestination(spec.Output.Publish, os.Getenv(buildIDEnvName))
+	if err != nil {
+		return err
 	}
 	authDir := os.Getenv(publishCredentialsDirEnv)
 	authFile := filepath.Join(authDir, ".dockerconfigjson")
@@ -105,7 +111,7 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	if err = os.WriteFile(metaFile, raw, 0600); err != nil {
 		return err
 	}
-	cmd = exec.CommandContext(ctx, "fsb-vm", "push", "--artifact-dir", filepath.Join(workdir, "artifacts", "template_build"), "--destination", strings.TrimPrefix(spec.Output.Publish, "oci://"), "--metadata-file", metaFile, "--auth-file", authFile)
+	cmd = exec.CommandContext(ctx, "fsb-vm", "push", "--artifact-dir", filepath.Join(workdir, "artifacts", "template_build"), "--destination", destination, "--metadata-file", metaFile, "--auth-file", authFile)
 	cmd.Stderr = os.Stderr
 	output, err := cmd.Output()
 	if err != nil {
@@ -122,6 +128,21 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 		return fmt.Errorf("fsb-vm push returned incomplete publication")
 	}
 	return patchPodAnnotations(ctx, result.ManifestRef, result.ArtifactDigest)
+}
+
+// The controller pins buildID in the Pod. Local builder runs get a fresh UUID.
+func ociBuildDestination(repository, buildID string) (string, error) {
+	if err := ocitemplate.ValidatePublishRepository(repository); err != nil {
+		return "", err
+	}
+	if buildID == "" {
+		buildID = uuid.NewString()
+	}
+	id, err := uuid.Parse(buildID)
+	if err != nil {
+		return "", fmt.Errorf("invalid OCI build UUID: %w", err)
+	}
+	return strings.TrimPrefix(repository, ocitemplate.Prefix) + ":" + id.String(), nil
 }
 
 // prepareOCISource reads only the source metadata. fsb-vm downloads the layers

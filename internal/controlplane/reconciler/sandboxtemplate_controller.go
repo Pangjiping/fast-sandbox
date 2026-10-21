@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +29,7 @@ import (
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/artifactstore"
+	"fast-sandbox/internal/ocitemplate"
 )
 
 const (
@@ -57,6 +59,9 @@ const (
 // builderImageEnv is the environment variable carrying the serialized
 // SandboxTemplate spec into the build Pod.
 const builderImageEnv = "SANDBOX_TEMPLATE_SPEC"
+
+// Persist the pair ID in the build Pod so reconciler retries reuse it.
+const buildIDEnvName = "SANDBOX_TEMPLATE_BUILD_ID"
 
 // sandboxTemplateBuildLabel links a build Pod to its SandboxTemplate (name
 // and namespace; the Pod also carries an owner reference — the labels let
@@ -511,6 +516,9 @@ func (r *SandboxTemplateReconciler) effectiveOutput(output apiv1alpha2.OutputSpe
 		if output.Format != apiv1alpha2.ArtifactFormatOverlayBD {
 			return output, fmt.Errorf("OCI templates require overlaybd format")
 		}
+		if err := ocitemplate.ValidatePublishRepository(output.Publish); err != nil {
+			return output, err
+		}
 		if output.PublishSecretRef == nil || strings.TrimSpace(output.PublishSecretRef.Name) == "" {
 			return output, fmt.Errorf("OCI templates require output.publishSecretRef with a Secret name containing .dockerconfigjson")
 		}
@@ -594,6 +602,7 @@ func (r *SandboxTemplateReconciler) createBuildPod(ctx context.Context, template
 		},
 	}
 	if strings.HasPrefix(output.Publish, "oci://") {
+		env = append(env, corev1.EnvVar{Name: buildIDEnvName, Value: uuid.NewString()})
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "host-dev", MountPath: "/dev"})
 		volumes = append(volumes, corev1.Volume{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev", Type: ptr(corev1.HostPathDirectory)}}})
 	}

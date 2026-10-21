@@ -154,6 +154,14 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 ## 4. 构建模板
 
+通过 Kubernetes `SandboxTemplate` 构建时，`spec.output.publish` 只填写仓库地址，
+例如 `oci://registry.example.com/team/templates`，不要带 tag 或 digest。
+Controller 为每个构建 Pod 分配随机 UUID，Builder 发布 `<uuid>_rootfs` 和
+`<uuid>_snapfiles`，并通过 `status.manifestRef` 返回 snapfiles 的不可变 digest 引用。
+修改 spec 触发新一轮构建时生成新的 UUID；重复 reconcile 复用已有 Pod 的 UUID。
+重复 apply 未变化的 spec 不会触发构建。已有带 tag 的发布地址需要先去掉 tag，
+具体见 [OCI 模板重复构建](overlaybd-oci-sandboxes.md#rebuilds-and-generated-tags)。
+
 `SandboxTemplate` 的标准 Builder 镜像包含 OCI 所需的 `fsb-vm`、convertor 和 OverlayBD 工具。输出为 `oci://` 时，Builder 启动 ublkd，读取源镜像的 manifest/config 以固定 linux/amd64 镜像 digest 并准备环境变量和运行时注入文件，然后将远端 digest 引用直接传给 `fsb-vm build`。源镜像层由 `fsb-vm` 的构建流程读取，不预先写入 OCI layout，也不启动本地 registry。`format: native` 的对象存储路径保留 `pullOCILayout → oci2rootfs` 流程；OverlayBD 仅支持 OCI，不支持 S3；`SANDBOX_TEMPLATE_IMAGE_TAR` 仅支持该对象存储路径，OCI 路径设置此变量会报错。OCI 构建需要访问源和目标 registry。
 
 `build/Dockerfile.fastlet` 生成的标准 Fastlet 镜像包含 OCI 运行工具；OCI Firecracker Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启动 ublkd。默认不启动，普通运行模式不需要 ublk。标准 Builder 使用 `auto` 模式，保留非 OCI 构建不依赖 ublk 的行为。OCI 仓库访问支持匿名或用户名密码认证，包括 Docker config 的 `auth` 字段；仅含 `identitytoken` 的凭据会被明确拒绝，同时存在用户名密码时使用用户名密码。原有公共凭据字段及其他运行时行为保持不变。
@@ -342,7 +350,7 @@ registry.example.com/team/application:v1_snapfiles
 
 对明文 HTTP registry，使用 `fsb-vm --plain-http push ...`；该参数同时用于目标仓库和增量产物的远端父层读取，默认仍使用 HTTPS。
 
-`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，携带平台元数据和 checkpoint owner annotations 的 snapfiles 最后发布，不再生成第三份元数据入口。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。历史三产物入口仍可读取。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
+`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，携带平台元数据和 checkpoint owner annotations 的 snapfiles 最后发布，不再生成第三份元数据入口。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。历史三产物入口仍可读取。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤，将不带 tag 的 `output.publish` 与系统分配的 UUID 组合为上传目标。手动执行 CLI 时仍按 `--destination repository:tag` 显式指定 tag。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
 
 ## 6. 准备 template.json
 

@@ -118,6 +118,19 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	_, _, err = Push(context.Background(), dir, dest, []byte(`{"machine":{"vcpu":"2"}}`), nil)
 	require.ErrorContains(t, err, "refusing to overwrite")
 
+	// A separate build can publish changed content into the same repository
+	// under its own UUID without altering the original immutable pair.
+	nextDestination := strings.TrimSuffix(dest, ":build") + ":8a4fa491-2ea1-4c5f-9f26-682ed926dc22"
+	nextRef, _, err := Push(context.Background(), dir, nextDestination, []byte(`{"machine":{"vcpu":"2"}}`), nil)
+	require.NoError(t, err)
+	require.NotEqual(t, ref, nextRef)
+	oldMetadata, err := Resolve(context.Background(), ref, nil)
+	require.NoError(t, err)
+	require.Contains(t, string(oldMetadata), `"vcpu":"1"`)
+	newMetadata, err := Resolve(context.Background(), nextRef, nil)
+	require.NoError(t, err)
+	require.Contains(t, string(newMetadata), `"vcpu":"2"`)
+
 	payload, err := Resolve(context.Background(), ref, nil)
 	require.NoError(t, err)
 	pair, err := Decode(payload)
@@ -229,5 +242,14 @@ func TestResolveSharesRepositoryAuthAndValidatesPair(t *testing.T) {
 				require.Error(t, err)
 			}
 		})
+	}
+}
+
+func TestValidatePublishRepository(t *testing.T) {
+	for _, reference := range []string{"oci://registry.example.com/team/templates", "oci://localhost:5000/templates", "oci://[::1]:5000/team/templates"} {
+		require.NoError(t, ValidatePublishRepository(reference))
+	}
+	for _, reference := range []string{"registry.example.com/templates", "oci://registry.example.com/templates:tag", "oci://registry.example.com/templates@sha256:" + strings.Repeat("a", 64), "oci://registry.example.com/templates:", "oci://registry.example.com/templates@", "oci://registry.example.com/", "oci://registry.example.com", "oci://user:password@registry.example.com/templates", "oci://registry.example.com/UPPER"} {
+		require.Error(t, ValidatePublishRepository(reference), reference)
 	}
 }

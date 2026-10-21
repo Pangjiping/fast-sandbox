@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1080,7 +1082,7 @@ func TestSandboxTemplateReconcileDefaultsMitmCertificateKey(t *testing.T) {
 func TestSandboxTemplateOCIOutputAndDeviceMount(t *testing.T) {
 	template := newSandboxTemplate("default", "oci-template")
 	template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
-	template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine:build"
+	template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine"
 	template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: "registry"}
 	r := newSandboxTemplateReconciler(t, template)
 	output, err := r.effectiveOutput(template.Spec.Output, "s3://native/store")
@@ -1141,7 +1143,7 @@ func TestOCIMissingPublishSecretFailsBeforeCreatingPod(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			template := newSandboxTemplate("default", "oci-no-secret")
 			template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
-			template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine:build"
+			template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine"
 			if name != "nil" {
 				template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: name}
 			}
@@ -1161,6 +1163,73 @@ func TestOCIMissingPublishSecretFailsBeforeCreatingPod(t *testing.T) {
 			if len(pods.Items) != 0 {
 				t.Fatal("invalid OCI output launched a Pod")
 			}
+		})
+	}
+}
+
+func TestOCITemplateBuildUUIDPersistsPerPodAndChangesOnRebuild(t *testing.T) {
+	ctx := context.Background()
+	template := newSandboxTemplate("default", "oci-rebuild")
+	template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
+	template.Spec.Output.Publish = "oci://registry.example.com/templates/alpine"
+	template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: "registry"}
+	r := newSandboxTemplateReconciler(t, template)
+	key := client.ObjectKeyFromObject(template)
+	reconcileOnce(t, r, key)
+	readID := func(template *apiv1alpha2.SandboxTemplate) string {
+		var pod corev1.Pod
+		require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: template.Namespace, Name: buildPodName(template)}, &pod))
+		id := ""
+		for _, env := range pod.Spec.Containers[0].Env {
+			switch env.Name {
+			case buildIDEnvName:
+				id = env.Value
+			case builderImageEnv:
+				var spec apiv1alpha2.SandboxTemplateSpec
+				require.NoError(t, json.Unmarshal([]byte(env.Value), &spec))
+				require.Equal(t, template.Spec.Output.Publish, spec.Output.Publish, "user spec remains repository-only")
+			}
+		}
+		parsed, err := uuid.Parse(id)
+		require.NoError(t, err)
+		require.Equal(t, uuid.Version(4), parsed.Version())
+		return id
+	}
+	first := readID(template)
+	// Even competing Pod creates retain the UUID persisted by the winning create.
+	require.NoError(t, r.createBuildPod(ctx, template, template.Spec.Output, ""))
+	reconcileOnce(t, r, key)
+	require.Equal(t, first, readID(template))
+	var updated apiv1alpha2.SandboxTemplate
+	require.NoError(t, r.Get(ctx, key, &updated))
+	updated.Generation++
+	updated.Spec.Machine.Memory = "4Gi"
+	require.NoError(t, r.Update(ctx, &updated))
+	reconcileOnce(t, r, key)
+	second := readID(&updated)
+	require.NotEqual(t, first, second, "new generations must not overwrite the previous pair")
+	reconcileOnce(t, r, key)
+	require.Equal(t, second, readID(&updated))
+}
+
+func TestOCIInvalidPublishFailsBeforeCreatingPod(t *testing.T) {
+	for _, publish := range []string{"oci://registry.example.com/templates:tag", "oci://registry.example.com/templates@sha256:" + strings.Repeat("a", 64), "oci://registry.example.com/", "oci://registry.example.com/templates:"} {
+		t.Run(publish, func(t *testing.T) {
+			template := newSandboxTemplate("default", "oci-invalid-target")
+			template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
+			template.Spec.Output.Publish = publish
+			template.Spec.Output.PublishSecretRef = &corev1.LocalObjectReference{Name: "registry"}
+			r := newSandboxTemplateReconciler(t, template)
+			reconcileOnce(t, r, client.ObjectKeyFromObject(template))
+			var current apiv1alpha2.SandboxTemplate
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(template), &current))
+			require.Equal(t, apiv1alpha2.SandboxTemplatePhaseFailed, current.Status.Phase)
+			condition := findBuildCondition(t, &current)
+			require.Equal(t, "InvalidOutput", condition.Reason)
+			require.Contains(t, condition.Message, "without a tag or digest")
+			var pods corev1.PodList
+			require.NoError(t, r.List(context.Background(), &pods))
+			require.Empty(t, pods.Items)
 		})
 	}
 }

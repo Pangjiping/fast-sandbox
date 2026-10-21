@@ -51,6 +51,17 @@ func WithPlainHTTP(enabled bool) RepositoryOption {
 	return func(repo *remote.Repository) { repo.PlainHTTP = enabled }
 }
 
+// ValidatePublishRepository requires a repository-only SandboxTemplate target.
+// Explicit tags remain supported by the standalone Push API.
+func ValidatePublishRepository(reference string) error {
+	raw := strings.TrimPrefix(reference, Prefix)
+	ref, err := registry.ParseReference(raw)
+	if !strings.HasPrefix(reference, Prefix) || err != nil || ref.Reference != "" || raw != ref.Registry+"/"+ref.Repository {
+		return fmt.Errorf("OCI publish target must be oci://registry/repository without a tag or digest")
+	}
+	return nil
+}
+
 func Repository(reference string, credentials CredentialFunc, options ...RepositoryOption) (*remote.Repository, registry.Reference, error) {
 	ref, err := registry.ParseReference(strings.TrimPrefix(reference, Prefix))
 	if err != nil {

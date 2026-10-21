@@ -328,8 +328,10 @@ spec:
                     type: object
                   publish:
                     description: |-
-                      Publish selects the destination. oci://registry/namespace/repo:tag
-                      invokes fsb-vm and publishes an OverlayBD OCI template pair;
+                      Publish selects the destination. oci://registry/namespace/repo must
+                      omit the tag and digest; each build Pod receives a system-generated
+                      UUID and publishes <uuid>_rootfs and <uuid>_snapfiles. A new build
+                      uses a new UUID; retries of the same Pod reuse its UUID.
                       PublishSecretRef then requires .dockerconfigjson.
                       For format=native, Publish is the S3-compatible object store target, e.g.
                       s3://bucket/sandbox-images/ (digest-addressed publication). When

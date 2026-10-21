@@ -7,7 +7,9 @@ object store. The Firecracker runtime consumes the artifacts on demand
 the template is the build-time half of on-demand loading.
 
 This guide covers the `format: native` object-store pipeline. OverlayBD templates
-require `output.publish: oci://...` and use the [OverlayBD OCI guide](overlaybd-oci-sandboxes.md).
+require a repository-only `output.publish: oci://registry/repository`, without a
+tag or digest. The system generates a UUID per build; see the
+[OverlayBD OCI guide](overlaybd-oci-sandboxes.md#rebuilds-and-generated-tags).
 
 Only two combinations are supported: `native` + S3-compatible storage, and
 `overlaybd` + OCI registry. The default format remains `overlaybd`, so S3
@@ -217,7 +219,7 @@ Precedence: custom `probe` → execd `/ping` (when execd is injected) →
 | --- | ---: | --- | --- |
 | `output.rootfsSize` | Yes | `"30Gi"` | Logical capacity of the produced `rootfs.ext4` (Kubernetes quantity). Rounded **up** to SI GiB for oci2rootfs (`30Gi` → 33G → ~30.7 GiB sparse file) |
 | `output.format` | Yes | `overlaybd` | `native` for S3-compatible storage; `overlaybd` requires an explicit `oci://` target |
-| `output.publish` | No | platform store | S3-compatible target for `format: native`, e.g. `s3://sandbox-images/publish`. OverlayBD requires `oci://registry/repository:id` and a registry credential Secret. For native output, empty defaults to the platform artifact store (`fast-sandbox-artifact-store` ConfigMap); a non-empty value must equal that store or the build fails with an `InvalidOutput` condition, so a template cannot silently publish where no node agent reads. Digest-addressed publication; the builder itself refuses to run with an empty target unless `SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1` |
+| `output.publish` | No for native; yes for OCI | platform store for native | S3-compatible target for `format: native`, e.g. `s3://sandbox-images/publish`. OverlayBD requires `oci://registry/repository` without a tag or digest (the system generates a UUID per build) and a registry credential Secret. For native output, empty defaults to the platform artifact store (`fast-sandbox-artifact-store` ConfigMap); a non-empty value must equal that store or the build fails with an `InvalidOutput` condition, so a template cannot silently publish where no node agent reads. Digest-addressed publication; the builder itself refuses to run with an empty target unless `SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1` |
 | `output.publishSecretRef` | No | — | Name of the write-credential Secret in the template's namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`); the controller mounts it into the build Pod and the builder reads the keys as files (never env-injected). Without it the build relies on platform-level credentials (IRSA/node metadata). Runtime nodes read with a **separate** read-only credential — write keys never reach them |
 | `output.prime` | No | — | Reserved: seed-node cache priming after a successful build; not yet implemented |
 
@@ -236,6 +238,11 @@ what the node agents pull.
 - **Rebuild**: edit the spec — the generation bump triggers a new build. A
   mid-build spec change deletes the stale build Pod immediately (concurrent
   privileged builds cannot stack up).
+  Reapplying an unchanged spec does not start another build. For OCI output,
+  each new build Pod publishes a new UUID pair in the declared repository;
+  controller retries reuse the UUID already stored in that Pod. Use the new
+  `status.manifestRef` after the build succeeds; earlier published pairs remain
+  intact.
 - **Build Pods** run in the template's own namespace as
   `<template>-build-<generation>`, owned by the template (deleting the
   template cascades to its Pods via the garbage collector), pinned to

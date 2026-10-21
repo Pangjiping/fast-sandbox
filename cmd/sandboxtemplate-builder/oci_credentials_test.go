@@ -15,7 +15,7 @@ import (
 func TestOCIBuilderRejectsSelectedTokenOnlyCredentials(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DOCKER_CONFIG", dir)
-	spec := apiv1alpha2.SandboxTemplateSpec{Image: "source.example/team/base:build", Execd: "execd.example/team/execd:build", Output: apiv1alpha2.OutputSpec{Publish: "oci://destination.example/team/template:build"}}
+	spec := apiv1alpha2.SandboxTemplateSpec{Image: "source.example/team/base:build", Execd: "execd.example/team/execd:build", Output: apiv1alpha2.OutputSpec{Publish: "oci://destination.example/team/template"}}
 	for _, host := range []string{"source.example", "execd.example", "destination.example"} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"auths":{"`+host+`":{"identitytoken":"private-token"}}}`), 0600))
 		require.ErrorContains(t, stageOCICredentials(spec, dir), "identitytoken-only credentials are not supported")
@@ -26,7 +26,7 @@ func TestOCIBuilderRejectsSelectedTokenOnlyCredentials(t *testing.T) {
 		raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 		require.NoError(t, err)
 		require.NotContains(t, string(raw), "identitytoken")
-		for _, image := range []string{spec.Image, spec.Execd, "destination.example/team/template:build"} {
+		for _, image := range []string{spec.Image, spec.Execd, "destination.example/team/template"} {
 			ref, err := name.ParseReference(image)
 			require.NoError(t, err)
 			selected, err := authn.DefaultKeychain.Resolve(ref.Context())
@@ -34,7 +34,7 @@ func TestOCIBuilderRejectsSelectedTokenOnlyCredentials(t *testing.T) {
 			credential, err := selected.Authorization()
 			require.NoError(t, err)
 			require.Empty(t, credential.IdentityToken)
-			if image == "destination.example/team/template:build" && config != `{"auths":{}}` {
+			if image == "destination.example/team/template" && config != `{"auths":{}}` {
 				require.Equal(t, "reader", credential.Username)
 				require.Equal(t, "secret", credential.Password)
 			} else {

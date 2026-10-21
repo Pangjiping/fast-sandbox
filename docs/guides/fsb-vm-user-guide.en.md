@@ -154,6 +154,15 @@ sudo "$FSB_VM" --plain-http --state-dir "$STATE_DIR" list
 
 ## 4. Build a template
 
+For Kubernetes SandboxTemplate builds, set `spec.output.publish` to the repository
+only, for example `oci://registry.example.com/team/templates`, without a tag or
+digest. The controller assigns a random UUID to each build Pod; the builder
+publishes `<uuid>_rootfs` and `<uuid>_snapfiles` and returns the immutable
+snapfiles digest in `status.manifestRef`. A new spec generation receives a new
+UUID, while reconciliation retries reuse the existing Pod's UUID. Applying an
+unchanged spec does not rebuild. See [OCI template rebuilds](overlaybd-oci-sandboxes.md#rebuilds-and-generated-tags)
+for migration from tagged publish addresses.
+
 The standard `SandboxTemplate` builder image includes `fsb-vm`, the convertor and OverlayBD tools. For `oci://` output, the builder starts ublkd, reads the source manifest/config to pin the linux/amd64 image digest and prepare environment variables and runtime injections, then passes the remote digest reference directly to `fsb-vm build`. The `fsb-vm` build flow reads the source layers; the builder does not stage an OCI layout or start a local registry. The `format: native` object-store path retains `pullOCILayout → oci2rootfs`. OverlayBD is supported only with OCI publication, not S3. `SANDBOX_TEMPLATE_IMAGE_TAR` is supported only on that object-store path and is rejected for OCI output. OCI builds require access to both source and destination registries.
 
 The standard Fastlet image built with `build/Dockerfile.fastlet` includes the OCI runtime tools. Set `FAST_SANDBOX_OCI_ENABLED=true` in an OCI Firecracker Pool to start ublkd; it is disabled by default so other runtime deployments do not require ublk. The standard builder uses `auto` mode so non-OCI builds do not require ublk. OCI registry access supports anonymous or username/password authentication, including Docker config `auth` entries. Identity-token-only credentials are rejected; when both are present, username/password credentials are used. The public registry credential fields and other runtimes are unchanged.
@@ -349,7 +358,7 @@ The publishing process must upload every `blobs/sha256/*` object referenced by t
 
 For a plain HTTP registry, use `fsb-vm --plain-http push ...`. The setting applies to the destination and remote parent-layer reads for incremental artifacts; HTTPS remains the default.
 
-`fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It publishes only `<tag>_rootfs` and `<tag>_snapfiles`, uploading rootfs first and snapfiles last. Platform metadata and checkpoint owner annotations live on the snapfiles manifest; no third metadata image is created. The returned `manifestRef` and `artifactDigest` identify the snapfiles manifest. The two images are paired by ID, so IDs must be immutable; the publisher rejects overwriting a tag with different contents. Previously published three-image entries remain readable. The OCI `SandboxTemplate` builder runs this step automatically. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
+`fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It publishes only `<tag>_rootfs` and `<tag>_snapfiles`, uploading rootfs first and snapfiles last. Platform metadata and checkpoint owner annotations live on the snapfiles manifest; no third metadata image is created. The returned `manifestRef` and `artifactDigest` identify the snapfiles manifest. The two images are paired by ID, so IDs must be immutable; the publisher rejects overwriting a tag with different contents. Previously published three-image entries remain readable. The OCI `SandboxTemplate` builder runs this step automatically, composing the destination from the repository-only `output.publish` and the system-assigned UUID. Explicit `--destination repository:tag` remains the standalone CLI contract. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
 
 ## 6. Prepare template.json
 

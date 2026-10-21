@@ -108,7 +108,7 @@ spec:
   output:
     rootfsSize: 2Gi
     format: overlaybd
-    publish: oci://registry.example.com/sandbox/templates:alpine-v1
+    publish: oci://registry.example.com/sandbox/templates
     publishSecretRef:
       name: registry-credentials
 ```
@@ -118,14 +118,36 @@ kubectl apply -f template.yaml
 kubectl -n fast-sandbox get sandboxtemplate alpine-oci -w
 ```
 
-Once `status.phase` is `Ready`, retrieve the result:
+Once `status.phase` is `Succeeded`, retrieve the result:
 
 ```bash
 TEMPLATE_REF=$(kubectl -n fast-sandbox get sandboxtemplate alpine-oci \
   -o jsonpath='{.status.manifestRef}')
 ```
 
-`TEMPLATE_REF` should look like `oci://registry.example.com/sandbox/templates@sha256:...`. Use this reference when creating Sandboxes, rather than the source image `alpine:3.19` or the resource name `alpine-oci`.
+`output.publish` is the destination repository only: `oci://registry/repository`. A tag such as `:alpine-v1`, a digest such as `@sha256:...`, or a malformed repository causes `InvalidOutput` before a build Pod is launched. The source `spec.image` can still include its normal image tag or digest.
+
+`TEMPLATE_REF` should look like `oci://registry.example.com/sandbox/templates@sha256:...`. Use this immutable `status.manifestRef` when creating Sandboxes. The repository-only `output.publish` is a build destination; it is not a runnable template reference.
+
+### Rebuilds and generated tags
+
+Each build Pod receives a system-generated random UUID. The builder uses it as the shared prefix for the two registry tags:
+
+```text
+# First build
+registry.example.com/sandbox/templates:<uuid-1>_rootfs
+registry.example.com/sandbox/templates:<uuid-1>_snapfiles
+
+# Next build, with the same output.publish
+registry.example.com/sandbox/templates:<uuid-2>_rootfs
+registry.example.com/sandbox/templates:<uuid-2>_snapfiles
+```
+
+Editing the Template spec, for example `spec.image` or `spec.envs`, increments its generation and starts a new build with a new UUID. Applying the same unchanged spec does not trigger another build. Reconciliation retries reuse the existing Pod and its UUID; a replacement build Pod receives a new UUID. Callers do not supply the UUID in the CR.
+
+On success, `status.manifestRef` and `status.artifactDigest` identify the latest build's snapfiles manifest. Rebuilding leaves previously published pairs intact. Save the earlier `manifestRef` before rebuilding if you need to create VMs from that version later.
+
+For an existing OCI Template with a tagged `output.publish`, remove the tag before its next build, for example change `oci://registry.example.com/sandbox/templates:alpine-v1` to `oci://registry.example.com/sandbox/templates`. This spec change triggers a new build. Historical pairs and their digest references remain usable. The standalone `fsb-vm push --destination repository:tag` command continues to accept an explicit tag; automatic UUID allocation belongs to the SandboxTemplate build flow.
 
 ### Registry artifact format
 
@@ -208,7 +230,7 @@ fp DeleteSandbox "{\"sandbox\": $SANDBOX_REF}"
 
 ## 5. Template and checkpoint destinations
 
-- **Template:** set `SandboxTemplate.spec.output.publish`, including `oci://` and a tag.
+- **Template:** set `SandboxTemplate.spec.output.publish` to `oci://registry/repository`, without a tag or digest. The system generates a UUID pair ID for each build Pod.
 - **Checkpoint:** defaults to the repository of the current restore source, which is the template repository on the first pause. The system generates the checkpoint tag.
 
 For a separate checkpoint repository, add this environment variable to the Pool's Fastlet container:
