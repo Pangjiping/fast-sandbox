@@ -668,11 +668,21 @@ func (m *Manager) setBinding(ctx context.Context, state *sandboxState, handlerNa
 	}
 	request := buildRequest(actionapi.OperationSetBinding, stableInvocationID(actionapi.OperationSetBinding, handlerName, instanceID, generation, attachment, digest, ""), generation, attachment)
 	request.Binding = &actionapi.BindingPayload{Input: input}
-	if err := m.caller.Invoke(ctx, handler.TargetHTTPPort, request); err != nil {
+	invokeStarted := time.Now()
+	invokeErr := m.caller.Invoke(ctx, handler.TargetHTTPPort, request)
+	klog.Infof("fastlet action invoke: sandbox=%s op=set_binding handler=%s gen=%d took=%dms result=%s",
+		attachment.SandboxUID, handlerName, generation, time.Since(invokeStarted).Milliseconds(),
+		func() string {
+			if invokeErr != nil {
+				return "err:" + invokeErr.Error()
+			}
+			return "ok"
+		}())
+	if invokeErr != nil {
 		state.mu.Lock()
-		setBindingStatus(binding, apiv1alpha2.ActionFailed, err.Error())
+		setBindingStatus(binding, apiv1alpha2.ActionFailed, invokeErr.Error())
 		state.mu.Unlock()
-		return err
+		return invokeErr
 	}
 	if current, currentErr := m.handlerInstance(handlerName); currentErr != nil || current != instanceID {
 		state.mu.Lock()
@@ -726,11 +736,21 @@ func (m *Manager) invokeHook(ctx context.Context, state *sandboxState, handlerNa
 	extra := fmt.Sprintf("%s/%d", checkpoint.Name, checkpoint.Sequence)
 	request := buildRequest(actionapi.OperationLifecycleHook, stableInvocationID(actionapi.OperationLifecycleHook, handlerName, instanceID, generation, attachment, binding.digest, extra), generation, attachment)
 	request.Hook = &actionapi.LifecycleHookPayload{Name: checkpoint.Name, Sequence: checkpoint.Sequence}
-	if err := m.caller.Invoke(ctx, handler.TargetHTTPPort, request); err != nil {
+	invokeStarted := time.Now()
+	invokeErr := m.caller.Invoke(ctx, handler.TargetHTTPPort, request)
+	klog.Infof("fastlet action invoke: sandbox=%s op=hook handler=%s hook=%s/%d gen=%d took=%dms result=%s",
+		attachment.SandboxUID, handlerName, checkpoint.Name, checkpoint.Sequence, generation, time.Since(invokeStarted).Milliseconds(),
+		func() string {
+			if invokeErr != nil {
+				return "err:" + invokeErr.Error()
+			}
+			return "ok"
+		}())
+	if invokeErr != nil {
 		state.mu.Lock()
-		setBindingStatus(binding, apiv1alpha2.ActionFailed, err.Error())
+		setBindingStatus(binding, apiv1alpha2.ActionFailed, invokeErr.Error())
 		state.mu.Unlock()
-		return err
+		return invokeErr
 	}
 	if current, currentErr := m.handlerInstance(handlerName); currentErr != nil || current != instanceID {
 		state.mu.Lock()
