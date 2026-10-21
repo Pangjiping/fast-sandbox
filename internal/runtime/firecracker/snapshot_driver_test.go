@@ -104,44 +104,6 @@ func TestCreateSnapshotSpillsDumpOutsideStateRoot(t *testing.T) {
 	require.Empty(t, entries, "the per-snapshot spill directory is removed")
 }
 
-func TestCreateSnapshotRecordsActionBindingsInManifest(t *testing.T) {
-	fixture, agent := newSnapshotFixture(t)
-	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-
-	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
-		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
-		ActionBindings: []runtimecontract.SnapshotActionBinding{
-			{Handler: "egress", Input: `{"egressPolicy":"deny-all"}`},
-		},
-	})
-	require.NoError(t, err)
-	recorded, ok := agent.manifest["actionBindings"].([]any)
-	require.True(t, ok, "manifest lacks actionBindings")
-	require.Len(t, recorded, 1)
-	entry := recorded[0].(map[string]any)
-	require.Equal(t, "egress", entry["handler"])
-	require.Equal(t, `{"egressPolicy":"deny-all"}`, entry["input"])
-}
-
-func TestCreateCheckpointRecordsActionBindingsInManifest(t *testing.T) {
-	fixture, agent := newSnapshotFixture(t)
-	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
-
-	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
-		SandboxID: sandboxID, SnapshotID: "ckpt-1", Kind: fastletapi.SnapshotKindCheckpoint,
-		ActionBindings: []runtimecontract.SnapshotActionBinding{
-			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
-		},
-	})
-	require.NoError(t, err)
-	recorded, ok := agent.manifest["actionBindings"].([]any)
-	require.True(t, ok, "checkpoint manifest lacks actionBindings")
-	require.Len(t, recorded, 1)
-	entry := recorded[0].(map[string]any)
-	require.Equal(t, "egress", entry["handler"])
-	require.Equal(t, `{"defaultAction":"deny"}`, entry["input"])
-}
-
 func TestCreateSnapshotFallsBackWhenSpillUnavailable(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	// A spill root that does not exist: the capacity guard fails and the
@@ -365,7 +327,7 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	size, err := assembleSnapshotManifest(fixture.stateRoot, staging, dir, nil)
+	size, err := assembleSnapshotManifest(fixture.stateRoot, staging, dir)
 	require.NoError(t, err)
 	require.Positive(t, size)
 
@@ -384,8 +346,7 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
 
 	// The Sandbox is itself a resume from a checkpoint whose manifest carries
-	// an egressVault entry and a stale actionBindings record; this dump
-	// stages no vault or policy file of its own.
+	// an egressVault entry; this dump stages no vault file of its own.
 	dir := filepath.Join(fixture.stateRoot, sandboxStateDir, sandboxID)
 	state, err := loadState(dir)
 	require.NoError(t, err)
@@ -400,9 +361,6 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
 		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
 		"egressVault":  map[string]any{"sha256": "stale", "sizeBytes": 7},
-		"actionBindings": []map[string]string{
-			{"handler": "egress", "input": `{"defaultAction":"allow"}`},
-		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
@@ -411,7 +369,7 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	_, err = assembleSnapshotManifest(fixture.stateRoot, staging, dir, nil)
+	_, err = assembleSnapshotManifest(fixture.stateRoot, staging, dir)
 	require.NoError(t, err)
 
 	payload, err := os.ReadFile(filepath.Join(staging, "manifest.json"))
@@ -420,8 +378,6 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	require.NoError(t, json.Unmarshal(payload, &document))
 	require.NotContains(t, document, "egressVault",
 		"a source checkpoint's vault marker must not ride forward into a vault-less dump")
-	require.NotContains(t, document, "actionBindings",
-		"a source checkpoint's recorded bindings must not ride forward into a dump that records none")
 }
 
 func TestCreateSnapshotPublishesWithTemplateKind(t *testing.T) {
@@ -646,23 +602,14 @@ func TestCreateTemplateSnapshotNeverExportsPolicy(t *testing.T) {
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
 		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
-		ActionBindings: []runtimecontract.SnapshotActionBinding{
-			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
-		},
 	})
 	require.NoError(t, err)
 	exports, _ := mover.snapshot()
 	for _, call := range exports {
 		require.NotContains(t, call, "policy:", "a template export would seal the still-running source")
 	}
-	// The manifest stays the CRD desired state; no policy file, no embed.
 	require.Len(t, agent.manifest["files"].(map[string]any), 3)
 	require.NotContains(t, agent.manifest["files"], "policy.json")
-	recorded, ok := agent.manifest["actionBindings"].([]any)
-	require.True(t, ok)
-	require.Len(t, recorded, 1)
-	require.Equal(t, `{"defaultAction":"deny"}`, recorded[0].(map[string]any)["input"],
-		"the CRD seed rides through untouched")
 }
 
 // A staged policy file rides the checkpoint cache commit like the vault file.
@@ -877,9 +824,7 @@ func TestImportRestorePolicyDeliversBundleBeforeDataPlane(t *testing.T) {
 }
 
 // A capability-carrying mover stages BOTH state files into the template
-// bundle seal-free (the snapshot is a complete capture); the manifest's
-// actionBindings stay the CRD desired state — the record content is never
-// embedded.
+// bundle seal-free (the snapshot is a complete capture).
 func TestCreateTemplateSnapshotStagesSealFreeState(t *testing.T) {
 	fixture, agent := newSnapshotFixture(t)
 	sandboxID := seedRunningSandbox(t, fixture, PhaseRunning)
@@ -893,9 +838,6 @@ func TestCreateTemplateSnapshotStagesSealFreeState(t *testing.T) {
 
 	_, err := fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{
 		SandboxID: sandboxID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindTemplate, TemplateName: "app-v2",
-		ActionBindings: []runtimecontract.SnapshotActionBinding{
-			{Handler: "egress", Input: `{"defaultAction":"deny"}`},
-		},
 	})
 	require.NoError(t, err)
 
@@ -911,10 +853,6 @@ func TestCreateTemplateSnapshotStagesSealFreeState(t *testing.T) {
 	require.Contains(t, files, "policy.json")
 	require.Contains(t, agent.sums, "vault.json")
 	require.Contains(t, agent.sums, "policy.json")
-	recorded, ok := agent.manifest["actionBindings"].([]any)
-	require.True(t, ok)
-	require.Len(t, recorded, 1)
-	require.Equal(t, `{"defaultAction":"deny"}`, recorded[0].(map[string]any)["input"])
 }
 
 // importTemplateCarry hands manifest-provenanced template state to the

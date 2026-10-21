@@ -168,7 +168,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 
-	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir, input.ActionBindings)
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir)
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
 		return nil, err
@@ -1060,28 +1060,7 @@ func stagedBundleFiles(staging string) ([]string, error) {
 	return bundleFiles, nil
 }
 
-// recordActionBindings writes THIS dump's actionBindings record into the
-// manifest: the CRD bindings of the snapshot request — the desired state the
-// control plane compiled at trigger time, and the ONLY policy channel into
-// a clone-create (a fresh subject has no egress record to import; the
-// staged policy.json is an opaque resume-only artifact and is deliberately
-// never embedded here). The source manifest's inherited record is dropped
-// unconditionally first: stale bindings must never ride forward — they
-// would publish the previous dump's policy (possibly relay-DELETEd since)
-// as this snapshot's authoritative record.
-func recordActionBindings(document map[string]any, actionBindings []runtimecontract.SnapshotActionBinding) {
-	delete(document, "actionBindings")
-	if len(actionBindings) == 0 {
-		return
-	}
-	recorded := make([]map[string]string, 0, len(actionBindings))
-	for _, binding := range actionBindings {
-		recorded = append(recorded, map[string]string{"handler": binding.Handler, "input": binding.Input})
-	}
-	document["actionBindings"] = recorded
-}
-
-func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindings []runtimecontract.SnapshotActionBinding) (int64, error) {
+func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
@@ -1144,13 +1123,11 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string, actionBindi
 	}
 	document["format"] = "native"
 	document["validation"] = map[string]any{"booted": true, "restored": false}
-	// The actionBindings record and the egress vault marker describe THIS
-	// dump: a source checkpoint's inherited entries must never ride forward
-	// (see recordActionBindings) — and a stale vault marker would claim
-	// vault state this bundle does not carry and publish the previous
+	// The egress vault marker describes THIS dump: a source checkpoint's
+	// inherited marker must never ride forward — a stale vault marker would
+	// claim vault state this bundle does not carry and publish the previous
 	// subject's vault fingerprint into shared, world-readable template
 	// manifests.
-	recordActionBindings(document, actionBindings)
 	delete(document, "egressVault")
 	if vaultEntry, ok := files[vaultBundleName]; ok {
 		document["egressVault"] = vaultEntry

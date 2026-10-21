@@ -96,32 +96,17 @@ path); later creates on that node restore in milliseconds.
 
 ## Network policy on restore
 
-A snapshot records the source Sandbox's **action bindings** verbatim in the
-published manifest (`actionBindings`, an optional field every existing
-consumer ignores) — including egress network policy applied through the
-egress handler. The artifact set is therefore self-contained and outlives
-the SandboxSnapshot CR: deleting the CR keeps the artifacts, and the
-policy survives with them.
+The published manifest carries no policy record. A fresh Sandbox created
+from a snapshot image is a new policy subject: it is seeded only by the
+`actionBindings` you pass on the create request (handlers the target Pool
+declares, validated as on any create). Pause the source Sandbox first if
+you need to replay its bindings — they are readable from the Sandbox spec
+until it is gone.
 
-Creating a Sandbox whose `image` equals a snapshot's `templateName`
-re-applies the recorded policy automatically: fastpath resolves the image
-through the artifact store at create time (two small GETs — index then
-manifest — served through the target Pool's compiled registry credential,
-with a short-TTL cache), then merges:
-
-- bindings you pass **explicitly** on the create win per handler (override
-  one policy, keep the rest);
-- recorded handlers the target Pool does not declare are dropped (they
-  could not take effect there);
-- in-guest network state (routes, connections, in-guest firewall) comes
-  along in the memory image itself.
-
-Resolution is best-effort: an unreachable store or an image unknown to it
-(the local-only case) proceeds without recorded policy, so sandbox create
-availability never hinges on the object store. The store comes from the
-mounted `fast-sandbox-artifact-store` ConfigMap (an absent or empty `store`
-disables the feature). The policy still passes the target Pool's
-handler validation and drives the normal binding lifecycle.
+A resume of the *same* Sandbox (pause checkpoint) is different: its live,
+relay-mutated policy rides the checkpoint bundle as the opaque
+`policy.json` and is re-imported node-side before the data plane becomes
+ready. That path never involves the control plane or the manifest.
 
 ## Rules of thumb
 
