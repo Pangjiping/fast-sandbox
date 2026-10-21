@@ -158,15 +158,14 @@ repository:<id>_rootfs
 repository:<id>_snapfiles
 ```
 
-No third metadata image is published. Both images describe their own layers in their OCI manifests. The snapfiles filesystem retains `vmstate.bin`, `memfile`, and `metadata.json`. Its OCI manifest carries these annotations:
+No third metadata image is published. Both images describe their own layers in their OCI manifests. The snapfiles filesystem contains `vmstate.bin`, `memfile`, the VM/device contract in `metadata.json`, and the platform `manifest.json` (machine, compatibility, guest network, lineage and checksums for optional opaque policy/vault files). Fastlet reads `manifest.json` after mounting snapfiles, validates restore admission and imports verified state before data-plane readiness. Create-request bindings seed handler registration; template policy state remains authoritative when carried by the bundle. FastPath does not query the OCI registry or need registry credentials for create. Its OCI manifest carries only pairing and ownership annotations:
 
 - `io.fast-sandbox.template.id`: the shared tag prefix used to find `<id>_rootfs` in the same repository.
-- `io.fast-sandbox.metadata`: the small platform metadata JSON (machine, compatibility, guest network, policy and lineage), available before mounting snapshot data.
 - For checkpoints, `io.fast-sandbox.sandbox.uid`, `io.fast-sandbox.sandbox.namespace`, and `io.fast-sandbox.checkpoint.id`: owner and runtime snapshot ID. The latter is the runtime snapshot UUID used as the tag prefix; the control-plane checkpoint task ID is unchanged.
 
 The publisher uploads rootfs first and snapfiles last. It rejects replacing an existing tag with different content; configure registry tag immutability as well, since the two images are paired by ID rather than a third manifest containing both digests. Use a fresh ID for every new checkpoint. A retry with identical contents is allowed.
 
-`manifestRef` and `artifactDigest` identify the snapfiles manifest. On first resolution, fsb-vm resolves `<id>_rootfs` and caches the pair as digest references. A logical `oci://repository:<id>` input also resolves the pair; mutable tag inputs are resolved remotely on each preparation. Previously published three-image metadata entries remain readable, but new publications only write the two-image format. Existing publications are not rewritten or deleted. Upgrade the Controller/FastPath and Fastlet/fsb-vm readers before enabling new publications from upgraded Fastlets or Builders. Older readers do not understand the new snapfiles entry format.
+`manifestRef` and `artifactDigest` identify the snapfiles manifest. On first resolution, fsb-vm resolves `<id>_rootfs` and caches the pair as digest references. A logical `oci://repository:<id>` input also resolves the pair; mutable tag inputs are resolved remotely on each preparation. Rebuild historical OCI templates that carry platform metadata only in registry annotations or a third metadata image: Fastlet now requires `snapfiles/manifest.json`. Checkpoints and live snapshots produced by the upgraded Fastlet include this file. Deploy matching Builder/fsb-vm and Fastlet versions before publishing new templates. Existing registry artifacts are not rewritten or deleted.
 
 ## 4. Create, pause, and resume through FastPath
 
@@ -262,9 +261,7 @@ and imports it before data-plane readiness. A new VM created from a snapshot
 lands the verified state for its first handler registration, under the new VM's
 identity. The recorded policy takes precedence over the create-time binding
 seed; absent or invalid state follows the same observable fallback as native
-restore. As in the native path, FastPath may merge the manifest's
-`actionBindings` as create-time bootstrap inputs, including when a snapshot clone
-omits explicit bindings. OCI snapfiles mounts are private to the Fastlet container.
+restore. As in the native path, create-request `actionBindings` provide the bootstrap seed; the manifest carries no action-binding channel. Declare the handler and pass its seed when cloning a snapshot. OCI snapfiles mounts are private to the Fastlet container.
 For handler import, Fastlet copies the verified opaque record to a temporary
 directory under the shared `<stateRoot>/sandboxes/<uid>/`, then removes that
 directory after the handler returns. The egress container must mount the same

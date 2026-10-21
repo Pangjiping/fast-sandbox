@@ -1238,7 +1238,7 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 	return sizeBytes, nil
 }
 
-// readSourceManifest loads source metadata from the prepared OCI CLI state or
+// readSourceManifest loads source metadata from mounted OCI snapfiles or
 // the native image cache. machine and guestNetwork are required: restore validation
 // rejects a snapshot manifest without them, so a hand-seeded cache cannot
 // produce a restorable snapshot.

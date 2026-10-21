@@ -24,6 +24,7 @@ func installPreparedOCI(t *testing.T, fixture *driverFixture, metadata string) {
 		state = []byte(metadata)
 	}
 	t.Setenv("TEST_PREPARE_STATE", string(state))
+	t.Setenv("TEST_PREPARE_MANIFEST", metadata)
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "fsb-vm"), []byte(`#!/bin/sh
 set -eu
@@ -37,6 +38,7 @@ cp "$TEST_PREPARE_ROOT/oci/inputs/sandbox-1.json" "$TEST_PREPARE_ROOT/cli-input.
 mkdir -p "$home/mnt"
 printf '%s' "$TEST_PREPARE_STATE" > "$home/state.json"
 touch "$home/mnt/vmstate.bin" "$home/mnt/memfile"
+printf '%s' "$TEST_PREPARE_MANIFEST" > "$home/mnt/manifest.json"
 if [ -n "${TEST_PREPARE_BUNDLE:-}" ]; then
   cp "$TEST_PREPARE_BUNDLE/"* "$home/mnt/"
 fi
@@ -51,6 +53,39 @@ func preparedMetadata(t *testing.T) map[string]any {
 		"machine":      map[string]string{"vcpu": "2", "memory": "1Gi"},
 		"guestNetwork": map[string]string{"ip": "172.30.0.3", "gateway": "172.30.0.1", "netmask": "255.255.255.0"},
 	}
+}
+
+func TestOCIMetadataComesOnlyFromMountedManifest(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "oci/sandboxes", "sandbox-1")
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "mnt"), 0750))
+	// The registry envelope may contain legacy metadata. It is not the
+	// platform source of truth after snapfiles has been mounted.
+	envelope := preparedMetadata(t)
+	envelope["machine"] = map[string]string{"vcpu": "99", "memory": "99Gi"}
+	state, err := json.Marshal(map[string]any{"template_metadata": envelope})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "state.json"), state, 0600))
+	_, err = readPreparedOCIMetadata(root, "sandbox-1")
+	require.ErrorIs(t, err, os.ErrNotExist, "registry metadata must not bypass a missing manifest.json")
+	raw, err := json.Marshal(preparedMetadata(t))
+	require.NoError(t, err)
+	manifest := filepath.Join(home, "mnt", snapshotManifestName)
+	require.NoError(t, os.WriteFile(manifest, raw, 0600))
+	metadata, err := readPreparedOCIMetadata(root, "sandbox-1")
+	require.NoError(t, err)
+	require.Equal(t, "2", metadata.Machine.VCPU)
+	require.Equal(t, "1Gi", metadata.Machine.Memory)
+	// An OCI owner annotation cannot silently disagree with embedded ownership.
+	envelope["checkpoint"] = map[string]string{"sandboxUID": "other", "namespace": "tenant-a"}
+	state, err = json.Marshal(map[string]any{"template_metadata": envelope})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "state.json"), state, 0600))
+	_, err = readPreparedOCIMetadata(root, "sandbox-1")
+	require.ErrorContains(t, err, "checkpoint owner disagrees")
+	require.NoError(t, os.WriteFile(manifest, []byte(`{"machine":`), 0600))
+	_, err = readPreparedOCIMetadata(root, "sandbox-1")
+	require.Error(t, err)
 }
 
 func TestOCICreateAndResumeUseCLIResultWithoutAgentMetadata(t *testing.T) {
@@ -89,7 +124,7 @@ func TestOCICreateAndResumeUseCLIResultWithoutAgentMetadata(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("snapshot-data"), 0600))
 			}
 			sandboxDir := filepath.Join(fixture.stateRoot, sandboxStateDir, "sandbox-1")
-			_, err = assembleSnapshotManifest(fixture.stateRoot, staging, sandboxDir, nil)
+			_, err = assembleSnapshotManifest(fixture.stateRoot, staging, sandboxDir)
 			require.NoError(t, err)
 			raw, err = os.ReadFile(filepath.Join(staging, snapshotManifestName))
 			require.NoError(t, err)

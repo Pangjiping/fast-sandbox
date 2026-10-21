@@ -26,6 +26,7 @@ type buildOptions struct {
 	snapfilesProgress func(string) error
 	snapshotMetadata  []byte
 	snapshotExtras    map[string]string
+	manifestFile      string
 	injectDir         string
 	tapName           string
 	guestMAC          string
@@ -59,6 +60,7 @@ func newBuildCommand() *cobra.Command {
 		},
 	}
 	flags := command.Flags()
+	flags.StringVar(&options.manifestFile, "manifest-file", "", "platform manifest.json to include in snapfiles before sealing")
 	flags.StringVar(&options.injectDir, "inject-dir", "", "directory of guest files to inject before snapshot")
 	flags.StringVar(&options.tapName, "tap-name", "", "preconfigured build tap (optional)")
 	flags.StringVar(&options.guestMAC, "guest-mac", "02:FC:00:00:00:01", "baked guest NIC MAC")
@@ -714,6 +716,11 @@ func captureSnapfiles(ctx context.Context, ublkd *ublkdClient, options *buildOpt
 	}
 	for name, source := range options.snapshotExtras {
 		if err := copyFile(source, filepath.Join(snapMount, name), 0600); err != nil {
+			return err
+		}
+	}
+	if options.manifestFile != "" {
+		if err := copyFile(options.manifestFile, filepath.Join(snapMount, "manifest.json"), 0600); err != nil {
 			return err
 		}
 	}

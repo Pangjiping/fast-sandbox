@@ -21,12 +21,10 @@ import (
 func templateRegistry(t *testing.T, legacy bool) (string, dockerConfig, *atomic.Int64, func()) {
 	t.Helper()
 	root := cacheTestManifest(t, "rootfs")
-	metadata := []byte(`{"machine":{"vcpu":"2","memory":"1Gi"},"checkpoint":{"sandboxUID":"spoofed","namespace":"spoofed"}}`)
 	var snap oci.Manifest
 	require.NoError(t, json.Unmarshal(cacheTestManifest(t, "snapfiles"), &snap))
 	snap.Annotations = map[string]string{
 		ocitemplate.AnnotationTemplateID:   "checkpoint-1",
-		ocitemplate.AnnotationMetadata:     string(metadata),
 		ocitemplate.AnnotationSandboxUID:   "sandbox-1",
 		ocitemplate.AnnotationNamespace:    "tenant-a",
 		ocitemplate.AnnotationCheckpointID: "checkpoint-1",

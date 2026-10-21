@@ -16,7 +16,6 @@ import (
 
 const (
 	AnnotationTemplateID   = "io.fast-sandbox.template.id"
-	AnnotationMetadata     = "io.fast-sandbox.metadata"
 	AnnotationSandboxUID   = "io.fast-sandbox.sandbox.uid"
 	AnnotationNamespace    = "io.fast-sandbox.sandbox.namespace"
 	AnnotationCheckpointID = "io.fast-sandbox.checkpoint.id"
@@ -59,15 +58,6 @@ func pairAnnotations(id string, metadata []byte) (map[string]string, error) {
 		}
 		annotations[AnnotationSandboxUID], annotations[AnnotationNamespace], annotations[AnnotationCheckpointID] = owner.SandboxUID, owner.Namespace, id
 	}
-	// Pair references are derived at resolution time. Owner fields have a single
-	// authority on the published manifest, outside the platform metadata JSON.
-	delete(doc, "oci")
-	delete(doc, "checkpoint")
-	raw, err := json.Marshal(doc)
-	if err != nil {
-		return nil, err
-	}
-	annotations[AnnotationMetadata] = string(raw)
 	return annotations, nil
 }
 
@@ -77,16 +67,8 @@ func resolvePair(ctx context.Context, repo MetadataRepository, ref registry.Refe
 	if err := validatePairID(id); err != nil {
 		return nil, err
 	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(annotations[AnnotationMetadata]), &doc); err != nil {
-		return nil, fmt.Errorf("invalid snapfiles metadata: %w", err)
-	}
-	if doc == nil {
-		return nil, fmt.Errorf("snapfiles metadata must be a JSON object")
-	}
-	// Untrusted embedded fields must never override owner annotations or the
-	// derived pair. Never infer a checkpoint owner from the tag text alone.
-	delete(doc, "checkpoint")
+	doc := map[string]json.RawMessage{}
+	// Owner annotations are authoritative; never infer ownership from tag text.
 	uid, namespace, checkpoint := annotations[AnnotationSandboxUID], annotations[AnnotationNamespace], annotations[AnnotationCheckpointID]
 	if uid != "" || namespace != "" || checkpoint != "" {
 		if strings.TrimSpace(uid) == "" || strings.TrimSpace(namespace) == "" || checkpoint != id {

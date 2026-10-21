@@ -24,7 +24,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
-// ConfigMediaType identifies legacy metadata-only entries; new writes use snapfiles annotations.
+// ConfigMediaType identifies legacy metadata-only entries; new writes use snapfiles with an embedded manifest.json.
 const ConfigMediaType = "application/vnd.fast-sandbox.template.v1+json"
 const Prefix = "oci://"
 
@@ -185,7 +185,7 @@ func fetchSmall(ctx context.Context, repo MetadataRepository, desc oci.Descripto
 }
 
 // Push publishes exactly two images. Rootfs is uploaded first; the snapfiles
-// manifest carries metadata annotations and is the final publication point.
+// manifest carries pairing/owner annotations and is the final publication point.
 func Push(ctx context.Context, dir, destination string, metadata []byte, credentials CredentialFunc, options ...RepositoryOption) (string, string, error) {
 	repo, ref, err := Repository(destination, credentials, options...)
 	if err != nil {

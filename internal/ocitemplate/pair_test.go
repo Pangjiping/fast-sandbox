@@ -38,9 +38,18 @@ func localPairFixture(t *testing.T) string {
 	raw, err := json.Marshal(oci.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: oci.MediaTypeImageManifest, Config: config, Layers: []oci.Descriptor{layer}})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest/pair.json"), raw, 0640))
+	// Use distinct disk manifests while sharing their blobs, as real rootfs
+	// and snapfiles images do. Previously the metadata annotation alone made
+	// this synthetic fixture's otherwise identical images distinct.
+	var snap oci.Manifest
+	require.NoError(t, json.Unmarshal(raw, &snap))
+	snap.Annotations = map[string]string{"fixture": "snapfiles"}
+	snapRaw, err := json.Marshal(snap)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest/snapfiles.json"), snapRaw, 0640))
 	// Reversed input order must not change the required publication order.
 	index := map[string]any{"images": []map[string]string{
-		{"name": "test:v1_snapfiles", "manifest_file": "pair.json", "manifest_digest": digest.FromBytes(raw).String()},
+		{"name": "test:v1_snapfiles", "manifest_file": "snapfiles.json", "manifest_digest": digest.FromBytes(snapRaw).String()},
 		{"name": "test:v1_rootfs", "manifest_file": "pair.json", "manifest_digest": digest.FromBytes(raw).String()},
 	}}
 	raw, err = json.Marshal(index)
@@ -73,22 +82,19 @@ func TestCheckpointOwnerLivesOnSnapfilesManifest(t *testing.T) {
 	require.Equal(t, "owner", manifest.Annotations[AnnotationSandboxUID])
 	require.Equal(t, "tenant", manifest.Annotations[AnnotationNamespace])
 	require.Equal(t, "checkpoint-1", manifest.Annotations[AnnotationCheckpointID])
-	require.NotContains(t, manifest.Annotations[AnnotationMetadata], "checkpoint")
-	require.NotContains(t, manifest.Annotations[AnnotationMetadata], `"oci"`)
+	require.NotContains(t, manifest.Annotations, "io.fast-sandbox.metadata")
 	got, err := Resolve(ctx, ref, nil)
 	require.NoError(t, err)
 	var doc map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(got, &doc))
 	require.JSONEq(t, `{"sandboxUID":"owner","namespace":"tenant","id":"checkpoint-1"}`, string(doc["checkpoint"]))
 	for _, key := range []string{"machine", "guestNetwork", "actionBindings"} {
-		var expected map[string]json.RawMessage
-		require.NoError(t, json.Unmarshal(metadata, &expected))
-		require.JSONEq(t, string(expected[key]), string(doc[key]))
+		require.NotContains(t, doc, key, "platform metadata is read only from snapfiles")
 	}
 	pair, err := Decode(got)
 	require.NoError(t, err)
 	require.Equal(t, strings.TrimPrefix(ref, Prefix), pair.Snapfiles)
-	for _, mode := range []string{"missing-uid", "missing-namespace", "missing-id", "mismatched-id", "bad-pair-id", "null-metadata", "embedded-owner"} {
+	for _, mode := range []string{"missing-uid", "missing-namespace", "missing-id", "mismatched-id", "bad-pair-id"} {
 		t.Run(mode, func(t *testing.T) {
 			var tampered oci.Manifest
 			require.NoError(t, json.Unmarshal(raw, &tampered))
@@ -103,23 +109,13 @@ func TestCheckpointOwnerLivesOnSnapfilesManifest(t *testing.T) {
 				tampered.Annotations[AnnotationCheckpointID] = "other"
 			case "bad-pair-id":
 				tampered.Annotations[AnnotationTemplateID] = "../../other"
-			case "null-metadata":
-				tampered.Annotations[AnnotationMetadata] = "null"
-			case "embedded-owner":
-				tampered.Annotations[AnnotationMetadata] = `{"checkpoint":{"sandboxUID":"other","namespace":"other"}}`
 			}
 			payload, err := json.Marshal(tampered)
 			require.NoError(t, err)
 			desc := content.NewDescriptorFromBytes(oci.MediaTypeImageManifest, payload)
 			require.NoError(t, repo.Manifests().Push(ctx, desc, bytes.NewReader(payload)))
-			got, err := Resolve(ctx, repo.Reference.Registry+"/"+repo.Reference.Repository+"@"+desc.Digest.String(), nil)
-			if mode == "embedded-owner" {
-				require.NoError(t, err)
-				require.Contains(t, string(got), `"sandboxUID":"owner"`, "annotations are the single owner authority")
-				require.NotContains(t, string(got), `"sandboxUID":"other"`)
-			} else {
-				require.Error(t, err)
-			}
+			_, err = Resolve(ctx, repo.Reference.Registry+"/"+repo.Reference.Repository+"@"+desc.Digest.String(), nil)
+			require.Error(t, err)
 		})
 	}
 }

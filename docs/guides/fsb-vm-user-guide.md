@@ -191,6 +191,7 @@ sudo "$FSB_VM" build \
 | `--disk-size-gb` | `20` | rootfs 虚拟磁盘大小 GiB，必须为正整数 |
 | `--snapfiles-size-mb` | 自动计算 | snapfiles 虚拟磁盘大小 |
 | `--kernel-version` | 从 `vmlinux-<version>` 推导 | 写入模板 metadata 的内核版本 |
+| `--manifest-file` | 空 | 封装前复制到 snapfiles 的平台 `manifest.json`；供 Fastlet 使用的模板需提供 |
 | `--init-script-file` | 内置 Redis init | 注入 guest 并作为 PID 1 运行的脚本 |
 | `--ready-pattern` | `Ready to accept connections` | 串口中表示工作负载就绪的文本 |
 | `--ready-timeout` | `3m` | 等待就绪文本的超时 |
@@ -288,7 +289,7 @@ sudo "$FSB_VM" --plain-http build ...
 命中后直接使用，不再向 registry 请求这两份 manifest 或获取对应的认证 token。
 缓存按 registry、repository、HTTP/HTTPS 和当前凭证隔离，不保存凭证。
 使用 `template.reference` 时，同目录还缓存由平台入口解析出的不可变 pair 和元数据，
-并将解析结果记录到 sandbox 的 `state.json.template_metadata`，供 Fastlet 校验和后续 checkpoint 使用。
+并将镜像配对和 checkpoint 归属记录到 sandbox 的 `state.json.template_metadata`；平台信息从挂载的 `manifest.json` 读取。
 删除单个 sandbox 不会删除这份共享缓存。
 
 缓存缺失或损坏时重新从 registry 获取并原子写入；缓存写入失败不会阻止使用已验证的
@@ -296,10 +297,7 @@ sudo "$FSB_VM" --plain-http build ...
 删除 `.manifest-cache/` 可清除本地 manifest 缓存。它与 OverlayBD 数据块缓存独立：
 每个 sandbox 仍创建独立的可写层和设备，未缓存的数据块仍由 OverlayBD 按需读取。
 
-FastPath 在带 ActionHandlers 的 Pool 中还会读取模板记录的策略。对于不可变 SHA256
-引用，策略读取结果（包括空结果）缓存在控制面进程中，按 Pool 身份和已编译的仓库
-凭据版本隔离，不因 TTL 到期重复回源。每次查询仍检查当前凭据配置；凭据变更或
-Pool 重建会失效，读取失败不会缓存。可变 tag 保持每次回源，控制面重启后重新填充缓存。
+Fastlet 从挂载的 snapfiles 文件系统中的 `manifest.json` 读取平台信息。FastPath 使用 create 请求中的绑定，不再访问 OCI registry 读取策略；opaque `policy.json` 和 `vault.json` 由节点侧导入。
 
 ### 4.4 磁盘大小
 
@@ -350,7 +348,7 @@ registry.example.com/team/application:v1_snapfiles
 
 对明文 HTTP registry，使用 `fsb-vm --plain-http push ...`；该参数同时用于目标仓库和增量产物的远端父层读取，默认仍使用 HTTPS。
 
-`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，携带平台元数据和 checkpoint owner annotations 的 snapfiles 最后发布，不再生成第三份元数据入口。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。历史三产物入口仍可读取。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤，将不带 tag 的 `output.publish` 与系统分配的 UUID 组合为上传目标。手动执行 CLI 时仍按 `--destination repository:tag` 显式指定 tag。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
+`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，snapfiles 最后发布。平台信息在封装前通过 `build --manifest-file <platform-manifest.json>` 写入 snapfiles 内的 `manifest.json`；OCI manifest 仅保留配对和 checkpoint 归属 annotations。`push --metadata-file` 可省略，仅提取 checkpoint 归属，不能向已封装的 snapfiles 添加文件。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。缺少 `snapfiles/manifest.json` 的历史模板需重建后供 Fastlet 使用。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤，将不带 tag 的 `output.publish` 与系统分配的 UUID 组合为上传目标。手动执行 CLI 时仍按 `--destination repository:tag` 显式指定 tag。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
 
 ## 6. 准备 template.json
 
@@ -383,7 +381,7 @@ registry.example.com/team/application:v1_snapfiles
 
 Fastlet 集成使用 `template.reference`，直接执行 `create --prepare-only`。
 CLI 负责解析两产物引用及 annotations、复用缓存和准备设备；Fastlet 不再先通过节点 agent 查询 OCI 元数据。
-使用这种输入时，`metadata` 由解析后的平台元数据替换，原有 repo/template_id 输入仍可使用。
+使用这种输入时，`metadata` 由解析后的镜像配对和归属信息替换，原有 repo/template_id 输入仍可使用。
 
 私有 registry 的 `dockerAuth` 是 JSON **字符串**，不是嵌套对象。例如原始 Docker config：
 

@@ -115,7 +115,7 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 	return state.Rootfs.Path, filepath.Join(home, "mnt/vmstate.bin"), filepath.Join(home, "mnt/memfile"), nil
 }
 
-// Metadata comes from the CLI's prepared state, never a second agent cache.
+// Platform metadata comes from the mounted snapfiles, never registry annotations.
 type ociRestoreMetadata struct {
 	Machine       manifestMachine                 `json:"machine"`
 	GuestNetwork  manifestGuestNetwork            `json:"guestNetwork"`
@@ -181,25 +181,35 @@ func readPreparedOCIMetadata(stateRoot, id string) (ociRestoreMetadata, error) {
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		return metadata, err
 	}
-	return metadata, nil
-}
-
-func readPreparedOCIManifest(stateRoot, id string) ([]byte, error) {
-	raw, err := os.ReadFile(filepath.Join(stateRoot, "oci/sandboxes", id, "state.json"))
+	// Pair resolution authenticates checkpoint ownership through the OCI
+	// manifest. The embedded platform manifest must agree before admission.
+	stateRaw, err := os.ReadFile(filepath.Join(stateRoot, "oci/sandboxes", id, "state.json"))
 	if err != nil {
-		return nil, err
+		return metadata, err
 	}
 	var state struct {
 		Metadata json.RawMessage `json:"template_metadata"`
 	}
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil, err
+	if err := json.Unmarshal(stateRaw, &state); err != nil {
+		return metadata, err
 	}
 	pair, err := ocitemplate.Decode(state.Metadata)
 	if err != nil || pair == nil {
-		return nil, fmt.Errorf("%w: fsb-vm prepared state has no valid template metadata", ErrInvalidConfig)
+		return metadata, fmt.Errorf("%w: fsb-vm prepared state has no valid template pair", ErrInvalidConfig)
 	}
-	return state.Metadata, nil
+	var envelope ociRestoreMetadata
+	if err := json.Unmarshal(state.Metadata, &envelope); err != nil {
+		return metadata, err
+	}
+	owner := envelope.Checkpoint
+	if (owner == nil) != (metadata.Checkpoint == nil) || (owner != nil && *owner != *metadata.Checkpoint) {
+		return metadata, fmt.Errorf("%w: snapfiles checkpoint owner disagrees with OCI manifest", ErrInvalidConfig)
+	}
+	return metadata, nil
+}
+
+func readPreparedOCIManifest(stateRoot, id string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(stateRoot, "oci/sandboxes", id, "mnt", snapshotManifestName))
 }
 func (d *Driver) releaseOCI(ctx context.Context, id string) error {
 	home := filepath.Join(d.config.StateRoot, "oci/sandboxes", id)

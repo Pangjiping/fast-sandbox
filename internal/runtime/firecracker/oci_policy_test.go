@@ -30,12 +30,12 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 			state.Config.Spec.Image = "oci://r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 			require.NoError(t, saveState(sandboxDir, state))
 			home := filepath.Join(fixture.stateRoot, "oci/sandboxes", id)
-			require.NoError(t, os.MkdirAll(home, 0750))
+			require.NoError(t, os.MkdirAll(filepath.Join(home, "mnt"), 0750))
 			metadata := preparedMetadata(t)
 			metadata["files"] = map[string]any{"policy.json": map[string]any{"sha256": "stale", "sizeBytes": 1}}
-			raw, err := json.Marshal(map[string]any{"template_metadata": metadata})
+			raw, err := json.Marshal(metadata)
 			require.NoError(t, err)
-			require.NoError(t, os.WriteFile(filepath.Join(home, "state.json"), raw, 0600))
+			require.NoError(t, os.WriteFile(filepath.Join(home, "mnt", snapshotManifestName), raw, 0600))
 			policy := []byte(`{"v":1,"incarnation":"source-fence","attachmentId":"source-route","revision":7,"policy":{"defaultAction":"deny"},"opaque":"preserve-me"}`)
 			vault := []byte(`{"encrypted":"opaque-vault-record"}`)
 			mover := &fakeTemplateCapableMover{fakeStateMover: &fakeStateMover{exportData: map[runtimecontract.StateKind][]byte{runtimecontract.StateKindPolicy: policy, runtimecontract.StateKindVault: vault}}}
@@ -56,7 +56,7 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 				exports, _ := mover.snapshotTemplate()
 				require.Len(t, exports, 2, "template snapshots use seal-free state export")
 			}
-			_, err = assembleSnapshotManifest(fixture.stateRoot, staging, sandboxDir, []runtimecontract.SnapshotActionBinding{{Handler: "egress", Input: `{"bootstrap":true}`}})
+			_, err = assembleSnapshotManifest(fixture.stateRoot, staging, sandboxDir)
 			require.NoError(t, err)
 			raw, err = os.ReadFile(filepath.Join(staging, snapshotManifestName))
 			require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 			require.Equal(t, files[vaultBundleName], document["egressVault"], "native vault provenance remains intact")
 			require.NotContains(t, string(raw), "preserve-me", "the manifest only checksums the opaque policy record")
 			require.NotContains(t, string(raw), "source-fence")
-			require.Contains(t, string(raw), "bootstrap", "the CRD binding seed is separate from the recorded policy")
+			require.NotContains(t, document, "actionBindings", "binding seeds come from the create request")
 			saved, err := os.ReadFile(filepath.Join(staging, policyBundleName))
 			require.NoError(t, err)
 			require.Equal(t, policy, saved)

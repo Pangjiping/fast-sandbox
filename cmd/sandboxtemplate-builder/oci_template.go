@@ -92,12 +92,6 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	}
 	defer deleteBuildTap()
 	args := []string{"--firecracker", firecrackerBin, "--overlaybd-convertor", "/usr/local/bin/convertor", "--build-work-dir", filepath.Join(workdir, "builds"), "--build-output-dir", filepath.Join(workdir, "artifacts"), "build", "--source", source, "--output", "template:build", "--kernel", kernel, "--kernel-version", strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), "--vcpu", strconv.FormatInt(vcpu.Value(), 10), "--memory-mb", strconv.FormatInt((memory.Value()+(1<<20)-1)/(1<<20), 10), "--disk-size-gb", strconv.Itoa(size), "--inject-dir", inject, "--init-path", guestInitPath(spec), "--init-script-file", filepath.Join(inject, strings.TrimPrefix(guestInitPath(spec), "/")), "--boot-args", bakedNetworkBootArgs("console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 random.trust_cpu=on root=/dev/vda rw init=" + guestInitPath(spec)), "--tap-name", tap, "--guest-mac", bakedGuestMAC, "--ready-pattern", "SANDBOX_READY", "--ready-timeout", readinessTimeout(spec).String(), "--auth-file", authFile}
-	cmd := exec.CommandContext(ctx, "fsb-vm", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err = cmd.Run(); err != nil {
-		return fmt.Errorf("fsb-vm build: %w", err)
-	}
 	identity := artifacts.HostCPUIdentity()
 	doc := map[string]any{"schemaVersion": 1, "runtime": "firecracker", "format": "overlaybd", "machine": map[string]any{"vcpu": spec.Machine.VCPU, ociMemoryField: spec.Machine.Memory, "rootfs": fmt.Sprintf("%dGi", size)}, "lineage": map[string]any{"image": spec.Image, "imageDigest": sourceDigest, "execd": spec.Execd, "entrypoint": spec.Entrypoint}, "compatibility": map[string]any{"vendor": identity.Vendor, "cpuFamily": identity.Family, "cpuModel": identity.Model, "cpuStepping": identity.Stepping, "cpuTemplate": "none", "firecrackerVersion": artifacts.FirecrackerVersion(firecrackerBin)}, "guestNetwork": map[string]any{"iface": ociGuestInterface, "mac": bakedGuestMAC, "ip": bakedGuestIP, "gateway": bakedGuestGateway, "netmask": bakedGuestNetmask, "mtu": bakedGuestMTU}, "validation": map[string]any{"booted": true}}
 	if len(ca) > 0 {
@@ -111,7 +105,14 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	if err = os.WriteFile(metaFile, raw, 0600); err != nil {
 		return err
 	}
-	cmd = exec.CommandContext(ctx, "fsb-vm", "push", "--artifact-dir", filepath.Join(workdir, "artifacts", "template_build"), "--destination", destination, "--metadata-file", metaFile, "--auth-file", authFile)
+	args = append(args, "--manifest-file", metaFile)
+	cmd := exec.CommandContext(ctx, "fsb-vm", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err = cmd.Run(); err != nil {
+		return fmt.Errorf("fsb-vm build: %w", err)
+	}
+	cmd = exec.CommandContext(ctx, "fsb-vm", "push", "--artifact-dir", filepath.Join(workdir, "artifacts", "template_build"), "--destination", destination, "--auth-file", authFile)
 	cmd.Stderr = os.Stderr
 	output, err := cmd.Output()
 	if err != nil {

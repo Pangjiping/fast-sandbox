@@ -115,7 +115,7 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	repeated, _, err := Push(context.Background(), dir, dest, []byte(`{"machine":{"vcpu":"1","memory":"512Mi"}}`), nil)
 	require.NoError(t, err)
 	require.Equal(t, ref, repeated)
-	_, _, err = Push(context.Background(), dir, dest, []byte(`{"machine":{"vcpu":"2"}}`), nil)
+	_, _, err = Push(context.Background(), dir, dest, []byte(`{"checkpoint":{"sandboxUID":"new-owner","namespace":"tenant"}}`), nil)
 	require.ErrorContains(t, err, "refusing to overwrite")
 
 	// A separate build can publish changed content into the same repository
@@ -126,10 +126,10 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	require.NotEqual(t, ref, nextRef)
 	oldMetadata, err := Resolve(context.Background(), ref, nil)
 	require.NoError(t, err)
-	require.Contains(t, string(oldMetadata), `"vcpu":"1"`)
+	require.NotContains(t, string(oldMetadata), `"machine"`)
 	newMetadata, err := Resolve(context.Background(), nextRef, nil)
 	require.NoError(t, err)
-	require.Contains(t, string(newMetadata), `"vcpu":"2"`)
+	require.NotContains(t, string(newMetadata), `"machine"`)
 
 	payload, err := Resolve(context.Background(), ref, nil)
 	require.NoError(t, err)

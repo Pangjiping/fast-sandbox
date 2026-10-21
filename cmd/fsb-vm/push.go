@@ -26,9 +26,12 @@ func newPushCommand() *cobra.Command {
 		if _, err = parseRegistryReference(destination); err != nil {
 			return err
 		}
-		payload, err := os.ReadFile(metadata)
-		if err != nil {
-			return err
+		payload := []byte(`{}`)
+		if metadata != "" {
+			payload, err = os.ReadFile(metadata)
+			if err != nil {
+				return err
+			}
 		}
 		manifestRef, digest, err := ocitemplate.Push(cmd.Context(), dir, destination, payload, func(_ context.Context, reference string) (auth.Credential, error) {
 			ref, err := parseRegistryReference(reference)
@@ -46,9 +49,9 @@ func newPushCommand() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&dir, "artifact-dir", "", "local build artifact directory")
 	f.StringVar(&destination, "destination", "", "registry/repository:tag")
-	f.StringVar(&metadata, "metadata-file", "", "platform metadata JSON stored in snapfiles manifest annotations")
+	f.StringVar(&metadata, "metadata-file", "", "optional manifest.json used only to identify checkpoint ownership")
 	f.StringVar(&authFile, "auth-file", "", "Docker authentication JSON")
-	for _, name := range []string{"artifact-dir", "destination", "metadata-file", "auth-file"} {
+	for _, name := range []string{"artifact-dir", "destination", "auth-file"} {
 		if err := cmd.MarkFlagRequired(name); err != nil {
 			panic(fmt.Sprint(err))
 		}
