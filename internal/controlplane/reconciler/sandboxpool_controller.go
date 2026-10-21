@@ -178,35 +178,24 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	// Only publish RegistryReady after the rollout check below; an intermediate
-	// message would flip each reconcile and continuously retrigger our watch.
 	logger.V(4).Info("pool registry configuration compiled", "revision", compiledRegistry.Revision)
-	infraPlan, err := r.resolveInfraPlan(&pool, profile)
-	if err != nil {
-		logger.V(1).Info("pool Infra Components are invalid", "reason", err.Error())
-		if condErr := r.updatePoolCondition(ctx, &pool, metav1.Condition{
-			Type: apiv1alpha2.PoolConditionInfraReady, Status: metav1.ConditionFalse,
-			Reason: apiv1alpha2.ReasonInfraComponentsInvalid, Message: err.Error(),
-		}); condErr != nil {
-			logger.Error(condErr, "Failed to update Pool condition", "condition", apiv1alpha2.PoolConditionInfraReady)
-		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	_ = r.updatePoolCondition(ctx, &pool, metav1.Condition{
+	infraPlan, infraErr := r.resolveInfraPlan(&pool, profile)
+	infraCondition := metav1.Condition{
 		Type: apiv1alpha2.PoolConditionInfraReady, Status: metav1.ConditionTrue,
 		Reason: apiv1alpha2.ReasonInfraComponentsAvailable, Message: "Infra Components are valid for the selected runtime",
-	})
-	if err := r.ensureInfraPlanConfigMap(ctx, &pool, infraPlan); err != nil {
-		return ctrl.Result{}, err
 	}
-	if err := r.ensureRuntimePlanConfigMap(ctx, &pool, runtimePlan); err != nil {
-		return ctrl.Result{}, err
+	if infraErr != nil {
+		logger.V(1).Info("pool Infra Components are invalid", "reason", infraErr.Error())
+		infraCondition.Status = metav1.ConditionFalse
+		infraCondition.Reason = apiv1alpha2.ReasonInfraComponentsInvalid
+		infraCondition.Message = infraErr.Error()
 	}
-	settings := buildFastletSettings(&pool)
-	if err := r.ensureFastletSettingsConfigMap(ctx, &pool, settings); err != nil {
+	if err := r.updatePoolCondition(ctx, &pool, infraCondition); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	// Report registry rollout even when infra validation failed, but do not
+	// provision Fastlets until both configurations are valid.
 	var childPods corev1.PodList
 	if err := r.durableReader().List(ctx, &childPods, client.InNamespace(req.Namespace), client.MatchingLabels(poolLabels(pool.Name))); err != nil {
 		return ctrl.Result{}, err
@@ -224,6 +213,20 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.updatePoolCondition(ctx, &pool, registryCondition); err != nil {
 		return ctrl.Result{}, err
 	}
+	if infraErr != nil {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if err := r.ensureInfraPlanConfigMap(ctx, &pool, infraPlan); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureRuntimePlanConfigMap(ctx, &pool, runtimePlan); err != nil {
+		return ctrl.Result{}, err
+	}
+	settings := buildFastletSettings(&pool)
+	if err := r.ensureFastletSettingsConfigMap(ctx, &pool, settings); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	runtimeCondition, readyPods := r.runtimeCapabilityCondition(&pool, childPods.Items)
 	if err := r.updatePoolCondition(ctx, &pool, runtimeCondition); err != nil {
 		return ctrl.Result{}, err
@@ -352,8 +355,11 @@ func (r *SandboxPoolReconciler) aggregateWarmImageStatus(
 				status.CachedFastlets++
 			case "Failed":
 				status.FailedFastlets++
-				if observed.Message != "" {
-					status.LastError = boundedStatusMessage(observed.Message)
+				// Registry iteration order is unspecified; select a stable error
+				// so unchanged reports cannot trigger another status write.
+				if msg := boundedStatusMessage(observed.Message); msg != "" &&
+					(status.LastError == "" || msg < status.LastError) {
+					status.LastError = msg
 				}
 			default:
 				status.PullingFastlets++

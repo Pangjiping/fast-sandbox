@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -81,13 +82,17 @@ registries:
 
 func TestPoolRegistryConditionConvergesWithoutRepeatedStatusWrites(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		fastlet bool
-		applied bool
+		name                 string
+		fastlet              bool
+		applied              bool
+		infraInvalid         bool
+		initialRegistryValid bool
 	}{
 		{name: "empty pool"},
 		{name: "configuration propagating", fastlet: true},
 		{name: "configuration applied", fastlet: true, applied: true},
+		{name: "registry recovered with invalid infra", infraInvalid: true, fastlet: true},
+		{name: "new pool with invalid infra", infraInvalid: true, initialRegistryValid: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -109,9 +114,21 @@ func TestPoolRegistryConditionConvergesWithoutRepeatedStatusWrites(t *testing.T)
 			if test.fastlet {
 				pool.Spec.Capacity.PoolMin = 1
 			}
+			if test.infraInvalid {
+				component := testInlineComponent()
+				component.Artifact = nil
+				component.Delivery = apiv1alpha2.InfraDeliveryHostProcess
+				pool.Spec.InfraComponents = []apiv1alpha2.InfraComponent{component}
+				// The declaration is valid, but the container runtime cannot
+				// deliver host-process components.
+				require.NoError(t, pool.Spec.ValidateInfraComponents())
+			}
 			source := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{Name: registryconfig.ConfigMapName, Namespace: pool.Namespace},
 				Data:       map[string]string{registryconfig.ConfigMapKey: "registries: ["},
+			}
+			if test.initialRegistryValid {
+				source.Data[registryconfig.ConfigMapKey] = "registries: []"
 			}
 			statusWrites := 0
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).
@@ -131,7 +148,12 @@ func TestPoolRegistryConditionConvergesWithoutRepeatedStatusWrites(t *testing.T)
 			if test.fastlet {
 				plan, err := runtimeenv.ResolveDefault(reconciler.Catalog, pool.Spec.Runtime)
 				require.NoError(t, err)
-				pod, err := reconciler.constructPodWithRuntimePlan(pool, plan)
+				// Existing Fastlets can outlive a later invalid infra update.
+				podPool := pool.DeepCopy()
+				if test.infraInvalid {
+					podPool.Spec.InfraComponents = nil
+				}
+				pod, err := reconciler.constructPodWithRuntimePlan(podPool, plan)
 				require.NoError(t, err)
 				pod.Name, pod.GenerateName, pod.UID = "fastlet-a", "", "pod-a"
 				pod.Status.Phase = corev1.PodRunning
@@ -150,15 +172,21 @@ func TestPoolRegistryConditionConvergesWithoutRepeatedStatusWrites(t *testing.T)
 				})
 			}
 
-			// An invalid configuration must still report its error, then recover
-			// when the source is removed (the valid anonymous-registry default).
+			// Registry validation and rollout must reflect the current
+			// configuration independently of infra validation.
 			_, err := reconciler.Reconcile(ctx, poolRequest(pool))
 			require.NoError(t, err)
 			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), pool))
 			condition := apiMeta.FindStatusCondition(pool.Status.Conditions, apiv1alpha2.PoolConditionRegistryReady)
 			require.NotNil(t, condition)
-			require.Equal(t, metav1.ConditionFalse, condition.Status)
-			require.Equal(t, apiv1alpha2.ReasonRegistryInvalid, condition.Reason)
+			if test.initialRegistryValid {
+				require.Equal(t, metav1.ConditionTrue, condition.Status)
+				require.Equal(t, apiv1alpha2.ReasonRegistryAvailable, condition.Reason)
+			} else {
+				require.Equal(t, metav1.ConditionFalse, condition.Status)
+				require.Equal(t, apiv1alpha2.ReasonRegistryInvalid, condition.Reason)
+			}
+			// Removing the source selects the valid anonymous-registry default.
 			require.NoError(t, k8sClient.Delete(ctx, source))
 			_, err = reconciler.Reconcile(ctx, poolRequest(pool))
 			require.NoError(t, err)
@@ -172,7 +200,14 @@ func TestPoolRegistryConditionConvergesWithoutRepeatedStatusWrites(t *testing.T)
 				require.Equal(t, metav1.ConditionTrue, condition.Status)
 				require.Equal(t, apiv1alpha2.ReasonRegistryAvailable, condition.Reason)
 			}
-			require.True(t, apiMeta.IsStatusConditionTrue(pool.Status.Conditions, apiv1alpha2.PoolConditionInfraReady))
+			infraCondition := apiMeta.FindStatusCondition(pool.Status.Conditions, apiv1alpha2.PoolConditionInfraReady)
+			require.NotNil(t, infraCondition)
+			if test.infraInvalid {
+				require.Equal(t, metav1.ConditionFalse, infraCondition.Status)
+				require.Equal(t, apiv1alpha2.ReasonInfraComponentsInvalid, infraCondition.Reason)
+			} else {
+				require.Equal(t, metav1.ConditionTrue, infraCondition.Status)
+			}
 
 			// Check actual writes: comparing only final status would miss a
 			// condition that flips twice and ends each reconcile unchanged.
@@ -827,6 +862,45 @@ func TestUniqueWarmImagesPreservesFirstOccurrence(t *testing.T) {
 	require.Equal(t, []string{"alpine:latest", "ubuntu:24.04"}, uniqueWarmImages([]string{
 		"alpine:latest", "", "ubuntu:24.04", "alpine:latest",
 	}))
+}
+
+type warmImageStatusRegistry struct {
+	placement.FastletRegistry
+	fastlets []placement.FastletInfo
+}
+
+func (r *warmImageStatusRegistry) GetAllFastlets() []placement.FastletInfo {
+	return r.fastlets
+}
+
+func TestPoolWarmImageFailuresConvergeRegardlessOfFastletOrder(t *testing.T) {
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", Generation: 1},
+		Spec:       apiv1alpha2.SandboxPoolSpec{WarmImages: []string{"alpine:latest"}},
+	}
+	registry := &warmImageStatusRegistry{}
+	var pods []corev1.Pod
+	for _, report := range []struct{ name, message string }{
+		{"fastlet-a", "pull denied"}, {"fastlet-b", "connection refused"},
+	} {
+		uid := report.name + "-uid"
+		pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: report.name, UID: types.UID(uid)}})
+		registry.fastlets = append(registry.fastlets, placement.FastletInfo{
+			Namespace: pool.Namespace, PoolName: pool.Name, PodName: report.name, PodUID: uid,
+			WarmImages: []fastletapi.WarmImageState{{Image: "alpine:latest", State: "Failed", Message: report.message}},
+		})
+	}
+	reconciler := &SandboxPoolReconciler{Registry: registry}
+	warm := reconciler.aggregateWarmImageStatus(pool, pods)
+	require.Len(t, warm, 1)
+	require.Equal(t, int32(2), warm[0].FailedFastlets)
+	require.Equal(t, "connection refused", warm[0].LastError)
+	require.True(t, (poolObservation{warmImages: warm}).apply(pool))
+
+	// The same reports in reverse order must not require another status write.
+	slices.Reverse(registry.fastlets)
+	warm = reconciler.aggregateWarmImageStatus(pool, pods)
+	require.False(t, (poolObservation{warmImages: warm}).apply(pool))
 }
 
 func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
