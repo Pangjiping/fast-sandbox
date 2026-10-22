@@ -18,7 +18,10 @@ cd /src/overlaybd
 git checkout --detach "$revision"
 install -m 0644 "$tools_dir/overlaybd-import-raw.cpp" src/tools/overlaybd-import-raw.cpp
 sed -i '/add_executable(overlaybd-create/i add_executable(overlaybd-import-raw overlaybd-import-raw.cpp)\ntarget_include_directories(overlaybd-import-raw PUBLIC ${PHOTON_INCLUDE_DIR})\ntarget_link_libraries(overlaybd-import-raw photon_static overlaybd_lib)\n' src/tools/CMakeLists.txt
+# Third-party source is built container-only; suppress its default-warning
+# noise so real errors stay visible in build logs.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DCMAKE_CXX_FLAGS="-w" \
   -DBUILD_STREAM_CONVERTOR=OFF -DBUILD_UBLK_FRONTEND=ON -DORIGIN_EXT2FS=OFF
 cmake --build build --target overlaybd-import-raw overlaybd-ublkd \
   overlaybd-create overlaybd-apply overlaybd-commit overlaybd-resize \
