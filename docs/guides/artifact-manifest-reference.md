@@ -32,6 +32,100 @@ CPU count is a positive integer; memory and disk capacity are positive integer M
 
 The fixed OCI snapshot paths are `/vmstate.bin`, `/memfile` and `/manifest.json`. Native object storage publishes `rootfs.ext4`, `vmstate.snap`, `memory.snap`, `manifest.json` and `SHA256SUMS`. VM state and memory reside in those binary files, not in the JSON document.
 
+## Complete annotated reference
+
+All current fields are shown below using a native/S3 checkpoint. Values are illustrative; omit optional fields that do not apply. File entries require a lowercase hex SHA-256 (without `sha256:`) and a positive logical size in bytes.
+
+**JSONC example only:** actual `manifest.json` must be strict JSON without comments.
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "runtime": "firecracker",
+  "machine": { // Captured VM configuration.
+    "vcpuCount": 2,
+    "memoryMiB": 1024,
+    "rootfsSizeMiB": 20480, // Virtual capacity, not compressed layer size.
+    "rootfsDriveID": "rootfs",
+    "rootfsDrivePath": "rootfs.img" // Native: rootfs.img; OCI: rootfs.dev.
+  },
+  "kernel": { // Guest kernel.
+    "version": "6.1.177"
+  },
+  "compatibility": { // CPU and VMM restore constraints.
+    "cpuArch": "x86_64",
+    "firecrackerVersion": "1.16.1",
+    "cpuTemplate": "none", // none: exact CPU match; T2/T2A: versioned allowlist.
+    "vendor": "GenuineIntel",
+    "cpuFamily": 6,
+    "cpuModel": 85,
+    "cpuStepping": 7,
+    "cpuModelName": "Intel(R) Xeon(R) Platinum 8269CY CPU @ 2.60GHz", // Diagnostic only; not used for CPU matching.
+    "hostKernel": "6.1.0" // Capture-host kernel, not the guest kernel.
+  },
+  "guestNetwork": { // Captured guest network; optional standalone, complete for Fastlet.
+    "iface": "eth0",
+    "mac": "02:fc:00:00:00:01",
+    "ip": "172.30.0.3",
+    "gateway": "172.30.0.1",
+    "netmask": "255.255.255.0",
+    "mtu": 1500
+  },
+  "lineage": { // Source image and build provenance.
+    "image": "registry.example/team/base:v1",
+    "imageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // Original source digest; preserved by snapshots.
+    "createdAt": "2026-10-22T00:00:00Z"
+  },
+  "platform": { // Optional platform metadata and exported state.
+    "execd": "registry.example/team/execd:v1",
+    "entrypoint": ["/bin/sh", "-lc", "sleep infinity"],
+    "init": "/usr/local/sbin/sandbox-init",
+    "envs": {
+      "APP_MODE": "production"
+    },
+    "egressMitmCA": { // Public CA fingerprints baked into the guest.
+      "certificates": [
+        {
+          "certSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", // SHA-256 of DER certificate.
+          "spkiSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", // SHA-256 of DER public-key info.
+          "notAfter": "2027-10-22T00:00:00Z"
+        }
+      ]
+    },
+    "checkpoint": { // Private checkpoints only; omit for reusable templates.
+      "sandboxUID": "sandbox-uid-123",
+      "namespace": "tenant-a"
+    },
+    "stateFiles": { // Exported handler state; listed only here.
+      "policy.json": {
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sizeBytes": 256
+      },
+      "vault.json": {
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "sizeBytes": 512
+      }
+    }
+  },
+  "files": { // Native/S3 file list; omit for OCI.
+    "rootfs.ext4": {
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sizeBytes": 21474836480
+    },
+    "vmstate.snap": {
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sizeBytes": 524288
+    },
+    "memory.snap": {
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sizeBytes": 1073741824
+    }
+  }
+}
+```
+
+OCI uses `rootfs.dev`, `vmstate.bin` and `memfile`, with no `files` list. Reusable templates omit `platform.checkpoint`; exported state appears only in `platform.stateFiles`. Standalone fsb-vm needs no `platform` fields.
+
 ## Optional shared records
 
 `guestNetwork` describes a NIC baked into vmstate: `iface` and `mac`, plus optional `ip`, `gateway`, `netmask` and `mtu`. A standalone VM without a NIC omits it. Fastlet's static guest networking requires the complete network record. Host tap names are allocated on restore and are not persisted here.
