@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	artifactmodel "fast-sandbox/internal/artifacts"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -105,22 +104,22 @@ func testS3Client(t *testing.T, store *fakeStore) *s3Client {
 
 // testManifest assembles a manifest document in the publisher's shape for a
 // set of artifacts, returning the exact bytes a download would carry.
-func testManifest(artifacts map[string][]byte) []byte {
+func testManifest(contents map[string][]byte) []byte {
 	files := map[string]any{}
-	for name, content := range artifacts {
+	for name, content := range contents {
 		files[name] = map[string]any{
 			"sha256":    sha256Hex(content),
 			"sizeBytes": len(content),
 		}
 	}
-	document := artifactmodel.NewVMManifest(artifactmodel.VMMachine{VCPUCount: 1, MemoryMiB: 1, RootfsSizeMiB: 1, RootfsDriveID: "rootfs", RootfsDrivePath: "rootfs.img"}, "6.1.177", "/missing/firecracker", artifactmodel.CPUTemplateNone)
+	document := artifacts.NewVMManifest(artifacts.VMMachine{VCPUCount: 1, MemoryMiB: 1, RootfsSizeMiB: 1, RootfsDriveID: "rootfs", RootfsDrivePath: "rootfs.img"}, "6.1.177", "/missing/firecracker", artifacts.CPUTemplateNone)
 	document.Compatibility.FirecrackerVersion = "1.16.1"
-	document.Lineage = &artifactmodel.VMLineage{Image: testImage}
-	document.Files = map[string]artifactmodel.ManifestFile{}
-	document.Platform = &artifactmodel.VMPlatform{StateFiles: map[string]artifactmodel.ManifestFile{}}
+	document.Lineage = &artifacts.VMLineage{Image: testImage}
+	document.Files = map[string]artifacts.ManifestFile{}
+	document.Platform = &artifacts.VMPlatform{StateFiles: map[string]artifacts.ManifestFile{}}
 	for name, entry := range files {
 		fields := entry.(map[string]any)
-		file := artifactmodel.ManifestFile{SHA256: fields["sha256"].(string), SizeBytes: int64(fields["sizeBytes"].(int))}
+		file := artifacts.ManifestFile{SHA256: fields["sha256"].(string), SizeBytes: int64(fields["sizeBytes"].(int))}
 		if name == "policy.json" || name == "vault.json" {
 			document.Platform.StateFiles[name] = file
 		} else {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fast-sandbox/internal/artifacts"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
+	"fast-sandbox/internal/artifacts"
 )
 
 func TestNativeManifestExcludesStaleOverlayBDLayers(t *testing.T) {
