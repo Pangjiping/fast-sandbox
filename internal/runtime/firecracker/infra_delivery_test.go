@@ -76,3 +76,12 @@ func TestDeliverGuestInfraRequiresRunner(t *testing.T) {
 	err := deliverGuestInfra(context.Background(), nil, "img", fastletinfra.PreparedInstance{Mounts: infraMounts(t)}, false)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
+
+func TestDeliverGuestInfraMountsOCIDeviceDirectly(t *testing.T) {
+	runner := &infraRunner{}
+	require.NoError(t, deliverGuestInfra(context.Background(), runner, "/dev/ublkb42", fastletinfra.PreparedInstance{Mounts: infraMounts(t)}, true))
+	require.Contains(t, runner.commands[0], "mount /dev/ublkb42 ")
+	for _, command := range runner.commands {
+		require.NotContains(t, command, "loop")
+	}
+}

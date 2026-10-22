@@ -24,8 +24,6 @@ import (
 	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
-// ConfigMediaType identifies legacy metadata-only entries; new writes use snapfiles with an embedded manifest.json.
-const ConfigMediaType = "application/vnd.fast-sandbox.template.v1+json"
 const Prefix = "oci://"
 
 type Pair struct {
@@ -118,7 +116,7 @@ func Decode(payload []byte) (*Pair, error) {
 
 // Resolve reads a snapfiles manifest and resolves its rootfs by the shared ID.
 // The returned node-local metadata pins both images by digest; no data layers
-// are downloaded. Old metadata-only entry manifests remain readable.
+// are downloaded.
 func Resolve(ctx context.Context, reference string, credentials CredentialFunc) ([]byte, error) {
 	repo, ref, err := Repository(reference, credentials)
 	if err != nil {
@@ -147,34 +145,10 @@ func ResolveFrom(ctx context.Context, ref registry.Reference, repo MetadataRepos
 	if err = json.Unmarshal(raw, &manifest); err != nil {
 		return nil, err
 	}
-	if manifest.Config.MediaType != ConfigMediaType {
-		return resolvePair(ctx, repo, ref, desc, manifest)
+	if manifest.Config.MediaType != oci.MediaTypeImageConfig {
+		return nil, fmt.Errorf("unexpected template config media type %q; rebuild the template as a rootfs/snapfiles pair", manifest.Config.MediaType)
 	}
-	// Compatibility for existing three-image publications.
-	payload, err := fetchSmall(ctx, repo, manifest.Config)
-	if err != nil {
-		return nil, err
-	}
-	pair, err := Decode(payload)
-	if err != nil {
-		return nil, err
-	}
-	if pair == nil {
-		return nil, fmt.Errorf("template has no OCI pair")
-	}
-	for _, value := range []string{pair.Rootfs, pair.Snapfiles} {
-		pairRef, e := registry.ParseReference(value)
-		if e != nil {
-			return nil, e
-		}
-		if pairRef.Registry != ref.Registry || pairRef.Repository != ref.Repository {
-			return nil, fmt.Errorf("template pair must stay in the template repository")
-		}
-		if _, e = repo.Resolve(ctx, pairRef.Reference); e != nil {
-			return nil, e
-		}
-	}
-	return payload, nil
+	return resolvePair(ctx, repo, ref, desc, manifest)
 }
 
 func fetchSmall(ctx context.Context, repo MetadataRepository, desc oci.Descriptor) ([]byte, error) {

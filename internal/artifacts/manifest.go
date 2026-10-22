@@ -187,6 +187,8 @@ func HostCPUArch() string {
 	}
 }
 
+// MarshalVMManifest validates and serializes the shared contract with two-space
+// indentation and a trailing newline. Its exact bytes determine the artifact digest.
 func MarshalVMManifest(document VMManifest) ([]byte, error) {
 	if err := document.Validate(); err != nil {
 		return nil, err
@@ -211,33 +213,21 @@ func Digest16(manifestBytes []byte) string {
 	return SHA256Of(manifestBytes)[:16]
 }
 
-// MarshalManifest serializes a manifest document with the canonical
-// producer encoding: two-space indented JSON plus a trailing newline. The
-// artifact digest and the per-build namespace are both derived from these
-// exact bytes, so every producer must marshal identically.
-func MarshalManifest(document map[string]any) ([]byte, error) {
-	payload, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(payload, '\n'), nil
-}
-
 // FileEntry describes one artifact in a manifest: a sparse-aware sha256 and
 // the logical (sparse) size. cache memoizes checksums across the manifest
 // and SHA256SUMS of one artifact set; it may be nil.
-func FileEntry(path string, cache map[string]string) (map[string]any, error) {
+func FileEntry(path string, cache map[string]string) (ManifestFile, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return ManifestFile{}, err
 	}
 	sum, err := SHA256FileCached(path, cache)
 	if err != nil {
-		return nil, err
+		return ManifestFile{}, err
 	}
-	return map[string]any{
-		"sha256":    sum,
-		"sizeBytes": info.Size(),
+	return ManifestFile{
+		SHA256:    sum,
+		SizeBytes: info.Size(),
 	}, nil
 }
 

@@ -1,12 +1,15 @@
 package firecracker
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"oras.land/oras-go/v2/registry/remote/auth"
 
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
+	"fast-sandbox/internal/registryconfig"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
@@ -122,4 +125,35 @@ func TestDisabledOCIRejectsLiveSnapshotBeforeDump(t *testing.T) {
 	require.ErrorContains(t, err, "FAST_SANDBOX_OCI_ENABLED=true")
 	require.Empty(t, fixture.server.snapshotDumps)
 	require.True(t, fixture.server.running)
+}
+
+func TestCheckpointCredentialsSeparateParentReadAndDestinationWrite(t *testing.T) {
+	installOCIRegistryConfig(t,
+		registryconfig.Credential{Host: "r.example", RepositoryPrefix: "templates", Username: "parent-reader", Password: "read-secret"},
+		registryconfig.Credential{Host: "other.example", RepositoryPrefix: "templates", Username: "other-reader", Password: "other-secret"},
+		registryconfig.Credential{Host: "r.example", RepositoryPrefix: "checkpoints", IdentityToken: "checkpoint-read-token", WriteUsername: "writer", WritePassword: "write-secret"},
+	)
+	credentials, err := checkpointCredentials("r.example/checkpoints/sandbox:pause")
+	require.NoError(t, err)
+	for _, test := range []struct {
+		reference string
+		want      auth.Credential
+	}{
+		{"r.example/checkpoints/sandbox:pause_rootfs", auth.Credential{Username: "writer", Password: "write-secret"}},
+		{"r.example/templates/base:rootfs", auth.Credential{Username: "parent-reader", Password: "read-secret"}},
+		{"other.example/templates/base:rootfs", auth.Credential{Username: "other-reader", Password: "other-secret"}},
+		{"public.example/base:rootfs", auth.EmptyCredential},
+	} {
+		got, err := credentials(context.Background(), test.reference)
+		require.NoError(t, err)
+		require.Equal(t, test.want, got, test.reference)
+	}
+	_, err = checkpointCredentials("missing.example/checkpoints/sandbox:pause")
+	require.ErrorContains(t, err, "no registry credential")
+}
+
+func TestOCITokenOnlyCredentialsFailBeforePacking(t *testing.T) {
+	installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", IdentityToken: "private-token"})
+	_, err := checkpointCredentials("r.example/checkpoints/sandbox:pause")
+	require.ErrorContains(t, err, "identitytoken-only credentials are not supported")
 }

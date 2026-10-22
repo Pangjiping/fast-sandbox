@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -916,4 +918,51 @@ func TestImportTemplateCarryAbsent(t *testing.T) {
 	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, cacheDir, sandboxID)
 	_, imports := mover.snapshot()
 	require.Empty(t, imports, "a mover without the template-carry capability is never invoked")
+}
+
+func TestSnapshotStagingRecoveryBeforeRetryAndDelete(t *testing.T) {
+	for _, operation := range []string{"retry", "delete"} {
+		for _, failed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fail=%t", operation, failed), func(t *testing.T) {
+				fixture := newDriverFixture(t)
+				require.NoError(t, os.MkdirAll(filepath.Join(fixture.driver.config.StateRoot, sandboxStateDir, fixture.sandboxSpec.Identity.SandboxUID), 0750))
+				require.NoError(t, saveState(filepath.Join(fixture.driver.config.StateRoot, sandboxStateDir, fixture.sandboxSpec.Identity.SandboxUID), &SandboxState{Config: fixture.sandboxSpec, Phase: PhaseStopped}))
+				staging := filepath.Join(fixture.driver.config.StateRoot, snapshotStagingDir, "snap-1")
+				require.NoError(t, os.MkdirAll(staging, 0750))
+				marker := filepath.Join(staging, ".pack-resources-active")
+				require.NoError(t, os.WriteFile(marker, []byte("retained"), 0600))
+				bin := t.TempDir()
+				t.Setenv("TEST_PACK_STAGING", staging)
+				t.Setenv("TEST_PACK_FAIL", strconv.FormatBool(failed))
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "fsb-vm"), []byte(`#!/bin/sh
+set -eu
+test -f "$TEST_PACK_STAGING/.pack-resources-active"
+printf '%s\n' "$@" > "$TEST_PACK_STAGING/arguments"
+if [ "$TEST_PACK_FAIL" = true ]; then exit 7; fi
+rm "$TEST_PACK_STAGING/.pack-resources-active"
+touch "$TEST_PACK_STAGING/cleaned"
+`), 0755))
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				var err error
+				if operation == "delete" {
+					err = fixture.driver.DeleteSnapshot(context.Background(), "snap-1")
+				} else {
+					// Invalid live state makes the snapshot fail after stale staging recovery.
+					_, err = fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{SandboxID: fixture.sandboxSpec.Identity.SandboxUID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindCheckpoint})
+				}
+				if failed {
+					require.ErrorContains(t, err, "recover checkpoint pack resources")
+					require.FileExists(t, marker)
+					raw, readErr := os.ReadFile(filepath.Join(staging, "arguments"))
+					require.NoError(t, readErr)
+					require.Contains(t, string(raw), "cleanup-pack\n--bundle-dir\n"+staging)
+				} else {
+					if operation == "delete" {
+						require.NoError(t, err)
+					}
+					require.NoDirExists(t, staging)
+				}
+			})
+		}
+	}
 }

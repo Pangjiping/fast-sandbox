@@ -86,7 +86,7 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 		if err != nil {
 			return empty, err
 		}
-		document.Files[file.name] = artifacts.ManifestFile{SHA256: entry["sha256"].(string), SizeBytes: entry["sizeBytes"].(int64)}
+		document.Files[file.name] = entry
 	}
 	return document, document.Validate()
 }

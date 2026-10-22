@@ -1210,11 +1210,10 @@ func collectSnapshotManifestEntries(staging string, isOCI bool) (snapshotManifes
 	var sizeBytes, rootfsSize int64
 	cache := map[string]string{}
 	for _, name := range bundleFiles {
-		entry, err := artifacts.FileEntry(filepath.Join(staging, name), cache)
+		file, err := artifacts.FileEntry(filepath.Join(staging, name), cache)
 		if err != nil {
 			return snapshotManifestEntries{}, err
 		}
-		file := artifacts.ManifestFile{SHA256: entry["sha256"].(string), SizeBytes: entry["sizeBytes"].(int64)}
 		sizeBytes += file.SizeBytes
 		switch name {
 		case vaultBundleName, policyBundleName:

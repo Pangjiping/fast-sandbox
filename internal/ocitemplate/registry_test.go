@@ -167,12 +167,12 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The pair is constrained to the metadata repository, so its descriptor checks
-// must share the metadata client's bearer token while still checking both refs.
+// Resolving both images must share the repository's bearer token without
+// downloading any config or layer blobs.
 func TestResolveSharesRepositoryAuthAndValidatesPair(t *testing.T) {
-	for _, mode := range []string{"valid", "missing-rootfs", "missing-snapfiles", "cross-repository", "cross-host"} {
+	for _, mode := range []string{"valid", "missing-rootfs", "missing-snapfiles", "legacy-metadata"} {
 		t.Run(mode, func(t *testing.T) {
-			var tokens atomic.Int32
+			var tokens, blobReads atomic.Int32
 			documents := map[string][]byte{}
 			heads := map[string]int{}
 			var server *httptest.Server
@@ -187,6 +187,9 @@ func TestResolveSharesRepositoryAuthAndValidatesPair(t *testing.T) {
 					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="registry",scope="repository:team/template:pull"`, server.URL))
 					w.WriteHeader(http.StatusUnauthorized)
 					return
+				}
+				if strings.Contains(r.URL.Path, "/blobs/") {
+					blobReads.Add(1)
 				}
 				raw, ok := documents[r.URL.Path]
 				if !ok {
@@ -207,40 +210,40 @@ func TestResolveSharesRepositoryAuthAndValidatesPair(t *testing.T) {
 			retry.DefaultClient = server.Client()
 			defer func() { retry.DefaultClient = old }()
 			repo := strings.TrimPrefix(server.URL, "https://") + "/team/template"
-			root, snap := []byte(`{"schemaVersion":2,"annotations":{"kind":"rootfs"}}`), []byte(`{"schemaVersion":2,"annotations":{"kind":"snapfiles"}}`)
-			rootSum, snapSum := digest.FromBytes(root).String(), digest.FromBytes(snap).String()
-			pair := Pair{Rootfs: repo + "@" + rootSum, Snapfiles: repo + "@" + snapSum}
-			switch mode {
-			case "cross-repository":
-				pair.Rootfs = strings.Replace(pair.Rootfs, "/team/template", "/other/template", 1)
-			case "cross-host":
-				pair.Rootfs = "other.example/team/template@" + rootSum
+			config := content.NewDescriptorFromBytes(oci.MediaTypeImageConfig, []byte(`{}`))
+			if mode == "legacy-metadata" {
+				config.MediaType = "application/vnd.fast-sandbox.template.v1+json"
 			}
-			cfg, err := json.Marshal(map[string]any{"oci": pair})
+			root, err := json.Marshal(oci.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: oci.MediaTypeImageManifest, Config: config})
 			require.NoError(t, err)
-			config := content.NewDescriptorFromBytes(ConfigMediaType, cfg)
-			top, err := json.Marshal(oci.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: oci.MediaTypeImageManifest, Config: config})
+			snap, err := json.Marshal(oci.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: oci.MediaTypeImageManifest, Config: config, Annotations: map[string]string{AnnotationTemplateID: "build"}})
 			require.NoError(t, err)
-			topSum := digest.FromBytes(top).String()
-			documents["/v2/team/template/manifests/"+topSum] = top
-			documents["/v2/team/template/blobs/"+config.Digest.String()] = cfg
-			rootPath, snapPath := "/v2/team/template/manifests/"+rootSum, "/v2/team/template/manifests/"+snapSum
+			rootPath := "/v2/team/template/manifests/build_rootfs"
+			snapSum := digest.FromBytes(snap).String()
+			snapPath := "/v2/team/template/manifests/" + snapSum
 			if mode != "missing-rootfs" {
 				documents[rootPath] = root
 			}
 			if mode != "missing-snapfiles" {
 				documents[snapPath] = snap
 			}
-			got, err := Resolve(context.Background(), repo+"@"+topSum, nil)
-			if mode == "valid" {
+			got, err := Resolve(context.Background(), repo+"@"+snapSum, nil)
+			switch mode {
+			case "valid":
 				require.NoError(t, err)
-				require.JSONEq(t, string(cfg), string(got))
-				require.EqualValues(t, 1, tokens.Load(), "metadata and both pair checks must share one token cache")
+				pair, err := Decode(got)
+				require.NoError(t, err)
+				require.Equal(t, &Pair{Rootfs: repo + "@" + digest.FromBytes(root).String(), Snapfiles: repo + "@" + snapSum}, pair)
+				require.EqualValues(t, 1, tokens.Load(), "both manifest reads must share one token cache")
 				require.Equal(t, 1, heads[rootPath])
 				require.Equal(t, 1, heads[snapPath])
-			} else {
+			case "legacy-metadata":
+				require.ErrorContains(t, err, "unexpected template config media type")
+				require.Zero(t, heads[rootPath], "reject the old metadata image before resolving the pair")
+			default:
 				require.Error(t, err)
 			}
+			require.Zero(t, blobReads.Load(), "resolution must not fetch config or layer blobs")
 		})
 	}
 }
