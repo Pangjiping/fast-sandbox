@@ -15,6 +15,7 @@ import (
 	oci "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sys/unix"
 
+	"fast-sandbox/internal/artifacts"
 	"fast-sandbox/internal/ocitemplate"
 )
 
@@ -45,17 +46,15 @@ func captureOCIUpper(stateRoot, sandboxID, staging string) error {
 		return fmt.Errorf("invalid OverlayBD parent blob URL")
 	}
 	repository := endpoint.Host + strings.TrimSuffix(strings.TrimPrefix(endpoint.Path, "/v2"), "/blobs")
-	raw, err = os.ReadFile(filepath.Join(home, "mnt/metadata.json"))
+	raw, err = os.ReadFile(filepath.Join(home, "mnt/manifest.json"))
 	if err != nil {
 		return err
 	}
-	var machine struct {
-		DiskSizeMB int64 `json:"disk_size_mb"`
-	}
-	if err = json.Unmarshal(raw, &machine); err != nil {
+	manifest, err := artifacts.DecodeVMManifest(raw)
+	if err != nil {
 		return err
 	}
-	upper := ocitemplate.RootfsUpper{Repository: repository, VirtualSizeBytes: machine.DiskSizeMB << 20}
+	upper := ocitemplate.RootfsUpper{Repository: repository, VirtualSizeBytes: manifest.Machine.RootfsSizeMiB << 20}
 	for _, lower := range config.Lowers {
 		upper.Lowers = append(upper.Lowers, oci.Descriptor{MediaType: ocitemplate.OverlayBDLayerMediaType, Digest: digest.Digest(lower.Digest), Size: lower.Size})
 	}

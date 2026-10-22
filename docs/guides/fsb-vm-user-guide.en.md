@@ -192,7 +192,7 @@ Common build options:
 | `--disk-size-gb` | `20` | Rootfs virtual disk size in GiB; must be positive |
 | `--snapfiles-size-mb` | derived | Snapfiles virtual disk size |
 | `--kernel-version` | derived from `vmlinux-<version>` | Kernel version recorded in template metadata |
-| `--manifest-file` | empty | Platform `manifest.json` to copy into snapfiles before sealing; required for Fastlet templates |
+| `--manifest-extra-file` | empty | Optional guestNetwork, lineage and platform fields that supplement the generated VM manifest; core VM fields cannot be overridden |
 | `--init-script-file` | built-in Redis init | Script injected into the guest and run as PID 1 |
 | `--ready-pattern` | `Ready to accept connections` | Serial-log text that marks workload readiness |
 | `--ready-timeout` | `3m` | Readiness timeout |
@@ -353,7 +353,7 @@ The publishing process must upload every `blobs/sha256/*` object referenced by t
 
 For a plain HTTP registry, use `fsb-vm --plain-http push ...`. The setting applies to the destination and remote parent-layer reads for incremental artifacts; HTTPS remains the default.
 
-`fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It publishes only `<tag>_rootfs` and `<tag>_snapfiles`, uploading rootfs first and snapfiles last. Platform metadata lives in `snapfiles/manifest.json`; only pair identity and checkpoint owner annotations live on the OCI manifest. Build with `--manifest-file <platform-manifest.json>` to include it before sealing snapfiles. `push --metadata-file` is optional and only extracts checkpoint ownership; it cannot add files to sealed snapfiles. The returned `manifestRef` and `artifactDigest` identify the snapfiles manifest. The two images are paired by ID, so IDs must be immutable; the publisher rejects overwriting a tag with different contents. Historical templates without `snapfiles/manifest.json` must be rebuilt for Fastlet. The OCI `SandboxTemplate` builder runs this step automatically, composing the destination from the repository-only `output.publish` and the system-assigned UUID. Explicit `--destination repository:tag` remains the standalone CLI contract. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
+`fsb-vm push` accepts `--artifact-dir`, `--destination registry/repository:tag`, `--metadata-file` and `--auth-file`. It publishes only `<tag>_rootfs` and `<tag>_snapfiles`, uploading rootfs first and snapfiles last. Platform metadata lives in `snapfiles/manifest.json`; only pair identity and checkpoint owner annotations live on the OCI manifest. `fsb-vm build` always generates the single `snapfiles/manifest.json`, including core VM fields, even without platform input. Use optional `--manifest-extra-file <manifest-extra.json>` to supplement guest networking, lineage and platform fields; it cannot replace the core contract. See the [shared manifest schema](artifact-manifest-reference.md). `push --metadata-file` is optional and only extracts checkpoint ownership; it cannot add files to sealed snapfiles. The returned `manifestRef` and `artifactDigest` identify the snapfiles manifest. The two images are paired by ID, so IDs must be immutable; the publisher rejects overwriting a tag with different contents. Rebuild historical OCI and S3 templates using the unified schemaVersion 1; dual-file metadata and the previous manifest layout are not supported. The OCI `SandboxTemplate` builder runs this step automatically, composing the destination from the repository-only `output.publish` and the system-assigned UUID. Explicit `--destination repository:tag` remains the standalone CLI contract. See the [publication contract](../design/adr-fsb-vm-cli.en.md#adr-012-build-artifact-layout-and-publish-contract-build-iteration) for layout and ordering.
 
 ## 6. Prepare template.json
 
@@ -429,7 +429,7 @@ sudo "$FSB_VM" \
 3. creates `rootfs.dev` in the runtime directory and loads the snapshot with that cwd;
 4. resumes the VM and changes `state.json` to `running`.
 
-By default, it checks `/opt/fsb-vm/kernels/vmlinux-<version>` using `kernel_version` from template metadata. When the standard Builder uses `vmlinux.bin`, that literal `kernel_version` selects `vmlinux.bin` in the same directory without adding the `vmlinux-` prefix. Override the path when necessary:
+By default, it checks `/opt/fsb-vm/kernels/vmlinux-<version>` using `kernel.version` from template metadata. When the standard Builder uses `vmlinux.bin`, that literal `kernel.version` selects `vmlinux.bin` in the same directory without adding the `vmlinux-` prefix. Override the path when necessary:
 
 ```bash
 sudo "$FSB_VM" \

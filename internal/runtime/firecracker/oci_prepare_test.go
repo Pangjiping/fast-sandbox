@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"fast-sandbox/internal/ocitemplate"
+	"github.com/opencontainers/go-digest"
+	oci "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
@@ -18,7 +21,17 @@ func installPreparedOCI(t *testing.T, fixture *driverFixture, metadata string) {
 	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "true")
 	installOCIRegistryConfig(t, registryconfig.Credential{Host: "r.example", Username: "pool-reader", Password: "pool-secret"})
 	t.Setenv("TEST_PREPARE_ROOT", fixture.stateRoot)
-	state, err := json.Marshal(map[string]any{"rootfs_device": map[string]string{"dev_path": "/dev/ublkb42"}, "template_metadata": json.RawMessage(metadata)})
+	var platformDoc map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(metadata), &platformDoc)
+	envelope := map[string]json.RawMessage{"oci": platformDoc["oci"]}
+	if value := platformDoc["platform"]; value != nil {
+		var platform map[string]json.RawMessage
+		_ = json.Unmarshal(value, &platform)
+		if owner := platform["checkpoint"]; owner != nil {
+			envelope["checkpoint"] = owner
+		}
+	}
+	state, err := json.Marshal(map[string]any{"rootfs_device": map[string]string{"dev_path": "/dev/ublkb42"}, "template_metadata": envelope})
 	if err != nil {
 		// Malformed output models a broken/incompatible CLI.
 		state = []byte(metadata)
@@ -48,11 +61,11 @@ fi
 
 func preparedMetadata(t *testing.T) map[string]any {
 	t.Helper()
-	return map[string]any{
-		"oci":          map[string]string{"rootfs": "r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "snapfiles": "r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-		"machine":      map[string]string{"vcpu": "2", "memory": "1Gi"},
-		"guestNetwork": map[string]string{"ip": "172.30.0.3", "gateway": "172.30.0.1", "netmask": "255.255.255.0"},
-	}
+	document := testManifestDocument(t)
+	document["machine"].(map[string]any)["rootfsDrivePath"] = "rootfs.dev"
+	delete(document, "files")
+	document["oci"] = map[string]string{"rootfs": "r.example/templates/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "snapfiles": "r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	return document
 }
 
 func TestOCIMetadataComesOnlyFromMountedManifest(t *testing.T) {
@@ -74,8 +87,8 @@ func TestOCIMetadataComesOnlyFromMountedManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(manifest, raw, 0600))
 	metadata, err := readPreparedOCIMetadata(root, "sandbox-1")
 	require.NoError(t, err)
-	require.Equal(t, "2", metadata.Machine.VCPU)
-	require.Equal(t, "1Gi", metadata.Machine.Memory)
+	require.Equal(t, 2, metadata.Machine.VCPUCount)
+	require.Equal(t, int64(1024), metadata.Machine.MemoryMiB)
 	// An OCI owner annotation cannot silently disagree with embedded ownership.
 	envelope["checkpoint"] = map[string]string{"sandboxUID": "other", "namespace": "tenant-a"}
 	state, err = json.Marshal(map[string]any{"template_metadata": envelope})
@@ -98,7 +111,7 @@ func TestOCICreateAndResumeUseCLIResultWithoutAgentMetadata(t *testing.T) {
 			metadata := preparedMetadata(t)
 			if resume {
 				fixture.sandboxSpec.Spec.Restore = &fastletapi.RestoreSpec{ManifestRef: image, ArtifactDigest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
-				metadata["checkpoint"] = map[string]string{"sandboxUID": "sandbox-1", "namespace": "tenant-a"}
+				metadata["platform"] = map[string]any{"checkpoint": map[string]string{"sandboxUID": "sandbox-1", "namespace": "tenant-a"}}
 			}
 			raw, err := json.Marshal(metadata)
 			require.NoError(t, err)
@@ -123,6 +136,10 @@ func TestOCICreateAndResumeUseCLIResultWithoutAgentMetadata(t *testing.T) {
 			for _, name := range []string{publishedRootfsName, vmstateSnapshotName, memorySnapshotName} {
 				require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("snapshot-data"), 0600))
 			}
+			upper := ocitemplate.RootfsUpper{Repository: "r.example/templates/base", VirtualSizeBytes: 1 << 30, Lowers: []oci.Descriptor{{Digest: digest.FromString("parent"), Size: 1, MediaType: ocitemplate.OverlayBDLayerMediaType}}}
+			upperRaw, err := json.Marshal(upper)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(staging, ocitemplate.RootfsUpperName), upperRaw, 0600))
 			sandboxDir := filepath.Join(fixture.stateRoot, sandboxStateDir, "sandbox-1")
 			_, err = assembleSnapshotManifest(fixture.stateRoot, staging, sandboxDir)
 			require.NoError(t, err)
@@ -144,9 +161,9 @@ func TestOCIPreparePreservesAdmissionAndReleasesDevices(t *testing.T) {
 			metadata := preparedMetadata(t)
 			switch invalid {
 			case "owner":
-				metadata["checkpoint"] = map[string]string{"sandboxUID": "someone-else", "namespace": "tenant-a"}
+				metadata["platform"] = map[string]any{"checkpoint": map[string]string{"sandboxUID": "someone-else", "namespace": "tenant-a"}}
 			case "memory":
-				metadata["machine"] = map[string]string{"vcpu": "2", "memory": "2Gi"}
+				metadata["machine"].(map[string]any)["memoryMiB"] = 2048
 			case "network":
 				metadata["guestNetwork"] = map[string]string{"ip": "invalid-ip", "gateway": "172.30.0.1", "netmask": "255.255.255.0"}
 			case "compatibility":

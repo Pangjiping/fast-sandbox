@@ -116,15 +116,7 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 }
 
 // Platform metadata comes from the mounted snapfiles, never registry annotations.
-type ociRestoreMetadata struct {
-	Machine       manifestMachine                 `json:"machine"`
-	GuestNetwork  manifestGuestNetwork            `json:"guestNetwork"`
-	Compatibility artifacts.SnapshotCompatibility `json:"compatibility"`
-	Checkpoint    *struct {
-		SandboxUID string `json:"sandboxUID"`
-		Namespace  string `json:"namespace"`
-	} `json:"checkpoint"`
-}
+type ociRestoreMetadata = artifacts.VMManifest
 
 type ociAttachment struct {
 	rootfs, vmstate, memory string
@@ -162,7 +154,7 @@ func (d *Driver) prepareOCIRestore(ctx context.Context, directory, reference str
 	if err := validateOCIResumeOwner(metadata, config); err != nil {
 		return attachment, err
 	}
-	hasMachine := metadata.Machine.VCPU != "" && metadata.Machine.Memory != ""
+	hasMachine := metadata.Machine.VCPUCount > 0 && metadata.Machine.MemoryMiB > 0
 	if err := validateRestoreMachine(config.Spec, d.config, metadata.Machine, hasMachine); err != nil {
 		return attachment, err
 	}
@@ -178,7 +170,11 @@ func readPreparedOCIMetadata(stateRoot, id string) (ociRestoreMetadata, error) {
 	if err != nil {
 		return metadata, err
 	}
-	if err := json.Unmarshal(raw, &metadata); err != nil {
+	metadata, err = artifacts.DecodeVMManifest(raw)
+	if err != nil {
+		return metadata, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+	if err := requireStaticGuestNetwork(metadata.GuestNetwork); err != nil {
 		return metadata, err
 	}
 	// Pair resolution authenticates checkpoint ownership through the OCI
@@ -197,12 +193,18 @@ func readPreparedOCIMetadata(stateRoot, id string) (ociRestoreMetadata, error) {
 	if err != nil || pair == nil {
 		return metadata, fmt.Errorf("%w: fsb-vm prepared state has no valid template pair", ErrInvalidConfig)
 	}
-	var envelope ociRestoreMetadata
+	var envelope struct {
+		Checkpoint *artifacts.CheckpointOwner `json:"checkpoint"`
+	}
 	if err := json.Unmarshal(state.Metadata, &envelope); err != nil {
 		return metadata, err
 	}
 	owner := envelope.Checkpoint
-	if (owner == nil) != (metadata.Checkpoint == nil) || (owner != nil && *owner != *metadata.Checkpoint) {
+	var embedded *artifacts.CheckpointOwner
+	if metadata.Platform != nil {
+		embedded = metadata.Platform.Checkpoint
+	}
+	if (owner == nil) != (embedded == nil) || (owner != nil && *owner != *embedded) {
 		return metadata, fmt.Errorf("%w: snapfiles checkpoint owner disagrees with OCI manifest", ErrInvalidConfig)
 	}
 	return metadata, nil

@@ -67,7 +67,7 @@ func TestCheckpointOwnerLivesOnSnapfilesManifest(t *testing.T) {
 	defer func() { retry.DefaultClient = previous }()
 	dir := localPairFixture(t)
 	destination := strings.TrimPrefix(server.URL, "https://") + "/checkpoints/sandbox:checkpoint-1"
-	metadata := []byte(`{"machine":{"vcpu":"1","memory":"512Mi"},"guestNetwork":{"ip":"172.30.0.3"},"actionBindings":[{"action":"exec"}],"checkpoint":{"sandboxUID":"owner","namespace":"tenant"}}`)
+	metadata := []byte(`{"machine":{"vcpu":"1","memory":"512Mi"},"guestNetwork":{"ip":"172.30.0.3"},"actionBindings":[{"action":"exec"}],"platform":{"checkpoint":{"sandboxUID":"owner","namespace":"tenant"}}}`)
 	ref, sum, err := Push(ctx, dir, destination, metadata, nil)
 	require.NoError(t, err)
 	repo, _, err := Repository(ref, nil)
@@ -146,7 +146,7 @@ func TestPairMetadataRejectsInvalidIDsAndOwners(t *testing.T) {
 		_, err := pairAnnotations(id, []byte(`{}`))
 		require.Error(t, err, id)
 	}
-	for _, raw := range []string{`null`, `[]`, `{"checkpoint":{}}`, `{"checkpoint":{"sandboxUID":"owner"}}`, `{"checkpoint":{"sandboxUID":"owner","namespace":" "}}`} {
+	for _, raw := range []string{`null`, `[]`, `{"platform":{"checkpoint":{}}}`, `{"platform":{"checkpoint":{"sandboxUID":"owner"}}}`, `{"platform":{"checkpoint":{"sandboxUID":"owner","namespace":" "}}}`} {
 		_, err := pairAnnotations("valid-id", []byte(raw))
 		require.Error(t, err, raw)
 	}

@@ -739,18 +739,17 @@ func TestWriteGuestFileReplacesSpecialFiles(t *testing.T) {
 	})
 }
 
-func TestMetadataRequiresRelativeRootfsDrive(t *testing.T) {
-	legacy := vmMetadata{HypervisorType: hypervisorFirecracker}
-	if err := legacy.validate("firecracker", true); err == nil || !strings.Contains(err.Error(), "rebuild") {
-		t.Fatalf("legacy template = %v, want rebuild error even with --force", err)
+func TestManifestRequiresRelativeRootfsDrive(t *testing.T) {
+	for _, path := range []string{"", "/dev/ublkb2"} {
+		document := testVMManifest()
+		document.Machine.RootfsDrivePath = path
+		if err := validateManifest(document, "firecracker", true); err == nil {
+			t.Fatalf("drive %q must fail even with --force", path)
+		}
 	}
-	pinned := vmMetadata{RootfsDrivePath: "/dev/ublkb2"}
-	if err := pinned.validate("firecracker", true); err == nil {
-		t.Fatal("a host device path must be rejected")
-	}
-	current := vmMetadata{RootfsDrivePath: rootfsDriveLink}
-	if err := current.validate("firecracker", true); err != nil {
-		t.Fatalf("current template: %v", err)
+	document := testVMManifest()
+	if err := validateManifest(document, "/missing/firecracker", true); err != nil {
+		t.Fatal(err)
 	}
 }
 

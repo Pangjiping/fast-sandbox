@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func TestResolveRootfsImage(t *testing.T) {
 	require.Equal(t, path, resolved)
 }
 
-func TestLocalCacheRejectsOverlayBDObjectStore(t *testing.T) {
+func TestLocalCacheRejectsIncompleteManifest(t *testing.T) {
 	root, image := t.TempDir(), "example.com/legacy-overlaybd:v1"
 	path, err := imageCachePath(root, image)
 	require.NoError(t, err)
@@ -60,7 +61,9 @@ func TestLocalCacheRejectsOverlayBDObjectStore(t *testing.T) {
 	require.ErrorIs(t, driver.PullImage(context.Background(), image), ErrInvalidConfig)
 
 	// The supported native cache remains usable without a runtime-agent.
-	require.NoError(t, os.WriteFile(manifest, []byte(`{"format":"native"}`), 0640))
+	raw, err := json.Marshal(testManifestDocument(t))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest, raw, 0640))
 	require.NoError(t, verifyRestorableImage(root, image))
 	require.NoError(t, driver.PullImage(context.Background(), image))
 }

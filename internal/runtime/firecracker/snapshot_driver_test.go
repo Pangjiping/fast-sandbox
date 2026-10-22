@@ -164,15 +164,14 @@ func TestCreateSnapshotDumpsPublishesAndResumes(t *testing.T) {
 	require.Equal(t, "app-v2", agent.key)
 	require.Equal(t, fixture.sandboxSpec.Spec.Image,
 		agent.manifest["lineage"].(map[string]any)["image"])
-	require.Equal(t, map[string]any{
-		"vcpu": "2", "memory": "1Gi", "rootfs": "1Gi",
-	}, agent.manifest["machine"])
-	require.Equal(t, map[string]any{
-		"iface": "eth0", "mac": "02:00:00:00:00:01", "ip": "172.30.0.3",
-		"gateway": "172.30.0.1", "netmask": "255.255.255.0",
-	}, agent.manifest["guestNetwork"])
-	require.Equal(t, "native", agent.manifest["format"])
-	require.Equal(t, map[string]any{"booted": true, "restored": false}, agent.manifest["validation"])
+	machine := agent.manifest["machine"].(map[string]any)
+	require.Equal(t, float64(2), machine["vcpuCount"])
+	require.Equal(t, float64(1024), machine["memoryMiB"])
+	require.Equal(t, float64(1), machine["rootfsSizeMiB"])
+	require.Equal(t, "rootfs.img", machine["rootfsDrivePath"])
+	require.Equal(t, "172.30.0.3", agent.manifest["guestNetwork"].(map[string]any)["ip"])
+	require.NotContains(t, agent.manifest, "format")
+	require.NotContains(t, agent.manifest, "validation")
 	files := agent.manifest["files"].(map[string]any)
 	require.Len(t, files, 3)
 	require.Contains(t, agent.sums, "rootfs.ext4")
@@ -238,7 +237,7 @@ func TestCreateSnapshotRequiresSourceManifestFacts(t *testing.T) {
 		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
 	})
 	require.ErrorIs(t, err, ErrInvalidConfig)
-	require.Contains(t, err.Error(), "machine")
+	require.Contains(t, err.Error(), "manifest")
 }
 
 func TestCreateSnapshotRejectsInsufficientStagingBeforePause(t *testing.T) {
@@ -314,12 +313,13 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 
 	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(artifacts.CheckpointReference(restore.ArtifactDigest)))
 	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
-	lineage, err := json.Marshal(map[string]any{
-		"schemaVersion": 1, "runtime": "firecracker",
-		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
-		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
-		"kernel":       map[string]any{"name": "vmlinux"},
-	})
+	sourceDocument := testManifestDocument(t)
+	sourceDocument["guestNetwork"].(map[string]any)["ip"] = "10.0.0.2"
+	sourceDocument["guestNetwork"].(map[string]any)["gateway"] = "10.0.0.1"
+	sourceDocument["machine"].(map[string]any)["vcpuCount"] = 1
+	sourceDocument["machine"].(map[string]any)["memoryMiB"] = 512
+
+	lineage, err := json.Marshal(sourceDocument)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
 
@@ -356,12 +356,13 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 
 	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(artifacts.CheckpointReference(restore.ArtifactDigest)))
 	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
-	lineage, err := json.Marshal(map[string]any{
-		"schemaVersion": 1, "runtime": "firecracker",
-		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
-		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
-		"egressVault":  map[string]any{"sha256": "stale", "sizeBytes": 7},
-	})
+	sourceDocument := testManifestDocument(t)
+	sourceDocument["guestNetwork"].(map[string]any)["ip"] = "10.0.0.2"
+	sourceDocument["guestNetwork"].(map[string]any)["gateway"] = "10.0.0.1"
+	sourceDocument["machine"].(map[string]any)["vcpuCount"] = 1
+	sourceDocument["machine"].(map[string]any)["memoryMiB"] = 512
+	sourceDocument["platform"] = map[string]any{"stateFiles": map[string]any{"vault.json": map[string]any{"sha256": artifacts.SHA256Of([]byte("stale")), "sizeBytes": 7}}}
+	lineage, err := json.Marshal(sourceDocument)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
 
@@ -531,9 +532,11 @@ func TestCreateCheckpointStagesAndPublishesVaultBundle(t *testing.T) {
 	// The staged vault file rides the manifest file list, SHA256SUMS, and the
 	// egressVault marker.
 	files := agent.manifest["files"].(map[string]any)
-	require.Len(t, files, 4)
+	require.Len(t, files, 3)
+	files = agent.manifest["platform"].(map[string]any)["stateFiles"].(map[string]any)
 	require.Contains(t, files, "vault.json")
-	require.Equal(t, files["vault.json"], agent.manifest["egressVault"], "the egressVault marker names the staged vault entry")
+	require.Contains(t, files, "vault.json")
+	require.NotContains(t, agent.manifest, "egressVault")
 	require.Contains(t, agent.sums, "vault.json")
 
 	// The node-local cache commit carries the vault file next to the
@@ -650,9 +653,9 @@ func TestCreateCheckpointFailsWhenPolicyExportFails(t *testing.T) {
 // egressVault entry describing content.
 func writeCheckpointManifest(t *testing.T, dir string, content []byte, withMarker bool) {
 	t.Helper()
-	document := map[string]any{"schemaVersion": 1, "runtime": "firecracker"}
+	document := testManifestDocument(t)
 	if withMarker {
-		document["egressVault"] = map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}
+		document["platform"] = map[string]any{"stateFiles": map[string]any{"vault.json": map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}}}
 	}
 	payload, err := json.Marshal(document)
 	require.NoError(t, err)
@@ -667,7 +670,9 @@ func writeSnapshotManifestWithFiles(t *testing.T, dir string, entries map[string
 	for name, content := range entries {
 		files[name] = map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}
 	}
-	payload, err := json.Marshal(map[string]any{"schemaVersion": 1, "runtime": "firecracker", "files": files})
+	document := testManifestDocument(t)
+	document["platform"] = map[string]any{"stateFiles": files}
+	payload, err := json.Marshal(document)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotManifestName), payload, 0o644))
 }
@@ -848,7 +853,9 @@ func TestCreateTemplateSnapshotStagesSealFreeState(t *testing.T) {
 	require.Contains(t, joined, "policy.json")
 
 	files := agent.manifest["files"].(map[string]any)
-	require.Len(t, files, 5)
+	require.Len(t, files, 3)
+	files = agent.manifest["platform"].(map[string]any)["stateFiles"].(map[string]any)
+	require.Len(t, files, 2)
 	require.Contains(t, files, "vault.json")
 	require.Contains(t, files, "policy.json")
 	require.Contains(t, agent.sums, "vault.json")
@@ -870,14 +877,11 @@ func TestImportTemplateCarry(t *testing.T) {
 	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), vaultContent, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, policyBundleName), policyContent, 0o600))
-	document := map[string]any{
-		"schemaVersion": 1, "runtime": "firecracker",
-		"egressVault": map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
-		"files": map[string]any{
-			"vault.json":  map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
-			"policy.json": map[string]any{"sha256": artifacts.SHA256Of(policyContent), "sizeBytes": len(policyContent)},
-		},
-	}
+	document := testManifestDocument(t)
+	document["platform"] = map[string]any{"stateFiles": map[string]any{
+		"vault.json":  map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
+		"policy.json": map[string]any{"sha256": artifacts.SHA256Of(policyContent), "sizeBytes": len(policyContent)},
+	}}
 	payload, err := json.Marshal(document)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))

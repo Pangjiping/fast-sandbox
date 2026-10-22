@@ -2,7 +2,6 @@ package firecracker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote/auth"
 
+	"fast-sandbox/internal/artifacts"
 	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
@@ -120,23 +120,10 @@ func (d *Driver) publishOCISnapshot(ctx context.Context, plan dumpPlan, sizeByte
 	if err != nil {
 		return nil, err
 	}
-	// Preserve fsb-vm's machine/device contract in the snapfiles filesystem.
-	source := filepath.Join(d.config.StateRoot, "oci/sandboxes", plan.sandboxID, "mnt/metadata.json")
-	if err = copyFile(source, filepath.Join(plan.staging, "metadata.json")); err != nil {
-		return nil, err
-	}
+
 	manifestPath := filepath.Join(plan.staging, snapshotManifestName)
 	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return nil, err
-	}
-	raw, err = ociSnapshotMetadata(raw, kind, state.Config.Identity)
-	if err != nil {
-		return nil, err
-	}
-	// Sanitize before packing too: a reusable template must not retain an
-	// inherited checkpoint owner inside snapfiles/manifest.json.
-	if err = os.WriteFile(manifestPath, raw, 0644); err != nil { //nolint:gosec // published metadata, world-readable by design
 		return nil, err
 	}
 	args := append(d.fsbArgs(), "--build-work-dir", filepath.Join(plan.staging, "pack-work"), "--build-output-dir", filepath.Join(plan.staging, "artifacts"), "pack", "--bundle-dir", plan.staging, "--output", "snapshot:"+plan.snapshotID)
@@ -157,33 +144,20 @@ func (d *Driver) publishOCISnapshot(ctx context.Context, plan dumpPlan, sizeByte
 	return &runtimecontract.SnapshotResult{SnapshotID: plan.snapshotID, ManifestRef: ref, ArtifactDigest: strings.TrimPrefix(parsed.Reference, "sha256:"), SizeBytes: sizeBytes}, nil
 }
 
-func ociSnapshotMetadata(raw []byte, kind fastletapi.SnapshotKind, owner fastletapi.SandboxIdentity) ([]byte, error) {
-	var document map[string]any
-	if err := json.Unmarshal(raw, &document); err != nil {
-		return nil, err
-	}
-	if document == nil {
-		return nil, fmt.Errorf("%w: snapshot metadata must be an object", ErrInvalidConfig)
-	}
-	delete(document, "oci")
-	delete(document, "checkpoint")
-	document["format"] = "overlaybd"
-	if kind == fastletapi.SnapshotKindCheckpoint {
-		document["checkpoint"] = map[string]string{"sandboxUID": owner.SandboxUID, "namespace": owner.Namespace}
-	}
-	return json.Marshal(document)
-}
-
 // Checkpoints are instance-private even though their bytes use an OCI envelope.
 // They cannot be used as golden templates to boot a different sandbox.
 func validateOCIResumeOwner(document ociRestoreMetadata, config *fastletapi.RuntimeSandboxConfig) error {
-	if config.Spec.Restore != nil && document.Checkpoint == nil {
+	var owner *artifacts.CheckpointOwner
+	if document.Platform != nil {
+		owner = document.Platform.Checkpoint
+	}
+	if config.Spec.Restore != nil && owner == nil {
 		return fmt.Errorf("%w: OCI resume reference is not a checkpoint", ErrInvalidConfig)
 	}
-	if document.Checkpoint == nil {
+	if owner == nil {
 		return nil
 	}
-	if config.Spec.Restore == nil || document.Checkpoint.SandboxUID != config.Identity.SandboxUID || document.Checkpoint.Namespace != config.Identity.Namespace {
+	if config.Spec.Restore == nil || owner.SandboxUID != config.Identity.SandboxUID || owner.Namespace != config.Identity.Namespace {
 		return fmt.Errorf("%w: OCI checkpoint belongs to a different sandbox", ErrInvalidConfig)
 	}
 	return nil

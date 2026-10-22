@@ -190,7 +190,7 @@ credentials) see the sections below.
 - **Artifacts**: byte-identical to SandboxTemplate builds
   (`<store>/<sha256(manifest)[:16]>/{rootfs.ext4,vmstate.snap,memory.snap,
   SHA256SUMS,manifest.json}` + `index/<sha256(templateName)>.json` written
-  last). The manifest copies `machine`/`guestNetwork`/`kernel`/`envs`
+  last). The manifest copies `machine`/`guestNetwork`/`kernel`/`platform.envs`
   verbatim from the source image (they describe the vmstate lineage that
   restore validates). Only the template-name index is written — never a
   default `sha256(image)` key, which would pollute the golden image.

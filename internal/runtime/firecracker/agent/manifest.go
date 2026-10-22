@@ -6,45 +6,23 @@ package agent
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 
-	"fast-sandbox/internal/ocitemplate"
+	"fast-sandbox/internal/artifacts"
 )
 
-// manifestFile describes one published artifact.
-type manifestFile struct {
-	SHA256    string `json:"sha256"`
-	SizeBytes int64  `json:"sizeBytes"`
-}
+// manifest adds transport-specific helpers to the shared metadata model.
+type manifest artifacts.VMManifest
 
-// manifest is the consumer-side view of manifest.json; only the file list
-// is needed by the pull layer.
-type manifest struct {
-	Format string                  `json:"format"`
-	OCI    *ocitemplate.Pair       `json:"oci,omitempty"`
-	Files  map[string]manifestFile `json:"files"`
-}
-
-// parseManifest decodes a downloaded manifest document.
 func parseManifest(payload []byte) (manifest, error) {
-	var document manifest
-	if err := json.Unmarshal(payload, &document); err != nil {
+	document, err := artifacts.DecodeVMManifest(payload)
+	if err != nil {
 		return manifest{}, fmt.Errorf("decode manifest: %w", err)
 	}
-	if document.OCI != nil {
-		if _, err := ocitemplate.Decode(payload); err != nil {
-			return manifest{}, err
-		}
-		return document, nil
-	}
-	if document.Format == "overlaybd" {
-		return manifest{}, fmt.Errorf("OverlayBD object-store artifacts are unsupported; rebuild as native or publish to an OCI registry")
-	}
 	if len(document.Files) == 0 {
-		return manifest{}, fmt.Errorf("manifest has no files")
+		return manifest{}, fmt.Errorf("manifest has no native files; OCI artifacts must be prepared through fsb-vm")
 	}
-	return document, nil
+	return manifest(document), nil
 }
 
 // nativeFile pairs a published artifact with its local cache name and the
@@ -111,7 +89,10 @@ func (m manifest) policyFile() (nativeFile, bool, error) {
 
 // bundleFile resolves one optional state bundle entry by published name.
 func (m manifest) bundleFile(name string) (nativeFile, bool, error) {
-	entry, ok := m.Files[name]
+	if m.Platform == nil {
+		return nativeFile{}, false, nil
+	}
+	entry, ok := m.Platform.StateFiles[name]
 	if !ok {
 		return nativeFile{}, false, nil
 	}

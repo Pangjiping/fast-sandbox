@@ -178,6 +178,9 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		_ = os.RemoveAll(plan.staging)
 		return nil, err
 	}
+	if err := writeSnapshotOwner(plan.staging, plan.sandboxDir, kind); err != nil {
+		return nil, err
+	}
 	klog.InfoS("firecracker checkpoint manifest assembled",
 		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind,
 		"sizeBytes", sizeBytes, "staging", plan.staging)
@@ -875,7 +878,7 @@ const maxPolicyBundleBytes = 1 << 20
 // importRestoreVault delivers a restored checkpoint's vault bundle file to
 // egress — before the data plane becomes ready. Only a resumed checkpoint
 // carries the file (golden-image caches never do); a nil mover is a no-op.
-// The committed manifest's egressVault entry is the enforced provenance:
+// The committed manifest's platform.stateFiles entry is the provenance:
 // an authorized-but-missing file, a read failure, a marker/size/digest
 // mismatch, or an import failure all degrade the subject's vault
 // fail-closed and observably — mirroring the corrupt vault file posture at
@@ -1067,10 +1070,7 @@ func deliverStateBundle(plan importPlan, verified []byte) error {
 
 // fileMarker is a manifest provenance entry: a sha256 + size pair that
 // authorizes exactly one bundle file content.
-type fileMarker struct {
-	SHA256    string `json:"sha256"`
-	SizeBytes int64  `json:"sizeBytes"`
-}
+type fileMarker = artifacts.ManifestFile
 
 // sentinel degradation causes of the restore import; the log line carries
 // the specifics.
@@ -1084,42 +1084,32 @@ var (
 	errPolicyBundleMismatch = errors.New("policy bundle does not match the manifest entry")
 )
 
-// vaultManifestMarker parses the committed checkpoint manifest's egressVault
-// entry. A manifest without the marker authorizes nothing.
+// vaultManifestMarker resolves vault provenance from platform.stateFiles.
 func vaultManifestMarker(bundleDir string) (*fileMarker, bool, error) {
-	payload, err := os.ReadFile(filepath.Join(bundleDir, snapshotManifestName))
-	if err != nil {
-		return nil, false, fmt.Errorf("read checkpoint manifest: %w", err)
-	}
-	var document struct {
-		EgressVault *fileMarker `json:"egressVault"`
-	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return nil, false, fmt.Errorf("decode checkpoint manifest: %w", err)
-	}
-	return document.EgressVault, document.EgressVault != nil, nil
+	return stateFileMarker(bundleDir, vaultBundleName)
 }
 
-// policyManifestMarker returns the committed snapshot manifest's policy.json
-// files entry: the recorded policy needs no dedicated top-level marker —
-// the checksummed file list IS the provenance. A manifest without the entry
-// authorizes nothing.
 func policyManifestMarker(bundleDir string) (*fileMarker, bool, error) {
-	payload, err := os.ReadFile(filepath.Join(bundleDir, snapshotManifestName))
+	return stateFileMarker(bundleDir, policyBundleName)
+}
+
+func stateFileMarker(bundleDir, name string) (*fileMarker, bool, error) {
+	raw, err := os.ReadFile(filepath.Join(bundleDir, snapshotManifestName))
 	if err != nil {
-		return nil, false, fmt.Errorf("read snapshot manifest: %w", err)
+		return nil, false, err
 	}
-	var document struct {
-		Files map[string]fileMarker `json:"files"`
+	document, err := artifacts.DecodeVMManifest(raw)
+	if err != nil {
+		return nil, false, err
 	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return nil, false, fmt.Errorf("decode snapshot manifest: %w", err)
-	}
-	marker, listed := document.Files[policyBundleName]
-	if !listed {
+	if document.Platform == nil {
 		return nil, false, nil
 	}
-	return &marker, true, nil
+	entry, exists := document.Platform.StateFiles[name]
+	if !exists {
+		return nil, false, nil
+	}
+	return &entry, true, nil
 }
 
 // stagedBundleFiles validates the optional state bundle files of the staged
@@ -1143,106 +1133,207 @@ func stagedBundleFiles(staging string) ([]string, error) {
 	return bundleFiles, nil
 }
 
+func writeSnapshotOwner(staging, sandboxDir string, kind fastletapi.SnapshotKind) error {
+	raw, err := os.ReadFile(filepath.Join(staging, snapshotManifestName))
+	if err != nil {
+		return err
+	}
+	state, err := loadState(sandboxDir)
+	if err != nil {
+		return err
+	}
+	raw, err = setSnapshotManifestOwner(raw, kind, state.Config.Identity)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(staging, snapshotManifestName), raw, 0644) //nolint:gosec // published metadata, readable by the runtime-agent
+}
+
+func manifestSection(document map[string]json.RawMessage, name string) (map[string]json.RawMessage, error) {
+	section := map[string]json.RawMessage{}
+	if value := document[name]; len(value) > 0 {
+		if err := json.Unmarshal(value, &section); err != nil {
+			return nil, err
+		}
+	}
+	if section == nil {
+		section = map[string]json.RawMessage{}
+	}
+	return section, nil
+}
+
+func setSnapshotManifestOwner(raw []byte, kind fastletapi.SnapshotKind, owner fastletapi.SandboxIdentity) ([]byte, error) {
+	if _, err := artifacts.DecodeVMManifest(raw); err != nil {
+		return nil, err
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	platform, err := manifestSection(document, "platform")
+	if err != nil {
+		return nil, err
+	}
+	delete(platform, "checkpoint")
+	if kind == fastletapi.SnapshotKindCheckpoint {
+		value, err := json.Marshal(artifacts.CheckpointOwner{SandboxUID: owner.SandboxUID, Namespace: owner.Namespace})
+		if err != nil {
+			return nil, err
+		}
+		platform["checkpoint"] = value
+	}
+	value, err := json.Marshal(platform)
+	if err != nil {
+		return nil, err
+	}
+	document["platform"] = value
+	return json.Marshal(document)
+}
+
+type snapshotManifestEntries struct {
+	Files, StateFiles     map[string]artifacts.ManifestFile
+	RootfsSize, SizeBytes int64
+	Cache                 map[string]string
+	Names                 []string
+}
+
+func collectSnapshotManifestEntries(staging string, isOCI bool) (snapshotManifestEntries, error) {
+	bundleFiles, err := stagedBundleFiles(staging)
+	if err != nil {
+		return snapshotManifestEntries{}, err
+	}
+
+	if isOCI {
+		bundleFiles = bundleFiles[1:]
+	}
+	files, stateFiles := map[string]artifacts.ManifestFile{}, map[string]artifacts.ManifestFile{}
+	var sizeBytes, rootfsSize int64
+	cache := map[string]string{}
+	for _, name := range bundleFiles {
+		entry, err := artifacts.FileEntry(filepath.Join(staging, name), cache)
+		if err != nil {
+			return snapshotManifestEntries{}, err
+		}
+		file := artifacts.ManifestFile{SHA256: entry["sha256"].(string), SizeBytes: entry["sizeBytes"].(int64)}
+		sizeBytes += file.SizeBytes
+		switch name {
+		case vaultBundleName, policyBundleName:
+			stateFiles[name] = file
+		default:
+			if !isOCI {
+				files[name] = file
+			}
+		}
+		if name == publishedRootfsName {
+			rootfsSize = file.SizeBytes
+		}
+	}
+	if isOCI {
+		upper, err := ocitemplate.ReadRootfsUpper(staging)
+		if err != nil {
+			return snapshotManifestEntries{}, err
+		}
+		rootfsSize = upper.VirtualSizeBytes
+		sizeBytes += rootfsSize
+	}
+	return snapshotManifestEntries{Files: files, StateFiles: stateFiles, RootfsSize: rootfsSize, SizeBytes: sizeBytes, Cache: cache, Names: bundleFiles}, nil
+}
+
 func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
 	}
-	// The lineage manifest of the dump: the golden image manifest of a fresh
-	// boot, or the cached checkpoint manifest when the Sandbox was itself
-	// resumed from a checkpoint (the checkpoint carries every lineage field
-	// forward, and the original image may not exist on this node at all).
 	sourceRef, err := restoreReference(state.Config.Spec)
 	if err != nil {
 		return 0, err
 	}
-	document, err := readSourceManifest(stateRoot, sourceRef, state.Config.Identity.SandboxUID)
+	raw, err := readSourceManifest(stateRoot, sourceRef, state.Config.Identity.SandboxUID)
 	if err != nil {
 		return 0, err
 	}
 
-	bundleFiles, err := stagedBundleFiles(staging)
+	var document map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &document); err != nil {
+		return 0, err
+	}
+	isOCI := strings.HasPrefix(sourceRef, ocitemplate.Prefix)
+	entries, err := collectSnapshotManifestEntries(staging, isOCI)
 	if err != nil {
 		return 0, err
 	}
-	var incrementalRootBytes int64
-	if upper, err := ocitemplate.ReadRootfsUpper(staging); err == nil {
-		incrementalRootBytes = upper.VirtualSizeBytes
-		bundleFiles = bundleFiles[1:] // OCI carries rootfs separately from snapfiles.
-	} else if !errors.Is(err, os.ErrNotExist) {
+	rootfsSize := entries.RootfsSize
+	files, stateFiles := entries.Files, entries.StateFiles
+	// Modify only the actual disk capacity, preserving unknown machine fields.
+	machine, err := manifestSection(document, "machine")
+	if err != nil {
 		return 0, err
 	}
-
-	cache := map[string]string{}
-	files := map[string]any{}
-	var sizeBytes, rootfsSize int64
-	for _, name := range bundleFiles {
-		entry, err := artifacts.FileEntry(filepath.Join(staging, name), cache)
+	if rootfsSize > 0 {
+		machine["rootfsSizeMiB"], err = json.Marshal((rootfsSize + (1 << 20) - 1) >> 20)
 		if err != nil {
-			return 0, fmt.Errorf("checksum %s: %w", name, err)
-		}
-		files[name] = entry
-		if entrySize, ok := entry["sizeBytes"].(int64); ok {
-			sizeBytes += entrySize
-			if name == publishedRootfsName {
-				rootfsSize = entrySize
-			}
+			return 0, err
 		}
 	}
-	if incrementalRootBytes > 0 {
-		rootfsSize = incrementalRootBytes
-		sizeBytes += incrementalRootBytes
-	}
-	if err := artifacts.WriteSHA256SUMS(staging, bundleFiles, cache); err != nil {
-		return 0, err
-	}
-
-	document["schemaVersion"] = 1
-	document["runtime"] = "firecracker"
-	// The lineage object rides forward from the source manifest; only the
-	// image reference is rewritten to the one this Sandbox booted from (the
-	// imageDigest stays the original build's anchor).
-	lineage, ok := document["lineage"].(map[string]any)
-	if !ok {
-		lineage = map[string]any{}
-		document["lineage"] = lineage
-	}
-	lineage["image"] = state.Config.Spec.Image
-	// compatibility rides forward untouched — see assembleSnapshotManifest.
-	delete(document, "oci")
-	document["files"] = files
-	// machine.rootfs reflects this dump's actual rootfs size; vcpu/memory
-	// ride forward from the source manifest untouched.
-	if machine, ok := document["machine"].(map[string]any); ok {
-		machine["rootfs"] = fmt.Sprintf("%dGi", artifacts.SizeGiB(rootfsSize))
-	}
-	document["format"] = "native"
-	document["validation"] = map[string]any{"booted": true, "restored": false}
-	// The egress vault marker describes THIS dump: a source checkpoint's
-	// inherited marker must never ride forward — a stale vault marker would
-	// claim vault state this bundle does not carry and publish the previous
-	// subject's vault fingerprint into shared, world-readable template
-	// manifests.
-	delete(document, "egressVault")
-	if vaultEntry, ok := files[vaultBundleName]; ok {
-		document["egressVault"] = vaultEntry
-	}
-
-	manifestBytes, err := artifacts.MarshalManifest(document)
+	document["machine"], err = json.Marshal(machine)
 	if err != nil {
 		return 0, err
 	}
-	if err := os.WriteFile(filepath.Join(staging, snapshotManifestName), manifestBytes, 0o644); err != nil { //nolint:gosec // published snapshot manifest, world-readable by design
+	// imageDigest continues to anchor the original build, not the latest dump.
+	lineage, err := manifestSection(document, "lineage")
+	if err != nil {
 		return 0, err
 	}
-	return sizeBytes, nil
+	image, err := json.Marshal(state.Config.Spec.Image)
+	if err != nil {
+		return 0, err
+	}
+	lineage["image"] = image
+	document["lineage"], err = json.Marshal(lineage)
+	if err != nil {
+		return 0, err
+	}
+	platform, err := manifestSection(document, "platform")
+	if err != nil {
+		return 0, err
+	}
+	delete(platform, "stateFiles")
+	if len(stateFiles) > 0 {
+		platform["stateFiles"], err = json.Marshal(stateFiles)
+		if err != nil {
+			return 0, err
+		}
+	}
+	document["platform"], err = json.Marshal(platform)
+	if err != nil {
+		return 0, err
+	}
+	delete(document, "files")
+	if !isOCI {
+		document["files"], err = json.Marshal(files)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if !isOCI {
+		if err = artifacts.WriteSHA256SUMS(staging, entries.Names, entries.Cache); err != nil {
+			return 0, err
+		}
+	}
+	payload, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return 0, err
+	}
+	if _, err = artifacts.DecodeVMManifest(payload); err != nil {
+		return 0, err
+	}
+	if err = os.WriteFile(filepath.Join(staging, snapshotManifestName), append(payload, '\n'), 0644); err != nil { //nolint:gosec // published metadata, readable by the runtime-agent
+		return 0, err
+	}
+	return entries.SizeBytes, nil
 }
 
-// readSourceManifest loads source metadata from mounted OCI snapfiles or
-// the native image cache. machine and guestNetwork are required: restore validation
-// rejects a snapshot manifest without them, so a hand-seeded cache cannot
-// produce a restorable snapshot.
-func readSourceManifest(stateRoot, image, sandboxID string) (map[string]any, error) {
+func readSourceManifest(stateRoot, image, sandboxID string) ([]byte, error) {
 	var payload []byte
 	var err error
 	if strings.HasPrefix(image, ocitemplate.Prefix) {
@@ -1253,14 +1344,12 @@ func readSourceManifest(stateRoot, image, sandboxID string) (map[string]any, err
 	if err != nil {
 		return nil, fmt.Errorf("read source image manifest: %w", err)
 	}
-	var document map[string]any
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return nil, fmt.Errorf("decode source image manifest: %w", err)
+	document, err := artifacts.DecodeVMManifest(payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
-	for _, key := range []string{"machine", "guestNetwork"} {
-		if _, ok := document[key]; !ok {
-			return nil, fmt.Errorf("%w: source image manifest carries no %s; a restorable snapshot cannot be published", ErrInvalidConfig, key)
-		}
+	if document.GuestNetwork == nil {
+		return nil, fmt.Errorf("%w: source image manifest carries no guestNetwork", ErrInvalidConfig)
 	}
-	return document, nil
+	return payload, nil
 }

@@ -30,7 +30,7 @@ func TestCaptureOCIUpperPreservesSparsePrivateChangesAndParent(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 	require.NoError(t, os.WriteFile(index, []byte("frozen mapping"), 0600))
-	require.NoError(t, os.WriteFile(filepath.Join(home, "mnt/metadata.json"), []byte(`{"disk_size_mb":1024}`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "mnt/manifest.json"), mustPreparedManifest(t), 0600))
 	config := map[string]any{"repoBlobUrl": "https://r.example/v2/templates/base/blobs", "lowers": []map[string]any{{"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 123}}, "upper": map[string]string{"data": data, "index": index}}
 	raw, err := json.Marshal(config)
 	require.NoError(t, err)
@@ -106,4 +106,11 @@ func TestCopyUpperSparseFallbackPreservesHolesAndTail(t *testing.T) {
 			require.Less(t, info.Sys().(*syscall.Stat_t).Blocks*512, int64(1<<20), "zero-filled holes must remain sparse")
 		})
 	}
+}
+
+func mustPreparedManifest(t *testing.T) []byte {
+	t.Helper()
+	raw, err := json.Marshal(preparedMetadata(t))
+	require.NoError(t, err)
+	return raw
 }

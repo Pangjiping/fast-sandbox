@@ -2,9 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fast-sandbox/internal/artifacts"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,7 +27,7 @@ func TestNativeManifestExcludesStaleOverlayBDLayers(t *testing.T) {
 		Files  map[string]any `json:"files"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &manifest))
-	require.Equal(t, "native", manifest.Format)
+	require.Empty(t, manifest.Format)
 	require.Len(t, manifest.Files, 3)
 	for _, name := range []string{rootfsImageName, vmstateFileName, memoryFileName} {
 		require.Contains(t, manifest.Files, name)
@@ -62,13 +62,16 @@ func buildManifestFixture(t *testing.T) (apiv1alpha2.SandboxTemplateSpec, string
 		}
 	}
 	spec := apiv1alpha2.SandboxTemplateSpec{
-		Image: "registry.example.com/sandbox:v1",
+		Image:   "registry.example.com/sandbox:v1",
+		Machine: apiv1alpha2.MachineSpec{VCPU: "2", Memory: "1Gi"},
 		Output: apiv1alpha2.OutputSpec{
 			Format:     apiv1alpha2.ArtifactFormatNative,
 			RootfsSize: "1Gi",
 		},
 	}
-	kernel := filepath.Join(workdir, "vmlinux")
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "firecracker"), []byte("#!/bin/sh\necho Firecracker v1.16.1\n"), 0755))
+	t.Setenv("PATH", workdir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	kernel := filepath.Join(workdir, "vmlinux-6.1.177")
 	if err := os.WriteFile(kernel, []byte("kernel"), 0o600); err != nil {
 		t.Fatalf("stage kernel: %v", err)
 	}
@@ -78,7 +81,7 @@ func buildManifestFixture(t *testing.T) (apiv1alpha2.SandboxTemplateSpec, string
 		filepath.Join(workdir, memoryFileName)
 }
 
-// TestBuildManifestMitmCALineage: lineage.egressMitmCA is present exactly
+// TestBuildManifestMitmCALineage: platform.egressMitmCA is present exactly
 // when the build baked a CA.
 func TestBuildManifestMitmCALineage(t *testing.T) {
 	spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
@@ -88,14 +91,8 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}
-	lineage, ok := manifest["lineage"].(map[string]any)
-	if !ok {
-		t.Fatalf("lineage missing or wrong type: %+v", manifest["lineage"])
-	}
-	if _, present := lineage["egressMitmCA"]; present {
-		t.Fatalf("egressMitmCA must be absent without a baked CA, got %+v", lineage["egressMitmCA"])
-	}
-
+	require.Empty(t, manifest.Platform.EgressMitmCA)
+	require.Equal(t, artifacts.VMManifestVersion, manifest.SchemaVersion)
 	wantEntry := mitmCALineage{
 		CertSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
 		SPKISHA256: "6a21c9f0e0d2e0d0f76b4b1e5f0e8e5e7e9d0c1b2a3f4b5c6d7e8f9a0b1c2d3e",
@@ -106,15 +103,6 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}
-	lineage, ok = manifest["lineage"].(map[string]any)
-	if !ok {
-		t.Fatalf("lineage missing or wrong type: %+v", manifest["lineage"])
-	}
-	recorded, ok := lineage["egressMitmCA"].(map[string]any)
-	if !ok {
-		t.Fatalf("egressMitmCA missing or wrong type: %+v", lineage["egressMitmCA"])
-	}
-	if !reflect.DeepEqual(recorded["certificates"], []mitmCALineage{wantEntry}) {
-		t.Fatalf("egressMitmCA.certificates = %+v, want [%+v]", recorded["certificates"], wantEntry)
-	}
+	require.NotNil(t, manifest.Platform.EgressMitmCA)
+	require.Equal(t, []mitmCALineage{wantEntry}, manifest.Platform.EgressMitmCA.Certificates)
 }

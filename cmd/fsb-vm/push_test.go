@@ -35,8 +35,8 @@ func TestPushPackedPairWithCheckpointAnnotations(t *testing.T) {
 	previous := retry.DefaultClient
 	retry.DefaultClient = server.Client()
 	defer func() { retry.DefaultClient = previous }()
-	metadata, auth := filepath.Join(t.TempDir(), "metadata.json"), filepath.Join(t.TempDir(), "auth.json")
-	require.NoError(t, os.WriteFile(metadata, []byte(`{"checkpoint":{"sandboxUID":"sandbox-1","namespace":"tenant"},"machine":{"vcpu":"1"}}`), 0600))
+	metadata, auth := filepath.Join(t.TempDir(), "manifest.json"), filepath.Join(t.TempDir(), "auth.json")
+	require.NoError(t, os.WriteFile(metadata, []byte(`{"machine":{"vcpu":"1"},"platform":{"checkpoint":{"sandboxUID":"sandbox-1","namespace":"tenant"}}}`), 0600))
 	require.NoError(t, os.WriteFile(auth, []byte(`{"auths":{}}`), 0600))
 	cmd := newPushCommand()
 	cmd.SetArgs([]string{"--artifact-dir", layout.root, "--destination", strings.TrimPrefix(server.URL, "https://") + "/checkpoint/test:checkpoint-1", "--metadata-file", metadata, "--auth-file", auth})
@@ -97,7 +97,7 @@ func TestPushPlainHTTP(t *testing.T) {
 			}
 			raw, err := json.Marshal(config)
 			require.NoError(t, err)
-			metadata, auth := filepath.Join(t.TempDir(), "metadata.json"), filepath.Join(t.TempDir(), "auth.json")
+			metadata, auth := filepath.Join(t.TempDir(), "manifest.json"), filepath.Join(t.TempDir(), "auth.json")
 			require.NoError(t, os.WriteFile(metadata, []byte(`{}`), 0600))
 			require.NoError(t, os.WriteFile(auth, raw, 0600))
 			args := []string{"--artifact-dir", layout.root, "--destination", host + "/snapshots/test:http-test", "--metadata-file", metadata, "--auth-file", auth}

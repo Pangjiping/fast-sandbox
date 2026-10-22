@@ -24,9 +24,9 @@ const defaultBuildDiskSizeGiB = 20
 
 type buildOptions struct {
 	snapfilesProgress func(string) error
-	snapshotMetadata  []byte
+	snapshotManifest  []byte
 	snapshotExtras    map[string]string
-	manifestFile      string
+	manifestExtraFile string
 	injectDir         string
 	tapName           string
 	guestMAC          string
@@ -60,14 +60,14 @@ func newBuildCommand() *cobra.Command {
 		},
 	}
 	flags := command.Flags()
-	flags.StringVar(&options.manifestFile, "manifest-file", "", "platform manifest.json to include in snapfiles before sealing")
+	flags.StringVar(&options.manifestExtraFile, "manifest-extra-file", "", "optional guestNetwork, lineage and platform fields to supplement the VM manifest")
 	flags.StringVar(&options.injectDir, "inject-dir", "", "directory of guest files to inject before snapshot")
 	flags.StringVar(&options.tapName, "tap-name", "", "preconfigured build tap (optional)")
 	flags.StringVar(&options.guestMAC, "guest-mac", "02:FC:00:00:00:01", "baked guest NIC MAC")
 	flags.StringVar(&options.source, "source", "", "source overlaybd image reference (required)")
 	flags.StringVar(&options.output, "output", "", "logical output name <name>:<tag>; produces <tag>_rootfs and <tag>_snapfiles (required)")
 	flags.StringVar(&options.kernel, "kernel", "", "vmlinux path used for the cold boot (required)")
-	flags.StringVar(&options.kernelVersion, "kernel-version", "", "kernel_version recorded in metadata.json (default: derived from the vmlinux-<version> filename)")
+	flags.StringVar(&options.kernelVersion, "kernel-version", "", "kernel.version recorded in manifest.json (default: derived from the vmlinux-<version> filename)")
 	flags.IntVar(&options.vcpu, "vcpu", 1, "guest vCPU count")
 	flags.IntVar(&options.memoryMB, "memory-mb", 1024, "guest memory in MiB")
 	flags.IntVar(&options.diskSizeGiB, "disk-size-gb", defaultBuildDiskSizeGiB, "rootfs virtual disk size in GiB")
@@ -661,7 +661,7 @@ func createBuildWorkDir(artifactName string, keep bool, undo *rollback) (string,
 }
 
 // captureSnapfiles formats a blank ublk disk, copies the snapshot files and
-// metadata.json onto it, then unmounts and detaches it so its upper can be
+// manifest.json onto it, then unmounts and detaches it so its upper can be
 // sealed.
 func captureSnapfiles(ctx context.Context, ublkd *ublkdClient, options *buildOptions, workDir, vmstatePath, memfilePath string, undo *rollback) error {
 	sizeGiB, err := snapfilesSizeGiB(options, vmstatePath, memfilePath)
@@ -704,26 +704,22 @@ func captureSnapfiles(ctx context.Context, ublkd *ublkdClient, options *buildOpt
 	if err := copyFile(memfilePath, filepath.Join(snapMount, inDiskMemfile), 0o640); err != nil {
 		return err
 	}
-	metadataPayload := options.snapshotMetadata
+	metadataPayload := options.snapshotManifest
 	if len(metadataPayload) == 0 {
-		metadataPayload, err = buildSnapfilesMetadata(options, options.source, time.Now())
+		metadataPayload, err = buildSnapfilesManifest(options, time.Now())
 	}
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(snapMount, inDiskMetadata), metadataPayload, 0o600); err != nil {
-		return fmt.Errorf("write metadata.json: %w", err)
+	if err := os.WriteFile(filepath.Join(snapMount, inDiskManifest), metadataPayload, 0o600); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
 	}
 	for name, source := range options.snapshotExtras {
 		if err := copyFile(source, filepath.Join(snapMount, name), 0600); err != nil {
 			return err
 		}
 	}
-	if options.manifestFile != "" {
-		if err := copyFile(options.manifestFile, filepath.Join(snapMount, "manifest.json"), 0600); err != nil {
-			return err
-		}
-	}
+
 	syncFilesystems()
 	if err := unmount(snapMount); err != nil {
 		return err

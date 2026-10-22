@@ -191,7 +191,7 @@ sudo "$FSB_VM" build \
 | `--disk-size-gb` | `20` | rootfs 虚拟磁盘大小 GiB，必须为正整数 |
 | `--snapfiles-size-mb` | 自动计算 | snapfiles 虚拟磁盘大小 |
 | `--kernel-version` | 从 `vmlinux-<version>` 推导 | 写入模板 metadata 的内核版本 |
-| `--manifest-file` | 空 | 封装前复制到 snapfiles 的平台 `manifest.json`；供 Fastlet 使用的模板需提供 |
+| `--manifest-extra-file` | 空 | 可选的 `guestNetwork`、`lineage` 和 `platform` 补充字段；合入生成的 manifest，不能覆盖核心 VM 字段 |
 | `--init-script-file` | 内置 Redis init | 注入 guest 并作为 PID 1 运行的脚本 |
 | `--ready-pattern` | `Ready to accept connections` | 串口中表示工作负载就绪的文本 |
 | `--ready-timeout` | `3m` | 等待就绪文本的超时 |
@@ -299,6 +299,8 @@ sudo "$FSB_VM" --plain-http build ...
 
 Fastlet 从挂载的 snapfiles 文件系统中的 `manifest.json` 读取平台信息。FastPath 使用 create 请求中的绑定，不再访问 OCI registry 读取策略；opaque `policy.json` 和 `vault.json` 由节点侧导入。
 
+`fsb-vm build` 无需平台输入也会生成唯一的 `snapfiles/manifest.json`，不再生成 `metadata.json`。`--manifest-extra-file` 只补充 `guestNetwork`、`lineage`、`platform`，禁止覆盖核心 VM 配置。OCI 和 S3 共用 [schemaVersion 1 模型](artifact-manifest-reference.md)；已有产物需重建，不提供旧格式兼容读取。
+
 ### 4.4 磁盘大小
 
 rootfs 默认是 20 GiB，可指定其他正整数 GiB：
@@ -348,7 +350,7 @@ registry.example.com/team/application:v1_snapfiles
 
 对明文 HTTP registry，使用 `fsb-vm --plain-http push ...`；该参数同时用于目标仓库和增量产物的远端父层读取，默认仍使用 HTTPS。
 
-`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，snapfiles 最后发布。平台信息在封装前通过 `build --manifest-file <platform-manifest.json>` 写入 snapfiles 内的 `manifest.json`；OCI manifest 仅保留配对和 checkpoint 归属 annotations。`push --metadata-file` 可省略，仅提取 checkpoint 归属，不能向已封装的 snapfiles 添加文件。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。缺少 `snapfiles/manifest.json` 的历史模板需重建后供 Fastlet 使用。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤，将不带 tag 的 `output.publish` 与系统分配的 UUID 组合为上传目标。手动执行 CLI 时仍按 `--destination repository:tag` 显式指定 tag。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
+`fsb-vm push` 接收 `--artifact-dir`、`--destination registry/repository:tag`、`--metadata-file` 和 `--auth-file`，只发布 `<tag>_rootfs` 和 `<tag>_snapfiles` 两份镜像；rootfs 先发布，snapfiles 最后发布。fsb-vm 始终生成核心 VM manifest，平台信息通过可选 `build --manifest-extra-file <manifest-extra.json>` 补充并在封装前写入同一份 `manifest.json`；OCI manifest 仅保留配对和 checkpoint 归属 annotations。`push --metadata-file` 可省略，仅提取 checkpoint 归属，不能向已封装的 snapfiles 添加文件。返回的 `manifestRef` 与 `artifactDigest` 指向 snapfiles manifest。两份镜像按相同 ID 配对，ID 必须不可覆盖；发布器拒绝用不同内容覆盖现有 tag。采用历史元数据结构的 OCI 和 S3 模板均需重建，不提供旧格式兼容读取。`SandboxTemplate` 的 OCI 构建流程自动执行此步骤，将不带 tag 的 `output.publish` 与系统分配的 UUID 组合为上传目标。手动执行 CLI 时仍按 `--destination repository:tag` 显式指定 tag。产物布局与上传顺序参见 [发布契约](../design/adr-fsb-vm-cli.md#adr-012-build-本地产物布局与发布契约build-迭代补充)。
 
 ## 6. 准备 template.json
 
@@ -423,7 +425,7 @@ sudo "$FSB_VM" \
 3. 在 runtime 目录建立 `rootfs.dev` 链接，以该目录为 cwd 加载 Firecracker snapshot；
 4. 恢复 VM，将 `state.json` 更新为 `running`。
 
-默认根据模板 metadata 中的 `kernel_version` 检查 `/opt/fsb-vm/kernels/vmlinux-<version>`。标准 Builder 使用 `vmlinux.bin` 时，`kernel_version` 为 `vmlinux.bin`，对应检查同目录下的 `vmlinux.bin`，不会添加 `vmlinux-` 前缀。可显式覆盖：
+默认根据模板 metadata 中的 `kernel.version` 检查 `/opt/fsb-vm/kernels/vmlinux-<version>`。标准 Builder 使用 `vmlinux.bin` 时，`kernel.version` 为 `vmlinux.bin`，对应检查同目录下的 `vmlinux.bin`，不会添加 `vmlinux-` 前缀。可显式覆盖：
 
 ```bash
 sudo "$FSB_VM" \

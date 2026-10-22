@@ -25,7 +25,7 @@ func TestOCIResumeRejectsAnotherSandboxAndTemplateUse(t *testing.T) {
 	config.Identity.Namespace = "test"
 	config.Identity.SandboxUID = "owner"
 	config.Spec.Restore = &fastletapi.RestoreSpec{ManifestRef: ref, ArtifactDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	raw, err := json.Marshal(map[string]any{"checkpoint": map[string]string{"sandboxUID": "owner", "namespace": "test"}})
+	raw, err := json.Marshal(map[string]any{"platform": map[string]any{"checkpoint": map[string]string{"sandboxUID": "owner", "namespace": "test"}}})
 	require.NoError(t, err)
 	var metadata ociRestoreMetadata
 	require.NoError(t, json.Unmarshal(raw, &metadata))
@@ -86,22 +86,25 @@ func TestPrepareOCISnapshotKeepsNativeFlowIndependentOfRegistry(t *testing.T) {
 }
 
 func TestOCISnapshotMetadataRemovesInheritedCheckpointOwner(t *testing.T) {
-	raw := []byte(`{"format":"native","oci":{"rootfs":"old"},"checkpoint":{"sandboxUID":"previous","namespace":"old"},"machine":{"vcpu":"2","memory":"1Gi"},"actionBindings":[{"handler":"egress","input":"deny"}]}`)
+	doc := preparedMetadata(t)
+	doc["platform"] = map[string]any{"checkpoint": map[string]string{"sandboxUID": "previous", "namespace": "old"}, "future": map[string]bool{"keep": true}}
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
 	owner := fastletapi.SandboxIdentity{SandboxUID: "current", Namespace: "tenant"}
 	for _, kind := range []fastletapi.SnapshotKind{fastletapi.SnapshotKindTemplate, fastletapi.SnapshotKindCheckpoint} {
 		t.Run(string(kind), func(t *testing.T) {
-			data, err := ociSnapshotMetadata(raw, kind, owner)
+			data, err := setSnapshotManifestOwner(raw, kind, owner)
 			require.NoError(t, err)
 			var document map[string]any
 			require.NoError(t, json.Unmarshal(data, &document))
-			require.Equal(t, "overlaybd", document["format"])
-			require.NotContains(t, document, "oci")
+			require.Equal(t, float64(1), document["schemaVersion"])
+			require.Contains(t, document, "platform")
 			require.Contains(t, document, "machine")
-			require.Contains(t, document, "actionBindings")
+			require.Contains(t, document["platform"], "future")
 			if kind == fastletapi.SnapshotKindTemplate {
-				require.NotContains(t, document, "checkpoint")
+				require.NotContains(t, document["platform"], "checkpoint")
 			} else {
-				require.Equal(t, map[string]any{"sandboxUID": "current", "namespace": "tenant"}, document["checkpoint"])
+				require.Equal(t, map[string]any{"sandboxUID": "current", "namespace": "tenant"}, document["platform"].(map[string]any)["checkpoint"])
 			}
 		})
 	}

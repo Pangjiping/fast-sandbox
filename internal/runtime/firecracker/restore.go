@@ -13,7 +13,6 @@ package firecracker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -58,16 +57,11 @@ func restoreReference(spec fastletapi.SandboxSpec) (string, error) {
 	return artifacts.CheckpointReference(spec.Restore.ArtifactDigest), nil
 }
 
-// manifestMachine is the machine tuple recorded in the published manifest
-// (builder records {vcpu, memory} as resource quantities).
-type manifestMachine struct {
-	VCPU   string `json:"vcpu"`
-	Memory string `json:"memory"`
-}
+// manifestMachine uses the shared integer CPU/MiB contract.
+type manifestMachine = artifacts.VMMachine
 
 // readCachedManifestMachine loads the machine tuple from the cached
-// manifest. It reports false when the manifest is absent or carries no
-// machine tuple (hand-seeded local cache).
+// manifest. Only an absent local manifest reports false; malformed metadata fails.
 func readCachedManifestMachine(stateRoot, image string) (manifestMachine, bool, error) {
 	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
 	if err != nil {
@@ -76,14 +70,9 @@ func readCachedManifestMachine(stateRoot, image string) (manifestMachine, bool, 
 		}
 		return manifestMachine{}, false, err
 	}
-	var document struct {
-		Machine manifestMachine `json:"machine"`
-	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return manifestMachine{}, false, fmt.Errorf("decode cached manifest: %w", err)
-	}
-	if document.Machine.VCPU == "" || document.Machine.Memory == "" {
-		return manifestMachine{}, false, nil
+	document, err := artifacts.DecodeVMManifest(payload)
+	if err != nil {
+		return manifestMachine{}, false, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 	return document.Machine, true, nil
 }
@@ -91,12 +80,7 @@ func readCachedManifestMachine(stateRoot, image string) (manifestMachine, bool, 
 // manifestGuestNetwork is the guest network baked into a template snapshot
 // (clone networking model). MTU is 0 for manifests recorded before the field
 // existed (the kernel default was baked implicitly).
-type manifestGuestNetwork struct {
-	IP      string `json:"ip"`
-	Gateway string `json:"gateway"`
-	Netmask string `json:"netmask"`
-	MTU     int    `json:"mtu"`
-}
+type manifestGuestNetwork = artifacts.VMGuestNetwork
 
 // readCachedManifestGuestNetwork loads the baked guest network from the
 // cached manifest (builder records guestNetwork.ip, guestNetwork.mtu). It
@@ -111,16 +95,21 @@ func readCachedManifestGuestNetwork(stateRoot, image string) (manifestGuestNetwo
 		}
 		return manifestGuestNetwork{}, false, err
 	}
-	var document struct {
-		GuestNetwork manifestGuestNetwork `json:"guestNetwork"`
+	document, err := artifacts.DecodeVMManifest(payload)
+	if err != nil {
+		return manifestGuestNetwork{}, false, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return manifestGuestNetwork{}, false, fmt.Errorf("decode cached manifest: %w", err)
+	if err := requireStaticGuestNetwork(document.GuestNetwork); err != nil {
+		return manifestGuestNetwork{}, false, err
 	}
-	if document.GuestNetwork.IP == "" {
-		return manifestGuestNetwork{}, false, nil
+	return *document.GuestNetwork, true, nil
+}
+
+func requireStaticGuestNetwork(network *artifacts.VMGuestNetwork) error {
+	if network == nil || network.IP == "" || network.Gateway == "" || network.Netmask == "" || network.MTU <= 0 {
+		return fmt.Errorf("%w: Fastlet requires a complete guestNetwork", ErrInvalidConfig)
 	}
-	return document.GuestNetwork, true, nil
+	return nil
 }
 
 // validateRestoreMachineConfig validates the Sandbox request against the
@@ -146,51 +135,29 @@ func validateRestoreMachine(spec fastletapi.SandboxSpec, config runtimecatalog.F
 		_, err := resolveMachineConfig(spec, config)
 		return err
 	}
-	if _, err := machineVCPUs(machine.VCPU); err != nil {
-		return err
+	if machine.VCPUCount < 1 || machine.MemoryMiB < 1 {
+		return fmt.Errorf("%w: invalid manifest machine", ErrInvalidConfig)
 	}
-	snapshotMiB, err := parseMemMiB(machine.Memory)
-	if err != nil {
-		return err
-	}
+	snapshotMiB := machine.MemoryMiB
 	if spec.Memory != "" {
 		requestMiB, err := parseMemMiB(spec.Memory)
 		if err != nil {
 			return err
 		}
-		if requestMiB < snapshotMiB {
+		if int64(requestMiB) < snapshotMiB {
 			return fmt.Errorf("%w: requested memory %d MiB is below the template snapshot memory %d MiB", ErrInvalidConfig, requestMiB, snapshotMiB)
 		}
 	}
 	return nil
 }
 
-// decodeCachedManifestCompatibility extracts the compatibility block from a
-// manifest document; ok=false for an absent, legacy, or undecodable block.
-func decodeCachedManifestCompatibility(payload []byte) (artifacts.SnapshotCompatibility, bool) {
-	var document struct {
-		Compatibility artifacts.SnapshotCompatibility `json:"compatibility"`
-	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		//nolint:nilerr // undecodable = pre-structured legacy manifest; admitted with a warning
-		return artifacts.SnapshotCompatibility{}, false
-	}
-	compat := document.Compatibility
-	if compat.Vendor == "" && compat.CPUTemplate == "" {
-		return artifacts.SnapshotCompatibility{}, false
-	}
-	return compat, true
-}
-
-// checkRestoreCompatibility fails the restore before staging unless the
-// compatibility block matches this node; a legacy block is admitted with a
-// warning.
+// checkRestoreCompatibility rejects snapshots incompatible with this node.
 func checkRestoreCompatibility(compat artifacts.SnapshotCompatibility, local artifacts.CPUIdentity, localFirecrackerVersion, image string) error {
+	if compat.CPUArch != "" && compat.CPUArch != artifacts.HostCPUArch() {
+		return fmt.Errorf("%w: snapshot cpuArch %q does not match host %q", ErrIncompatibleArtifact, compat.CPUArch, artifacts.HostCPUArch())
+	}
 	if err := artifacts.MatchRestoreCompatibility(compat, local, localFirecrackerVersion); err != nil {
-		if errors.Is(err, artifacts.ErrLegacyCompatibility) {
-			klog.InfoS("restore admitted without CPU checks: manifest carries no structured compatibility", "image", image)
-			return nil
-		}
+
 		klog.ErrorS(err, "restore compatibility admission rejected", "image", image)
 		return fmt.Errorf("%w: %w", ErrIncompatibleArtifact, err)
 	}
@@ -233,21 +200,11 @@ func (d *Driver) validateRestoreCompatibility(stateRoot, image string) error {
 		klog.InfoS("cached manifest absent; admitting restore without CPU checks", "image", image)
 		return nil
 	}
-	compat, _ := decodeCachedManifestCompatibility(payload)
-	return checkRestoreCompatibility(compat, artifacts.HostCPUIdentity(), d.firecrackerVersion(), image)
-}
-
-// machineVCPUs parses the manifest vcpu quantity into a vCPU count.
-func machineVCPUs(value string) (int, error) {
-	quantity, err := resource.ParseQuantity(value)
+	document, err := artifacts.DecodeVMManifest(payload)
 	if err != nil {
-		return 0, fmt.Errorf("%w: invalid manifest vcpu %q", ErrInvalidConfig, value)
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
-	vcpus := int(math.Ceil(float64(quantity.MilliValue()) / 1000.0))
-	if vcpus < 1 {
-		return 0, fmt.Errorf("%w: manifest vcpu %q yields no vCPU", ErrInvalidConfig, value)
-	}
-	return vcpus, nil
+	return checkRestoreCompatibility(document.Compatibility, artifacts.HostCPUIdentity(), d.firecrackerVersion(), image)
 }
 
 // parseMemMiB parses a resource quantity into whole MiB.

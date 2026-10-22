@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	artifactmodel "fast-sandbox/internal/artifacts"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -112,11 +113,19 @@ func testManifest(artifacts map[string][]byte) []byte {
 			"sizeBytes": len(content),
 		}
 	}
-	document := map[string]any{
-		"schemaVersion": 1,
-		"runtime":       "firecracker",
-		"lineage":       map[string]any{"image": testImage},
-		"files":         files,
+	document := artifactmodel.NewVMManifest(artifactmodel.VMMachine{VCPUCount: 1, MemoryMiB: 1, RootfsSizeMiB: 1, RootfsDriveID: "rootfs", RootfsDrivePath: "rootfs.img"}, "6.1.177", "/missing/firecracker", artifactmodel.CPUTemplateNone)
+	document.Compatibility.FirecrackerVersion = "1.16.1"
+	document.Lineage = &artifactmodel.VMLineage{Image: testImage}
+	document.Files = map[string]artifactmodel.ManifestFile{}
+	document.Platform = &artifactmodel.VMPlatform{StateFiles: map[string]artifactmodel.ManifestFile{}}
+	for name, entry := range files {
+		fields := entry.(map[string]any)
+		file := artifactmodel.ManifestFile{SHA256: fields["sha256"].(string), SizeBytes: int64(fields["sizeBytes"].(int))}
+		if name == "policy.json" || name == "vault.json" {
+			document.Platform.StateFiles[name] = file
+		} else {
+			document.Files[name] = file
+		}
 	}
 	payload, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
@@ -184,11 +193,11 @@ func TestPullImageFullFlow(t *testing.T) {
 	require.ElementsMatch(t, expected, store.requested())
 }
 
-func TestPullImageRejectsOverlayBDObjectStoreBeforeDownloadingFiles(t *testing.T) {
+func TestPullImageRequiresNativeFileListBeforeDownloadingFiles(t *testing.T) {
 	store, client, original, _ := publishFixture(t)
 	var document map[string]any
 	require.NoError(t, json.Unmarshal(original, &document))
-	document["format"] = "overlaybd"
+	delete(document, "files")
 	payload, err := json.Marshal(document)
 	require.NoError(t, err)
 	manifestKey := sha256Hex(original)[:16] + "/manifest.json"
@@ -203,7 +212,7 @@ func TestPullImageRejectsOverlayBDObjectStoreBeforeDownloadingFiles(t *testing.T
 
 	root := t.TempDir()
 	err = (&Client{s3: client}).PullImage(context.Background(), root, testImage)
-	require.ErrorContains(t, err, "OverlayBD object-store artifacts are unsupported")
+	require.ErrorContains(t, err, "no native files")
 	require.ElementsMatch(t, []string{indexKey, manifestKey}, store.requested())
 	require.NoFileExists(t, filepath.Join(imageDir(root, testImage), manifestName))
 }
@@ -477,14 +486,9 @@ func TestPullCheckpointMaterializesOptionalVaultBundle(t *testing.T) {
 	delete(store.objects, "index/"+imageKey(testImage)+".json")
 	buildDir := sha256Hex(manifestPayload)[:16]
 	store.objects[buildDir+"/"+publishVaultName] = vaultContent
-	files := map[string]any{}
-	for name, content := range nativeBodies {
-		files[name] = map[string]any{"sha256": sha256Hex(content), "sizeBytes": len(content)}
-	}
-	files[publishVaultName] = map[string]any{"sha256": sha256Hex(vaultContent), "sizeBytes": len(vaultContent)}
-	withVault, err := json.MarshalIndent(map[string]any{
-		"schemaVersion": 1, "runtime": "firecracker", "files": files,
-	}, "", "  ")
+	nativeBodies[publishVaultName] = vaultContent
+	withVault := testManifest(nativeBodies)
+	var err error
 	require.NoError(t, err)
 	digest := sha256Hex(withVault)
 	store.objects[buildDir+"/manifest.json"] = withVault

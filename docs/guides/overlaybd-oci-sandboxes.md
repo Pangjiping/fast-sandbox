@@ -158,14 +158,14 @@ repository:<id>_rootfs
 repository:<id>_snapfiles
 ```
 
-No third metadata image is published. Both images describe their own layers in their OCI manifests. The snapfiles filesystem contains `vmstate.bin`, `memfile`, the VM/device contract in `metadata.json`, and the platform `manifest.json` (machine, compatibility, guest network, lineage and checksums for optional opaque policy/vault files). Fastlet reads `manifest.json` after mounting snapfiles, validates restore admission and imports verified state before data-plane readiness. Create-request bindings seed handler registration; template policy state remains authoritative when carried by the bundle. FastPath does not query the OCI registry or need registry credentials for create. Its OCI manifest carries only pairing and ownership annotations:
+No third metadata image is published. Both images describe their own layers in their OCI manifests. The snapfiles filesystem contains `vmstate.bin`, `memfile` and a single `manifest.json` using the [shared VM manifest schema](artifact-manifest-reference.md). fsb-vm generates the VM fields; Builder supplies optional platform and network information through `--manifest-extra-file`. No `metadata.json` is produced. Fastlet reads the shared manifest after mounting snapfiles, validates restore admission and imports verified state before data-plane readiness. Create-request bindings seed handler registration; template policy state remains authoritative when carried by the bundle. FastPath does not query the OCI registry or need registry credentials for create. Its OCI manifest carries only pairing and ownership annotations:
 
 - `io.fast-sandbox.template.id`: the shared tag prefix used to find `<id>_rootfs` in the same repository.
 - For checkpoints, `io.fast-sandbox.sandbox.uid`, `io.fast-sandbox.sandbox.namespace`, and `io.fast-sandbox.checkpoint.id`: owner and runtime snapshot ID. The latter is the runtime snapshot UUID used as the tag prefix; the control-plane checkpoint task ID is unchanged.
 
 The publisher uploads rootfs first and snapfiles last. It rejects replacing an existing tag with different content; configure registry tag immutability as well, since the two images are paired by ID rather than a third manifest containing both digests. Use a fresh ID for every new checkpoint. A retry with identical contents is allowed.
 
-`manifestRef` and `artifactDigest` identify the snapfiles manifest. On first resolution, fsb-vm resolves `<id>_rootfs` and caches the pair as digest references. A logical `oci://repository:<id>` input also resolves the pair; mutable tag inputs are resolved remotely on each preparation. Rebuild historical OCI templates that carry platform metadata only in registry annotations or a third metadata image: Fastlet now requires `snapfiles/manifest.json`. Checkpoints and live snapshots produced by the upgraded Fastlet include this file. Deploy matching Builder/fsb-vm and Fastlet versions before publishing new templates. Existing registry artifacts are not rewritten or deleted.
+`manifestRef` and `artifactDigest` identify the snapfiles manifest. On first resolution, fsb-vm resolves `<id>_rootfs` and caches the pair as digest references. A logical `oci://repository:<id>` input also resolves the pair; mutable tag inputs are resolved remotely on each preparation. Rebuild historical OCI templates, including dual-file `metadata.json`/`manifest.json` templates: fsb-vm and Fastlet now require the unified schemaVersion 1 `snapfiles/manifest.json`. Checkpoints and live snapshots produced by the upgraded Fastlet include this file. Deploy matching Builder/fsb-vm and Fastlet versions before publishing new templates. Existing registry artifacts are not rewritten or deleted.
 
 ## 4. Create, pause, and resume through FastPath
 
@@ -246,11 +246,7 @@ Use `registry/repository` without `oci://`, a tag, or a digest. The account must
 
 OCI pause checkpoints and live snapshots use the same recorded-state layout as
 native snapshots. Fastlet exports the egress-owned `policy.json` record without
-parsing or rewriting it. The snapfiles filesystem carries `manifest.json`,
-`SHA256SUMS`, and the optional `policy.json` and `vault.json` files alongside
-`metadata.json`, `vmstate.bin`, and `memfile`. The manifest's
-`files["policy.json"]` entry records its SHA-256 and size; vault provenance keeps
-the native `egressVault` marker. Rootfs remains the other OCI image: no third
+parsing or rewriting it. The snapfiles filesystem carries the unified `manifest.json`, optional opaque `policy.json` and `vault.json`, `vmstate.bin` and `memfile`. `platform.stateFiles` records each state file's digest and size exactly once for verified Fastlet imports. Rootfs remains the other OCI image: no third
 artifact or separate policy format is introduced.
 
 Pause exports checkpoint state before releasing the runtime. A live template

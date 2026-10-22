@@ -13,7 +13,7 @@ import (
 const (
 	inDiskVMState   = "vmstate.bin"
 	inDiskMemfile   = "memfile"
-	inDiskMetadata  = "metadata.json"
+	inDiskManifest  = "manifest.json"
 	snapfilesMount  = "mnt"
 	apiSocketName   = "api.sock"
 	serialLogName   = "firecracker.log"

@@ -17,11 +17,11 @@ import (
 
 func TestPackRejectsTruncatedCheckpointBeforeKernelResources(t *testing.T) {
 	dir := t.TempDir()
-	metadata := vmMetadata{VCPUCount: 1, MemoryMB: 1, DiskSizeMB: 1, RootfsDrivePath: rootfsDriveLink}
+	metadata := testVMManifest()
 	raw, err := json.Marshal(metadata)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "metadata.json"), raw, 0600))
-	for _, file := range []string{"rootfs.ext4", "memory.snap", "vmstate.snap", "manifest.json"} {
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), raw, 0600))
+	for _, file := range []string{"rootfs.ext4", "memory.snap", "vmstate.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, file), []byte("short"), 0600))
 	}
 	err = packCheckpoint(context.Background(), dir, "snapshot:test")
@@ -151,12 +151,12 @@ func TestValidatePackBundlePreservesMetadataAndChecksMachine(t *testing.T) {
 	for _, mode := range []string{"valid", "invalid-cpu", "invalid-drive", "short-memory", "short-rootfs"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
-			machine := vmMetadata{VCPUCount: 1, MemoryMB: 1, DiskSizeMB: 1, RootfsDrivePath: rootfsDriveLink}
+			machine := testVMManifest()
 			if mode == "invalid-cpu" {
-				machine.VCPUCount = 0
+				machine.Machine.VCPUCount = 0
 			}
 			if mode == "invalid-drive" {
-				machine.RootfsDrivePath = "/unrelated"
+				machine.Machine.RootfsDrivePath = "/unrelated"
 			}
 			raw, err := json.Marshal(machine)
 			require.NoError(t, err)
@@ -165,8 +165,8 @@ func TestValidatePackBundlePreservesMetadataAndChecksMachine(t *testing.T) {
 			document["checkpointExtension"] = map[string]string{"keep": "opaque metadata"}
 			raw, err = json.MarshalIndent(document, "", "  ")
 			require.NoError(t, err)
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "metadata.json"), raw, 0600))
-			for _, name := range []string{"rootfs.ext4", "memory.snap", "vmstate.snap", "manifest.json"} {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), raw, 0600))
+			for _, name := range []string{"rootfs.ext4", "memory.snap", "vmstate.snap"} {
 				file, err := os.Create(filepath.Join(dir, name))
 				require.NoError(t, err)
 				size := int64(1)
@@ -194,10 +194,8 @@ func TestValidatePackBundlePreservesMetadataAndChecksMachine(t *testing.T) {
 func TestPackSnapshotExtrasPreservesOpaqueState(t *testing.T) {
 	bundle := t.TempDir()
 	payloads := map[string]string{
-		"manifest.json": `{"files":{"policy.json":{"sha256":"recorded"}}}`,
-		"policy.json":   `{"v":1,"incarnation":"source","revision":7,"policy":{"defaultAction":"deny"}}`,
-		"vault.json":    `{"opaque":"encrypted record"}`,
-		"SHA256SUMS":    "recorded  policy.json\n",
+		"policy.json": `{"v":1,"incarnation":"source","revision":7,"policy":{"defaultAction":"deny"}}`,
+		"vault.json":  `{"opaque":"encrypted record"}`,
 	}
 	for name, content := range payloads {
 		require.NoError(t, os.WriteFile(filepath.Join(bundle, name), []byte(content), 0600))
@@ -211,16 +209,16 @@ func TestPackSnapshotExtrasPreservesOpaqueState(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, want, string(raw))
 	}
-	for _, name := range []string{"policy.json", "vault.json", "SHA256SUMS"} {
+	for _, name := range []string{"policy.json", "vault.json"} {
 		require.NoError(t, os.Remove(filepath.Join(bundle, name)))
 	}
 	extras, err = packSnapshotExtras(bundle)
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}, extras, "older stateless bundles remain packable")
+	require.Equal(t, map[string]string{}, extras, "older stateless bundles remain packable")
 }
 
 func TestPackSnapshotExtrasRejectsUnreadableState(t *testing.T) {
-	for _, name := range []string{"policy.json", "vault.json", "SHA256SUMS"} {
+	for _, name := range []string{"policy.json", "vault.json"} {
 		t.Run(name, func(t *testing.T) {
 			bundle := t.TempDir()
 			require.NoError(t, os.Symlink(name, filepath.Join(bundle, name)))

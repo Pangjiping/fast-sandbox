@@ -179,7 +179,7 @@ Behavior:
   (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`, after `spec.envs`, so it
   wins).
 - The builder records the baked CA's public-key identity into the manifest
-  lineage (`lineage.egressMitmCA`): per `CERTIFICATE` block, `certSha256`
+  lineage (`platform.egressMitmCA`): per `CERTIFICATE` block, `certSha256`
   (SHA-256 of the certificate DER — matched byte-for-byte against the egress
   pinned-CA fingerprint exposed on `/healthz`, which is how a template↔pool
   pinning mismatch becomes checkable), `spkiSha256` (the key identity,
@@ -270,18 +270,14 @@ s3://sandbox-images/publish/
 
 `manifest.json` records (among others):
 
-- `machine` — the vcpu/memory/rootfs tuple restore validates against;
-- `guestNetwork` — the NIC baked into the snapshot (`eth0` + static
-  guest IP/MAC); the runtime replaces only the host tap via
-  `network_overrides`;
-- `files` — publish filename → `{sha256, sizeBytes}` for digest-verified pull;
-- `compatibility` — the structured CPU identity (vendor/cpuFamily/cpuModel)
-  of the build host, the pinned CPU template (`T2`/`T2A`, or `none` when a
-  host refused it and the raw CPUID was baked in), firecracker version and
-  host kernel;
-- `lineage` — build provenance carried by every derived snapshot: `image`,
-  `imageDigest`, `execd`, `kernel`, `entrypoint`, `init`, `envs`;
-- `validation` — build gates.
+- `schemaVersion: 1`, `runtime`, `machine` and `kernel.version` — the shared VM contract; CPU count and MiB sizes use integers.
+- `guestNetwork` — the baked NIC and static network; restore replaces only the host tap.
+- `files` — native VM artifact names with digest and size; optional state files are described once under `platform.stateFiles`.
+- `compatibility` — CPU architecture, capture CPU identity/template, Firecracker version and optional host diagnostics.
+- `lineage` — optional source image, original digest and creation time.
+- `platform` — optional execd, entrypoint, init, literal environment values, public MITM CA fingerprints, private checkpoint ownership and state-file records.
+
+The full schema and upgrade requirements are in [Artifact manifest reference](artifact-manifest-reference.md).
 
 The consumer-side cache layout is
 `<StateRoot>/images/<sha256(image)>/{rootfs.img, vmstate.snap, memory.snap,

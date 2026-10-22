@@ -1132,7 +1132,10 @@ func resolveBakedGuestIP(stateRoot, image string, slot *fastletnetwork.Slot) (st
 
 func resolveRestoreGuestIP(stateRoot, image string, slot *fastletnetwork.Slot, metadata ociRestoreMetadata) (string, int, error) {
 	if strings.HasPrefix(image, ocitemplate.Prefix) {
-		return bakedGuestIP(slot, metadata.GuestNetwork, metadata.GuestNetwork.IP != "")
+		if metadata.GuestNetwork == nil {
+			return "", 0, fmt.Errorf("%w: missing guestNetwork", ErrInvalidConfig)
+		}
+		return bakedGuestIP(slot, *metadata.GuestNetwork, true)
 	}
 	return resolveBakedGuestIP(stateRoot, image, slot)
 }

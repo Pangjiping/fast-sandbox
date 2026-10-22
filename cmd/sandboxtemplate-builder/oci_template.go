@@ -21,8 +21,6 @@ import (
 	"fast-sandbox/internal/ocitemplate"
 )
 
-const ociMemoryField = "memory"
-const ociGuestInterface = "eth0"
 const buildIDEnvName = "SANDBOX_TEMPLATE_BUILD_ID"
 
 // buildOCITemplate delegates disk conversion, cold boot and snapshots to fsb-vm.
@@ -92,20 +90,22 @@ func buildOCITemplate(ctx context.Context, spec apiv1alpha2.SandboxTemplateSpec,
 	}
 	defer deleteBuildTap()
 	args := []string{"--firecracker", firecrackerBin, "--overlaybd-convertor", "/usr/local/bin/convertor", "--build-work-dir", filepath.Join(workdir, "builds"), "--build-output-dir", filepath.Join(workdir, "artifacts"), "build", "--source", source, "--output", "template:build", "--kernel", kernel, "--kernel-version", strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), "--vcpu", strconv.FormatInt(vcpu.Value(), 10), "--memory-mb", strconv.FormatInt((memory.Value()+(1<<20)-1)/(1<<20), 10), "--disk-size-gb", strconv.Itoa(size), "--inject-dir", inject, "--init-path", guestInitPath(spec), "--init-script-file", filepath.Join(inject, strings.TrimPrefix(guestInitPath(spec), "/")), "--boot-args", bakedNetworkBootArgs("console=ttyS0 reboot=k panic=1 pci=off nomodules net.ifnames=0 biosdevname=0 random.trust_cpu=on root=/dev/vda rw init=" + guestInitPath(spec)), "--tap-name", tap, "--guest-mac", bakedGuestMAC, "--ready-pattern", "SANDBOX_READY", "--ready-timeout", readinessTimeout(spec).String(), "--auth-file", authFile}
-	identity := artifacts.HostCPUIdentity()
-	doc := map[string]any{"schemaVersion": 1, "runtime": "firecracker", "format": "overlaybd", "machine": map[string]any{"vcpu": spec.Machine.VCPU, ociMemoryField: spec.Machine.Memory, "rootfs": fmt.Sprintf("%dGi", size)}, "lineage": map[string]any{"image": spec.Image, "imageDigest": sourceDigest, "execd": spec.Execd, "entrypoint": spec.Entrypoint}, "compatibility": map[string]any{"vendor": identity.Vendor, "cpuFamily": identity.Family, "cpuModel": identity.Model, "cpuStepping": identity.Stepping, "cpuTemplate": "none", "firecrackerVersion": artifacts.FirecrackerVersion(firecrackerBin)}, "guestNetwork": map[string]any{"iface": ociGuestInterface, "mac": bakedGuestMAC, "ip": bakedGuestIP, "gateway": bakedGuestGateway, "netmask": bakedGuestNetmask, "mtu": bakedGuestMTU}, "validation": map[string]any{"booted": true}}
-	if len(ca) > 0 {
-		doc["lineage"].(map[string]any)["egressMitmCA"] = map[string]any{"certificates": ca}
-	}
-	raw, err := json.Marshal(doc)
+	platform := templatePlatform(spec, ca)
+	extra := struct {
+		Lineage      *artifacts.VMLineage  `json:"lineage"`
+		GuestNetwork map[string]any        `json:"guestNetwork"`
+		Platform     *artifacts.VMPlatform `json:"platform"`
+	}{Lineage: &artifacts.VMLineage{Image: spec.Image, ImageDigest: sourceDigest},
+		GuestNetwork: map[string]any{"ip": bakedGuestIP, "gateway": bakedGuestGateway, "netmask": bakedGuestNetmask, "mtu": bakedGuestMTU}, Platform: platform}
+	raw, err := json.Marshal(extra)
 	if err != nil {
 		return err
 	}
-	metaFile := filepath.Join(workdir, "template-metadata.json")
-	if err = os.WriteFile(metaFile, raw, 0600); err != nil {
+	extraFile := filepath.Join(workdir, "manifest-extra.json")
+	if err = os.WriteFile(extraFile, raw, 0600); err != nil {
 		return err
 	}
-	args = append(args, "--manifest-file", metaFile)
+	args = append(args, "--manifest-extra-file", extraFile)
 	cmd := exec.CommandContext(ctx, "fsb-vm", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

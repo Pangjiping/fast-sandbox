@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"fast-sandbox/internal/artifacts"
 )
 
 // createOptions holds the create-command flags (ADR-007/009/010). The machine
@@ -176,7 +178,7 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 	}
 
 	// Step 4/5: the snapfiles device is attached and mounted first (a minor
-	// reordering of the ADR's illustrative sequence) because metadata.json —
+	// reordering of the ADR's illustrative sequence) because manifest.json —
 	// which lives on it — supplies the disk size that sets the rootfs hybrid
 	// upper's virtual size. Attaching snapfiles read-only carries no such
 	// dependency, so it is the safe first step.
@@ -192,18 +194,18 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 		return err
 	}
 
-	metadata, err := loadMetadata(filepath.Join(layout.mountPoint, inDiskMetadata))
+	metadata, err := loadManifest(filepath.Join(layout.mountPoint, inDiskManifest))
 	if err != nil {
 		return err
 	}
-	if err := metadata.validate(global.firecrackerBin, options.force); err != nil {
+	if err := validateManifest(metadata, global.firecrackerBin, options.force); err != nil {
 		return err
 	}
-	state.VCPU, state.MemoryMB = metadata.VCPUCount, metadata.MemoryMB
+	state.VCPU, state.MemoryMB = metadata.Machine.VCPUCount, int(metadata.Machine.MemoryMiB)
 
 	// rootfs device: create the hybrid writable upper sized from the
 	// authoritative disk size, then attach it.
-	rootfsConfig, err := writeRootfsConfig(ctx, layout.home, rootfsImage, metadata.DiskSizeMB)
+	rootfsConfig, err := writeRootfsConfig(ctx, layout.home, rootfsImage, int(metadata.Machine.RootfsSizeMiB))
 	if err != nil {
 		return err
 	}
@@ -219,7 +221,7 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 	// Step 6: resolve the kernel path (ADR-004). Firecracker snapshot restore
 	// carries the guest kernel in the memory state, but the ADR requires the
 	// host-local vmlinux to be present and version-matched.
-	if _, err := resolveKernel(global.kernelDir, metadata.KernelVersion, options.kernel); err != nil {
+	if _, err := resolveKernel(global.kernelDir, metadata.Kernel.Version, options.kernel); err != nil {
 		return err
 	}
 
@@ -298,7 +300,7 @@ func addSandboxDevice(ctx context.Context, ublkd *ublkdClient, config string, re
 // first API call (v1.16 rejects prior device/machine config) and opens the
 // rootfs drive through the relative rootfs.dev link; the network is then
 // acquired and the VM resumed (ADR create flow §7).
-func resumeVM(ctx context.Context, layout sandboxLayout, metadata vmMetadata, provider networkProvider) error {
+func resumeVM(ctx context.Context, layout sandboxLayout, metadata artifacts.VMManifest, provider networkProvider) error {
 	client := newFirecrackerClient(layout.apiSocket)
 	defer client.close()
 
@@ -334,7 +336,7 @@ func resumeVM(ctx context.Context, layout sandboxLayout, metadata vmMetadata, pr
 	return nil
 }
 
-// resolveKernel maps metadata.kernel_version to a host-local vmlinux path
+// resolveKernel maps manifest.kernel.version to a host-local vmlinux path
 // (ADR-004). An explicit override wins; a missing file is a hard error.
 func resolveKernel(kernelDir, kernelVersion, override string) (string, error) {
 	path := override
@@ -347,7 +349,7 @@ func resolveKernel(kernelDir, kernelVersion, override string) (string, error) {
 		path = filepath.Join(kernelDir, name)
 	}
 	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("kernel %s not found (kernel_version %q): %w", path, kernelVersion, err)
+		return "", fmt.Errorf("kernel %s not found (kernel.version %q): %w", path, kernelVersion, err)
 	}
 	return path, nil
 }

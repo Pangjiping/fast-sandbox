@@ -1,9 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/artifacts"
@@ -44,7 +47,7 @@ func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 	if err != nil {
 		return nil, err
 	}
-	manifestBytes, err := artifacts.MarshalManifest(manifest)
+	manifestBytes, err := artifacts.MarshalVMManifest(manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -63,91 +66,43 @@ func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 // declared minimum with the real artifact size. The lineage object records
 // where the set came from and what was baked in at build time; snapshot
 // and checkpoint producers carry it forward verbatim across generations.
-func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, cache map[string]string, rootfsGiB int, cpuTemplate string, mitmCA []mitmCALineage) (map[string]any, error) {
-	files := map[string]any{}
-	staged := []struct{ name, path string }{
-		{rootfsImageName, rootfs},
-		{vmstateFileName, vmstate},
-		{memoryFileName, memory},
-	}
-	for _, artifact := range staged {
-		entry, err := artifacts.FileEntry(artifact.path, cache)
-		if err != nil {
-			return nil, fmt.Errorf("checksum %s: %w", artifact.name, err)
-		}
-		files[artifact.name] = entry
-	}
-	kernelDigest, err := artifacts.SHA256FileCached(kernel, cache)
+func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, cache map[string]string, rootfsGiB int, cpuTemplate string, mitmCA []mitmCALineage) (artifacts.VMManifest, error) {
+	var empty artifacts.VMManifest
+	cpu, err := resource.ParseQuantity(spec.Machine.VCPU)
 	if err != nil {
-		return nil, fmt.Errorf("checksum kernel: %w", err)
+		return empty, err
 	}
-	// Snapshot compatibility: vendor/family/model is the CPUID identity
-	// consumers match before restoring (8163 and 8269CY share identity 6/85);
-	// cpuModelName is display-only. cpuTemplate records how the snapshot was
-	// masked; field semantics live in docs/guides/artifact-manifest-reference.md.
-	identity := artifacts.HostCPUIdentity()
-	compatibility := map[string]any{
-		"vendor":             identity.Vendor,
-		"cpuFamily":          identity.Family,
-		"cpuModel":           identity.Model,
-		"cpuStepping":        identity.Stepping,
-		"cpuModelName":       identity.ModelName,
-		"cpuTemplate":        compatibilityCPUTemplate(cpuTemplate),
-		"firecrackerVersion": artifacts.FirecrackerVersion(firecrackerBin),
-		"hostKernel":         artifacts.HostKernelRelease(),
+	mem, err := resource.ParseQuantity(spec.Machine.Memory)
+	if err != nil {
+		return empty, err
 	}
-	lineage := map[string]any{
-		"image":        spec.Image,
-		"imageDigest":  sourceDigest,
-		execdAssetName: spec.Execd,
-		"kernel": map[string]any{
-			"name":   filepath.Base(kernel),
-			"digest": kernelDigest,
-		},
-		"entrypoint": spec.Entrypoint,
-		"init":       spec.Init,
-		// Note: envs are published verbatim into the manifest — do not
-		// place secrets here; use the publishSecretRef secret for
-		// credentials.
-		"envs": spec.Envs,
+	document := artifacts.NewVMManifest(artifacts.VMMachine{VCPUCount: int(cpu.Value()), MemoryMiB: (mem.Value() + (1 << 20) - 1) >> 20, RootfsSizeMiB: int64(rootfsGiB) << 10, RootfsDriveID: rootfsDirName, RootfsDrivePath: snapshotDriveName}, strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), firecrackerBin, compatibilityCPUTemplate(cpuTemplate))
+	document.Lineage = &artifacts.VMLineage{Image: spec.Image, ImageDigest: sourceDigest, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	document.Platform = templatePlatform(spec, mitmCA)
+	document.GuestNetwork = &artifacts.VMGuestNetwork{Iface: "eth0", MAC: bakedGuestMAC, IP: bakedGuestIP, Gateway: bakedGuestGateway, Netmask: bakedGuestNetmask, MTU: bakedGuestMTU}
+	document.Files = map[string]artifacts.ManifestFile{}
+	for _, file := range []struct{ name, path string }{{rootfsImageName, rootfs}, {vmstateFileName, vmstate}, {memoryFileName, memory}} {
+		entry, err := artifacts.FileEntry(file.path, cache)
+		if err != nil {
+			return empty, err
+		}
+		document.Files[file.name] = artifacts.ManifestFile{SHA256: entry["sha256"].(string), SizeBytes: entry["sizeBytes"].(int64)}
 	}
-	// The egress MITM CA the build baked: public-key fingerprints only.
-	// Absent when no CA is baked; consumers read that as unknown and skip
-	// pinning comparisons.
-	if len(mitmCA) > 0 {
-		lineage["egressMitmCA"] = map[string]any{"certificates": mitmCA}
+	return document, document.Validate()
+}
+
+func templatePlatform(spec apiv1alpha2.SandboxTemplateSpec, ca []mitmCALineage) *artifacts.VMPlatform {
+	platform := &artifacts.VMPlatform{Execd: spec.Execd, Entrypoint: spec.Entrypoint, Init: spec.Init}
+	if len(spec.Envs) > 0 {
+		platform.Envs = map[string]string{}
+		for _, env := range spec.Envs {
+			platform.Envs[env.Name] = env.Value
+		}
 	}
-	return map[string]any{
-		"schemaVersion": 1,
-		"runtime":       "firecracker",
-		"lineage":       lineage,
-		"compatibility": compatibility,
-		"machine": map[string]any{
-			"vcpu":   spec.Machine.VCPU,
-			"memory": spec.Machine.Memory,
-			// The actual rootfs size (rounded up from the declared minimum
-			// to whole GiB), matching files['rootfs.ext4'].sizeBytes.
-			rootfsDirName: fmt.Sprintf("%dGi", rootfsGiB),
-		},
-		// The guest network baked into the snapshot (clone networking
-		// model): the restored guest owns a static eth0 address/MAC; the
-		// consumer replaces only the host tap via network_overrides and
-		// validates the MTU against its slot data plane.
-		"guestNetwork": map[string]any{
-			"iface":   "eth0",
-			"mac":     bakedGuestMAC,
-			"ip":      bakedGuestIP,
-			"gateway": bakedGuestGateway,
-			"netmask": bakedGuestNetmask,
-			"mtu":     bakedGuestMTU,
-		},
-		"format": spec.Output.Format,
-		"files":  files,
-		"validation": map[string]any{
-			"booted":   true,
-			"restored": true,
-		},
-	}, nil
+	if len(ca) > 0 {
+		platform.EgressMitmCA = &artifacts.MITMCALineage{Certificates: ca}
+	}
+	return platform
 }
 
 // compatibilityCPUTemplate normalizes the snapshot-stage CPU template for

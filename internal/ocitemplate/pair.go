@@ -12,6 +12,8 @@ import (
 	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote"
+
+	"fast-sandbox/internal/artifacts"
 )
 
 const (
@@ -45,14 +47,15 @@ func pairAnnotations(id string, metadata []byte) (map[string]string, error) {
 		return nil, fmt.Errorf("template metadata must be a JSON object")
 	}
 	annotations := map[string]string{AnnotationTemplateID: id}
-	if raw, ok := doc["checkpoint"]; ok {
-		var owner struct {
-			SandboxUID string `json:"sandboxUID"`
-			Namespace  string `json:"namespace"`
-		}
-		if err := json.Unmarshal(raw, &owner); err != nil {
+	if raw, ok := doc["platform"]; ok {
+		var platform artifacts.VMPlatform
+		if err := json.Unmarshal(raw, &platform); err != nil {
 			return nil, err
 		}
+		if platform.Checkpoint == nil {
+			return annotations, nil
+		}
+		owner := platform.Checkpoint
 		if strings.TrimSpace(owner.SandboxUID) == "" || strings.TrimSpace(owner.Namespace) == "" {
 			return nil, fmt.Errorf("checkpoint requires sandbox UID and namespace")
 		}

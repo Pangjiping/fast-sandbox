@@ -12,6 +12,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/cobra"
 
+	"fast-sandbox/internal/artifacts"
 	"fast-sandbox/internal/ocitemplate"
 )
 
@@ -76,7 +77,7 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 		return err
 	}
 	ublkd := newUblkdClient(global.ublkdSocket)
-	options := &buildOptions{snapshotMetadata: metadata, snapshotExtras: extras, snapfilesProgress: func(phase string) error { return writePackResources(activeMarker, work, phase) }}
+	options := &buildOptions{snapshotManifest: metadata, snapshotExtras: extras, snapfilesProgress: func(phase string) error { return writePackResources(activeMarker, work, phase) }}
 	// Preserve backing files if this process is killed or resource rollback fails.
 	if err = writePackResources(activeMarker, work, packPhasePrepared); err != nil {
 		return err
@@ -101,8 +102,8 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 
 // State files keep the native snapshot names and opaque contents in snapfiles.
 func packSnapshotExtras(bundle string) (map[string]string, error) {
-	extras := map[string]string{"manifest.json": filepath.Join(bundle, "manifest.json")}
-	for _, name := range []string{"vault.json", "policy.json", "SHA256SUMS"} {
+	extras := map[string]string{}
+	for _, name := range []string{"vault.json", "policy.json"} {
 		path := filepath.Join(bundle, name)
 		if _, err := os.Stat(path); err == nil {
 			extras[name] = path
@@ -137,31 +138,30 @@ func writePackedPair(layout artifactLayout, output outputNames, root []ocispec.D
 }
 
 func validatePackBundle(bundle string) ([]byte, *ocitemplate.RootfsUpper, error) {
-	metadata, err := os.ReadFile(filepath.Join(bundle, "metadata.json"))
+	metadata, err := os.ReadFile(filepath.Join(bundle, inDiskManifest))
 	if err != nil {
 		return nil, nil, err
 	}
-	var machine vmMetadata
-	if err = json.Unmarshal(metadata, &machine); err != nil {
+	manifest, err := artifacts.DecodeVMManifest(metadata)
+	if err != nil {
 		return nil, nil, err
 	}
-	if machine.VCPUCount < 1 || machine.MemoryMB < 1 || machine.DiskSizeMB < 1 || machine.RootfsDrivePath != rootfsDriveLink {
-		return nil, nil, fmt.Errorf("invalid checkpoint machine metadata")
-	}
+	machine := manifest.Machine
+
 	upper, upperErr := ocitemplate.ReadRootfsUpper(bundle)
 	if upperErr != nil && !errors.Is(upperErr, os.ErrNotExist) {
 		return nil, nil, upperErr
 	}
 	required := []string{"vmstate.snap", "memory.snap", "manifest.json"}
-	sizes := map[string]int64{"memory.snap": int64(machine.MemoryMB) << 20}
+	sizes := map[string]int64{"memory.snap": int64(machine.MemoryMiB) << 20}
 	if upper != nil {
-		if upper.VirtualSizeBytes != int64(machine.DiskSizeMB)<<20 {
+		if upper.VirtualSizeBytes != int64(machine.RootfsSizeMiB)<<20 {
 			return nil, nil, fmt.Errorf("rootfs upper size does not match machine metadata")
 		}
 		required = append(required, ocitemplate.UpperDataName, ocitemplate.UpperIndexName)
 	} else {
 		required = append(required, "rootfs.ext4")
-		sizes["rootfs.ext4"] = int64(machine.DiskSizeMB) << 20
+		sizes["rootfs.ext4"] = int64(machine.RootfsSizeMiB) << 20
 	}
 	for _, name := range required {
 		if info, err := os.Stat(filepath.Join(bundle, name)); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {

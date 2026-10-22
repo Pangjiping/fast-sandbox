@@ -32,7 +32,8 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 			home := filepath.Join(fixture.stateRoot, "oci/sandboxes", id)
 			require.NoError(t, os.MkdirAll(filepath.Join(home, "mnt"), 0750))
 			metadata := preparedMetadata(t)
-			metadata["files"] = map[string]any{"policy.json": map[string]any{"sha256": "stale", "sizeBytes": 1}}
+			metadata["platform"] = map[string]any{}
+			metadata["platform"] = map[string]any{"stateFiles": map[string]any{"policy.json": map[string]any{"sha256": artifacts.SHA256Of([]byte("stale")), "sizeBytes": 1}}}
 			raw, err := json.Marshal(metadata)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(home, "mnt", snapshotManifestName), raw, 0600))
@@ -60,23 +61,22 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 			require.NoError(t, err)
 			raw, err = os.ReadFile(filepath.Join(staging, snapshotManifestName))
 			require.NoError(t, err)
-			raw, err = ociSnapshotMetadata(raw, kind, state.Config.Identity)
+			raw, err = setSnapshotManifestOwner(raw, kind, state.Config.Identity)
 			require.NoError(t, err)
 			var document map[string]any
 			require.NoError(t, json.Unmarshal(raw, &document))
-			files := document["files"].(map[string]any)
+			files := document["platform"].(map[string]any)["stateFiles"].(map[string]any)
 			require.NotContains(t, files, publishedRootfsName, "OCI rootfs stays in the other image")
 			require.Equal(t, map[string]any{"sha256": artifacts.SHA256Of(policy), "sizeBytes": float64(len(policy))}, files[policyBundleName])
-			require.Equal(t, files[vaultBundleName], document["egressVault"], "native vault provenance remains intact")
+			require.Contains(t, files, vaultBundleName)
+			require.NotContains(t, document, "egressVault")
 			require.NotContains(t, string(raw), "preserve-me", "the manifest only checksums the opaque policy record")
 			require.NotContains(t, string(raw), "source-fence")
 			require.NotContains(t, document, "actionBindings", "binding seeds come from the create request")
 			saved, err := os.ReadFile(filepath.Join(staging, policyBundleName))
 			require.NoError(t, err)
 			require.Equal(t, policy, saved)
-			sums, err := os.ReadFile(filepath.Join(staging, "SHA256SUMS"))
-			require.NoError(t, err)
-			require.Contains(t, string(sums), artifacts.SHA256Of(policy)+"  "+policyBundleName)
+			require.NoFileExists(t, filepath.Join(staging, "SHA256SUMS"))
 		})
 	}
 }
@@ -90,9 +90,10 @@ func TestOCIRestoreImportsStateFromSnapfilesBeforeReady(t *testing.T) {
 				image := "oci://r.example/templates/base@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 				fixture.sandboxSpec.Spec.Image = image
 				metadata := preparedMetadata(t)
+				metadata["platform"] = map[string]any{}
 				if resume {
 					fixture.sandboxSpec.Spec.Restore = &fastletapi.RestoreSpec{ManifestRef: image, ArtifactDigest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
-					metadata["checkpoint"] = map[string]string{"sandboxUID": "sandbox-1", "namespace": "tenant-a"}
+					metadata["platform"].(map[string]any)["checkpoint"] = map[string]string{"sandboxUID": "sandbox-1", "namespace": "tenant-a"}
 				}
 				policy := []byte(`{"v":1,"incarnation":"old","revision":7,"policy":{"defaultAction":"deny"}}`)
 				vault := []byte(`{"encrypted":"record"}`)
@@ -101,7 +102,7 @@ func TestOCIRestoreImportsStateFromSnapfilesBeforeReady(t *testing.T) {
 				if integrity != "unlisted" {
 					files[policyBundleName] = map[string]any{"sha256": artifacts.SHA256Of(policy), "sizeBytes": len(policy)}
 				}
-				metadata["files"], metadata["egressVault"] = files, marker
+				metadata["platform"].(map[string]any)["stateFiles"] = files
 				raw, err := json.Marshal(metadata)
 				require.NoError(t, err)
 				installPreparedOCI(t, fixture, string(raw))
