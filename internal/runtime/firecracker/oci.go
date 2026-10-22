@@ -65,6 +65,7 @@ func (d *Driver) fsbArgs() []string {
 	}
 	return []string{
 		"--state-dir", filepath.Join(d.ociRoot(), "sandboxes"),
+		"--manifest-cache-dir", filepath.Join(d.config.StateRoot, "oci/manifest-cache"),
 		"--runtime-dir", filepath.Join(d.ociRoot(), "runtime"),
 		"--build-work-dir", filepath.Join(d.ociRoot(), "builds"),
 		"--build-output-dir", filepath.Join(d.ociRoot(), "artifacts"),

@@ -140,6 +140,7 @@ go build -o "$FSB_VM" ./cmd/fsb-vm/
 | `--reject-credential-conflicts` | `false` | 共享 daemon 时拒绝同仓库的凭证冲突 |
 | `--kernel-dir` | `/opt/fsb-vm/kernels` | `create` 默认查找 `vmlinux-<version>` 的目录 |
 | `--state-dir` | `/var/lib/fsb-vm/sandboxes` | 持久化 sandbox 状态根目录 |
+| `--manifest-cache-dir` | `<state-dir>/.manifest-cache` | 不可变 registry 元数据缓存，可独立于 sandbox 状态共享 |
 | `--runtime-dir` | `/run/fsb-vm/sandboxes` | API socket 和串口日志目录 |
 | `--firecracker` | `firecracker` | Firecracker 可执行文件 |
 | `--overlaybd-convertor` | `/opt/overlaybd/snapshotter/convertor` | OCI userspace convertor |
@@ -291,7 +292,7 @@ sudo "$FSB_VM" --plain-http build ...
 缓存按 registry、repository、HTTP/HTTPS 和当前凭证隔离，不保存凭证。
 使用 `template.reference` 时，同目录还缓存由平台入口解析出的不可变 pair 和元数据，
 并将镜像配对和 checkpoint 归属记录到 sandbox 的 `state.json.template_metadata`；平台信息从挂载的 `manifest.json` 读取。
-删除单个 sandbox 不会删除这份共享缓存。
+删除单个 sandbox 不会删除这份共享缓存。通过 `--manifest-cache-dir` 可让同一节点上不同 sandbox 状态目录共用缓存。Fastlet 使用 `<StateRoot>/oci/manifest-cache`，Pod 重建后无需重新获取已缓存的 registry manifest。缓存超过 128 MiB 或 4,096 个文件时按最近访问时间淘汰；凭证隔离与可变 tag 回源规则不变。
 
 缓存缺失或损坏时重新从 registry 获取并原子写入；缓存写入失败不会阻止使用已验证的
 远端 manifest。可变 tag 始终回源解析，指向多架构 index 的 digest 保持现有平台选择流程。

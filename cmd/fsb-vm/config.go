@@ -32,6 +32,7 @@ type config struct {
 	credFile                  string
 	kernelDir                 string
 	stateDir                  string
+	manifestCacheDir          string
 	runtimeDir                string
 	firecrackerBin            string
 	overlaybdCreate           string
@@ -79,6 +80,13 @@ every control plane and drives overlaybd-ublkd and Firecracker directly.`,
 // devices on it, Firecracker is launched in another working directory, and a
 // lost Firecracker is found by its exact --api-sock argument.
 func (c *config) absolutize() error {
+	if c.manifestCacheDir != "" {
+		absolute, err := filepath.Abs(c.manifestCacheDir)
+		if err != nil {
+			return fmt.Errorf("resolve manifest cache: %w", err)
+		}
+		c.manifestCacheDir = absolute
+	}
 	for _, path := range []*string{&c.credFile, &c.kernelDir, &c.stateDir, &c.runtimeDir, &c.buildWorkDir, &c.buildOutputDir} {
 		absolute, err := filepath.Abs(*path)
 		if err != nil {
@@ -104,6 +112,7 @@ func init() {
 	flags.BoolVar(&global.rejectCredentialConflicts, "reject-credential-conflicts", false, "reject conflicting credentials in a shared node daemon credential file")
 	flags.StringVar(&global.kernelDir, "kernel-dir", defaultKernelDir, "directory holding vmlinux-<kernel_version> kernels")
 	flags.StringVar(&global.stateDir, "state-dir", defaultStateDir, "persistent per-sandbox state directory root")
+	flags.StringVar(&global.manifestCacheDir, "manifest-cache-dir", "", "shared immutable registry metadata cache (default <state-dir>/.manifest-cache)")
 	flags.StringVar(&global.runtimeDir, "runtime-dir", defaultRuntimeDir, "volatile per-sandbox runtime directory root")
 	flags.StringVar(&global.firecrackerBin, "firecracker", defaultFirecrackerBin, "firecracker binary path")
 	flags.StringVar(&global.overlaybdCreate, "overlaybd-create", defaultOverlaybdCreate, "overlaybd-create binary path")

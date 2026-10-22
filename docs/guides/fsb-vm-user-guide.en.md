@@ -140,6 +140,7 @@ Common global options:
 | `--reject-credential-conflicts` | `false` | Reject account changes in a shared daemon credential file |
 | `--kernel-dir` | `/opt/fsb-vm/kernels` | Default directory for `vmlinux-<version>` during create |
 | `--state-dir` | `/var/lib/fsb-vm/sandboxes` | Persistent sandbox state root |
+| `--manifest-cache-dir` | `<state-dir>/.manifest-cache` | Immutable registry metadata cache; may be shared independently of sandbox state |
 | `--runtime-dir` | `/run/fsb-vm/sandboxes` | API socket and serial-log root |
 | `--firecracker` | `firecracker` | Firecracker executable |
 | `--overlaybd-convertor` | `/opt/overlaybd/snapshotter/convertor` | OCI userspace convertor |
@@ -294,7 +295,7 @@ repository, HTTP/HTTPS, and the current credential; credentials are not stored.
 With `template.reference`, the same directory also caches the resolved immutable
 pair and checkpoint ownership. That addressing envelope is recorded in the sandbox's
 `state.json.template_metadata`; platform metadata is read from mounted `manifest.json`.
-Deleting one sandbox preserves this shared cache.
+Deleting one sandbox preserves this shared cache. Set `--manifest-cache-dir` to share it across separate sandbox state roots on one node. Fastlet uses `<StateRoot>/oci/manifest-cache`, so replacing a Pod does not require fetching cached registry manifests again. The cache evicts least recently used entries above 128 MiB or 4,096 files; credential scopes remain isolated and mutable tags still resolve remotely.
 
 Missing or corrupt entries are fetched again and written atomically. Cache write
 failures do not prevent using a verified remote manifest. Mutable tags always

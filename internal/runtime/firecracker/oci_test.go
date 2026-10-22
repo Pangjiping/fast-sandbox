@@ -124,6 +124,9 @@ func TestOCIBackingPathsArePrivateToFastletPod(t *testing.T) {
 	require.Contains(t, second, filepath.Join(fixture.stateRoot, "oci/pods/pod-b/sandboxes"))
 	require.NotContains(t, second, filepath.Join(fixture.stateRoot, "oci/pods/pod-a/sandboxes"))
 	require.Contains(t, first, "--reject-credential-conflicts")
+	cache := filepath.Join(fixture.stateRoot, "oci/manifest-cache")
+	require.Contains(t, first, cache)
+	require.Contains(t, second, cache)
 }
 
 func TestOCIPackRecoveryDoesNotShareReplacementPodStaging(t *testing.T) {

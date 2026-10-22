@@ -34,7 +34,7 @@ func resolveTemplate(ctx context.Context, template *templateFile, config dockerC
 	}
 	var payload []byte
 	if cachePath != "" {
-		payload, _ = os.ReadFile(cachePath + ".template")
+		payload, _ = readCachedManifest(cachePath + ".template")
 		if _, err := templatePair(payload, ref); err != nil {
 			payload = nil
 		}
@@ -53,8 +53,7 @@ func resolveTemplate(ctx context.Context, template *templateFile, config dockerC
 			return err
 		}
 		if cachePath != "" {
-			// Fetch has already created the credential-scoped parent directory.
-			if err := writeFileAtomic(cachePath+".template", payload, 0600); err != nil {
+			if err := cacheManifestFile(cachePath+".template", payload); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: cache template metadata: %v\n", err)
 			}
 		}

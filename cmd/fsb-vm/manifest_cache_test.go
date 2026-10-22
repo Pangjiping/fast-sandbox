@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go"
@@ -338,5 +339,90 @@ func TestResolveImageRevokedCredentialCannotUsePrivateManifestCache(t *testing.T
 	}
 	if r.requestCount() <= before {
 		t.Fatal("revoked access did not revalidate anonymous access with the registry")
+	}
+}
+
+func TestManifestCacheSurvivesSandboxStateRootReplacement(t *testing.T) {
+	setupManifestCache(t)
+	global.manifestCacheDir = t.TempDir()
+	reference, config, requests, closeRegistry := templateRegistry(t)
+	first := templateFile{Template: templateRef{Reference: reference}}
+	if err := resolveTemplate(context.Background(), &first, config); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{first.rootfsRef(), first.snapfilesRef()} {
+		if _, err := resolveImage(context.Background(), ref, config); err != nil {
+			t.Fatal(err)
+		}
+	}
+	coldRequests := requests.Load()
+	if err := os.RemoveAll(global.stateDir); err != nil {
+		t.Fatal(err)
+	}
+	global.stateDir = t.TempDir()
+	closeRegistry()
+	second := templateFile{Template: templateRef{Reference: reference}}
+	if err := resolveTemplate(context.Background(), &second, config); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{second.rootfsRef(), second.snapfilesRef()} {
+		if _, err := resolveImage(context.Background(), ref, config); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requests.Load() != coldRequests || first.Template.Rootfs != second.Template.Rootfs {
+		t.Fatal("replaced sandbox state root did not reuse the cached immutable pair")
+	}
+	rotated := dockerConfig{Auths: map[string]authEntry{strings.SplitN(strings.TrimPrefix(reference, "oci://"), "/", 2)[0]: {Username: "other", Password: "rotated"}}}
+	third := templateFile{Template: templateRef{Reference: reference}}
+	if err := resolveTemplate(context.Background(), &third, rotated); err == nil {
+		t.Fatal("shared cache crossed credential scopes")
+	}
+}
+
+func TestManifestCacheEvictsOldestEntriesByBytesAndCount(t *testing.T) {
+	for _, limit := range []struct {
+		name  string
+		bytes int64
+		files int
+	}{{"bytes", 16, 100}, {"files", 100, 2}} {
+		t.Run(limit.name, func(t *testing.T) {
+			root := t.TempDir()
+			paths := []string{filepath.Join(root, "old-scope", "old.json"), filepath.Join(root, "scope", "warm.json"), filepath.Join(root, "scope", "new.json.template")}
+			for i, path := range paths {
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("12345678"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				stamp := time.Unix(int64(i+1), 0)
+				if err := os.Chtimes(path, stamp, stamp); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A read refreshes recency, so a recently reused entry beats a newer write.
+			if _, ok := readCachedManifest(paths[0]); !ok {
+				t.Fatal("cache read failed")
+			}
+			if err := trimManifestCache(root, limit.bytes, limit.files); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(paths[1]); !os.IsNotExist(err) {
+				t.Fatalf("oldest entry retained: %v", err)
+			}
+			for _, path := range []string{paths[0], paths[2]} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := trimManifestCache(root, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			items, err := os.ReadDir(root)
+			if err != nil || len(items) != 0 {
+				t.Fatalf("evicted scopes remain: %v %v", items, err)
+			}
+		})
 	}
 }
