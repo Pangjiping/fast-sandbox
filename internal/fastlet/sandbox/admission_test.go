@@ -30,6 +30,7 @@ type admissionRuntime struct {
 	deleteCalls   int
 	ensureError   error
 	deleteError   error
+	allocation    fastletapi.RuntimeAllocation
 	ensureEntered chan struct{}
 	ensureBlock   chan struct{}
 	deleteEntered chan struct{}
@@ -116,6 +117,7 @@ func TestInspectUsesProbeInvalidatedActionStatusBeforeControllerProjection(t *te
 	_, _, err = actionManager.Reconcile(context.Background(), fastletaction.Attachment{
 		ID: "attachment-a", SandboxUID: "uid-a", SandboxName: "sandbox-a", Namespace: "default",
 		InstanceGeneration: 1, AssignmentAttempt: 1, RuntimeInstanceID: "runtime-a",
+		IP: "172.30.0.2", Gateway: "172.30.0.1", PrivateCIDR: "172.30.0.0/24", HostVeth: "host-a",
 	}, 1, []fastletaction.DesiredInput{{Handler: "egress", Input: `{}`}})
 	require.NoError(t, err)
 
@@ -212,7 +214,7 @@ func (r *admissionRuntime) EnsureSandbox(_ context.Context, input *fastletapi.En
 	}
 	config := input.Sandbox
 	sandboxUID := config.Identity.SandboxUID
-	metadata := &SandboxMetadata{Config: config, ContainerID: sandboxUID, Phase: "running", CreatedAt: time.Now().Unix()}
+	metadata := &SandboxMetadata{Config: config, Allocation: r.allocation, ContainerID: sandboxUID, Phase: "running", CreatedAt: time.Now().Unix()}
 	r.mu.Lock()
 	r.sandboxes[sandboxUID] = metadata
 	r.mu.Unlock()
@@ -546,6 +548,12 @@ func TestUserDeleteFailureCannotBeResurrectedByCreateRetry(t *testing.T) {
 
 func TestActionDeleteFailureDoesNotBlockRuntimeDeletion(t *testing.T) {
 	runtime := newAdmissionRuntime()
+	// The Binding must reach the Handler before Delete for REMOVE_BINDING to
+	// fire, so the fake runtime materializes a network allocation (#136: an
+	// unattached Binding parks as Pending and is never applied nor removed).
+	runtime.allocation = fastletapi.RuntimeAllocation{Network: fastletapi.NetworkAllocation{
+		IP: "172.30.0.2", Gateway: "172.30.0.1", PrivateCIDR: "172.30.0.0/24",
+	}}
 	caller := &failingDeleteActionCaller{}
 	actionManager, err := fastletaction.NewManager([]apiv1alpha2.ActionHandler{{Name: "egress", TargetHTTPPort: 18080}}, caller)
 	require.NoError(t, err)

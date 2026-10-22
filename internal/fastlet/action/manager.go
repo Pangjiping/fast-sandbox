@@ -552,6 +552,14 @@ func (m *Manager) RecordHook(sandboxUID string, attachment Attachment, hook acti
 	return nil
 }
 
+// unattachedBindingMessage is the Binding observation while desired state is
+// registered before the runtime network attachment exists (#136): the
+// admission-time registration precedes the runtime, so the attachment has
+// no IP until the VM boots and every Handler rejects that envelope with
+// "attachment.network.ip is required". SetBinding stays deferred instead of
+// retrying a doomed invocation once per probe tick.
+const unattachedBindingMessage = "network attachment has no IP; SetBinding is deferred until the runtime network exists"
+
 func (m *Manager) convergeLocked(ctx context.Context, state *sandboxState) error { //nolint:gocognit // pre-existing convergence loop; refactor tracked separately
 	state.mu.RLock()
 	desired := appendDesired(nil, state.desired)
@@ -560,6 +568,10 @@ func (m *Manager) convergeLocked(ctx context.Context, state *sandboxState) error
 	oldOrder := append([]string(nil), state.order...)
 	state.mu.RUnlock()
 	if generation <= 0 {
+		return nil
+	}
+	if attachment.IP == "" {
+		m.parkUnattachedBindings(state, desired, attachment.SandboxUID)
 		return nil
 	}
 	desiredByName := make(map[string]DesiredInput, len(desired))
@@ -645,6 +657,31 @@ func (m *Manager) convergeLocked(ctx context.Context, state *sandboxState) error
 	state.mu.Unlock()
 	m.notifyChanged(attachment.SandboxUID)
 	return nil
+}
+
+// parkUnattachedBindings records why desired Bindings cannot converge yet and
+// wakes status watchers once. Bindings stay Pending until the runtime network
+// attachment materializes (the post-boot attachment re-registration fires the
+// real convergence); no Handler I/O happens while parked.
+func (m *Manager) parkUnattachedBindings(state *sandboxState, desired []DesiredInput, sandboxUID string) {
+	state.mu.Lock()
+	changed := false
+	for _, input := range desired {
+		binding := state.bindings[input.Handler]
+		if binding == nil {
+			binding = &bindingState{status: fastletapi.ActionBindingStatus{Handler: input.Handler}, appliedHooks: make(map[actionapi.LifecycleHook]int64)}
+			state.bindings[input.Handler] = binding
+		}
+		if binding.status.State == string(apiv1alpha2.ActionPending) && binding.status.Message == unattachedBindingMessage {
+			continue
+		}
+		setBindingStatus(binding, apiv1alpha2.ActionPending, unattachedBindingMessage)
+		changed = true
+	}
+	state.mu.Unlock()
+	if changed {
+		m.notifyChanged(sandboxUID)
+	}
 }
 
 func (m *Manager) setBinding(ctx context.Context, state *sandboxState, handlerName string, generation int64, attachment Attachment, input *string, digest string, replayHooks bool) error {
