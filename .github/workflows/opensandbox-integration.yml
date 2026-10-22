@@ -1,31 +1,12 @@
 name: OpenSandbox Integration
 
-# Pre-merge integration testing against the OpenSandbox monorepo: PRs
-# dispatch the OpenSandbox "Fast Sandbox Integration Tests" workflow with
-# the PR head SHA, so a fast-sandbox change is validated against the full
-# OpenSandbox stack before it can be pinned into OpenSandbox
-# (manifests/third-party/fast-sandbox.commit).
-#
-# pull_request_target (NOT pull_request) is deliberate: the workflow file is
-# always taken from the base branch, so PRs can neither tamper with the
-# guard logic nor reach the secrets, and secrets stay available for fork
-# PRs. The job only reads event metadata and calls the API — it never
-# checks out or executes PR code.
-#
-# Who triggers it:
-#   - org members and repo collaborators: automatically on every code PR
-#   - external contributors: once a maintainer adds the `ok-to-test` label
-#     (their PR code runs on OpenSandbox's self-hosted KVM runner, so a
-#     trusted person opts in explicitly)
-#   - anyone with actions access: manual workflow_dispatch with an explicit
-#     SHA
-#
-# Requires two secrets holding a GitHub App installation scoped to the
-# OpenSandbox repository (Contents: read/write, no webhooks):
-#   OSB_APP_ID           the app's numeric ID
-#   OSB_APP_PRIVATE_KEY  the app's .pem private key contents
-# A short-lived installation token is minted per run; nothing is tied to a
-# personal account. Read-only otherwise.
+# Dispatches OpenSandbox's "Fast Sandbox Integration Tests" KVM workflow with
+# the PR head SHA, pre-merge. pull_request_target keeps the workflow file and
+# secrets on the base branch (PRs can't rewrite the guard or mint tokens); the
+# job only calls the API, never checks out PR code. External PRs need a
+# maintainer-added `ok-to-test` label — their code runs on a self-hosted
+# runner. Requires OSB_APP_ID / OSB_APP_PRIVATE_KEY (GitHub App with Contents
+# read/write, installed on the OpenSandbox repo only).
 
 on:
   pull_request_target:
@@ -50,10 +31,7 @@ permissions:
 jobs:
   dispatch:
     name: Trigger OpenSandbox fast-sandbox integration
-    # OpenSandbox's self-hosted KVM runner executes the tested fast-sandbox
-    # source, so running it for a PR is an explicit trust decision: trusted
-    # authors (org members / repo collaborators) run automatically; anyone
-    # else needs a maintainer to add the `ok-to-test` label.
+    # Untrusted PRs need a maintainer's ok-to-test label.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.author_association == 'MEMBER' ||
