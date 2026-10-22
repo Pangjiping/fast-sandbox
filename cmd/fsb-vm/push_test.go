@@ -29,7 +29,8 @@ func TestPushPackedPairWithCheckpointAnnotations(t *testing.T) {
 	require.NoError(t, err)
 	names, err := parseOutput("snapshot:checkpoint-1")
 	require.NoError(t, err)
-	require.NoError(t, writePackedPair(layout, names, []oci.Descriptor{parent, delta}, snap))
+	_, err = writeTemplatePair(layout, names, []oci.Descriptor{parent, delta}, snap, "checkpoint", nil)
+	require.NoError(t, err)
 	server := httptest.NewTLSServer(registrytest.New())
 	defer server.Close()
 	previous := retry.DefaultClient
@@ -44,7 +45,9 @@ func TestPushPackedPairWithCheckpointAnnotations(t *testing.T) {
 	// Resolve through the default paired-tag convention, then inspect exactly
 	// the snapfiles manifest returned as the checkpoint publication point.
 	ref := strings.TrimPrefix(server.URL, "https://") + "/checkpoint/test:checkpoint-1"
-	payload, err := ocitemplate.Resolve(context.Background(), ref, nil)
+	repository, reference, err := ocitemplate.Repository(ref, nil)
+	require.NoError(t, err)
+	payload, err := ocitemplate.ResolveFrom(context.Background(), reference, repository)
 	require.NoError(t, err)
 	pair, err := ocitemplate.Decode(payload)
 	require.NoError(t, err)
@@ -76,7 +79,8 @@ func TestPushPlainHTTP(t *testing.T) {
 			require.NoError(t, err)
 			names, err := parseOutput("snapshot:http-test")
 			require.NoError(t, err)
-			require.NoError(t, writePackedPair(layout, names, []oci.Descriptor{layer}, layer))
+			_, err = writeTemplatePair(layout, names, []oci.Descriptor{layer}, layer, "checkpoint", nil)
+			require.NoError(t, err)
 			handler := registrytest.New()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if private {

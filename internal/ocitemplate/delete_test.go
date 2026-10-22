@@ -75,7 +75,7 @@ func TestDeletePairPreservesOtherSnapshotsAndSharedBlobs(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, root.Digest, otherRoot.Digest, "pair ownership must distinguish manifests with identical layers")
 	require.ErrorContains(t, DeletePair(ctx, first, "second", nil), "pair ID mismatch")
-	_, err = Resolve(ctx, first, nil)
+	_, err = resolveTestPair(t, ctx, first, nil)
 	require.NoError(t, err, "validation must precede all deletions")
 
 	mu.Lock()
@@ -93,7 +93,7 @@ func TestDeletePairPreservesOtherSnapshotsAndSharedBlobs(t *testing.T) {
 	require.NoError(t, DeletePair(ctx, first, "first", nil), "retry after complete deletion is idempotent")
 	_, err = repo.Resolve(ctx, "first_snapfiles")
 	require.ErrorIs(t, err, errdef.ErrNotFound)
-	_, err = Resolve(ctx, second, nil)
+	_, err = resolveTestPair(t, ctx, second, nil)
 	require.NoError(t, err)
 	mu.Lock()
 	require.Zero(t, deletedBlobs, "shared config/layer blobs belong to registry GC")

@@ -83,7 +83,7 @@ func TestCheckpointOwnerLivesOnSnapfilesManifest(t *testing.T) {
 	require.Equal(t, "tenant", manifest.Annotations[AnnotationNamespace])
 	require.Equal(t, "checkpoint-1", manifest.Annotations[AnnotationCheckpointID])
 	require.NotContains(t, manifest.Annotations, "io.fast-sandbox.metadata")
-	got, err := Resolve(ctx, ref, nil)
+	got, err := resolveTestPair(t, ctx, ref, nil)
 	require.NoError(t, err)
 	var doc map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(got, &doc))
@@ -114,7 +114,7 @@ func TestCheckpointOwnerLivesOnSnapfilesManifest(t *testing.T) {
 			require.NoError(t, err)
 			desc := content.NewDescriptorFromBytes(oci.MediaTypeImageManifest, payload)
 			require.NoError(t, repo.Manifests().Push(ctx, desc, bytes.NewReader(payload)))
-			_, err = Resolve(ctx, repo.Reference.Registry+"/"+repo.Reference.Repository+"@"+desc.Digest.String(), nil)
+			_, err = resolveTestPair(t, ctx, repo.Reference.Registry+"/"+repo.Reference.Repository+"@"+desc.Digest.String(), nil)
 			require.Error(t, err)
 		})
 	}
@@ -137,7 +137,7 @@ func TestPairResolutionRequiresRootfsAndDoesNotDownloadLayers(t *testing.T) {
 	ref, _, err := Push(context.Background(), localPairFixture(t), strings.TrimPrefix(server.URL, "https://")+"/pair/test:v1", []byte(`{}`), nil)
 	require.NoError(t, err)
 	missingRoot.Store(true)
-	_, err = Resolve(context.Background(), ref, nil)
+	_, err = resolveTestPair(t, context.Background(), ref, nil)
 	require.Error(t, err, "a snapfiles manifest cannot be ready without its same-ID rootfs")
 }
 

@@ -32,8 +32,7 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 			home := filepath.Join(fixture.stateRoot, "oci/sandboxes", id)
 			require.NoError(t, os.MkdirAll(filepath.Join(home, "mnt"), 0750))
 			metadata := preparedMetadata(t)
-			metadata["platform"] = map[string]any{}
-			metadata["platform"] = map[string]any{"stateFiles": map[string]any{"policy.json": map[string]any{"sha256": artifacts.SHA256Of([]byte("stale")), "sizeBytes": 1}}}
+			metadata["platform"] = map[string]any{"checkpoint": map[string]string{"sandboxUID": "previous", "namespace": "old"}, "future": map[string]bool{"keep": true}, "stateFiles": map[string]any{"policy.json": map[string]any{"sha256": artifacts.SHA256Of([]byte("stale")), "sizeBytes": 1}}}
 			raw, err := json.Marshal(metadata)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(home, "mnt", snapshotManifestName), raw, 0600))
@@ -57,14 +56,19 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 				exports, _ := mover.snapshotTemplate()
 				require.Len(t, exports, 2, "template snapshots use seal-free state export")
 			}
-			_, err = assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, sandboxDir)
+			_, err = assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, sandboxDir, kind)
 			require.NoError(t, err)
 			raw, err = os.ReadFile(filepath.Join(staging, snapshotManifestName))
 			require.NoError(t, err)
-			raw, err = setSnapshotManifestOwner(raw, kind, state.Config.Identity)
-			require.NoError(t, err)
 			var document map[string]any
 			require.NoError(t, json.Unmarshal(raw, &document))
+			platform := document["platform"].(map[string]any)
+			require.Equal(t, map[string]any{"keep": true}, platform["future"])
+			if kind == fastletapi.SnapshotKindCheckpoint {
+				require.Equal(t, map[string]any{"sandboxUID": state.Config.Identity.SandboxUID, "namespace": state.Config.Identity.Namespace}, platform["checkpoint"])
+			} else {
+				require.NotContains(t, platform, "checkpoint")
+			}
 			files := document["platform"].(map[string]any)["stateFiles"].(map[string]any)
 			require.NotContains(t, files, publishedRootfsName, "OCI rootfs stays in the other image")
 			require.Equal(t, map[string]any{"sha256": artifacts.SHA256Of(policy), "sizeBytes": float64(len(policy))}, files[policyBundleName])

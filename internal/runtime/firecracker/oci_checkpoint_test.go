@@ -88,31 +88,6 @@ func TestPrepareOCISnapshotKeepsNativeFlowIndependentOfRegistry(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig)
 }
 
-func TestOCISnapshotMetadataRemovesInheritedCheckpointOwner(t *testing.T) {
-	doc := preparedMetadata(t)
-	doc["platform"] = map[string]any{"checkpoint": map[string]string{"sandboxUID": "previous", "namespace": "old"}, "future": map[string]bool{"keep": true}}
-	raw, err := json.Marshal(doc)
-	require.NoError(t, err)
-	owner := fastletapi.SandboxIdentity{SandboxUID: "current", Namespace: "tenant"}
-	for _, kind := range []fastletapi.SnapshotKind{fastletapi.SnapshotKindTemplate, fastletapi.SnapshotKindCheckpoint} {
-		t.Run(string(kind), func(t *testing.T) {
-			data, err := setSnapshotManifestOwner(raw, kind, owner)
-			require.NoError(t, err)
-			var document map[string]any
-			require.NoError(t, json.Unmarshal(data, &document))
-			require.Equal(t, float64(1), document["schemaVersion"])
-			require.Contains(t, document, "platform")
-			require.Contains(t, document, "machine")
-			require.Contains(t, document["platform"], "future")
-			if kind == fastletapi.SnapshotKindTemplate {
-				require.NotContains(t, document["platform"], "checkpoint")
-			} else {
-				require.Equal(t, map[string]any{"sandboxUID": "current", "namespace": "tenant"}, document["platform"].(map[string]any)["checkpoint"])
-			}
-		})
-	}
-}
-
 func TestDisabledOCIRejectsLiveSnapshotBeforeDump(t *testing.T) {
 	t.Setenv("FAST_SANDBOX_OCI_ENABLED", "false")
 	fixture := newSnapshotDriverFixture(t)

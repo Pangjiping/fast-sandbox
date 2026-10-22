@@ -108,7 +108,7 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	require.Len(t, snapManifest.Layers, 1)
 	require.Equal(t, oci.MediaTypeImageConfig, snapManifest.Config.MediaType)
 	for _, logical := range []string{dest, strings.TrimSuffix(dest, "build") + "build_snapfiles"} {
-		_, err = Resolve(context.Background(), logical, nil)
+		_, err = resolveTestPair(t, context.Background(), logical, nil)
 		require.NoError(t, err, "resolve paired tags without a third image")
 	}
 	// The same immutable publication can be retried, but not overwritten.
@@ -124,14 +124,14 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	nextRef, _, err := Push(context.Background(), dir, nextDestination, []byte(`{"machine":{"vcpu":"2"}}`), nil)
 	require.NoError(t, err)
 	require.NotEqual(t, ref, nextRef)
-	oldMetadata, err := Resolve(context.Background(), ref, nil)
+	oldMetadata, err := resolveTestPair(t, context.Background(), ref, nil)
 	require.NoError(t, err)
 	require.NotContains(t, string(oldMetadata), `"machine"`)
-	newMetadata, err := Resolve(context.Background(), nextRef, nil)
+	newMetadata, err := resolveTestPair(t, context.Background(), nextRef, nil)
 	require.NoError(t, err)
 	require.NotContains(t, string(newMetadata), `"machine"`)
 
-	payload, err := Resolve(context.Background(), ref, nil)
+	payload, err := resolveTestPair(t, context.Background(), ref, nil)
 	require.NoError(t, err)
 	pair, err := Decode(payload)
 	require.NoError(t, err)
@@ -146,7 +146,7 @@ func TestPublishResolveMetadataOnly(t *testing.T) {
 	checkpoint := strings.TrimPrefix(server.URL, "https://") + "/snapshots/checkpoint:delta"
 	checkpointRef, _, err := Push(context.Background(), dir, checkpoint, []byte(`{"machine":{"vcpu":"1"}}`), nil)
 	require.NoError(t, err)
-	_, err = Resolve(context.Background(), checkpointRef, nil)
+	_, err = resolveTestPair(t, context.Background(), checkpointRef, nil)
 	require.NoError(t, err)
 	copied, _, err := Repository(checkpointRef, nil)
 	require.NoError(t, err)
@@ -227,7 +227,7 @@ func TestResolveSharesRepositoryAuthAndValidatesPair(t *testing.T) {
 			if mode != "missing-snapfiles" {
 				documents[snapPath] = snap
 			}
-			got, err := Resolve(context.Background(), repo+"@"+snapSum, nil)
+			got, err := resolveTestPair(t, context.Background(), repo+"@"+snapSum, nil)
 			switch mode {
 			case "valid":
 				require.NoError(t, err)
@@ -255,4 +255,13 @@ func TestValidatePublishRepository(t *testing.T) {
 	for _, reference := range []string{"registry.example.com/templates", "oci://registry.example.com/templates:tag", "oci://registry.example.com/templates@sha256:" + strings.Repeat("a", 64), "oci://registry.example.com/templates:", "oci://registry.example.com/templates@", "oci://registry.example.com/", "oci://registry.example.com", "oci://user:password@registry.example.com/templates", "oci://registry.example.com/UPPER"} {
 		require.Error(t, ValidatePublishRepository(reference), reference)
 	}
+}
+
+func resolveTestPair(t *testing.T, ctx context.Context, reference string, credentials CredentialFunc) ([]byte, error) {
+	t.Helper()
+	repo, ref, err := Repository(reference, credentials)
+	if err != nil {
+		return nil, err
+	}
+	return ResolveFrom(ctx, ref, repo)
 }

@@ -141,7 +141,7 @@ func TestOCICreateAndResumeUseCLIResultWithoutAgentMetadata(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(staging, ocitemplate.RootfsUpperName), upperRaw, 0600))
 			sandboxDir := filepath.Join(fixture.stateRoot, sandboxStateDir, "sandbox-1")
-			_, err = assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, sandboxDir)
+			_, err = assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, sandboxDir, fastletapi.SnapshotKindCheckpoint)
 			require.NoError(t, err)
 			raw, err = os.ReadFile(filepath.Join(staging, snapshotManifestName))
 			require.NoError(t, err)

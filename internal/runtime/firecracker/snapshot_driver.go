@@ -173,12 +173,9 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 
-	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, d.ociRoot(), plan.staging, plan.sandboxDir)
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, d.ociRoot(), plan.staging, plan.sandboxDir, kind)
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
-		return nil, err
-	}
-	if err := writeSnapshotOwner(plan.staging, plan.sandboxDir, kind); err != nil {
 		return nil, err
 	}
 	klog.InfoS("firecracker checkpoint manifest assembled",
@@ -1133,22 +1130,6 @@ func stagedBundleFiles(staging string) ([]string, error) {
 	return bundleFiles, nil
 }
 
-func writeSnapshotOwner(staging, sandboxDir string, kind fastletapi.SnapshotKind) error {
-	raw, err := os.ReadFile(filepath.Join(staging, snapshotManifestName))
-	if err != nil {
-		return err
-	}
-	state, err := loadState(sandboxDir)
-	if err != nil {
-		return err
-	}
-	raw, err = setSnapshotManifestOwner(raw, kind, state.Config.Identity)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(staging, snapshotManifestName), raw, 0644) //nolint:gosec // published metadata, readable by the runtime-agent
-}
-
 func manifestSection(document map[string]json.RawMessage, name string) (map[string]json.RawMessage, error) {
 	section := map[string]json.RawMessage{}
 	if value := document[name]; len(value) > 0 {
@@ -1160,34 +1141,6 @@ func manifestSection(document map[string]json.RawMessage, name string) (map[stri
 		section = map[string]json.RawMessage{}
 	}
 	return section, nil
-}
-
-func setSnapshotManifestOwner(raw []byte, kind fastletapi.SnapshotKind, owner fastletapi.SandboxIdentity) ([]byte, error) {
-	if _, err := artifacts.DecodeVMManifest(raw); err != nil {
-		return nil, err
-	}
-	var document map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &document); err != nil {
-		return nil, err
-	}
-	platform, err := manifestSection(document, "platform")
-	if err != nil {
-		return nil, err
-	}
-	delete(platform, "checkpoint")
-	if kind == fastletapi.SnapshotKindCheckpoint {
-		value, err := json.Marshal(artifacts.CheckpointOwner{SandboxUID: owner.SandboxUID, Namespace: owner.Namespace})
-		if err != nil {
-			return nil, err
-		}
-		platform["checkpoint"] = value
-	}
-	value, err := json.Marshal(platform)
-	if err != nil {
-		return nil, err
-	}
-	document["platform"] = value
-	return json.Marshal(document)
 }
 
 type snapshotManifestEntries struct {
@@ -1238,7 +1191,7 @@ func collectSnapshotManifestEntries(staging string, isOCI bool) (snapshotManifes
 	return snapshotManifestEntries{Files: files, StateFiles: stateFiles, RootfsSize: rootfsSize, SizeBytes: sizeBytes, Cache: cache, Names: bundleFiles}, nil
 }
 
-func assembleSnapshotManifest(stateRoot, ociRoot, staging, sandboxDir string) (int64, error) {
+func assembleSnapshotManifest(stateRoot, ociRoot, staging, sandboxDir string, kind fastletapi.SnapshotKind) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
@@ -1295,6 +1248,13 @@ func assembleSnapshotManifest(stateRoot, ociRoot, staging, sandboxDir string) (i
 	platform, err := manifestSection(document, "platform")
 	if err != nil {
 		return 0, err
+	}
+	delete(platform, "checkpoint")
+	if kind == fastletapi.SnapshotKindCheckpoint {
+		platform["checkpoint"], err = json.Marshal(artifacts.CheckpointOwner{SandboxUID: state.Config.Identity.SandboxUID, Namespace: state.Config.Identity.Namespace})
+		if err != nil {
+			return 0, err
+		}
 	}
 	delete(platform, "stateFiles")
 	if len(stateFiles) > 0 {

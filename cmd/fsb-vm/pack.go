@@ -89,7 +89,7 @@ func packCheckpoint(ctx context.Context, bundle, outputName string) (resultErr e
 	if err != nil {
 		return err
 	}
-	if err = writePackedPair(layout, output, rootLayers, snap); err != nil {
+	if _, err = writeTemplatePair(layout, output, rootLayers, snap, "checkpoint", nil); err != nil {
 		return err
 	}
 	if err = publishArtifactLayout(layout, final); err != nil {
@@ -112,29 +112,6 @@ func packSnapshotExtras(bundle string) (map[string]string, error) {
 		}
 	}
 	return extras, nil
-}
-
-func writePackedPair(layout artifactLayout, output outputNames, root []ocispec.Descriptor, snap ocispec.Descriptor) error {
-	cfg, err := layout.installBytes(minimalImageConfig(), ocispec.MediaTypeImageConfig)
-	if err != nil {
-		return err
-	}
-	index := layoutIndex{SourceRef: "checkpoint"}
-	for _, entry := range []struct {
-		name   string
-		layers []ocispec.Descriptor
-	}{{output.rootfsName(), root}, {output.snapfilesName(), []ocispec.Descriptor{snap}}} {
-		payload, desc, err := assembleManifest(cfg, entry.layers)
-		if err != nil {
-			return err
-		}
-		file := sanitizeFileName(entry.name) + ".json"
-		if err = writeFileAtomic(layout.manifestPath(file), payload, 0640); err != nil {
-			return err
-		}
-		index.Images = append(index.Images, layoutIndexEntry{Name: entry.name, ManifestFile: file, ManifestDigest: desc.Digest.String()})
-	}
-	return layout.writeLayoutIndex(index)
 }
 
 func validatePackBundle(bundle string) ([]byte, *ocitemplate.RootfsUpper, error) {

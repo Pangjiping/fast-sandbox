@@ -44,7 +44,7 @@ func resolveTemplate(ctx context.Context, template *templateFile, config dockerC
 		if err != nil {
 			return err
 		}
-		cached := &templateRepository{remoteSource: repository, ref: ref, config: config}
+		cached := &templateRepository{MetadataRepository: repository, ref: ref, config: config}
 		payload, err = ocitemplate.ResolveFrom(ctx, ref, cached)
 		if err != nil {
 			return fmt.Errorf("resolve OCI template: %w", err)
@@ -87,7 +87,7 @@ func templatePair(payload []byte, ref registry.Reference) (*ocitemplate.Pair, er
 // templateRepository shares the existing digest-verified raw-manifest cache with
 // resolveImage. Cold envelope reads therefore also warm the snapfiles manifest.
 type templateRepository struct {
-	remoteSource
+	ocitemplate.MetadataRepository
 	ref    registry.Reference
 	config dockerConfig
 }
@@ -116,7 +116,7 @@ func (r *templateRepository) Resolve(ctx context.Context, reference string) (oci
 			return oci.Descriptor{MediaType: manifest.MediaType, Digest: digest.Digest(reference), Size: int64(len(raw))}, nil
 		}
 	}
-	return r.remoteSource.Resolve(ctx, reference)
+	return r.MetadataRepository.Resolve(ctx, reference)
 }
 
 func (r *templateRepository) Fetch(ctx context.Context, desc oci.Descriptor) (io.ReadCloser, error) {
@@ -128,7 +128,7 @@ func (r *templateRepository) Fetch(ctx context.Context, desc oci.Descriptor) (io
 		return nil, err
 	}
 	if len(raw) == 0 {
-		raw, err = content.FetchAll(ctx, r.remoteSource, desc)
+		raw, err = content.FetchAll(ctx, r.MetadataRepository, desc)
 		if err != nil {
 			return nil, err
 		}

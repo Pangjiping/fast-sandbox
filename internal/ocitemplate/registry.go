@@ -114,17 +114,6 @@ func Decode(payload []byte) (*Pair, error) {
 	return document.OCI, nil
 }
 
-// Resolve reads a snapfiles manifest and resolves its rootfs by the shared ID.
-// The returned node-local metadata pins both images by digest; no data layers
-// are downloaded.
-func Resolve(ctx context.Context, reference string, credentials CredentialFunc) ([]byte, error) {
-	repo, ref, err := Repository(reference, credentials)
-	if err != nil {
-		return nil, err
-	}
-	return ResolveFrom(ctx, ref, repo)
-}
-
 // ResolveFrom resolves the platform envelope through the caller's registry/cache.
 func ResolveFrom(ctx context.Context, ref registry.Reference, repo MetadataRepository) ([]byte, error) {
 	desc, err := repo.Resolve(ctx, ref.Reference)
@@ -376,4 +365,13 @@ func pushLocalBlob(ctx context.Context, repo *remote.Repository, dir string, des
 		return e
 	}
 	return nil
+}
+
+// BasicCredential keeps OCI metadata and native OverlayBD reads on the same
+// authentication contract. Identity tokens alone must not become anonymous reads.
+func BasicCredential(username, password, identityToken string) (auth.Credential, error) {
+	if username == "" && password == "" && identityToken != "" {
+		return auth.EmptyCredential, fmt.Errorf("OCI identitytoken-only credentials are not supported; use anonymous or username/password authentication")
+	}
+	return auth.Credential{Username: username, Password: password}, nil
 }

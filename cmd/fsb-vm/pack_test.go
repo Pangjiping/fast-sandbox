@@ -42,7 +42,8 @@ func TestPackedPairPreservesRootfsParentLayers(t *testing.T) {
 	snap := ocispec.Descriptor{MediaType: ocitemplate.OverlayBDLayerMediaType, Digest: digest.FromString("memory"), Size: 50}
 	names, err := parseOutput("snapshot:test")
 	require.NoError(t, err)
-	require.NoError(t, writePackedPair(layout, names, []ocispec.Descriptor{parent, delta}, snap))
+	_, err = writeTemplatePair(layout, names, []ocispec.Descriptor{parent, delta}, snap, "checkpoint", nil)
+	require.NoError(t, err)
 	var index layoutIndex
 	raw, err := os.ReadFile(filepath.Join(layout.root, "manifest/index.json"))
 	require.NoError(t, err)
