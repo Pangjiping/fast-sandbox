@@ -23,7 +23,7 @@ RUNTIME ?= container
 INFRA ?= execd
 ACTIONS ?= disabled
 PROFILE ?= basic
-E2E_TEST_TIMEOUT ?= 30m
+E2E_TEST_TIMEOUT ?= 30m # per-test ceiling for SCOPE=e2e runs
 ACCELERATED_CONTAINER_IMAGE_DIR ?= $(abspath $(CURDIR)/../accelerated-container-image)
 
 BIN_DIR := $(CURDIR)/bin
