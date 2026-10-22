@@ -1,10 +1,24 @@
 name: OpenSandbox Integration
 
-# Pre-merge integration testing against the OpenSandbox monorepo: every PR
-# dispatches the OpenSandbox "Fast Sandbox Integration Tests" workflow with
-# this PR's head SHA, so a fast-sandbox change is validated against the full
+# Pre-merge integration testing against the OpenSandbox monorepo: PRs
+# dispatch the OpenSandbox "Fast Sandbox Integration Tests" workflow with
+# the PR head SHA, so a fast-sandbox change is validated against the full
 # OpenSandbox stack before it can be pinned into OpenSandbox
 # (manifests/third-party/fast-sandbox.commit).
+#
+# pull_request_target (NOT pull_request) is deliberate: the workflow file is
+# always taken from the base branch, so PRs can neither tamper with the
+# guard logic nor reach the secrets, and secrets stay available for fork
+# PRs. The job only reads event metadata and calls the API — it never
+# checks out or executes PR code.
+#
+# Who triggers it:
+#   - org members and repo collaborators: automatically on every code PR
+#   - external contributors: once a maintainer adds the `ok-to-test` label
+#     (their PR code runs on OpenSandbox's self-hosted KVM runner, so a
+#     trusted person opts in explicitly)
+#   - anyone with actions access: manual workflow_dispatch with an explicit
+#     SHA
 #
 # Requires two secrets holding a GitHub App installation scoped to the
 # OpenSandbox repository (Contents: read/write, no webhooks):
@@ -14,8 +28,8 @@ name: OpenSandbox Integration
 # personal account. Read-only otherwise.
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -37,14 +51,14 @@ jobs:
   dispatch:
     name: Trigger OpenSandbox fast-sandbox integration
     # OpenSandbox's self-hosted KVM runner executes the tested fast-sandbox
-    # source, so only trusted authors trigger automatically: org members and
-    # repo collaborators (the people who could push org branches anyway).
-    # Drive-by fork PRs stay opt-in via manual workflow_dispatch with an
-    # explicit SHA.
+    # source, so running it for a PR is an explicit trust decision: trusted
+    # authors (org members / repo collaborators) run automatically; anyone
+    # else needs a maintainer to add the `ok-to-test` label.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.author_association == 'MEMBER' ||
-      github.event.pull_request.author_association == 'COLLABORATOR'
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      contains(github.event.pull_request.labels.*.name, 'ok-to-test')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
