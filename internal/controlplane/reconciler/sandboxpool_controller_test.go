@@ -762,6 +762,46 @@ func poolRequest(pool *apiv1alpha2.SandboxPool) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}}
 }
 
+func TestConstructPodSharesNodeOCIToolsAndSocket(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
+	for _, runtimeName := range []apiv1alpha2.RuntimeName{apiv1alpha2.RuntimeContainer, apiv1alpha2.RuntimeFirecracker} {
+		t.Run(string(runtimeName), func(t *testing.T) {
+			pool := &apiv1alpha2.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: types.UID("pool-uid")},
+				Spec: apiv1alpha2.SandboxPoolSpec{Runtime: runtimeName, MaxSandboxesPerPod: 1, SandboxResources: testSandboxResources(),
+					FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}}}},
+				},
+			}
+			plan, err := runtimeenv.ResolveDefault(reconciler.Catalog, runtimeName)
+			require.NoError(t, err)
+			pod, err := reconciler.constructPodWithRuntimePlan(pool, plan)
+			require.NoError(t, err)
+			require.Nil(t, volumeMountForContainer(pod, 0, "firecracker-overlaybd-cache"))
+			for name, path := range map[string]string{"oci-tools": runtimecatalog.OCIToolsDir, "oci-socket": runtimecatalog.OCISocketDir} {
+				mount := volumeMountForContainer(pod, 0, name)
+				if runtimeName != apiv1alpha2.RuntimeFirecracker {
+					require.Nil(t, mount)
+					continue
+				}
+				require.NotNil(t, mount)
+				require.Equal(t, path, mount.MountPath)
+				require.Equal(t, name == "oci-tools", mount.ReadOnly)
+				found := false
+				for _, volume := range pod.Spec.Volumes {
+					if volume.Name == name {
+						require.NotNil(t, volume.HostPath)
+						require.Equal(t, path, volume.HostPath.Path)
+						found = true
+					}
+				}
+				require.True(t, found)
+			}
+		})
+	}
+}
+
 func TestConstructPodAddsKVMWithoutRuntimeClass(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, apiv1alpha2.AddToScheme(scheme))

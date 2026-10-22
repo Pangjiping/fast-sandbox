@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -24,6 +25,7 @@ import (
 	"fast-sandbox/internal/controlplane/assignment"
 	orchestration "fast-sandbox/internal/controlplane/orchestrator"
 	"fast-sandbox/internal/observability"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
@@ -69,7 +71,8 @@ func snapshotFromCreateRequest(request *fastpathv2.CreateSandboxSnapshotRequest,
 	return &apiv1alpha2.SandboxSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: request.RequestId, Namespace: sandbox.Namespace, Labels: labels,
-			Annotations: map[string]string{assignment.AnnotationRequestID: request.RequestId, assignment.AnnotationCreateSpecHash: specHash},
+			Finalizers:  []string{assignment.SnapshotCleanupFinalizer},
+			Annotations: map[string]string{assignment.AnnotationRequestID: request.RequestId, assignment.AnnotationCreateSpecHash: specHash, assignment.AnnotationSnapshotPoolRef: sandbox.Spec.PoolRef},
 		},
 		Spec: apiv1alpha2.SandboxSnapshotSpec{
 			SandboxRef: apiv1alpha2.SandboxRef{
@@ -87,8 +90,10 @@ func (s *Server) CreateSandboxSnapshot(ctx context.Context, request *fastpathv2.
 	if err := ValidateRequestID(request.RequestId); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := validateTemplateName(request.TemplateName); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+	if request.TemplateName != "" {
+		if err := validateTemplateName(request.TemplateName); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
 	}
 	if err := validateMetadata(request.Metadata); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -102,6 +107,9 @@ func (s *Server) CreateSandboxSnapshot(ctx context.Context, request *fastpathv2.
 	sandbox, err := s.sandboxFromReference(ctx, request.Sandbox)
 	if err != nil {
 		return nil, err
+	}
+	if request.TemplateName == "" && !strings.HasPrefix(sandbox.Spec.Image, ocitemplate.Prefix) {
+		return nil, status.Error(codes.InvalidArgument, "template_name is required for a native snapshot")
 	}
 	ctx = observability.WithIdentity(ctx, observability.Identity{
 		RequestID: request.RequestId, Namespace: sandbox.Namespace, SandboxName: sandbox.Name, SandboxUID: string(sandbox.UID),
@@ -169,7 +177,7 @@ func (s *Server) checkSnapshotReentrancy(ctx context.Context, sandbox *apiv1alph
 		}
 		// The template-name fence holds to terminal: concurrent publishers
 		// of one index key would race last-writer-wins on the store.
-		if item.Spec.TemplateName == templateName {
+		if templateName != "" && item.Spec.TemplateName == templateName {
 			return status.Errorf(codes.FailedPrecondition, "template name %q is held by snapshot %s/%s in phase %q; retry after it terminates", templateName, item.Namespace, item.Name, item.Status.Phase)
 		}
 	}
@@ -212,6 +220,9 @@ func (s *Server) triggerSnapshot(ctx context.Context, snapshot *apiv1alpha2.Sand
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	response := &fastpathv2.CreateSandboxSnapshotResponse{Snapshot: snapshotInfo(snapshot)}
+	if snapshot.DeletionTimestamp != nil {
+		return nil, status.Error(codes.FailedPrecondition, "SandboxSnapshot is being deleted")
+	}
 	if snapshot.Status.Phase.Terminal() {
 		// One-shot semantics: a replayed request never re-triggers a
 		// terminated snapshot.
@@ -405,6 +416,7 @@ func snapshotInfo(snapshot *apiv1alpha2.SandboxSnapshot) *fastpathv2.SandboxSnap
 		ManifestRef:    snapshot.Status.ManifestRef,
 		ArtifactDigest: snapshot.Status.ArtifactDigest,
 		SizeBytes:      snapshot.Status.SizeBytes,
+		SnapshotId:     snapshot.Status.SnapshotID,
 	}
 	if !snapshot.CreationTimestamp.IsZero() {
 		info.CreatedUnixSeconds = snapshot.CreationTimestamp.Unix()

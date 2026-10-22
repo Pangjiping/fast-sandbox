@@ -415,6 +415,12 @@ func (s *Server) GetSandbox(ctx context.Context, request *fastpathv2.GetSandboxR
 	if err := checkGenerationFloor(sandbox, request.ExpectedGeneration); err != nil {
 		return nil, err
 	}
+	// Pause states belong to the controller FSM. The runtime may already be
+	// released while its assignment is still present, and Fastlet cannot
+	// report these states even before release.
+	if sandbox.Status.Runtime.State == apiv1alpha2.RuntimePausing || sandbox.Status.Runtime.State == apiv1alpha2.RuntimePaused {
+		return &fastpathv2.GetSandboxResponse{Sandbox: sandboxInfoFromCRD(sandbox), Generation: sandbox.Generation}, nil
+	}
 	// Without a durable assignment there is no live runtime to inspect: a
 	// paused Sandbox (no placement) and a resume waiting for capacity both
 	// project the durable CRD state instead of failing the read.

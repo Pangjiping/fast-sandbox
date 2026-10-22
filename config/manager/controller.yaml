@@ -101,11 +101,6 @@ spec:
         resources:
           requests: {cpu: 100m, memory: 128Mi}
           limits: {cpu: "1", memory: 512Mi}
-      volumes:
-      - name: artifact-store
-        configMap:
-          name: fast-sandbox-artifact-store
-          optional: true
 ---
 apiVersion: v1
 kind: Service

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -164,15 +166,14 @@ func TestCreateSnapshotDumpsPublishesAndResumes(t *testing.T) {
 	require.Equal(t, "app-v2", agent.key)
 	require.Equal(t, fixture.sandboxSpec.Spec.Image,
 		agent.manifest["lineage"].(map[string]any)["image"])
-	require.Equal(t, map[string]any{
-		"vcpu": "2", "memory": "1Gi", "rootfs": "1Gi",
-	}, agent.manifest["machine"])
-	require.Equal(t, map[string]any{
-		"iface": "eth0", "mac": "02:00:00:00:00:01", "ip": "172.30.0.3",
-		"gateway": "172.30.0.1", "netmask": "255.255.255.0",
-	}, agent.manifest["guestNetwork"])
-	require.Equal(t, "native", agent.manifest["format"])
-	require.Equal(t, map[string]any{"booted": true, "restored": false}, agent.manifest["validation"])
+	machine := agent.manifest["machine"].(map[string]any)
+	require.Equal(t, float64(2), machine["vcpuCount"])
+	require.Equal(t, float64(1024), machine["memoryMiB"])
+	require.Equal(t, float64(1), machine["rootfsSizeMiB"])
+	require.Equal(t, "rootfs.img", machine["rootfsDrivePath"])
+	require.Equal(t, "172.30.0.3", agent.manifest["guestNetwork"].(map[string]any)["ip"])
+	require.NotContains(t, agent.manifest, "format")
+	require.NotContains(t, agent.manifest, "validation")
 	files := agent.manifest["files"].(map[string]any)
 	require.Len(t, files, 3)
 	require.Contains(t, agent.sums, "rootfs.ext4")
@@ -238,7 +239,7 @@ func TestCreateSnapshotRequiresSourceManifestFacts(t *testing.T) {
 		SandboxID: sandboxID, SnapshotID: "snap-1", TemplateName: "app-v2",
 	})
 	require.ErrorIs(t, err, ErrInvalidConfig)
-	require.Contains(t, err.Error(), "machine")
+	require.Contains(t, err.Error(), "manifest")
 }
 
 func TestCreateSnapshotRejectsInsufficientStagingBeforePause(t *testing.T) {
@@ -314,12 +315,13 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 
 	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(artifacts.CheckpointReference(restore.ArtifactDigest)))
 	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
-	lineage, err := json.Marshal(map[string]any{
-		"schemaVersion": 1, "runtime": "firecracker",
-		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
-		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
-		"kernel":       map[string]any{"name": "vmlinux"},
-	})
+	sourceDocument := testManifestDocument(t)
+	sourceDocument["guestNetwork"].(map[string]any)["ip"] = "10.0.0.2"
+	sourceDocument["guestNetwork"].(map[string]any)["gateway"] = "10.0.0.1"
+	sourceDocument["machine"].(map[string]any)["vcpuCount"] = 1
+	sourceDocument["machine"].(map[string]any)["memoryMiB"] = 512
+
+	lineage, err := json.Marshal(sourceDocument)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
 
@@ -327,7 +329,7 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	size, err := assembleSnapshotManifest(fixture.stateRoot, staging, dir)
+	size, err := assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, dir, fastletapi.SnapshotKindCheckpoint)
 	require.NoError(t, err)
 	require.Positive(t, size)
 
@@ -356,12 +358,13 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 
 	cacheDir := filepath.Join(fixture.stateRoot, imageCacheDir, imageKey(artifacts.CheckpointReference(restore.ArtifactDigest)))
 	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
-	lineage, err := json.Marshal(map[string]any{
-		"schemaVersion": 1, "runtime": "firecracker",
-		"machine":      map[string]any{"vcpu": "1", "memory": "512Mi"},
-		"guestNetwork": map[string]any{"ip": "10.0.0.2", "gateway": "10.0.0.1"},
-		"egressVault":  map[string]any{"sha256": "stale", "sizeBytes": 7},
-	})
+	sourceDocument := testManifestDocument(t)
+	sourceDocument["guestNetwork"].(map[string]any)["ip"] = "10.0.0.2"
+	sourceDocument["guestNetwork"].(map[string]any)["gateway"] = "10.0.0.1"
+	sourceDocument["machine"].(map[string]any)["vcpuCount"] = 1
+	sourceDocument["machine"].(map[string]any)["memoryMiB"] = 512
+	sourceDocument["platform"] = map[string]any{"stateFiles": map[string]any{"vault.json": map[string]any{"sha256": artifacts.SHA256Of([]byte("stale")), "sizeBytes": 7}}}
+	lineage, err := json.Marshal(sourceDocument)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
 
@@ -369,7 +372,7 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	_, err = assembleSnapshotManifest(fixture.stateRoot, staging, dir)
+	_, err = assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, dir, fastletapi.SnapshotKindCheckpoint)
 	require.NoError(t, err)
 
 	payload, err := os.ReadFile(filepath.Join(staging, "manifest.json"))
@@ -531,9 +534,11 @@ func TestCreateCheckpointStagesAndPublishesVaultBundle(t *testing.T) {
 	// The staged vault file rides the manifest file list, SHA256SUMS, and the
 	// egressVault marker.
 	files := agent.manifest["files"].(map[string]any)
-	require.Len(t, files, 4)
+	require.Len(t, files, 3)
+	files = agent.manifest["platform"].(map[string]any)["stateFiles"].(map[string]any)
 	require.Contains(t, files, "vault.json")
-	require.Equal(t, files["vault.json"], agent.manifest["egressVault"], "the egressVault marker names the staged vault entry")
+	require.Contains(t, files, "vault.json")
+	require.NotContains(t, agent.manifest, "egressVault")
 	require.Contains(t, agent.sums, "vault.json")
 
 	// The node-local cache commit carries the vault file next to the
@@ -650,9 +655,9 @@ func TestCreateCheckpointFailsWhenPolicyExportFails(t *testing.T) {
 // egressVault entry describing content.
 func writeCheckpointManifest(t *testing.T, dir string, content []byte, withMarker bool) {
 	t.Helper()
-	document := map[string]any{"schemaVersion": 1, "runtime": "firecracker"}
+	document := testManifestDocument(t)
 	if withMarker {
-		document["egressVault"] = map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}
+		document["platform"] = map[string]any{"stateFiles": map[string]any{"vault.json": map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}}}
 	}
 	payload, err := json.Marshal(document)
 	require.NoError(t, err)
@@ -667,7 +672,9 @@ func writeSnapshotManifestWithFiles(t *testing.T, dir string, entries map[string
 	for name, content := range entries {
 		files[name] = map[string]any{"sha256": artifacts.SHA256Of(content), "sizeBytes": len(content)}
 	}
-	payload, err := json.Marshal(map[string]any{"schemaVersion": 1, "runtime": "firecracker", "files": files})
+	document := testManifestDocument(t)
+	document["platform"] = map[string]any{"stateFiles": files}
+	payload, err := json.Marshal(document)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, snapshotManifestName), payload, 0o644))
 }
@@ -848,7 +855,9 @@ func TestCreateTemplateSnapshotStagesSealFreeState(t *testing.T) {
 	require.Contains(t, joined, "policy.json")
 
 	files := agent.manifest["files"].(map[string]any)
-	require.Len(t, files, 5)
+	require.Len(t, files, 3)
+	files = agent.manifest["platform"].(map[string]any)["stateFiles"].(map[string]any)
+	require.Len(t, files, 2)
 	require.Contains(t, files, "vault.json")
 	require.Contains(t, files, "policy.json")
 	require.Contains(t, agent.sums, "vault.json")
@@ -870,26 +879,23 @@ func TestImportTemplateCarry(t *testing.T) {
 	require.NoError(t, os.MkdirAll(cacheDir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, vaultBundleName), vaultContent, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, policyBundleName), policyContent, 0o600))
-	document := map[string]any{
-		"schemaVersion": 1, "runtime": "firecracker",
-		"egressVault": map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
-		"files": map[string]any{
-			"vault.json":  map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
-			"policy.json": map[string]any{"sha256": artifacts.SHA256Of(policyContent), "sizeBytes": len(policyContent)},
-		},
-	}
+	document := testManifestDocument(t)
+	document["platform"] = map[string]any{"stateFiles": map[string]any{
+		"vault.json":  map[string]any{"sha256": artifacts.SHA256Of(vaultContent), "sizeBytes": len(vaultContent)},
+		"policy.json": map[string]any{"sha256": artifacts.SHA256Of(policyContent), "sizeBytes": len(policyContent)},
+	}}
 	payload, err := json.Marshal(document)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
 
 	spec := fixture.sandboxSpec.Spec // fresh boot from the fixture image
-	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, cacheDir, sandboxID)
 	_, imports := mover.snapshotTemplate()
 	require.Len(t, imports, 2, "vault and policy both land for the clone's first registration")
 
 	// A restore takes the restore-import path instead.
 	spec.Restore = &fastletapi.RestoreSpec{ManifestRef: "s3://bucket/manifest.json", ArtifactDigest: "d"}
-	fixture.driver.importTemplateCarry(context.Background(), spec, "checkpoint:sha256:d", fixture.stateRoot, sandboxID)
+	fixture.driver.importTemplateCarry(context.Background(), spec, "checkpoint:sha256:d", cacheDir, sandboxID)
 	_, imports = mover.snapshotTemplate()
 	require.Len(t, imports, 2, "the restore path never routes through the template carry")
 }
@@ -909,7 +915,54 @@ func TestImportTemplateCarryAbsent(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, snapshotManifestName), payload, 0o644))
 
 	spec := fixture.sandboxSpec.Spec
-	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, fixture.stateRoot, sandboxID)
+	fixture.driver.importTemplateCarry(context.Background(), spec, spec.Image, cacheDir, sandboxID)
 	_, imports := mover.snapshot()
 	require.Empty(t, imports, "a mover without the template-carry capability is never invoked")
+}
+
+func TestSnapshotStagingRecoveryBeforeRetryAndDelete(t *testing.T) {
+	for _, operation := range []string{"retry", "delete"} {
+		for _, failed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fail=%t", operation, failed), func(t *testing.T) {
+				fixture := newDriverFixture(t)
+				require.NoError(t, os.MkdirAll(filepath.Join(fixture.driver.config.StateRoot, sandboxStateDir, fixture.sandboxSpec.Identity.SandboxUID), 0750))
+				require.NoError(t, saveState(filepath.Join(fixture.driver.config.StateRoot, sandboxStateDir, fixture.sandboxSpec.Identity.SandboxUID), &SandboxState{Config: fixture.sandboxSpec, Phase: PhaseStopped}))
+				staging := filepath.Join(fixture.driver.config.StateRoot, snapshotStagingDir, "snap-1")
+				require.NoError(t, os.MkdirAll(staging, 0750))
+				marker := filepath.Join(staging, ".pack-resources-active")
+				require.NoError(t, os.WriteFile(marker, []byte("retained"), 0600))
+				bin := t.TempDir()
+				t.Setenv("TEST_PACK_STAGING", staging)
+				t.Setenv("TEST_PACK_FAIL", strconv.FormatBool(failed))
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "fsb-vm"), []byte(`#!/bin/sh
+set -eu
+test -f "$TEST_PACK_STAGING/.pack-resources-active"
+printf '%s\n' "$@" > "$TEST_PACK_STAGING/arguments"
+if [ "$TEST_PACK_FAIL" = true ]; then exit 7; fi
+rm "$TEST_PACK_STAGING/.pack-resources-active"
+touch "$TEST_PACK_STAGING/cleaned"
+`), 0755))
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				var err error
+				if operation == "delete" {
+					err = fixture.driver.DeleteSnapshot(context.Background(), "snap-1")
+				} else {
+					// Invalid live state makes the snapshot fail after stale staging recovery.
+					_, err = fixture.driver.CreateSnapshot(context.Background(), &runtimecontract.SnapshotInput{SandboxID: fixture.sandboxSpec.Identity.SandboxUID, SnapshotID: "snap-1", Kind: fastletapi.SnapshotKindCheckpoint})
+				}
+				if failed {
+					require.ErrorContains(t, err, "recover checkpoint pack resources")
+					require.FileExists(t, marker)
+					raw, readErr := os.ReadFile(filepath.Join(staging, "arguments"))
+					require.NoError(t, readErr)
+					require.Contains(t, string(raw), "cleanup-pack\n--bundle-dir\n"+staging)
+				} else {
+					if operation == "delete" {
+						require.NoError(t, err)
+					}
+					require.NoDirExists(t, staging)
+				}
+			})
+		}
+	}
 }

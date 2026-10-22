@@ -779,7 +779,8 @@ build_images() {
 		builder_goproxy_arg=(--build-arg "GOPROXY=$builder_goproxy")
 	fi
 	# shellcheck disable=SC2086
-	docker build "${builder_goproxy_arg[@]}" ${DOCKER_BUILD_FLAGS:-} --quiet -t "$IMG_BUILDER" \
+	docker build "${builder_goproxy_arg[@]}" ${DOCKER_BUILD_FLAGS:-} --quiet --platform linux/amd64 \
+		--build-arg "OCI_TOOLS_IMAGE=${OCI_TOOLS_IMAGE:-fast-sandbox/oci-tools:dev}" -t "$IMG_BUILDER" \
 		-f "$REPO_ROOT/build/Dockerfile.sandboxtemplate-builder" "$REPO_ROOT" >/dev/null
 	log "building fastctl (host CLI)"
 	mkdir -p "$WORK/bin"

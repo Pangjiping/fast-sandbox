@@ -5,8 +5,8 @@ package firecracker
 // running microVM, dump the writable instance rootfs plus the vmstate/memory
 // pair, resume the VM on every path, assemble a restore-compatible manifest
 // (byte-format shared with the golden-image builder via internal/artifacts),
-// and publish the set through the node runtime-agent. Local mode (no agent)
-// refuses snapshots: publication requires the agent's store credentials.
+// and publish the set. Native publication requires the node runtime-agent
+// and its store credentials; OCI publication uses the Fastlet registry credentials.
 
 import (
 	"context"
@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"fast-sandbox/internal/artifacts"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
 	agentprotocol "fast-sandbox/internal/runtime/firecracker/agent/protocol"
@@ -77,8 +78,8 @@ var _ runtimecontract.Snapshotter = (*Driver)(nil)
 var snapshotMu sync.Mutex
 
 // CreateSnapshot snapshots a running Sandbox in place and publishes the
-// artifact set. Template snapshots publish under the template name so later
-// creates boot from them; checkpoint snapshots publish an instance-private
+// artifact set. Native template snapshots publish a name index; OCI templates
+// publish an immutable registry reference for later creates; checkpoint snapshots publish an instance-private
 // set (no index) that only the owning Sandbox resumes from. The VM is always
 // resumed; a failed dump leaves the Sandbox running and discards the staging
 // directory without publishing anything.
@@ -92,9 +93,6 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	}
 	switch kind {
 	case fastletapi.SnapshotKindTemplate:
-		if input.TemplateName == "" {
-			return nil, fmt.Errorf("%w: templateName is required for a template snapshot", ErrInvalidConfig)
-		}
 	case fastletapi.SnapshotKindCheckpoint:
 		if input.TemplateName != "" {
 			return nil, fmt.Errorf("%w: checkpoint snapshots publish no template index; templateName must be empty", ErrInvalidConfig)
@@ -117,8 +115,15 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	}
 	d.mu.RUnlock()
 	plan.sandboxDir = filepath.Join(plan.stateRoot, sandboxStateDir, plan.sandboxID)
-	plan.staging = filepath.Join(plan.stateRoot, snapshotStagingDir, plan.snapshotID)
-	if err := os.RemoveAll(plan.staging); err != nil {
+	ociSnapshot, err := prepareOCISnapshot(plan)
+	if err != nil {
+		return nil, err
+	}
+	if !ociSnapshot && kind == fastletapi.SnapshotKindTemplate && input.TemplateName == "" {
+		return nil, fmt.Errorf("%w: templateName is required for a native template snapshot", ErrInvalidConfig)
+	}
+	plan.staging = snapshotStagingPath(plan.stateRoot, d.podUID, plan.snapshotID, ociSnapshot)
+	if err := d.cleanupSnapshotStaging(ctx, plan.staging); err != nil {
 		return nil, fmt.Errorf("clear stale snapshot staging %s: %w", plan.staging, err)
 	}
 
@@ -168,7 +173,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 
-	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir)
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, d.ociRoot(), plan.staging, plan.sandboxDir, kind)
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
 		return nil, err
@@ -177,6 +182,9 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "kind", kind,
 		"sizeBytes", sizeBytes, "staging", plan.staging)
 
+	if ociSnapshot {
+		return d.publishOCISnapshot(ctx, plan, sizeBytes, kind, input.OnPublishing)
+	}
 	client, err := d.agentClientOrNil()
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
@@ -311,7 +319,7 @@ func publishKind(kind fastletapi.SnapshotKind) string {
 
 // DeleteSnapshot discards the staging directory of a snapshot. It never
 // unpublishes stored objects. A missing directory is a successful no-op.
-func (d *Driver) DeleteSnapshot(_ context.Context, snapshotID string) error {
+func (d *Driver) DeleteSnapshot(ctx context.Context, snapshotID string) error {
 	if err := validateSandboxID(snapshotID); err != nil {
 		return fmt.Errorf("%w: invalid snapshot id %q", ErrInvalidConfig, snapshotID)
 	}
@@ -319,7 +327,7 @@ func (d *Driver) DeleteSnapshot(_ context.Context, snapshotID string) error {
 	stateRoot := d.config.StateRoot
 	d.mu.RUnlock()
 	staging := filepath.Join(stateRoot, snapshotStagingDir, snapshotID)
-	if err := os.RemoveAll(staging); err != nil {
+	if err := d.cleanupSnapshotStaging(ctx, staging); err != nil {
 		return fmt.Errorf("remove snapshot staging %s: %w", staging, err)
 	}
 	return nil
@@ -384,12 +392,34 @@ func (d *Driver) dumpFootprintBytes(plan dumpPlan) (int64, error) {
 	if plan.jailed {
 		rootfs = filepath.Join(plan.jailRoot(), rootfsImageName)
 	}
+	if source, e := restoreReference(state.Config.Spec); e == nil && strings.HasPrefix(source, "oci://") {
+		rootfs = filepath.Join(filepath.Dir(rootfs), "rootfs.dev")
+	}
 	info, err := d.stat(rootfs)
 	if err != nil {
 		return 0, err
 	}
+	rootBytes := info.Size()
+	if source, e := restoreReference(state.Config.Spec); e == nil && strings.HasPrefix(source, "oci://") {
+		// Frozen upper extents, snapfiles and compressed output are staged;
+		// remote parent data is never materialized in local scratch space.
+		home := filepath.Join(d.ociRoot(), "sandboxes", plan.sandboxID, "upper")
+		var upperBytes int64
+		for _, name := range []string{"writable_data", "writable_index"} {
+			info, e := os.Stat(filepath.Join(home, name))
+			if e != nil {
+				return 0, e
+			}
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+				upperBytes += stat.Blocks * 512
+			} else {
+				upperBytes += info.Size()
+			}
+		}
+		return 3*(upperBytes+(int64(mib)<<20)) + (512 << 20), nil
+	}
 	// vmstate is small; the margin covers filesystem overhead.
-	return info.Size() + int64(mib)<<20 + (64 << 20) + int64(mib)<<20/8, nil
+	return rootBytes + int64(mib)<<20 + (64 << 20) + int64(mib)<<20/8, nil
 }
 
 // stagingFree reports the free bytes of the filesystem holding the
@@ -485,7 +515,7 @@ func (d *Driver) spillDirFor(snapshotID, memoryQuantity string) string {
 // window pays the spill area's bandwidth (tmpfs/local NVMe) instead of the
 // StateRoot filesystem. The Sandbox keeps running on every failure path,
 // with a failed resume joined after (and never masking) the dump error.
-func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error { //nolint:gocognit // pre-existing pause/dump/resume window; refactor tracked separately
+func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error { //nolint:gocognit,maintidx // pre-existing pause/dump/resume window; refactor tracked separately
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
 
@@ -556,6 +586,14 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		}
 	}
 
+	sourceRef, err := restoreReference(state.Config.Spec)
+	if err != nil {
+		return err
+	}
+	ociRoot := strings.HasPrefix(sourceRef, "oci://")
+	if ociRoot {
+		rootfs = filepath.Join(filepath.Dir(rootfs), "rootfs.dev")
+	}
 	cleanupSpill := func() {
 		if !plan.spilled {
 			return
@@ -573,8 +611,10 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 	stagedRootfs := filepath.Join(plan.staging, publishedRootfsName)
 	rootfsCloned := false
 	reflinkStarted := time.Now()
-	if err := reflinkOnly(rootfs, stagedRootfs); err == nil {
-		rootfsCloned = true
+	if !ociRoot {
+		if err := reflinkOnly(rootfs, stagedRootfs); err == nil {
+			rootfsCloned = true
+		}
 	}
 	plan.rootfsClone = time.Since(reflinkStarted)
 
@@ -591,7 +631,7 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		"sandboxID", plan.sandboxID, "snapshotId", plan.snapshotID, "spilled", plan.spilled,
 		"rootfsCloned", rootfsCloned)
 	dumpErr := func() error {
-		if !rootfsCloned {
+		if !rootfsCloned && !ociRoot {
 			copyStarted := time.Now()
 			if err := copyReflinkOrCopy(rootfs, stagedRootfs); err != nil {
 				return fmt.Errorf("copy instance rootfs: %w", err)
@@ -607,6 +647,13 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		plan.dumpAPI = time.Since(dumpStarted)
 		if err != nil {
 			return fmt.Errorf("create Firecracker snapshot: %w", err)
+		}
+		if ociRoot {
+			copyStarted := time.Now()
+			if err := captureOCIUpper(d.ociRoot(), plan.sandboxID, plan.staging); err != nil {
+				return fmt.Errorf("freeze OverlayBD private upper: %w", err)
+			}
+			plan.rootfsCopy = time.Since(copyStarted)
 		}
 		return nil
 	}()
@@ -764,7 +811,7 @@ func (d *Driver) stageTemplateState(ctx context.Context, sandboxUID, staging str
 // state. Provenance is manifest-enforced exactly like the restore import
 // (sha256 + size, stat-first bounded); every rejected posture degrades the
 // clone to the CRD seed and never fails the create.
-func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.SandboxSpec, restoreRef, stateRoot, sandboxUID string) {
+func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.SandboxSpec, restoreRef, bundleDir, sandboxUID string) {
 	if spec.Restore != nil {
 		return //nolint:nilerr // restores take the restore-import path
 	}
@@ -780,7 +827,6 @@ func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.Sandbo
 	if !ok {
 		return //nolint:nilerr // mover without the template-carry capability
 	}
-	bundleDir := filepath.Join(stateRoot, imageCacheDir, imageKey(restoreRef))
 	for _, state := range []struct {
 		kind      runtimecontract.StateKind
 		bundle    string
@@ -801,12 +847,13 @@ func (d *Driver) importTemplateCarry(ctx context.Context, spec fastletapi.Sandbo
 		}
 		importRestoreBundle(ctx, importPlan{
 			sandboxUID: sandboxUID,
+			sharedDir:  d.stateImportDir(restoreRef, sandboxUID),
 			restoreRef: restoreRef, path: bundlePath, marker: marker, markerPresent: markerPresent,
 			maxBytes: state.maxBytes,
 			subject:  "template " + string(state.kind),
 			degrade:  "the clone degrades to the CRD seed",
-			importIt: func() error {
-				return carrier.ImportTemplateState(ctx, sandboxUID, state.kind, bundlePath)
+			importIt: func(path string) error {
+				return carrier.ImportTemplateState(ctx, sandboxUID, state.kind, path)
 			},
 			sentinelMissing:  state.sentinelM,
 			sentinelUnlisted: state.sentinelU,
@@ -828,7 +875,7 @@ const maxPolicyBundleBytes = 1 << 20
 // importRestoreVault delivers a restored checkpoint's vault bundle file to
 // egress — before the data plane becomes ready. Only a resumed checkpoint
 // carries the file (golden-image caches never do); a nil mover is a no-op.
-// The committed manifest's egressVault entry is the enforced provenance:
+// The committed manifest's platform.stateFiles entry is the provenance:
 // an authorized-but-missing file, a read failure, a marker/size/digest
 // mismatch, or an import failure all degrade the subject's vault
 // fail-closed and observably — mirroring the corrupt vault file posture at
@@ -856,11 +903,14 @@ func (d *Driver) importRestoreVault(ctx context.Context, spec fastletapi.Sandbox
 
 	importRestoreBundle(ctx, importPlan{
 		sandboxUID: sandboxUID,
+		sharedDir:  d.stateImportDir(restoreRef, sandboxUID),
 		restoreRef: restoreRef, path: vaultPath, marker: marker, markerPresent: markerPresent,
-		maxBytes:         maxVaultBundleBytes,
-		subject:          "vault",
-		degrade:          "the restored Sandbox vault degrades",
-		importIt:         func() error { return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindVault, vaultPath) },
+		maxBytes: maxVaultBundleBytes,
+		subject:  "vault",
+		degrade:  "the restored Sandbox vault degrades",
+		importIt: func(path string) error {
+			return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindVault, path)
+		},
 		sentinelMissing:  errVaultBundleMissing,
 		sentinelUnlisted: errVaultBundleUnlisted,
 		sentinelMismatch: errVaultBundleMismatch,
@@ -897,11 +947,14 @@ func (d *Driver) importRestorePolicy(ctx context.Context, spec fastletapi.Sandbo
 
 	importRestoreBundle(ctx, importPlan{
 		sandboxUID: sandboxUID,
+		sharedDir:  d.stateImportDir(restoreRef, sandboxUID),
 		restoreRef: restoreRef, path: policyPath, marker: marker, markerPresent: markerPresent,
-		maxBytes:         maxPolicyBundleBytes,
-		subject:          "policy",
-		degrade:          "the restored Sandbox keeps the bootstrap binding policy",
-		importIt:         func() error { return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindPolicy, policyPath) },
+		maxBytes: maxPolicyBundleBytes,
+		subject:  "policy",
+		degrade:  "the restored Sandbox keeps the bootstrap binding policy",
+		importIt: func(path string) error {
+			return mover.ImportState(ctx, sandboxUID, runtimecontract.StateKindPolicy, path)
+		},
 		sentinelMissing:  errPolicyBundleMissing,
 		sentinelUnlisted: errPolicyBundleUnlisted,
 		sentinelMismatch: errPolicyBundleMismatch,
@@ -911,6 +964,7 @@ func (d *Driver) importRestorePolicy(ctx context.Context, spec fastletapi.Sandbo
 // importPlan carries one restore-side state bundle delivery: the verified
 // hand-over of a manifest-provenanced bundle file to the mover.
 type importPlan struct {
+	sharedDir     string // OCI mounts are container-private; handlers need a shared file.
 	sandboxUID    string
 	restoreRef    string
 	path          string
@@ -923,7 +977,7 @@ type importPlan struct {
 	degrade string
 	// importIt performs the handler hand-over once provenance holds (the
 	// caller's closure captures the mover and the state kind).
-	importIt func() error
+	importIt func(string) error
 	// sentinels mark the degradation cause in the log line.
 	sentinelMissing, sentinelUnlisted, sentinelMismatch error
 }
@@ -976,18 +1030,44 @@ func importRestoreBundle(ctx context.Context, plan importPlan) {
 			"sandboxID", plan.sandboxUID, "checkpoint", plan.restoreRef, "file", plan.path)
 		return //nolint:nilerr // unverified state bytes are never delivered
 	}
-	if importErr := plan.importIt(); importErr != nil {
+	if importErr := deliverStateBundle(plan, bundleData); importErr != nil {
 		klog.ErrorS(importErr, "egress "+plan.subject+" import failed; "+plan.degrade,
 			"sandboxID", plan.sandboxUID, "checkpoint", plan.restoreRef)
 	}
 }
 
+// stateImportDir selects an ordinary shared directory for OCI state handoff.
+// Native bundles already live on the shared filesystem.
+func (d *Driver) stateImportDir(reference, sandboxUID string) string {
+	if !strings.HasPrefix(reference, ocitemplate.Prefix) {
+		return ""
+	}
+	return filepath.Join(d.config.StateRoot, sandboxStateDir, sandboxUID)
+}
+
+func deliverStateBundle(plan importPlan, verified []byte) error {
+	if plan.sharedDir == "" {
+		return plan.importIt(plan.path)
+	}
+	staging, err := os.MkdirTemp(plan.sharedDir, "state-import-")
+	if err != nil {
+		return fmt.Errorf("stage verified state for handler: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(staging); err != nil {
+			klog.ErrorS(err, "remove temporary state import directory failed", "directory", staging)
+		}
+	}()
+	path := filepath.Join(staging, filepath.Base(plan.path))
+	if err := os.WriteFile(path, verified, 0600); err != nil {
+		return fmt.Errorf("write verified state for handler: %w", err)
+	}
+	return plan.importIt(path)
+}
+
 // fileMarker is a manifest provenance entry: a sha256 + size pair that
 // authorizes exactly one bundle file content.
-type fileMarker struct {
-	SHA256    string `json:"sha256"`
-	SizeBytes int64  `json:"sizeBytes"`
-}
+type fileMarker = artifacts.ManifestFile
 
 // sentinel degradation causes of the restore import; the log line carries
 // the specifics.
@@ -1001,42 +1081,32 @@ var (
 	errPolicyBundleMismatch = errors.New("policy bundle does not match the manifest entry")
 )
 
-// vaultManifestMarker parses the committed checkpoint manifest's egressVault
-// entry. A manifest without the marker authorizes nothing.
+// vaultManifestMarker resolves vault provenance from platform.stateFiles.
 func vaultManifestMarker(bundleDir string) (*fileMarker, bool, error) {
-	payload, err := os.ReadFile(filepath.Join(bundleDir, snapshotManifestName))
-	if err != nil {
-		return nil, false, fmt.Errorf("read checkpoint manifest: %w", err)
-	}
-	var document struct {
-		EgressVault *fileMarker `json:"egressVault"`
-	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return nil, false, fmt.Errorf("decode checkpoint manifest: %w", err)
-	}
-	return document.EgressVault, document.EgressVault != nil, nil
+	return stateFileMarker(bundleDir, vaultBundleName)
 }
 
-// policyManifestMarker returns the committed snapshot manifest's policy.json
-// files entry: the recorded policy needs no dedicated top-level marker —
-// the checksummed file list IS the provenance. A manifest without the entry
-// authorizes nothing.
 func policyManifestMarker(bundleDir string) (*fileMarker, bool, error) {
-	payload, err := os.ReadFile(filepath.Join(bundleDir, snapshotManifestName))
+	return stateFileMarker(bundleDir, policyBundleName)
+}
+
+func stateFileMarker(bundleDir, name string) (*fileMarker, bool, error) {
+	raw, err := os.ReadFile(filepath.Join(bundleDir, snapshotManifestName))
 	if err != nil {
-		return nil, false, fmt.Errorf("read snapshot manifest: %w", err)
+		return nil, false, err
 	}
-	var document struct {
-		Files map[string]fileMarker `json:"files"`
+	document, err := artifacts.DecodeVMManifest(raw)
+	if err != nil {
+		return nil, false, err
 	}
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return nil, false, fmt.Errorf("decode snapshot manifest: %w", err)
-	}
-	marker, listed := document.Files[policyBundleName]
-	if !listed {
+	if document.Platform == nil {
 		return nil, false, nil
 	}
-	return &marker, true, nil
+	entry, exists := document.Platform.StateFiles[name]
+	if !exists {
+		return nil, false, nil
+	}
+	return &entry, true, nil
 }
 
 // stagedBundleFiles validates the optional state bundle files of the staged
@@ -1060,106 +1130,193 @@ func stagedBundleFiles(staging string) ([]string, error) {
 	return bundleFiles, nil
 }
 
-func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, error) {
+func manifestSection(document map[string]json.RawMessage, name string) (map[string]json.RawMessage, error) {
+	section := map[string]json.RawMessage{}
+	if value := document[name]; len(value) > 0 {
+		if err := json.Unmarshal(value, &section); err != nil {
+			return nil, err
+		}
+	}
+	if section == nil {
+		section = map[string]json.RawMessage{}
+	}
+	return section, nil
+}
+
+type snapshotManifestEntries struct {
+	Files, StateFiles     map[string]artifacts.ManifestFile
+	RootfsSize, SizeBytes int64
+	Cache                 map[string]string
+	Names                 []string
+}
+
+func collectSnapshotManifestEntries(staging string, isOCI bool) (snapshotManifestEntries, error) {
+	bundleFiles, err := stagedBundleFiles(staging)
+	if err != nil {
+		return snapshotManifestEntries{}, err
+	}
+
+	if isOCI {
+		bundleFiles = bundleFiles[1:]
+	}
+	files, stateFiles := map[string]artifacts.ManifestFile{}, map[string]artifacts.ManifestFile{}
+	var sizeBytes, rootfsSize int64
+	cache := map[string]string{}
+	for _, name := range bundleFiles {
+		file, err := artifacts.FileEntry(filepath.Join(staging, name), cache)
+		if err != nil {
+			return snapshotManifestEntries{}, err
+		}
+		sizeBytes += file.SizeBytes
+		switch name {
+		case vaultBundleName, policyBundleName:
+			stateFiles[name] = file
+		default:
+			if !isOCI {
+				files[name] = file
+			}
+		}
+		if name == publishedRootfsName {
+			rootfsSize = file.SizeBytes
+		}
+	}
+	if isOCI {
+		upper, err := ocitemplate.ReadRootfsUpper(staging)
+		if err != nil {
+			return snapshotManifestEntries{}, err
+		}
+		rootfsSize = upper.VirtualSizeBytes
+		sizeBytes += rootfsSize
+	}
+	return snapshotManifestEntries{Files: files, StateFiles: stateFiles, RootfsSize: rootfsSize, SizeBytes: sizeBytes, Cache: cache, Names: bundleFiles}, nil
+}
+
+func assembleSnapshotManifest(stateRoot, ociRoot, staging, sandboxDir string, kind fastletapi.SnapshotKind) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
 	}
-	// The lineage manifest of the dump: the golden image manifest of a fresh
-	// boot, or the cached checkpoint manifest when the Sandbox was itself
-	// resumed from a checkpoint (the checkpoint carries every lineage field
-	// forward, and the original image may not exist on this node at all).
 	sourceRef, err := restoreReference(state.Config.Spec)
 	if err != nil {
 		return 0, err
 	}
-	document, err := readSourceManifest(stateRoot, sourceRef)
+	raw, err := readSourceManifest(stateRoot, ociRoot, sourceRef, state.Config.Identity.SandboxUID)
 	if err != nil {
 		return 0, err
 	}
 
-	bundleFiles, err := stagedBundleFiles(staging)
+	var document map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &document); err != nil {
+		return 0, err
+	}
+	isOCI := strings.HasPrefix(sourceRef, ocitemplate.Prefix)
+	entries, err := collectSnapshotManifestEntries(staging, isOCI)
 	if err != nil {
 		return 0, err
 	}
-
-	cache := map[string]string{}
-	files := map[string]any{}
-	var sizeBytes, rootfsSize int64
-	for _, name := range bundleFiles {
-		entry, err := artifacts.FileEntry(filepath.Join(staging, name), cache)
+	rootfsSize := entries.RootfsSize
+	files, stateFiles := entries.Files, entries.StateFiles
+	// Modify only the actual disk capacity, preserving unknown machine fields.
+	machine, err := manifestSection(document, "machine")
+	if err != nil {
+		return 0, err
+	}
+	if rootfsSize > 0 {
+		machine["rootfsSizeMiB"], err = json.Marshal((rootfsSize + (1 << 20) - 1) >> 20)
 		if err != nil {
-			return 0, fmt.Errorf("checksum %s: %w", name, err)
-		}
-		files[name] = entry
-		if entrySize, ok := entry["sizeBytes"].(int64); ok {
-			sizeBytes += entrySize
-			if name == publishedRootfsName {
-				rootfsSize = entrySize
-			}
+			return 0, err
 		}
 	}
-	if err := artifacts.WriteSHA256SUMS(staging, bundleFiles, cache); err != nil {
-		return 0, err
-	}
-
-	document["schemaVersion"] = 1
-	document["runtime"] = "firecracker"
-	// The lineage object rides forward from the source manifest; only the
-	// image reference is rewritten to the one this Sandbox booted from (the
-	// imageDigest stays the original build's anchor).
-	lineage, ok := document["lineage"].(map[string]any)
-	if !ok {
-		lineage = map[string]any{}
-		document["lineage"] = lineage
-	}
-	lineage["image"] = state.Config.Spec.Image
-	// compatibility rides forward untouched — see assembleSnapshotManifest.
-	document["files"] = files
-	// machine.rootfs reflects this dump's actual rootfs size; vcpu/memory
-	// ride forward from the source manifest untouched.
-	if machine, ok := document["machine"].(map[string]any); ok {
-		machine["rootfs"] = fmt.Sprintf("%dGi", artifacts.SizeGiB(rootfsSize))
-	}
-	document["format"] = "native"
-	document["validation"] = map[string]any{"booted": true, "restored": false}
-	// The egress vault marker describes THIS dump: a source checkpoint's
-	// inherited marker must never ride forward — a stale vault marker would
-	// claim vault state this bundle does not carry and publish the previous
-	// subject's vault fingerprint into shared, world-readable template
-	// manifests.
-	delete(document, "egressVault")
-	if vaultEntry, ok := files[vaultBundleName]; ok {
-		document["egressVault"] = vaultEntry
-	}
-
-	manifestBytes, err := artifacts.MarshalManifest(document)
+	document["machine"], err = json.Marshal(machine)
 	if err != nil {
 		return 0, err
 	}
-	if err := os.WriteFile(filepath.Join(staging, snapshotManifestName), manifestBytes, 0o644); err != nil { //nolint:gosec // published snapshot manifest, world-readable by design
+	// imageDigest continues to anchor the original build, not the latest dump.
+	lineage, err := manifestSection(document, "lineage")
+	if err != nil {
 		return 0, err
 	}
-	return sizeBytes, nil
+	image, err := json.Marshal(state.Config.Spec.Image)
+	if err != nil {
+		return 0, err
+	}
+	lineage["image"] = image
+	document["lineage"], err = json.Marshal(lineage)
+	if err != nil {
+		return 0, err
+	}
+	platform, err := manifestSection(document, "platform")
+	if err != nil {
+		return 0, err
+	}
+	delete(platform, "checkpoint")
+	if kind == fastletapi.SnapshotKindCheckpoint {
+		platform["checkpoint"], err = json.Marshal(artifacts.CheckpointOwner{SandboxUID: state.Config.Identity.SandboxUID, Namespace: state.Config.Identity.Namespace})
+		if err != nil {
+			return 0, err
+		}
+	}
+	delete(platform, "stateFiles")
+	if len(stateFiles) > 0 {
+		platform["stateFiles"], err = json.Marshal(stateFiles)
+		if err != nil {
+			return 0, err
+		}
+	}
+	document["platform"], err = json.Marshal(platform)
+	if err != nil {
+		return 0, err
+	}
+	delete(document, "files")
+	if !isOCI {
+		document["files"], err = json.Marshal(files)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if !isOCI {
+		if err = artifacts.WriteSHA256SUMS(staging, entries.Names, entries.Cache); err != nil {
+			return 0, err
+		}
+	}
+	payload, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return 0, err
+	}
+	if _, err = artifacts.DecodeVMManifest(payload); err != nil {
+		return 0, err
+	}
+	if err = os.WriteFile(filepath.Join(staging, snapshotManifestName), append(payload, '\n'), 0644); err != nil { //nolint:gosec // published metadata, readable by the runtime-agent
+		return 0, err
+	}
+	return entries.SizeBytes, nil
 }
 
-// readSourceManifest loads the cached manifest of the image the Sandbox
-// boots from. machine and guestNetwork are required: restore validation
-// rejects a snapshot manifest without them, so a hand-seeded cache cannot
-// produce a restorable snapshot.
-func readSourceManifest(stateRoot, image string) (map[string]any, error) {
-	payload, err := os.ReadFile(cachedManifestPath(stateRoot, image))
+func readSourceManifest(stateRoot, ociRoot, image, sandboxID string) ([]byte, error) {
+	var payload []byte
+	var err error
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		payload, err = readPreparedOCIManifest(ociRoot, sandboxID)
+	} else {
+		payload, err = os.ReadFile(cachedManifestPath(stateRoot, image))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read source image manifest: %w", err)
 	}
-	var document map[string]any
-	if err := json.Unmarshal(payload, &document); err != nil {
-		return nil, fmt.Errorf("decode source image manifest: %w", err)
+	document, err := artifacts.DecodeVMManifest(payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
-	for _, key := range []string{"machine", "guestNetwork"} {
-		if _, ok := document[key]; !ok {
-			return nil, fmt.Errorf("%w: source image manifest carries no %s; a restorable snapshot cannot be published", ErrInvalidConfig, key)
-		}
+	if document.GuestNetwork == nil {
+		return nil, fmt.Errorf("%w: source image manifest carries no guestNetwork", ErrInvalidConfig)
 	}
-	return document, nil
+	return payload, nil
+}
+
+// OCI pack paths are Pod-private so cleanup cannot affect a replacement Pod.
+func snapshotStagingPath(stateRoot, podUID, snapshotID string, oci bool) string {
+	if oci {
+		return filepath.Join(stateRoot, snapshotStagingDir, podUID, snapshotID)
+	}
+	return filepath.Join(stateRoot, snapshotStagingDir, snapshotID)
 }

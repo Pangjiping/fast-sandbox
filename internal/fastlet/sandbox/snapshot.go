@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
 
 	"fast-sandbox/internal/observability"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/pkg/util/idgen"
 )
@@ -109,6 +111,15 @@ func (m *SandboxManager) CreateSnapshot(_ context.Context, req *fastletapi.Creat
 		return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, fastletError(fastletapi.ErrorRuntimeUnavailable,
 			fmt.Sprintf("target Sandbox runtime is %q, not running", metadata.Phase), true))
 	}
+	image := metadata.Config.Spec.Image
+	if metadata.Config.Spec.Restore != nil {
+		image = metadata.Config.Spec.Restore.ManifestRef
+	}
+	if req.Snapshot.Kind != fastletapi.SnapshotKindCheckpoint && req.Snapshot.TemplateName == "" && !strings.HasPrefix(image, ocitemplate.Prefix) {
+		m.mu.Unlock()
+		return snapshotFailure(fastletapi.CreateDispositionRejectedBeforeSideEffects, fastletError(fastletapi.ErrorConflict,
+			"templateName is required for a native template snapshot", false))
+	}
 	// Sandbox fence — only the pause window (Pending/Creating) is
 	// exclusive: a task in Publishing no longer touches the VM, and its
 	// upload may overlap the next snapshot's dump.
@@ -126,7 +137,7 @@ func (m *SandboxManager) CreateSnapshot(_ context.Context, req *fastletapi.Creat
 	// Template-name fence — holds to terminal: concurrent publishers of one
 	// index key would race last-writer-wins on the store. Checkpoints carry
 	// no index key and are exempt.
-	if req.Snapshot.Kind != fastletapi.SnapshotKindCheckpoint {
+	if req.Snapshot.Kind != fastletapi.SnapshotKindCheckpoint && req.Snapshot.TemplateName != "" {
 		for _, task := range m.snapshots {
 			if !fastletapi.SnapshotPhaseTerminal(task.phase) && task.templateName == req.Snapshot.TemplateName {
 				failure := fastletError(fastletapi.ErrorSnapshotInProgress,
@@ -163,9 +174,6 @@ func (m *SandboxManager) validateSnapshotRequest(req *fastletapi.CreateSnapshotR
 	}
 	switch req.Snapshot.Kind {
 	case "", fastletapi.SnapshotKindTemplate:
-		if req.Snapshot.TemplateName == "" {
-			return fastletError(fastletapi.ErrorConflict, "templateName is required for a template snapshot", false)
-		}
 	case fastletapi.SnapshotKindCheckpoint:
 		if req.Snapshot.TemplateName != "" {
 			return fastletError(fastletapi.ErrorConflict, "checkpoint snapshots publish no template index; templateName must be empty", false)

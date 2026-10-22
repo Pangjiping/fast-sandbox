@@ -307,21 +307,14 @@ Delivery timing with on-demand loading (two nodes, XFS StateRoot):
 - `fs.inotify.max_user_instances` ≥ 8192 (kubelet/containerd watchers).
 
 ### 6.2 StateRoot filesystem — the single biggest latency lever
-- Put the node StateRoot on **XFS with `reflink=1`**. The Firecracker Fastlet
-  refuses to start on any other filesystem, including ext4 and Btrfs.
-  Initialization also probes an actual `cp --reflink=always` clone; disabled
-  reflink, missing GNU coreutils, and an unwritable StateRoot block startup.
-  The node readiness check treats non-XFS or unavailable reflink as a hard
-  failure instead of a warning. There is no opt-out for a slow deployment.
-  A per-instance rootfs CoW clone takes ~1 ms instead of a multi-GiB copy.
+- Put the node StateRoot on **XFS with `reflink=1`** for short native snapshot pauses. With OCI disabled, Fastlet startup and node readiness require XFS and an actual reflink clone; missing GNU coreutils or disabled reflink blocks startup. With `FAST_SANDBOX_OCI_ENABLED=true`, XFS/reflink validation is skipped with a warning: native templates can still require full rootfs copies, increasing create latency and snapshot pause time. Set the variable on both the Fastlet and runtime-agent to relax both checks; the standalone host-check script accepts the same variable. Directory preparation and the node's minimum free-space requirement remain enforced. A per-instance rootfs CoW clone takes ~1 ms instead of a multi-GiB copy.
 - The cache, the agent journal, and the per-sandbox jails **must share one
   filesystem** (reflink only works within a filesystem) and one StateRoot
   (`/var/lib/fast-sandbox/firecracker`) across agent + all fastlets.
 - Size: sparse rootfs (2 GiB declared) × concurrency + snapshot cache;
   monitor real usage (`du`, not `ls` — sparse).
 
-Existing ext4/Btrfs deployments must drain sandboxes and stop Fastlets before
-migrating. Preserve the old StateRoot, provision an XFS mount with
+Existing ext4/Btrfs deployments adopting XFS must drain sandboxes and stop Fastlets before migrating. Preserve the old StateRoot, provision an XFS mount with
 `scripts/firecracker-xfs-stateroot.sh --loop`, copy the preserved state into
 the new mount, and restart the runtime Pods. Do not format an existing state
 disk or mount over live sandbox state.
