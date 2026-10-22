@@ -37,9 +37,14 @@ jobs:
   dispatch:
     name: Trigger OpenSandbox fast-sandbox integration
     # OpenSandbox's self-hosted KVM runner executes the tested fast-sandbox
-    # source, so only same-repo branches trigger automatically; fork PRs stay
-    # opt-in via manual workflow_dispatch with an explicit SHA.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    # source, so only trusted authors trigger automatically: org members and
+    # repo collaborators (the people who could push org branches anyway).
+    # Drive-by fork PRs stay opt-in via manual workflow_dispatch with an
+    # explicit SHA.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.author_association == 'COLLABORATOR'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
