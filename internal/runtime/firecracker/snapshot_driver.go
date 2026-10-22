@@ -122,7 +122,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 	if !ociSnapshot && kind == fastletapi.SnapshotKindTemplate && input.TemplateName == "" {
 		return nil, fmt.Errorf("%w: templateName is required for a native template snapshot", ErrInvalidConfig)
 	}
-	plan.staging = filepath.Join(plan.stateRoot, snapshotStagingDir, plan.snapshotID)
+	plan.staging = snapshotStagingPath(plan.stateRoot, d.podUID, plan.snapshotID, ociSnapshot)
 	if err := d.cleanupSnapshotStaging(ctx, plan.staging); err != nil {
 		return nil, fmt.Errorf("clear stale snapshot staging %s: %w", plan.staging, err)
 	}
@@ -173,7 +173,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, input *runtimecontract.Snap
 		return nil, err
 	}
 
-	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, plan.staging, plan.sandboxDir)
+	sizeBytes, err := assembleSnapshotManifest(plan.stateRoot, d.ociRoot(), plan.staging, plan.sandboxDir)
 	if err != nil {
 		_ = os.RemoveAll(plan.staging)
 		return nil, err
@@ -406,7 +406,7 @@ func (d *Driver) dumpFootprintBytes(plan dumpPlan) (int64, error) {
 	if source, e := restoreReference(state.Config.Spec); e == nil && strings.HasPrefix(source, "oci://") {
 		// Frozen upper extents, snapfiles and compressed output are staged;
 		// remote parent data is never materialized in local scratch space.
-		home := filepath.Join(plan.stateRoot, "oci/sandboxes", plan.sandboxID, "upper")
+		home := filepath.Join(d.ociRoot(), "sandboxes", plan.sandboxID, "upper")
 		var upperBytes int64
 		for _, name := range []string{"writable_data", "writable_index"} {
 			info, e := os.Stat(filepath.Join(home, name))
@@ -653,7 +653,7 @@ func (d *Driver) dumpRunningSandbox(ctx context.Context, plan *dumpPlan) error {
 		}
 		if ociRoot {
 			copyStarted := time.Now()
-			if err := captureOCIUpper(plan.stateRoot, plan.sandboxID, plan.staging); err != nil {
+			if err := captureOCIUpper(d.ociRoot(), plan.sandboxID, plan.staging); err != nil {
 				return fmt.Errorf("freeze OverlayBD private upper: %w", err)
 			}
 			plan.rootfsCopy = time.Since(copyStarted)
@@ -1238,7 +1238,7 @@ func collectSnapshotManifestEntries(staging string, isOCI bool) (snapshotManifes
 	return snapshotManifestEntries{Files: files, StateFiles: stateFiles, RootfsSize: rootfsSize, SizeBytes: sizeBytes, Cache: cache, Names: bundleFiles}, nil
 }
 
-func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, error) {
+func assembleSnapshotManifest(stateRoot, ociRoot, staging, sandboxDir string) (int64, error) {
 	state, err := loadState(sandboxDir)
 	if err != nil {
 		return 0, err
@@ -1247,7 +1247,7 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 	if err != nil {
 		return 0, err
 	}
-	raw, err := readSourceManifest(stateRoot, sourceRef, state.Config.Identity.SandboxUID)
+	raw, err := readSourceManifest(stateRoot, ociRoot, sourceRef, state.Config.Identity.SandboxUID)
 	if err != nil {
 		return 0, err
 	}
@@ -1332,11 +1332,11 @@ func assembleSnapshotManifest(stateRoot, staging, sandboxDir string) (int64, err
 	return entries.SizeBytes, nil
 }
 
-func readSourceManifest(stateRoot, image, sandboxID string) ([]byte, error) {
+func readSourceManifest(stateRoot, ociRoot, image, sandboxID string) ([]byte, error) {
 	var payload []byte
 	var err error
 	if strings.HasPrefix(image, ocitemplate.Prefix) {
-		payload, err = readPreparedOCIManifest(stateRoot, sandboxID)
+		payload, err = readPreparedOCIManifest(ociRoot, sandboxID)
 	} else {
 		payload, err = os.ReadFile(cachedManifestPath(stateRoot, image))
 	}
@@ -1351,4 +1351,12 @@ func readSourceManifest(stateRoot, image, sandboxID string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: source image manifest carries no guestNetwork", ErrInvalidConfig)
 	}
 	return payload, nil
+}
+
+// OCI pack paths are Pod-private so cleanup cannot affect a replacement Pod.
+func snapshotStagingPath(stateRoot, podUID, snapshotID string, oci bool) string {
+	if oci {
+		return filepath.Join(stateRoot, snapshotStagingDir, podUID, snapshotID)
+	}
+	return filepath.Join(stateRoot, snapshotStagingDir, snapshotID)
 }

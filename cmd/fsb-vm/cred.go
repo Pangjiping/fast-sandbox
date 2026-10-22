@@ -68,6 +68,9 @@ func mergeCredentials(credFile string, incoming dockerConfig) error {
 		existing.Auths = map[string]authEntry{}
 	}
 	for host, entry := range incoming.Auths {
+		if previous, exists := existing.Auths[host]; exists && global.rejectCredentialConflicts && previous != entry {
+			return fmt.Errorf("shared overlaybd credential conflict for %s: node daemon requires one credential per repository; drain consumers before rotating credentials", host)
+		}
 		existing.Auths[host] = entry
 	}
 	return writeCredentialsAtomic(credFile, existing)

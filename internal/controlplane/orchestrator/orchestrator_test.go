@@ -416,6 +416,32 @@ func TestClearAssignmentRemovesAnnotationAndAdvancesFences(t *testing.T) {
 	require.Nil(t, current)
 }
 
+func TestResumeAssignmentUsesDurableFencesWhenInformerLags(t *testing.T) {
+	orchestrator, registry, _, sandbox := newHarness(t)
+	parameters, err := orchestrator.ResolveRuntime(context.Background(), sandbox)
+	require.NoError(t, err)
+	candidate := candidateFor(parameters)
+	registry.candidates = []placement.FastletInfo{candidate}
+	registry.fastlets[candidate.ID] = candidate
+	sandbox.UID = types.UID("sandbox-uid-a")
+	require.NoError(t, orchestrator.Client.Create(context.Background(), sandbox))
+	assigned, _, err := orchestrator.AssignDeclarative(context.Background(), sandbox, string(sandbox.UID))
+	require.NoError(t, err)
+
+	for generation := int64(2); generation <= 3; generation++ {
+		stale := assigned.DeepCopy()
+		delete(stale.Annotations, assignment.AnnotationAssignment)
+		_, err := orchestrator.ClearAssignment(context.Background(), assigned, false)
+		require.NoError(t, err)
+		assigned, _, err = orchestrator.AssignDeclarative(context.Background(), stale, string(sandbox.UID))
+		require.NoError(t, err)
+		envelope, err := assignment.EffectiveAssignment(assigned)
+		require.NoError(t, err)
+		require.Equal(t, generation, envelope.RouteGeneration)
+		require.Equal(t, generation, envelope.Attempt)
+	}
+}
+
 func statusFromEnvelope(envelope assignment.AssignmentEnvelope) apiv1alpha2.SandboxStatus {
 	return apiv1alpha2.SandboxStatus{
 		Placement: envelope.StatusPlacement(),

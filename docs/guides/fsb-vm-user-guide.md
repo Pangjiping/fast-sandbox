@@ -137,6 +137,7 @@ go build -o "$FSB_VM" ./cmd/fsb-vm/
 | --- | --- | --- |
 | `--ublkd-socket` | `/var/run/overlaybd-ublk/ublkd.sock` | ublkd 控制 socket |
 | `--cred-file` | `/opt/overlaybd/cred.json` | OverlayBD 全局凭证文件 |
+| `--reject-credential-conflicts` | `false` | 共享 daemon 时拒绝同仓库的凭证冲突 |
 | `--kernel-dir` | `/opt/fsb-vm/kernels` | `create` 默认查找 `vmlinux-<version>` 的目录 |
 | `--state-dir` | `/var/lib/fsb-vm/sandboxes` | 持久化 sandbox 状态根目录 |
 | `--runtime-dir` | `/run/fsb-vm/sandboxes` | API socket 和串口日志目录 |
@@ -507,8 +508,8 @@ sudo curl -fsS \
 
 构建、创建步骤和产物所有权说明见 [fsb-vm 设计](../design/adr-fsb-vm-cli.md)。
 
-OCI Fastlet 使用宿主机 `/dev`，以访问运行期间新增的 ublk 设备。镜像入口同时监督 Fastlet 和 ublkd；任一进程退出都会结束容器。OCI jailer 也会在启动前挂载配置的 snapshot spill 目录。
+OCI Fastlet 使用宿主机 `/dev`，以访问运行期间新增的 ublk 设备。runtime-agent DaemonSet 中的节点 ublkd 容器为同节点的 Fastlet 提供服务；fsb-vm 直接连接共享 Unix socket，runtime-agent 安装工具、检查健康，不转发设备请求。OCI jailer 也会在启动前挂载配置的 snapshot spill 目录。
 
-快照打包中断后，重试或删除 staging 前会先按 config 路径恢复并释放 pack 设备；清理失败时保留 backing files。仓库凭据按实际 rootfs/snapfiles 仓库同步到 OverlayBD：匿名访问会覆盖该仓库的旧凭据，不会删除其他仓库的凭据。此同步不承诺立即撤销已经运行的 VM 的访问。
+快照打包中断后，重试或删除 staging 前会先按 config 路径恢复并释放 pack 设备；清理失败时保留 backing files。独立 fsb-vm 按实际 rootfs/snapfiles 仓库同步凭据：匿名访问会覆盖该仓库的旧凭据，不会删除其他仓库的凭据。Fastlet 为节点 daemon 启用 `--reject-credential-conflicts`，拒绝同仓库的不同账号或匿名覆盖。此同步不承诺立即撤销已经运行的 VM 的访问。
 
-构建 Fastlet 镜像使用 `make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev`，然后自行推送并在 Pool 中使用该镜像。此 tag 是构建示例，不表示已发布版本。Go 与 native 工具均在 Docker 内编译，无需宿主机编译器或预先生成 `.build/` 产物。Fastlet 与 Builder 使用同一份容器内 OverlayBD 构建脚本。OCI Pool 通过 `FAST_SANDBOX_OCI_ENABLED=true` 启用 ublkd。无 extent seek 支持时，upper 复制会扫描零块并保留稀疏空间，但扫描耗时可能高于 reflink/extent copy。
+构建 Fastlet 镜像使用 `make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev`，然后自行推送并在 Pool 中使用该镜像。此 tag 是构建示例，不表示已发布版本。Fastlet 使用 Ubuntu 22.04 运行阶段，不包含 Go 工具链和 OverlayBD 构建阶段。runtime-agent 镜像统一安装 fsb-vm 和 OverlayBD 工具，Fastlet 只读挂载这些工具，保留执行所需的系统库和基础工具。节点 agent/daemon 和 OCI Pool 均通过 `FAST_SANDBOX_OCI_ENABLED=true` 启用；路径、缓存容量、凭证和升级要求见 [OCI 部署指南](overlaybd-oci-sandboxes.md)。无 extent seek 支持时，upper 复制会扫描零块并保留稀疏空间，但扫描耗时可能高于 reflink/extent copy。

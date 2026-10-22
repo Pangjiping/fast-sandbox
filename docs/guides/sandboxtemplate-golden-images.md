@@ -45,6 +45,8 @@ SandboxTemplate CR (spec)
 The builder image is `build/Dockerfile.sandboxtemplate-builder` (oci2rootfs,
 firecracker v1.16.1, embedded guest kernel, OverlayBD toolchain, aws CLI v2).
 
+Build it with `make images COMPONENT=sandboxtemplate-builder`. Builder and runtime-agent copy OCI tools from the same artifact image; set `OCI_TOOLS_IMAGE` to the same published digest for both. See [OCI image builds](overlaybd-oci-sandboxes.md#1-prepare-the-pool) for the commands.
+
 ## Example
 
 ```yaml

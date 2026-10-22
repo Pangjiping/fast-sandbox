@@ -28,19 +28,20 @@ const (
 // config holds the resolved global options shared by every subcommand. It is
 // populated from the root command's persistent flags before RunE fires.
 type config struct {
-	ublkdSocket     string
-	credFile        string
-	kernelDir       string
-	stateDir        string
-	runtimeDir      string
-	firecrackerBin  string
-	overlaybdCreate string
-	overlaybdCommit string
-	overlaybdResize string
-	convertor       string
-	buildWorkDir    string
-	buildOutputDir  string
-	plainHTTP       bool
+	ublkdSocket               string
+	credFile                  string
+	kernelDir                 string
+	stateDir                  string
+	runtimeDir                string
+	firecrackerBin            string
+	overlaybdCreate           string
+	overlaybdCommit           string
+	overlaybdResize           string
+	convertor                 string
+	buildWorkDir              string
+	buildOutputDir            string
+	plainHTTP                 bool
+	rejectCredentialConflicts bool
 }
 
 // global is the process-wide configuration bound to the persistent flags.
@@ -100,6 +101,7 @@ func init() {
 	flags := rootCmd.PersistentFlags()
 	flags.StringVar(&global.ublkdSocket, "ublkd-socket", defaultUblkdSocket, "overlaybd-ublkd control socket")
 	flags.StringVar(&global.credFile, "cred-file", defaultCredFile, "overlaybd global credential file")
+	flags.BoolVar(&global.rejectCredentialConflicts, "reject-credential-conflicts", false, "reject conflicting credentials in a shared node daemon credential file")
 	flags.StringVar(&global.kernelDir, "kernel-dir", defaultKernelDir, "directory holding vmlinux-<kernel_version> kernels")
 	flags.StringVar(&global.stateDir, "state-dir", defaultStateDir, "persistent per-sandbox state directory root")
 	flags.StringVar(&global.runtimeDir, "runtime-dir", defaultRuntimeDir, "volatile per-sandbox runtime directory root")

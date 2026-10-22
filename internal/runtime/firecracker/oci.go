@@ -14,18 +14,21 @@ import (
 	"oras.land/oras-go/v2/registry"
 
 	"fast-sandbox/internal/artifacts"
+	runtimecatalog "fast-sandbox/internal/catalog/runtime"
 	"fast-sandbox/internal/observability"
 	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	"fast-sandbox/internal/registryconfig"
 )
 
+const ociEnabled = "true"
+
 func validateOCISupport(image string) error {
 	if !strings.HasPrefix(image, ocitemplate.Prefix) {
 		return nil
 	}
 	switch os.Getenv("FAST_SANDBOX_OCI_ENABLED") {
-	case "true":
+	case ociEnabled:
 		return nil
 	case "", "false":
 		return fmt.Errorf("%w: OCI templates and checkpoints require FAST_SANDBOX_OCI_ENABLED=true", ErrInvalidConfig)
@@ -41,8 +44,38 @@ func validateOCIReference(image string) error {
 	}
 	return nil
 }
+
+// ociRoot separates Pod-private backing files while the daemon/cache are shared.
+func (d *Driver) ociRoot() string {
+	return ociRootForPod(d.config.StateRoot, d.podUID)
+}
+
+func ociRootForPod(stateRoot, podUID string) string {
+	root := filepath.Join(stateRoot, "oci")
+	if podUID != "" {
+		root = filepath.Join(root, "pods", podUID)
+	}
+	return root
+}
+
 func (d *Driver) fsbArgs() []string {
-	return []string{"--state-dir", filepath.Join(d.config.StateRoot, "oci/sandboxes"), "--runtime-dir", filepath.Join(d.config.StateRoot, "oci/runtime"), "--firecracker", d.config.BinaryPath}
+	tools := filepath.Join(runtimecatalog.OCIToolsDir, "current", "bin")
+	if resolved, err := filepath.EvalSymlinks(tools); err == nil {
+		tools = resolved
+	}
+	return []string{
+		"--state-dir", filepath.Join(d.ociRoot(), "sandboxes"),
+		"--runtime-dir", filepath.Join(d.ociRoot(), "runtime"),
+		"--build-work-dir", filepath.Join(d.ociRoot(), "builds"),
+		"--build-output-dir", filepath.Join(d.ociRoot(), "artifacts"),
+		"--firecracker", d.config.BinaryPath,
+		"--ublkd-socket", filepath.Join(runtimecatalog.OCISocketDir, "ublkd.sock"),
+		"--cred-file", filepath.Join(runtimecatalog.OCISocketDir, "cred.json"),
+		"--reject-credential-conflicts",
+		"--overlaybd-create", filepath.Join(tools, "overlaybd-create"),
+		"--overlaybd-commit", filepath.Join(tools, "overlaybd-commit"),
+		"--overlaybd-resize", filepath.Join(tools, "overlaybd-resize"),
+	}
 }
 func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmstate, memory string, resultErr error) {
 	if err := validateOCIReference(image); err != nil {
@@ -72,7 +105,7 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 	if err != nil {
 		return "", "", "", err
 	}
-	dir := filepath.Join(d.config.StateRoot, "oci/inputs")
+	dir := filepath.Join(d.ociRoot(), "inputs")
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return "", "", "", err
 	}
@@ -81,7 +114,7 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 		return "", "", "", err
 	}
 	defer os.Remove(file)
-	home := filepath.Join(d.config.StateRoot, "oci/sandboxes", id)
+	home := filepath.Join(d.ociRoot(), "sandboxes", id)
 	if _, err = os.Stat(home); !errors.Is(err, os.ErrNotExist) {
 		return "", "", "", fmt.Errorf("OCI sandbox home already exists or is inaccessible: %s", home)
 	}
@@ -146,7 +179,7 @@ func (d *Driver) prepareOCIRestore(ctx context.Context, directory, reference str
 			resultErr = errors.Join(resultErr, d.releaseOCI(context.Background(), id))
 		}
 	}()
-	attachment.metadata, err = readPreparedOCIMetadata(d.config.StateRoot, id)
+	attachment.metadata, err = readPreparedOCIMetadata(d.ociRoot(), id)
 	if err != nil {
 		return attachment, err
 	}
@@ -164,9 +197,9 @@ func (d *Driver) prepareOCIRestore(ctx context.Context, directory, reference str
 	return attachment, nil
 }
 
-func readPreparedOCIMetadata(stateRoot, id string) (ociRestoreMetadata, error) {
+func readPreparedOCIMetadata(ociRoot, id string) (ociRestoreMetadata, error) {
 	var metadata ociRestoreMetadata
-	raw, err := readPreparedOCIManifest(stateRoot, id)
+	raw, err := readPreparedOCIManifest(ociRoot, id)
 	if err != nil {
 		return metadata, err
 	}
@@ -179,7 +212,7 @@ func readPreparedOCIMetadata(stateRoot, id string) (ociRestoreMetadata, error) {
 	}
 	// Pair resolution authenticates checkpoint ownership through the OCI
 	// manifest. The embedded platform manifest must agree before admission.
-	stateRaw, err := os.ReadFile(filepath.Join(stateRoot, "oci/sandboxes", id, "state.json"))
+	stateRaw, err := os.ReadFile(filepath.Join(ociRoot, "sandboxes", id, "state.json"))
 	if err != nil {
 		return metadata, err
 	}
@@ -210,11 +243,11 @@ func readPreparedOCIMetadata(stateRoot, id string) (ociRestoreMetadata, error) {
 	return metadata, nil
 }
 
-func readPreparedOCIManifest(stateRoot, id string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(stateRoot, "oci/sandboxes", id, "mnt", snapshotManifestName))
+func readPreparedOCIManifest(ociRoot, id string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(ociRoot, "sandboxes", id, "mnt", snapshotManifestName))
 }
 func (d *Driver) releaseOCI(ctx context.Context, id string) error {
-	home := filepath.Join(d.config.StateRoot, "oci/sandboxes", id)
+	home := filepath.Join(d.ociRoot(), "sandboxes", id)
 	if _, err := os.Stat(home); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

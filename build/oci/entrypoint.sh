@@ -6,8 +6,8 @@ case "$needs_oci" in
   true|false|auto) ;;
   *) echo 'FAST_SANDBOX_OCI_ENABLED must be true, false or auto' >&2; exit 1;;
 esac
-# The standard Builder opts into automatic selection by its output publication.
-# Fastlet remains opt-in, so ordinary runtimes do not require ublk.
+# Builder selects its temporary daemon by output publication. Fastlets use
+# the node daemon and do not run this entrypoint.
 if [ "$needs_oci" = auto ]; then
   needs_oci=false
   case "${1:-}" in

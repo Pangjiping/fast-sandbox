@@ -27,6 +27,7 @@ import (
 	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
+	"fast-sandbox/internal/runtime/firecracker/agent/hostready"
 )
 
 // bootPollInterval is the VM state polling interval after start/resume.
@@ -143,13 +144,17 @@ func (d *Driver) Initialize(ctx context.Context, _ string) error {
 		d.mu.Unlock()
 		return fmt.Errorf("prepare Firecracker StateRoot: %w", err)
 	}
-	checkStorage := d.checkStorage
-	if checkStorage == nil {
-		checkStorage = checkStateRootStorage
-	}
-	if err := checkStorage(ctx, d.config.StateRoot); err != nil {
-		d.mu.Unlock()
-		return fmt.Errorf("validate Firecracker StateRoot storage: %w", err)
+	if os.Getenv("FAST_SANDBOX_OCI_ENABLED") == ociEnabled {
+		klog.Warningf("FAST_SANDBOX_OCI_ENABLED=true: skipping XFS/reflink validation for StateRoot %q; native template rootfs copies may take longer and extend snapshot pause windows", d.config.StateRoot)
+	} else {
+		checkStorage := d.checkStorage
+		if checkStorage == nil {
+			checkStorage = checkStateRootStorage
+		}
+		if err := checkStorage(ctx, d.config.StateRoot); err != nil {
+			d.mu.Unlock()
+			return fmt.Errorf("validate Firecracker StateRoot storage: %w", err)
+		}
 	}
 	d.initialized = true
 	interval := d.imageGCInterval
@@ -389,6 +394,16 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 		if err := agent.Health(healthCtx); err != nil {
 			report.State = runtimecatalog.CapabilityDegraded
 			report.Reason = "AgentUnavailable"
+			report.Message = err.Error()
+			return report
+		}
+	}
+	if os.Getenv("FAST_SANDBOX_OCI_ENABLED") == ociEnabled {
+		healthCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if err := hostready.CheckOCI(healthCtx); err != nil {
+			report.State = runtimecatalog.CapabilityDegraded
+			report.Reason = "OCIRuntimeUnavailable"
 			report.Message = err.Error()
 			return report
 		}
@@ -882,6 +897,7 @@ func (d *Driver) ListManagedSandboxes(_ context.Context) ([]*SandboxMetadata, er
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
 	namespace := d.namespace
+	podUID := d.podUID
 	d.mu.RUnlock()
 	directories, err := listSandboxDirs(stateRoot)
 	if err != nil {
@@ -890,7 +906,7 @@ func (d *Driver) ListManagedSandboxes(_ context.Context) ([]*SandboxMetadata, er
 	managed := make([]*SandboxMetadata, 0, len(directories))
 	for _, directory := range directories {
 		state, err := loadState(directory)
-		if err != nil || (namespace != "" && state.Config.Identity.Namespace != namespace) {
+		if err != nil || (namespace != "" && state.Config.Identity.Namespace != namespace) || (podUID != "" && state.Config.Identity.FastletPodUID != podUID) {
 			continue
 		}
 		managed = append(managed, existingMetadata(state))
@@ -905,6 +921,7 @@ func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 	d.mu.RLock()
 	stateRoot := d.config.StateRoot
 	manager := d.networkManager
+	podUID := d.podUID
 	d.mu.RUnlock()
 	directories, err := listSandboxDirs(stateRoot)
 	if err != nil {
@@ -916,6 +933,9 @@ func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 			// Corrupt state: recovery cannot classify the sandbox. Never
 			// silent — the sandbox may leak a VM or a network slot.
 			klog.ErrorS(err, "Firecracker recovery skipped a sandbox with unreadable state", "stateDirectory", directory)
+			continue
+		}
+		if podUID != "" && state.Config.Identity.FastletPodUID != podUID {
 			continue
 		}
 		alive, probeErr := d.probeVM(ctx, state)

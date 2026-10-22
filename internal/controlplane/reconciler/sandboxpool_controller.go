@@ -908,23 +908,8 @@ func (r *SandboxPoolReconciler) constructPodWithRuntimePlan(pool *apiv1alpha2.Sa
 		})
 	}
 	runtimeContainer := &podSpec.Containers[0]
-	// The runtime plan owns the node cache root; each Pool and Pod mounts a
-	// separate child. Downward API expansion keeps the template hash stable
-	// before Kubernetes assigns the generated Pod name.
-	hostPaths := append([]runtimecatalog.HostPathRequirement(nil), profile.Deployment.HostPaths...)
-	for i := range hostPaths {
-		if hostPaths[i].Name == "firecracker-overlaybd-cache" {
-			hostPaths[i].HostPath = filepath.Join(hostPaths[i].HostPath, string(pool.UID))
-		}
-	}
-	if err := mergeRuntimeHostPaths(podSpec, runtimeContainer, hostPaths); err != nil {
+	if err := mergeRuntimeHostPaths(podSpec, runtimeContainer, profile.Deployment.HostPaths); err != nil {
 		return nil, err
-	}
-	for i := range runtimeContainer.VolumeMounts {
-		if runtimeContainer.VolumeMounts[i].Name == "firecracker-overlaybd-cache" {
-			runtimeContainer.VolumeMounts[i].SubPath = ""
-			runtimeContainer.VolumeMounts[i].SubPathExpr = "$(" + envPodName + ")"
-		}
 	}
 
 	pod := &corev1.Pod{

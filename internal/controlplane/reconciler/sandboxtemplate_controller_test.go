@@ -1111,12 +1111,21 @@ func TestSandboxTemplateOCIOutputAndDeviceMount(t *testing.T) {
 	}
 }
 
-func TestOverlayBDObjectStoreFailsBeforeCreatingPod(t *testing.T) {
-	for _, publish := range []string{"s3://bucket/sandbox-images/", ""} {
-		t.Run(publish, func(t *testing.T) {
+func TestOutputFormatMismatchFailsBeforeCreatingPod(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		format  apiv1alpha2.ArtifactFormat
+		publish string
+		message string
+	}{
+		{"overlaybd-s3", apiv1alpha2.ArtifactFormatOverlayBD, "s3://bucket/sandbox-images/", "overlaybd requires output.publish=oci://"},
+		{"overlaybd-default-store", apiv1alpha2.ArtifactFormatOverlayBD, "", "overlaybd requires output.publish=oci://"},
+		{"native-oci", apiv1alpha2.ArtifactFormatNative, "oci://registry.example.com/templates/alpine", "OCI templates require overlaybd format"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			template := newSandboxTemplate("default", "overlaybd-s3")
-			template.Spec.Output.Format = apiv1alpha2.ArtifactFormatOverlayBD
-			template.Spec.Output.Publish = publish
+			template.Spec.Output.Format = test.format
+			template.Spec.Output.Publish = test.publish
 			r := newSandboxTemplateReconciler(t, template)
 			reconcileOnce(t, r, client.ObjectKeyFromObject(template))
 			var current apiv1alpha2.SandboxTemplate
@@ -1124,7 +1133,7 @@ func TestOverlayBDObjectStoreFailsBeforeCreatingPod(t *testing.T) {
 				t.Fatal(err)
 			}
 			condition := findBuildCondition(t, &current)
-			if current.Status.Phase != apiv1alpha2.SandboxTemplatePhaseFailed || condition.Reason != "InvalidOutput" || !strings.Contains(condition.Message, "overlaybd requires output.publish=oci://") {
+			if current.Status.Phase != apiv1alpha2.SandboxTemplatePhaseFailed || condition.Reason != "InvalidOutput" || !strings.Contains(condition.Message, test.message) {
 				t.Fatalf("expected invalid output failure: %+v", current.Status)
 			}
 			var pods corev1.PodList
@@ -1132,7 +1141,7 @@ func TestOverlayBDObjectStoreFailsBeforeCreatingPod(t *testing.T) {
 				t.Fatal(err)
 			}
 			if len(pods.Items) != 0 {
-				t.Fatal("unsupported OverlayBD object-store output launched a Pod")
+				t.Fatal("invalid output format launched a Pod")
 			}
 		})
 	}

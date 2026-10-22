@@ -173,7 +173,7 @@ func applyFirecrackerBinding(config *runtimecatalog.FirecrackerConfig, binding *
 // replaceFirecrackerHostPaths drops the builtin firecracker-* host path
 // requirements from values and appends the ones derived from the resolved
 // configuration, so the fastlet pod mounts exactly the installed paths
-// (binary, jailer, rootfs, state root and OverlayBD cache; the kernel only
+// (binary, jailer, rootfs and state root; the kernel only
 // when pinned).
 func replaceFirecrackerHostPaths(values []runtimecatalog.HostPathRequirement, config *runtimecatalog.FirecrackerConfig) []runtimecatalog.HostPathRequirement {
 	kept := values[:0]
@@ -186,7 +186,6 @@ func replaceFirecrackerHostPaths(values []runtimecatalog.HostPathRequirement, co
 		runtimecatalog.HostPathRequirement{Name: "firecracker-bin", HostPath: config.BinaryPath, MountPath: config.BinaryPath, Type: corev1.HostPathFile, ReadOnly: true},
 		runtimecatalog.HostPathRequirement{Name: "firecracker-rootfs", HostPath: config.RootfsPath, MountPath: config.RootfsPath, Type: corev1.HostPathDirectoryOrCreate},
 		runtimecatalog.HostPathRequirement{Name: "firecracker-state", HostPath: config.StateRoot, MountPath: config.StateRoot, Type: corev1.HostPathDirectoryOrCreate},
-		runtimecatalog.HostPathRequirement{Name: "firecracker-overlaybd-cache", HostPath: filepath.Join(config.StateRoot, "overlaybd-cache"), MountPath: "/opt/overlaybd/registry_cache", Type: corev1.HostPathDirectoryOrCreate},
 	)
 	// The kernel mounts only when an operator pins kernelPath (#84).
 	if config.KernelPath != "" {

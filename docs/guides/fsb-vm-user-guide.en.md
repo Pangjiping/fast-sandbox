@@ -137,6 +137,7 @@ Common global options:
 | --- | --- | --- |
 | `--ublkd-socket` | `/var/run/overlaybd-ublk/ublkd.sock` | ublkd control socket |
 | `--cred-file` | `/opt/overlaybd/cred.json` | OverlayBD global credential file |
+| `--reject-credential-conflicts` | `false` | Reject account changes in a shared daemon credential file |
 | `--kernel-dir` | `/opt/fsb-vm/kernels` | Default directory for `vmlinux-<version>` during create |
 | `--state-dir` | `/var/lib/fsb-vm/sandboxes` | Persistent sandbox state root |
 | `--runtime-dir` | `/run/fsb-vm/sandboxes` | API socket and serial-log root |
@@ -511,8 +512,8 @@ sudo curl -fsS \
 
 For build/create sequencing and artifact ownership, see the [fsb-vm design](../design/adr-fsb-vm-cli.en.md).
 
-OCI Fastlets share host `/dev` so dynamically created ublk devices remain visible. The image entrypoint supervises both the component and ublkd; either process exiting terminates the container. OCI jailers bind the configured snapshot spill directory before launch.
+OCI Fastlets share host `/dev` so dynamically created ublk devices remain visible. A node ublkd container in the runtime-agent DaemonSet serves every Fastlet on that node. fsb-vm connects directly to its shared Unix socket; runtime-agent installs the tools and checks health without forwarding device requests. OCI jailers bind the configured snapshot spill directory before launch.
 
-After interrupted checkpoint packaging, retry and staging deletion first recover pack devices by their config paths. Cleanup failures retain backing files. OverlayBD credentials are synchronized for the actual rootfs/snapfiles repositories: anonymous access replaces that repository’s old credential without deleting credentials for other repositories. This does not promise immediate revocation for already running VMs.
+After interrupted checkpoint packaging, retry and staging deletion first recover pack devices by their config paths. Cleanup failures retain backing files. Standalone fsb-vm synchronizes credentials for the actual rootfs/snapfiles repositories; anonymous access replaces that repository’s old credential without deleting other repositories. Fastlets enable `--reject-credential-conflicts` for the node daemon, so differing accounts or an anonymous replacement for the same repository are rejected. This does not promise immediate revocation for already running VMs.
 
-Build the Fastlet with `make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev`, then push it and select that image in the Pool. This is a build example, not a claim that the tag is published. All Go and native-tool compilation runs inside Docker; no host compiler or prebuilt `.build/` artifacts are required. The Fastlet and Builder use the same container-only OverlayBD build recipe. Enable ublkd in the OCI Pool with `FAST_SANDBOX_OCI_ENABLED=true`. On filesystems without extent seeking, upper copying scans zero blocks to preserve sparsity; scanning can take longer than reflink or extent copying.
+Build the Fastlet with `make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev`, then push it and select that image in the Pool. This is a build example, not a claim that the tag is published. Fastlet uses an Ubuntu 22.04 runtime stage without the Go toolchain or OverlayBD build stage. The runtime-agent image installs fsb-vm and OverlayBD tools on the node; Fastlet mounts them read-only and retains their required system libraries and basic runtime tools. Enable OCI on both the node agent/daemon and the Pool with `FAST_SANDBOX_OCI_ENABLED=true`; see the [OCI deployment guide](overlaybd-oci-sandboxes.md) for paths, cache sizing, credentials, and upgrade requirements. On filesystems without extent seeking, upper copying scans zero blocks to preserve sparsity; scanning can take longer than reflink or extent copying.

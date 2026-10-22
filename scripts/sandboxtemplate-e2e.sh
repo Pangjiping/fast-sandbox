@@ -148,8 +148,9 @@ if [[ "$LOCAL_MODE" -eq 1 ]]; then
     }
 else
     log "building builder image from build/Dockerfile.sandboxtemplate-builder"
-    docker build --progress=plain --build-arg "KERNEL_URL=$KERNEL_URL" -t "$BUILDER_IMAGE" \
-        -f "$REPO_ROOT/build/Dockerfile.sandboxtemplate-builder" "$REPO_ROOT" || die "docker build failed"
+    (cd "$REPO_ROOT" && make images COMPONENT=sandboxtemplate-builder \
+        SANDBOX_TEMPLATE_BUILDER_IMAGE="$BUILDER_IMAGE" \
+        DOCKER_BUILD_FLAGS="--progress=plain --build-arg KERNEL_URL=$(printf '%q' "$KERNEL_URL")") || die "docker build failed"
     run_pipeline() {
         local fmt_dir=$1
         docker run --rm \

@@ -1181,3 +1181,19 @@ func testNetworkManifest(t *testing.T, raw string) []byte {
 	require.NoError(t, err)
 	return payload
 }
+
+func TestRecoveryDoesNotInspectAnotherFastletPodVM(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.driver.SetFastletPodUID("new-pod")
+	other := fixture.sandboxSpec
+	other.Identity.FastletPodUID = "live-other-pod"
+	directory, err := ensureSandboxDir(fixture.stateRoot, other.Identity.SandboxUID)
+	require.NoError(t, err)
+	require.NoError(t, saveState(directory, &SandboxState{Config: other, Phase: PhaseRunning, PID: 123}))
+	fixture.driver.probeProcess = func(int) error { t.Fatal("must not probe another Pod's PID in this PID namespace"); return nil }
+	managed, err := fixture.driver.ListManagedSandboxes(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, managed)
+	require.NoError(t, fixture.driver.RecoverRuntimeResources(context.Background(), nil))
+	require.FileExists(t, filepath.Join(directory, sandboxMetaName))
+}

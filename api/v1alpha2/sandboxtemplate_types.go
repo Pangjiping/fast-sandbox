@@ -104,7 +104,8 @@ type PrimeSpec struct {
 }
 
 // OutputSpec describes the artifacts to produce and where to publish them.
-// +kubebuilder:validation:XValidation:rule="(self.format == 'overlaybd') == (has(self.publish) && self.publish.startsWith('oci://'))",message="overlaybd requires an explicit oci:// publish target; object-store output requires format=native"
+// Cross-field validation runs in the controller so these CRDs ship without CEL
+// (x-kubernetes-validations) for legacy (< 1.25) API servers.
 type OutputSpec struct {
 	// RootfsSize is the logical size of the converted rootfs.ext4 — the
 	// capacity the guest sees as its root drive. A Kubernetes resource

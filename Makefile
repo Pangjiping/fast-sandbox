@@ -8,6 +8,8 @@ CONTROLLER_IMAGE ?= $(REGISTRY)/controller:dev
 JANITOR_IMAGE ?= $(REGISTRY)/janitor:dev
 SANDBOX_ACTION_FIXTURE_IMAGE ?= $(REGISTRY)/sandbox-action-fixture:dev
 FIRECRACKER_RUNTIME_IMAGE ?= $(REGISTRY)/firecracker-runtime:dev
+OCI_TOOLS_IMAGE ?= $(REGISTRY)/oci-tools:dev
+SANDBOX_TEMPLATE_BUILDER_IMAGE ?= $(REGISTRY)/sandboxtemplate-builder:dev
 
 GO ?= go
 PYTHON ?= python3
@@ -29,6 +31,7 @@ LINUX_BIN_DIR := $(CURDIR)/.build/linux-amd64
 ALL_BINARIES := controller fastlet sandbox-init sandbox-action-fixture fastlet-proxy sandbox-proxy janitor fastctl firecracker-runtime fsb-vm
 CORE_IMAGES := controller fastlet fastlet-proxy sandbox-proxy janitor
 ALL_IMAGES := $(CORE_IMAGES) sandbox-action-fixture firecracker-runtime
+IMAGE_COMPONENTS := $(ALL_IMAGES) oci-tools sandboxtemplate-builder
 UNIT_PACKAGES := ./api/... ./cmd/... ./internal/... ./pkg/... ./build/oci ./test/e2e/env/... ./test/e2e/support/... ./test/performance/...
 
 ifeq ($(DEBUG),1)
@@ -124,7 +127,7 @@ fsb-vm-convertor:
 	@$(MAKE) -C "$(ACCELERATED_CONTAINER_IMAGE_DIR)" bin/convertor
 
 images:
-	@case " $(ALL_IMAGES) " in \
+	@case " $(IMAGE_COMPONENTS) " in \
 		*" $(COMPONENT) "*) components="$(COMPONENT)" ;; \
 		*) case "$(COMPONENT)" in \
 			all) components="$(ALL_IMAGES)" ;; \
@@ -134,7 +137,13 @@ images:
 	esac; \
 	for component in $$components; do \
 		case "$$component" in \
-			fastlet) binaries="" ;; \
+			firecracker-runtime|sandboxtemplate-builder) \
+				if [ "$(OCI_TOOLS_IMAGE)" = "$(REGISTRY)/oci-tools:dev" ]; then \
+					$(MAKE) --no-print-directory images COMPONENT=oci-tools || exit $$?; \
+				fi ;; \
+		esac; \
+		case "$$component" in \
+			fastlet|oci-tools|sandboxtemplate-builder) binaries="" ;; \
 			sandbox-action-fixture) binaries="sandbox-action-fixture" ;; \
 			*) binaries="$$component" ;; \
 		esac; \
@@ -154,8 +163,15 @@ images:
 			sandbox-proxy) docker build $(DOCKER_BUILD_FLAGS) -t "$(SANDBOX_PROXY_IMAGE)" -f build/Dockerfile.sandbox-proxy . ;; \
 			janitor) docker build $(DOCKER_BUILD_FLAGS) -t "$(JANITOR_IMAGE)" -f build/Dockerfile.janitor . ;; \
 			sandbox-action-fixture) docker build $(DOCKER_BUILD_FLAGS) -t "$(SANDBOX_ACTION_FIXTURE_IMAGE)" -f build/Dockerfile.sandbox-action-fixture . ;; \
-			firecracker-runtime) docker build $(DOCKER_BUILD_FLAGS) \
+			firecracker-runtime) docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 \
+				--build-arg OCI_TOOLS_IMAGE="$(OCI_TOOLS_IMAGE)" \
 				-t "$(FIRECRACKER_RUNTIME_IMAGE)" -f build/Dockerfile.firecracker-runtime . ;; \
+			oci-tools) docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 \
+				--build-arg GOPROXY="$(GOPROXY)" \
+				-t "$(OCI_TOOLS_IMAGE)" -f build/Dockerfile.oci-tools . ;; \
+			sandboxtemplate-builder) docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 \
+				--build-arg GOPROXY="$(GOPROXY)" --build-arg OCI_TOOLS_IMAGE="$(OCI_TOOLS_IMAGE)" \
+				-t "$(SANDBOX_TEMPLATE_BUILDER_IMAGE)" -f build/Dockerfile.sandboxtemplate-builder . ;; \
 		esac || exit $$?; \
 	done
 

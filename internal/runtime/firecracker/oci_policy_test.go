@@ -57,7 +57,7 @@ func TestOCISnapshotManifestCarriesOpaquePolicy(t *testing.T) {
 				exports, _ := mover.snapshotTemplate()
 				require.Len(t, exports, 2, "template snapshots use seal-free state export")
 			}
-			_, err = assembleSnapshotManifest(fixture.stateRoot, staging, sandboxDir)
+			_, err = assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, sandboxDir)
 			require.NoError(t, err)
 			raw, err = os.ReadFile(filepath.Join(staging, snapshotManifestName))
 			require.NoError(t, err)

@@ -407,6 +407,7 @@ func readinessSettings(configPath, stateRoot string) func() (agenthostready.Sett
 		return agenthostready.Settings{
 			Check: agenthostready.CheckConfig{
 				StateRoot:    stateRoot,
+				OCIEnabled:   getEnv("FAST_SANDBOX_OCI_ENABLED", "false") == "true",
 				AssetsDir:    readiness.AssetsDir,
 				MinFreeBytes: minFree,
 				MinMemBytes:  minMemory,

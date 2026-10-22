@@ -4,11 +4,15 @@
 # fsb-vm, OverlayBD tools, aws CLI) plus the embedded guest kernel.
 # Native output uses oci2rootfs → snapshot → object-store publication;
 # OverlayBD output uses fsb-vm build → OCI publication. The snapshot stage
-# entry is the same binary under a symlinked name. OverlayBD tools are built
-# from source for the fsb-vm OCI path.
+# entry is the same binary under a symlinked name. OCI tools are copied from
+# the shared artifact image, also consumed by firecracker-runtime.
 
+ARG OCI_TOOLS_IMAGE=fast-sandbox/oci-tools:dev
 ARG OCI2ROOTFS_REV=76d3f4648a591066a4419f972e4118f2d1d68a35
 ARG FIRECRACKER_VERSION=v1.16.1
+
+# --- shared OCI artifacts ------------------------------------------------
+FROM ${OCI_TOOLS_IMAGE} AS oci-tools
 
 # --- oci2rootfs (OCI layers → ext4) ---------------------------------------
 FROM rust:1.88-bookworm AS oci2rootfs-build
@@ -19,22 +23,6 @@ RUN git clone https://github.com/arcboxlabs/oci2rootfs.git /src/oci2rootfs \
     && cd /src/oci2rootfs \
     && git checkout --detach "$OCI2ROOTFS_REV" \
     && cargo build --release --locked -p oci2rootfs-cli
-
-# --- OverlayBD native tools (shared recipe with Fastlet) ------------------
-FROM ubuntu:22.04 AS overlaybd-build
-
-ARG OVERLAYBD_REV
-COPY build/oci/build-overlaybd.sh build/sandboxtemplate-builder/overlaybd-import-raw.cpp /build-tools/
-RUN sh /build-tools/build-overlaybd.sh /out
-
-FROM golang:1.26.3 AS convertor-build
-ARG CONVERTOR_REV=a00e366f9bfc970ec4aaa00887541c4c1d9f9dab
-RUN git init /src/convertor \
-    && cd /src/convertor \
-    && git remote add origin https://github.com/containerd/accelerated-container-image.git \
-    && git fetch --depth 1 origin "$CONVERTOR_REV" \
-    && git checkout --detach FETCH_HEAD \
-    && CGO_ENABLED=0 go build -o /out/convertor ./cmd/convertor
 
 # --- sandboxtemplate-builder binary ----------------------------------------
 FROM golang:1.25 AS builder-build
@@ -55,9 +43,7 @@ COPY internal/artifacts ./internal/artifacts
 COPY internal/guestnetwork ./internal/guestnetwork
 COPY internal/ocitemplate ./internal/ocitemplate
 COPY cmd/sandboxtemplate-builder ./cmd/sandboxtemplate-builder
-COPY cmd/fsb-vm ./cmd/fsb-vm
-RUN CGO_ENABLED=0 go build -o /out/sandboxtemplate-builder ./cmd/sandboxtemplate-builder \
-    && CGO_ENABLED=0 go build -o /out/fsb-vm ./cmd/fsb-vm
+RUN CGO_ENABLED=0 go build -o /out/sandboxtemplate-builder ./cmd/sandboxtemplate-builder
 
 # --- runtime image ---------------------------------------------------------
 FROM ubuntu:22.04
@@ -103,9 +89,9 @@ RUN set -eux; \
     rm -rf "/tmp/${archive}" "/tmp/release-${FIRECRACKER_VERSION}-x86_64"
 
 COPY --from=oci2rootfs-build /src/oci2rootfs/target/release/oci2rootfs /usr/local/bin/oci2rootfs
-COPY --from=overlaybd-build /out/ /opt/overlaybd/
-COPY --from=convertor-build /out/convertor /usr/local/bin/convertor
-COPY --from=builder-build /out/fsb-vm /usr/local/bin/fsb-vm
+COPY --from=oci-tools /opt/overlaybd/ /opt/overlaybd/
+COPY --from=oci-tools /usr/local/bin/convertor /usr/local/bin/convertor
+COPY --from=oci-tools /usr/local/bin/fsb-vm /usr/local/bin/fsb-vm
 COPY --from=builder-build /out/sandboxtemplate-builder /usr/local/bin/sandboxtemplate-builder
 COPY build/oci/overlaybd.json /etc/overlaybd/ublkd.json
 COPY build/oci/entrypoint.sh /usr/local/bin/oci-entrypoint

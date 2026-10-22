@@ -376,10 +376,6 @@ spec:
                 - format
                 - rootfsSize
                 type: object
-                x-kubernetes-validations:
-                - message: overlaybd requires an explicit oci:// publish target; object-store
-                    output requires format=native
-                  rule: (self.format == 'overlaybd') == (has(self.publish) && self.publish.startsWith('oci://'))
               readiness:
                 description: Readiness defines when the guest is considered ready.
                 properties:

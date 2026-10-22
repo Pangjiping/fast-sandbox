@@ -113,3 +113,21 @@ func TestEnsureSandboxRejectsInvalidCLIMetadataBeforeAcquiringSlot(t *testing.T)
 		})
 	}
 }
+
+func TestOCIBackingPathsArePrivateToFastletPod(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.driver.SetFastletPodUID("pod-a")
+	first := fixture.driver.fsbArgs()
+	fixture.driver.SetFastletPodUID("pod-b")
+	second := fixture.driver.fsbArgs()
+	require.Contains(t, first, filepath.Join(fixture.stateRoot, "oci/pods/pod-a/sandboxes"))
+	require.Contains(t, second, filepath.Join(fixture.stateRoot, "oci/pods/pod-b/sandboxes"))
+	require.NotContains(t, second, filepath.Join(fixture.stateRoot, "oci/pods/pod-a/sandboxes"))
+	require.Contains(t, first, "--reject-credential-conflicts")
+}
+
+func TestOCIPackRecoveryDoesNotShareReplacementPodStaging(t *testing.T) {
+	root := t.TempDir()
+	require.NotEqual(t, snapshotStagingPath(root, "old-pod", "same-snapshot", true), snapshotStagingPath(root, "new-pod", "same-snapshot", true))
+	require.Equal(t, snapshotStagingPath(root, "old-pod", "same-snapshot", false), snapshotStagingPath(root, "new-pod", "same-snapshot", false))
+}

@@ -221,6 +221,17 @@ func (o *Orchestrator) AssignDeclarativePreferring(ctx context.Context, sandbox 
 	if sandbox == nil || sandbox.UID == "" {
 		return nil, false, errors.New("persisted Sandbox UID is required")
 	}
+	// Reconciles read from the informer cache, which may still contain the
+	// released assignment's fences after ClearAssignment writes to the API.
+	// Use the durable object before selecting a new runtime identity.
+	var current apiv1alpha2.Sandbox
+	if err := o.Client.Get(ctx, client.ObjectKeyFromObject(sandbox), &current); err != nil {
+		return nil, false, err
+	}
+	if current.UID != sandbox.UID {
+		return nil, false, assignment.ErrAssignmentAnnotationChanged
+	}
+	sandbox = &current
 	envelope, err := assignment.AssignmentFromAnnotation(sandbox)
 	if err != nil {
 		return nil, false, err

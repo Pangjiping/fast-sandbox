@@ -619,7 +619,7 @@ func poolRequest(pool *apiv1alpha2.SandboxPool) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}}
 }
 
-func TestConstructPodPersistsFirecrackerOverlayBDCache(t *testing.T) {
+func TestConstructPodSharesNodeOCIToolsAndSocket(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
 	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
@@ -627,47 +627,34 @@ func TestConstructPodPersistsFirecrackerOverlayBDCache(t *testing.T) {
 		t.Run(string(runtimeName), func(t *testing.T) {
 			pool := &apiv1alpha2.SandboxPool{
 				ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: types.UID("pool-uid")},
-				Spec: apiv1alpha2.SandboxPoolSpec{
-					Runtime: runtimeName, MaxSandboxesPerPod: 1, SandboxResources: testSandboxResources(),
-					FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}},
-					}},
+				Spec: apiv1alpha2.SandboxPoolSpec{Runtime: runtimeName, MaxSandboxesPerPod: 1, SandboxResources: testSandboxResources(),
+					FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}}}},
 				},
 			}
 			plan, err := runtimeenv.ResolveDefault(reconciler.Catalog, runtimeName)
 			require.NoError(t, err)
 			pod, err := reconciler.constructPodWithRuntimePlan(pool, plan)
 			require.NoError(t, err)
-			mount := volumeMountForContainer(pod, 0, "firecracker-overlaybd-cache")
-			if runtimeName != apiv1alpha2.RuntimeFirecracker {
-				require.Nil(t, mount)
-				return
-			}
-			require.NotNil(t, mount)
-			require.Equal(t, "/opt/overlaybd/registry_cache", mount.MountPath)
-			require.Equal(t, "$(POD_NAME)", mount.SubPathExpr)
-			require.Empty(t, mount.SubPath)
-			require.False(t, mount.ReadOnly)
-			var podNameEnv *corev1.EnvVar
-			for i := range pod.Spec.Containers[0].Env {
-				if pod.Spec.Containers[0].Env[i].Name == "POD_NAME" {
-					podNameEnv = &pod.Spec.Containers[0].Env[i]
+			require.Nil(t, volumeMountForContainer(pod, 0, "firecracker-overlaybd-cache"))
+			for name, path := range map[string]string{"oci-tools": runtimecatalog.OCIToolsDir, "oci-socket": runtimecatalog.OCISocketDir} {
+				mount := volumeMountForContainer(pod, 0, name)
+				if runtimeName != apiv1alpha2.RuntimeFirecracker {
+					require.Nil(t, mount)
+					continue
 				}
-			}
-			require.NotNil(t, podNameEnv)
-			require.Equal(t, "metadata.name", podNameEnv.ValueFrom.FieldRef.FieldPath)
-			samePod, err := reconciler.constructPodWithRuntimePlan(pool, plan)
-			require.NoError(t, err)
-			require.Equal(t, pod.Annotations[placement.AnnotationPodTemplateHash], samePod.Annotations[placement.AnnotationPodTemplateHash])
-			for _, volume := range pod.Spec.Volumes {
-				if volume.Name == mount.Name {
-					require.NotNil(t, volume.HostPath)
-					require.Equal(t, filepath.Join(plan.Profile.Firecracker.StateRoot, "overlaybd-cache", string(pool.UID)), volume.HostPath.Path)
-					require.Equal(t, corev1.HostPathDirectoryOrCreate, *volume.HostPath.Type)
-					return
+				require.NotNil(t, mount)
+				require.Equal(t, path, mount.MountPath)
+				require.Equal(t, name == "oci-tools", mount.ReadOnly)
+				found := false
+				for _, volume := range pod.Spec.Volumes {
+					if volume.Name == name {
+						require.NotNil(t, volume.HostPath)
+						require.Equal(t, path, volume.HostPath.Path)
+						found = true
+					}
 				}
+				require.True(t, found)
 			}
-			t.Fatal("OverlayBD cache volume is missing")
 		})
 	}
 }

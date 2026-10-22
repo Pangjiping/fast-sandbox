@@ -16,17 +16,39 @@ Deploy OpenSandbox images that include OCI support, on nodes with KVM and ublk s
 | Fastlet | `opensandbox/fsb-fastlet:release-<version>` |
 | execd | `opensandbox/execd:release-<version>` |
 
-The standard Fastlet image includes the OCI runtime tools. Enable ublkd with `FAST_SANDBOX_OCI_ENABLED=true` on OCI Firecracker Pools; it is disabled by default so ordinary runtime deployments do not require ublk. The tags above illustrate the release naming and do not assert that a particular release has been published. To build and publish your own Fastlet:
+Fastlet uses an Ubuntu 22.04 runtime image without the Go toolchain or bundled OverlayBD binaries. Builder and runtime-agent copy their OCI artifacts from the same `oci-tools` image. The runtime-agent image carries the node tool bundle; its init container verifies and installs an immutable release under `/opt/fast-sandbox/oci/releases/<digest>`, then atomically updates `current`. Firecracker Fastlets receive that directory read-only and call the installed tools locally.
+
+Deploy the updated `config/dev/agent-daemonset.yaml`, using your namespace and component image names. Set `FAST_SANDBOX_OCI_ENABLED=true` on both `firecracker-agent` and `overlaybd-ublkd` to enable the node service, and on OCI Firecracker Pools to admit OCI workloads. The flag defaults to false. The tags above illustrate release naming rather than published versions. Build and publish the components with:
 
 ```bash
-# All Go and native-tool compilation runs inside Docker.
+make images COMPONENT=oci-tools
+make images COMPONENT=sandboxtemplate-builder SANDBOX_TEMPLATE_BUILDER_IMAGE=opensandbox/fsb-sandboxtemplate-builder:dev
+make images COMPONENT=firecracker-runtime FIRECRACKER_RUNTIME_IMAGE=opensandbox/fsb-firecracker-runtime:dev
+make images COMPONENT=janitor JANITOR_IMAGE=opensandbox/fsb-janitor:dev
 make images COMPONENT=fastlet FASTLET_IMAGE=opensandbox/fsb-fastlet:dev
+docker push opensandbox/fsb-sandboxtemplate-builder:dev
+docker push opensandbox/fsb-firecracker-runtime:dev
+docker push opensandbox/fsb-janitor:dev
 docker push opensandbox/fsb-fastlet:dev
 ```
 
+The default local `fast-sandbox/oci-tools:dev` image is rebuilt automatically when building Builder or runtime-agent through Make. To reuse a published artifact image, pass the same immutable reference to both builds:
+
+```bash
+make images COMPONENT=oci-tools OCI_TOOLS_IMAGE=registry.example.com/opensandbox/oci-tools:dev
+docker push registry.example.com/opensandbox/oci-tools:dev
+export OCI_TOOLS_IMAGE="registry.example.com/opensandbox/oci-tools@sha256:<digest>"
+make images COMPONENT=sandboxtemplate-builder
+make images COMPONENT=firecracker-runtime
+```
+
+`OCI_TOOLS_IMAGE` is also a Docker build argument for both consumer Dockerfiles. A custom image reference is consumed as supplied; publish a new tools image whenever fsb-vm or its native dependencies change. The artifact image is a build input, not a running service. Both consumers retain Ubuntu 22.04 and install their required system libraries.
+
+With `FAST_SANDBOX_OCI_ENABLED=true`, Fastlet skips the XFS/reflink startup requirement and logs a warning. Set the same variable on the `firecracker-runtime` DaemonSet to relax the node readiness check, or on the standalone `scripts/firecracker-host-check.sh` invocation. Directory preparation and the node's minimum free-space check still apply. Native templates remain usable when OCI is enabled, but without reflink their rootfs copies can take longer and extend snapshot pause windows. With OCI disabled, XFS with `reflink=1` remains required.
+
 When OCI is disabled, OCI creation is rejected with an explicit error. Resume is asynchronous: the rejection is reported in the Sandbox `status.runtime.message` and `Ready=False` condition; `GetSandbox` may report `Unavailable` while no runtime is assigned.
 
-Select that image in the Pool. `build/Dockerfile.fastlet` compiles the runtime tools inside Docker, using the same OverlayBD build script as the Builder. Docker manages rebuilds when sources or patches change; no host C/C++ toolchain or prebuilt `.build/` artifacts are required for the Fastlet image.
+Select that Fastlet image in the Pool. Its Dockerfile compiles only Fastlet and sandbox-init in a Go build stage. `build/Dockerfile.oci-tools` builds fsb-vm, pinned OverlayBD tools and the userspace convertor once. Builder copies the full build toolchain; runtime-agent copies only its packaged node tools, so it does not gain unused convertor dependencies. Fastlet keeps the system libraries and network, mount, and filesystem tools needed to execute runtime operations; it neither builds nor starts ublkd.
 
 Configure these fields on an existing Firecracker Pool, retaining its node settings, agent socket, and storage mounts. This is a configuration fragment; see the [Firecracker sample](../../config/samples/pool-firecracker.yaml) for a complete Pool.
 
@@ -43,9 +65,11 @@ spec:
           value: "true"
 ```
 
-Firecracker Fastlets persist OverlayBD data caches under the node's `<stateRoot>/overlaybd-cache/<poolUID>/<podName>/`. The Controller mounts the Pool's parent directory with `hostPath: DirectoryOrCreate` and selects `$(POD_NAME)` using `subPathExpr`, so each Pod mounts only its own subdirectory at `/opt/overlaybd/registry_cache`. The default `stateRoot` is `/var/lib/fast-sandbox/firecracker`; overriding the runtime environment's `stateRoot` relocates the cache as well. Concurrent Fastlet Pods use separate cache directories, with no numbered-directory allocator or additional entrypoint locks.
+One `overlaybd-ublkd` container in the runtime-agent DaemonSet serves all Fastlets on each node. fsb-vm connects directly over HTTP through `/run/fast-sandbox/overlaybd/ublkd.sock`; runtime-agent does not proxy device operations. The daemon and Fastlets must mount the same StateRoot at the same absolute path and share the host `/dev`. If StateRoot is customized, update the agent, daemon, Janitor `--oci-state-root`, runtime environment, and their hostPath mounts together.
 
-Cache contents survive container restarts within the same Pod on the same node. A replacement Pod gets a new name and starts with a new cache. Old Pod directories remain on disk and need node-level garbage collection after their owners have exited. `cacheSizeGB: 4` limits each daemon's registry block cache, rather than imposing a node-wide quota. The same Pod directory also contains the gzip cache when enabled; gzip caching remains disabled by default. These caches are separate from fsb-vm's manifest and checkpoint state. Builders retain their temporary Pod-local cache.
+StateRoot must be node-local storage, not a cache directory shared by multiple nodes. The daemon caches blocks under `<StateRoot>/overlaybd/cache`. `OVERLAYBD_CACHE_SIZE_GB` configures the node cache capacity (default 16 GiB); it is independent of VM upper layers and fsb-vm metadata caches. Fastlet removal preserves the node cache. Each VM still owns separate devices and writable layers under `<StateRoot>/oci/pods/<fastletPodUID>/sandboxes/<sandboxUID>`. Janitor revalidates Pod absence before invoking fsb-vm cleanup for that Pod's retained devices and checkpoint pack resources. Builders retain their own temporary daemon/cache.
+
+Upgrade by draining OCI VMs from each node before replacing its daemon or switching tool releases. A daemon failure or DaemonSet Pod replacement can affect every OCI VM on that node; an agent-only container restart leaves direct fsb-vm requests independent. Remove old per-Pod cache directories only after their daemon, mounts, and VM consumers have exited. Do not delete a running daemon's cache directory or share it between daemon processes.
 
 The examples below assume a Pool named `firecracker-pool` in namespace `fast-sandbox`, with a per-Sandbox profile of 1 CPU and 512Mi memory.
 
@@ -54,6 +78,8 @@ The examples below assume a Pool named `firecracker-pool` in namespace `fast-san
 OCI registry access supports anonymous or username/password authentication. Docker config `auth` entries are supported; identity-token-only credentials are rejected. A token supplied as a username/password credential is treated as a password. Existing public credential fields and other runtimes are unchanged.
 
 Fastlet passes its namespace/Pool registry credentials and the OCI reference directly to `fsb-vm create --prepare-only`. The CLI resolves the pair, caches immutable manifests within the registry credential scope, and returns the metadata needed for restore validation. OCI creation and resume do not require a separate registry account or metadata cache on the node runtime-agent. The native S3 delivery path continues to use the agent.
+
+The current node daemon has a service-wide credential context. Use a single credential per repository across Fastlets sharing a node. fsb-vm runs with `--reject-credential-conflicts`, so a second account or anonymous replacement for an already configured repository fails explicitly rather than overriding another VM's credentials. To rotate credentials, drain the node's OCI consumers, stop the daemon, remove `/run/fast-sandbox/overlaybd/cred.json`, update Secrets, and restart. General per-device multi-account isolation requires upstream OverlayBD support and is not provided by this deployment. The socket and credential directory are root-only and shared exclusively with trusted runtime components.
 
 For the simplest setup, use one repository for templates and checkpoints, with one account that has pull and push permissions. Set `REGISTRY_USER` and `REGISTRY_PASSWORD`, then run:
 

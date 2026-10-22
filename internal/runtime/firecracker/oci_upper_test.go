@@ -36,7 +36,7 @@ func TestCaptureOCIUpperPreservesSparsePrivateChangesAndParent(t *testing.T) {
 	require.NoError(t, err)
 	path := filepath.Join(home, "rootfs.config.v1.json")
 	require.NoError(t, os.WriteFile(path, raw, 0600))
-	require.NoError(t, captureOCIUpper(root, "test", staging))
+	require.NoError(t, captureOCIUpper(filepath.Join(root, "oci"), "test", staging))
 	upper, err := ocitemplate.ReadRootfsUpper(staging)
 	require.NoError(t, err)
 	require.Equal(t, "r.example/templates/base", upper.Repository)
@@ -67,7 +67,7 @@ func TestCaptureOCIUpperPreservesSparsePrivateChangesAndParent(t *testing.T) {
 	raw, err = json.Marshal(config)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, raw, 0600))
-	require.Error(t, captureOCIUpper(root, "test", t.TempDir()))
+	require.Error(t, captureOCIUpper(filepath.Join(root, "oci"), "test", t.TempDir()))
 }
 
 func TestCopyUpperSparseFallbackPreservesHolesAndTail(t *testing.T) {

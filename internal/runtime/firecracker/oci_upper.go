@@ -21,8 +21,8 @@ import (
 
 // captureOCIUpper runs only after snapshot creation has drained/flushed the
 // drive, while vCPUs are paused. It never modifies the live writable layer.
-func captureOCIUpper(stateRoot, sandboxID, staging string) error {
-	home := filepath.Join(stateRoot, "oci/sandboxes", sandboxID)
+func captureOCIUpper(ociRoot, sandboxID, staging string) error {
+	home := filepath.Join(ociRoot, "sandboxes", sandboxID)
 	raw, err := os.ReadFile(filepath.Join(home, "rootfs.config.v1.json"))
 	if err != nil {
 		return err

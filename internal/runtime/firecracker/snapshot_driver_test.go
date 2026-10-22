@@ -329,7 +329,7 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	size, err := assembleSnapshotManifest(fixture.stateRoot, staging, dir)
+	size, err := assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, dir)
 	require.NoError(t, err)
 	require.Positive(t, size)
 
@@ -372,7 +372,7 @@ func TestAssembleSnapshotManifestDropsInheritedEgressVaultMarker(t *testing.T) {
 	for _, name := range []string{"rootfs.ext4", "vmstate.snap", "memory.snap"} {
 		require.NoError(t, os.WriteFile(filepath.Join(staging, name), []byte("data-"+name), 0o640))
 	}
-	_, err = assembleSnapshotManifest(fixture.stateRoot, staging, dir)
+	_, err = assembleSnapshotManifest(fixture.stateRoot, fixture.driver.ociRoot(), staging, dir)
 	require.NoError(t, err)
 
 	payload, err := os.ReadFile(filepath.Join(staging, "manifest.json"))

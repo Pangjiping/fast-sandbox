@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -38,4 +39,23 @@ func TestOverlaybdCredentialsReplaceRevokedAndRotatedRepository(t *testing.T) {
 	current, err = readCredentials(path)
 	require.NoError(t, err)
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("rotated:new-secret")), current.Auths["registry.example/team/template"].Auth)
+}
+
+func TestSharedDaemonRejectsCredentialConflictsAtomically(t *testing.T) {
+	previous := global.rejectCredentialConflicts
+	global.rejectCredentialConflicts = true
+	t.Cleanup(func() { global.rejectCredentialConflicts = previous })
+	path := filepath.Join(t.TempDir(), "cred.json")
+	original := dockerConfig{Auths: map[string]authEntry{"registry.example/repo": {Auth: "YWxpY2U6c2VjcmV0"}}}
+	require.NoError(t, mergeCredentials(path, original))
+	require.NoError(t, mergeCredentials(path, original))
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+	for _, replacement := range []authEntry{{Auth: "Ym9iOnNlY3JldA=="}, {Auth: "Og=="}} {
+		err = mergeCredentials(path, dockerConfig{Auths: map[string]authEntry{"registry.example/repo": replacement, "another.example/repo": {Auth: "Og=="}}})
+		require.ErrorContains(t, err, "credential conflict")
+		after, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, before, after)
+	}
 }

@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -124,6 +125,14 @@ func (d *Driver) publishOCISnapshot(ctx context.Context, plan dumpPlan, sizeByte
 	manifestPath := filepath.Join(plan.staging, snapshotManifestName)
 	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
+		return nil, err
+	}
+	// Local recovery ownership is not part of the published artifact manifest.
+	owner, err := json.Marshal(state.Config.Identity)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(plan.staging, ".pack-owner.json"), owner, 0600); err != nil {
 		return nil, err
 	}
 	args := append(d.fsbArgs(), "--build-work-dir", filepath.Join(plan.staging, "pack-work"), "--build-output-dir", filepath.Join(plan.staging, "artifacts"), "pack", "--bundle-dir", plan.staging, "--output", "snapshot:"+plan.snapshotID)
