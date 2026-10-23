@@ -102,6 +102,11 @@ func acquireSharedSnapfiles(ctx context.Context, client *ublkdClient, sandboxHom
 		}
 		return writeFileAtomic(statePath(home), raw, 0600)
 	}
+	if cached.Device != nil {
+		if err := recoverSharedSnapfilesDevice(ctx, client, &cached, persist); err != nil {
+			return err
+		}
+	}
 	if cached.Device == nil {
 		config, err := writeSnapfilesConfig(home, image)
 		if err != nil {
@@ -109,28 +114,6 @@ func acquireSharedSnapfiles(ctx context.Context, client *ublkdClient, sandboxHom
 		}
 		if _, err := addSandboxDevice(ctx, client, config, &cached.Device, persist); err != nil {
 			return err
-		}
-	} else {
-		devices, err := client.List(ctx)
-		if err != nil {
-			return err
-		}
-		found := false
-		for _, device := range devices {
-			if device.Config != cached.Device.Config || (cached.Device.DevPath != "" && device.Dev != cached.Device.DevPath) || device.Writable {
-				continue
-			}
-			found = true
-			if cached.Device.DevPath == "" {
-				cached.Device.DevID, cached.Device.DevPath = device.DevID, device.Dev
-				if err := persist(); err != nil {
-					return err
-				}
-			}
-			break
-		}
-		if !found {
-			return fmt.Errorf("shared snapfiles device missing or add incomplete: %s; retained for cleanup", home)
 		}
 	}
 	if !isMounted(state.MountPoint) {
@@ -140,6 +123,36 @@ func acquireSharedSnapfiles(ctx context.Context, client *ublkdClient, sandboxHom
 	}
 	now := time.Now()
 	return os.Chtimes(statePath(home), now, now)
+}
+
+// A pending Add can finish after its caller exits. Fence it before replacing the
+// config, then release any device it produced before starting a fresh Add.
+func recoverSharedSnapfilesDevice(ctx context.Context, client *ublkdClient, cached *sharedSnapfilesState, persist func() error) error {
+	devices, err := client.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, device := range devices {
+		if device.Config != cached.Device.Config || (cached.Device.DevPath != "" && device.Dev != cached.Device.DevPath) || device.Writable {
+			continue
+		}
+		if cached.Device.DevPath == "" {
+			cached.Device.DevID, cached.Device.DevPath = device.DevID, device.Dev
+			return persist()
+		}
+		return nil
+	}
+	if cached.Device.DevPath != "" {
+		return fmt.Errorf("shared snapfiles device missing: %s; retained for cleanup", cached.Device.Config)
+	}
+	if err := client.FenceAdd(ctx, cached.Device.Config); err != nil {
+		return err
+	}
+	if _, err := releaseOwnedDevicesByConfig(ctx, client, cached.Device.Config); err != nil {
+		return err
+	}
+	cached.Device = nil
+	return persist()
 }
 
 // The alias also identifies shared ownership if a Sandbox state is missing or
@@ -176,9 +189,12 @@ func releaseSharedSnapfilesLease(home string, state *sandboxState) error {
 	if err := os.Remove(filepath.Join(home, snapfilesMount)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	// Idle retention starts on release, including for long-running VMs.
-	now := time.Now()
-	_ = os.Chtimes(statePath(filepath.Join(sharedSnapfilesRoot(), state.SharedSnapfiles)), now, now)
+	// Failed Adds must not extend retention on each retry.
+	homePath := filepath.Join(sharedSnapfilesRoot(), state.SharedSnapfiles)
+	if cached, err := readSharedSnapfiles(homePath); err == nil && cached.Device != nil && cached.Device.DevPath != "" {
+		now := time.Now()
+		_ = os.Chtimes(statePath(homePath), now, now)
+	}
 	state.SharedSnapfiles = ""
 	return nil
 }
@@ -257,6 +273,9 @@ func pruneSharedSnapfiles(ctx context.Context, client *ublkdClient, all bool) er
 func pruneSharedSnapfilesEntry(ctx context.Context, client *ublkdClient, key string, all bool, idleCount int) (bool, error) {
 	unlock, err := tryLock(sharedSnapfilesRoot(), key)
 	if errors.Is(err, errBusy) {
+		if all {
+			return false, err
+		}
 		return false, nil
 	}
 	if err != nil {

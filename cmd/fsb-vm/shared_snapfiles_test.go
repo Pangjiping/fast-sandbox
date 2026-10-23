@@ -25,7 +25,7 @@ func (t snapfilesTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func sharedSnapfilesFixture(t *testing.T) (*ublkdClient, *int, *int) {
+func sharedSnapfilesFixture(t *testing.T, addHooks ...func(http.ResponseWriter, string) bool) (*ublkdClient, *int, *int) {
 	t.Helper()
 	setupManifestCache(t)
 	global.runtimeDir = t.TempDir()
@@ -43,6 +43,11 @@ func sharedSnapfilesFixture(t *testing.T) (*ublkdClient, *int, *int) {
 				Config string `json:"config"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, hook := range addHooks {
+				if hook(w, body.Config) {
+					return
+				}
+			}
 			*adds++
 			d := ublkdDevice{DevID: *adds, Dev: "/dev/ublkb" + strings.Repeat("1", *adds), Config: body.Config}
 			devices = append(devices, d)
@@ -241,4 +246,148 @@ func TestSharedSnapfilesRetentionStartsAtRelease(t *testing.T) {
 	require.NoError(t, releaseSandbox(context.Background(), client, layout, state))
 	require.NoError(t, pruneSharedSnapfiles(context.Background(), client, false))
 	require.Zero(t, *deletes, "a long-running VM must not make its newly idle template immediately expire")
+}
+
+func TestSharedSnapfilesRetriesFailedAdd(t *testing.T) {
+	for _, failure := range []string{"rejected", "disconnected", "fence-rejected"} {
+		t.Run(failure, func(t *testing.T) {
+			attempts, fences := 0, 0
+			client, adds, _ := sharedSnapfilesFixture(t, func(w http.ResponseWriter, config string) bool {
+				raw, err := os.ReadFile(config)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return true
+				}
+				if strings.Contains(string(raw), "retired pack config") {
+					fences++
+					w.WriteHeader(http.StatusInternalServerError)
+					message := "device failed to start (see daemon log)"
+					if failure == "fence-rejected" {
+						message = "unrecognized failure"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": message})
+					return true
+				}
+				attempts++
+				if attempts > 1 {
+					return false
+				}
+				if failure == "disconnected" {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						_ = conn.Close()
+					}
+					return true
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "device failed to start (see daemon log)"})
+				return true
+			})
+			ctx := context.Background()
+			state := &sandboxState{SandboxID: "first", SnapfilesRef: "r.example/team/t:v1"}
+			layout := newSandboxLayout(state.SandboxID)
+			require.NoError(t, claimSandbox(layout, state.SandboxID))
+			err := acquireSharedSnapfiles(ctx, client, layout.home, state, resolvedImage{}, dockerConfig{})
+			require.Error(t, err)
+			if failure == "disconnected" {
+				require.ErrorIs(t, err, errAddOutcomeUnknown)
+			}
+			path := statePath(filepath.Dir(state.MountPoint))
+			old := time.Now().Add(-2 * sharedSnapfilesIdleTTL)
+			require.NoError(t, os.Chtimes(path, old, old))
+			require.NoError(t, releaseSandbox(ctx, client, layout, state))
+			info, err := os.Stat(path)
+			require.NoError(t, err)
+			require.WithinDuration(t, old, info.ModTime(), time.Millisecond, "failed Add must not refresh idle retention")
+			err = acquireSharedSnapfiles(ctx, client, layout.home, state, resolvedImage{}, dockerConfig{})
+			require.Equal(t, 1, fences)
+			if failure == "fence-rejected" {
+				require.ErrorContains(t, err, "did not acknowledge")
+				require.Equal(t, 1, attempts, "must not replace config before the old Add is fenced")
+				require.Zero(t, *adds)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 2, attempts)
+			require.Equal(t, 1, *adds)
+			require.True(t, isMounted(state.MountPoint))
+		})
+	}
+}
+
+func TestSharedSnapfilesAdoptsCompletedPendingAdd(t *testing.T) {
+	client, adds, _ := sharedSnapfilesFixture(t)
+	state := &sandboxState{SandboxID: "first", SnapfilesRef: "r.example/team/t:v1"}
+	layout := newSandboxLayout(state.SandboxID)
+	require.NoError(t, claimSandbox(layout, state.SandboxID))
+	require.NoError(t, acquireSharedSnapfiles(context.Background(), client, layout.home, state, resolvedImage{}, dockerConfig{}))
+	path := statePath(filepath.Dir(state.MountPoint))
+	cached, err := readSharedSnapfiles(filepath.Dir(state.MountPoint))
+	require.NoError(t, err)
+	cached.Device.DevID, cached.Device.DevPath = -1, ""
+	raw, err := json.Marshal(cached)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0600))
+	require.NoError(t, releaseSandbox(context.Background(), client, layout, state))
+	require.NoError(t, acquireSharedSnapfiles(context.Background(), client, layout.home, state, resolvedImage{}, dockerConfig{}))
+	require.Equal(t, 1, *adds)
+	cached, err = readSharedSnapfiles(filepath.Dir(state.MountPoint))
+	require.NoError(t, err)
+	require.Equal(t, "/dev/ublkb1", cached.Device.DevPath)
+}
+
+func TestSharedSnapfilesRecoveryReleasesAddCompletedDuringFence(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "snapfiles.config.json")
+	require.NoError(t, os.WriteFile(config, []byte(`{}`), 0600))
+	lateDevice := false
+	var deleted []int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/list":
+			devices := []ublkdDevice{{DevID: 9, Config: "/other/config"}}
+			if lateDevice {
+				devices = append(devices, ublkdDevice{DevID: 7, Config: config, Dev: "/dev/ublkb7"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "devices": devices})
+		case "/v1/add":
+			// The old request finishes after the first List, before the fence acknowledges it.
+			lateDevice = true
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "device failed to start (see daemon log)"})
+		case "/v1/del":
+			var body struct {
+				ID int `json:"dev_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			deleted = append(deleted, body.ID)
+			lateDevice = false
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	client := &ublkdClient{httpClient: &http.Client{Transport: snapfilesTransport{target}}}
+	cached := sharedSnapfilesState{Device: &deviceRecord{Config: config, DevID: -1}}
+	persisted := false
+	require.NoError(t, recoverSharedSnapfilesDevice(context.Background(), client, &cached, func() error {
+		persisted = true
+		return nil
+	}))
+	require.Equal(t, []int{7}, deleted, "release only the late device owned by this cache config")
+	require.Nil(t, cached.Device)
+	require.True(t, persisted)
+}
+
+func TestSharedSnapfilesForcedCleanupRejectsBusyCache(t *testing.T) {
+	client, _, _ := sharedSnapfilesFixture(t)
+	state := &sandboxState{SandboxID: "first", SnapfilesRef: "r.example/team/t:v1"}
+	layout := newSandboxLayout(state.SandboxID)
+	require.NoError(t, claimSandbox(layout, state.SandboxID))
+	require.NoError(t, acquireSharedSnapfiles(context.Background(), client, layout.home, state, resolvedImage{}, dockerConfig{}))
+	unlock, err := lockSharedSnapfiles(context.Background(), state.SharedSnapfiles)
+	require.NoError(t, err)
+	defer unlock()
+	require.NoError(t, pruneSharedSnapfiles(context.Background(), client, false))
+	require.ErrorIs(t, pruneSharedSnapfiles(context.Background(), client, true), errBusy)
 }
