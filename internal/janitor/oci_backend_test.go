@@ -51,3 +51,27 @@ func TestOCICleanupKeepsOtherPodsAndRetainsFailedPack(t *testing.T) {
 		require.ErrorContains(t, backend.Cleanup(context.Background(), resource), "ownership")
 	}
 }
+
+func TestOCISharedSnapfilesOrphanIdentity(t *testing.T) {
+	root := t.TempDir()
+	for _, pod := range []string{"old-pod", "replacement-pod"} {
+		home := filepath.Join(root, "oci/pods", pod, "sandboxes/.snapfiles", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		require.NoError(t, os.MkdirAll(home, 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(home, "state.json"), []byte(`{"device":null}`), 0600))
+	}
+	backend := NewOCIBackend(root)
+	resources, err := backend.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, resources, 2)
+	var commands [][]string
+	backend.run = func(_ context.Context, args ...string) error { commands = append(commands, args); return nil }
+	for _, r := range resources {
+		if r.FastletPodUID == "old-pod" {
+			require.Equal(t, "snapfiles/old-pod", r.ResourceID)
+			require.NoError(t, backend.Cleanup(context.Background(), r))
+		}
+	}
+	require.Len(t, commands, 1)
+	require.Contains(t, commands[0], "cleanup-snapfiles")
+	require.Contains(t, commands[0], filepath.Join(root, "oci/pods/old-pod/sandboxes"))
+}

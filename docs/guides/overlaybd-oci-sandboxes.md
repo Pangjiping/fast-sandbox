@@ -284,6 +284,11 @@ lands the verified state for its first handler registration, under the new VM's
 identity. The recorded policy takes precedence over the create-time binding
 seed; absent or invalid state follows the same observable fallback as native
 restore. As in the native path, create-request `actionBindings` provide the bootstrap seed; the manifest carries no action-binding channel. Declare the handler and pass its seed when cloning a snapshot. OCI snapfiles mounts are private to the Fastlet container.
+
+Within each Fastlet, Sandboxes using the same resolved snapfiles layers and registry credential scope share one read-only device and mount. Each Sandbox retains a durable reference until teardown; writable rootfs devices and uppers remain private. Up to 16 idle snapfiles entries stay warm for 10 minutes and are pruned during subsequent Sandbox deletions. Janitor releases unused entries after their owning Fastlet Pod disappears. Upgrade node Janitor together with fsb-vm and Fastlet to reclaim orphan shared devices.
+
+Standalone `fsb-vm create` keeps private attachments by default; `--share-snapfiles` enables sharing within its `--state-dir` and mount namespace, and `cleanup-snapfiles` releases entries with no Sandbox references.
+
 For handler import, Fastlet copies the verified opaque record to a temporary
 directory under the shared `<stateRoot>/sandboxes/<uid>/`, then removes that
 directory after the handler returns. The egress container must mount the same

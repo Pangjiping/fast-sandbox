@@ -126,7 +126,7 @@ func (d *Driver) attachOCI(ctx context.Context, id, image string) (rootfs, vmsta
 			resultErr = errors.Join(resultErr, d.releaseOCI(context.Background(), id))
 		}
 	}()
-	args := append(d.fsbArgs(), "create", "--prepare-only", "-f", file)
+	args := append(d.fsbArgs(), "create", "--prepare-only", "--share-snapfiles", "-f", file)
 	output, err := exec.CommandContext(ctx, "fsb-vm", args...).CombinedOutput()
 	if err != nil {
 		return "", "", "", fmt.Errorf("attach OCI template: %w: %s", err, output)

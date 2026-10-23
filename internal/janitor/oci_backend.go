@@ -50,6 +50,24 @@ func (b *OCIBackend) Scan(_ context.Context) ([]ResourceIdentity, error) {
 		pod := filepath.Base(filepath.Dir(filepath.Dir(home)))
 		result = append(result, ResourceIdentity{Backend: BackendOCI, ResourceID: "sandbox/" + pod + "/" + filepath.Base(home), FastletPodUID: pod, CreatedAt: info.ModTime()})
 	}
+	caches, err := filepath.Glob(filepath.Join(b.stateRoot, "oci/pods/*/sandboxes/.snapfiles/*/state.json"))
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, path := range caches {
+		root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+		pod := filepath.Base(root)
+		if seen[pod] {
+			continue
+		}
+		seen[pod] = true
+		info, err := os.Stat(filepath.Join(root, "sandboxes/.snapfiles"))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, ResourceIdentity{Backend: BackendOCI, ResourceID: "snapfiles/" + pod, FastletPodUID: pod, CreatedAt: info.ModTime()})
+	}
 	owners, err := filepath.Glob(filepath.Join(b.stateRoot, "snapshots/*/*/.pack-owner.json"))
 	if err != nil {
 		return nil, err
@@ -104,6 +122,9 @@ func (b *OCIBackend) Cleanup(ctx context.Context, expected ResourceIdentity) err
 		// Remove empty Pod directories without touching retained/unknown operations.
 		_ = os.Remove(filepath.Join(root, "sandboxes"))
 		_ = os.Remove(filepath.Join(root, "runtime"))
+	case len(parts) == 2 && parts[0] == "snapfiles":
+		root := filepath.Join(b.stateRoot, "oci/pods", parts[1])
+		return b.run(ctx, "--ublkd-socket", socket, "--state-dir", filepath.Join(root, "sandboxes"), "cleanup-snapfiles")
 	case len(parts) == 3 && parts[0] == "pack":
 		staging := filepath.Join(b.stateRoot, "snapshots", parts[1], parts[2])
 		if err := b.run(ctx, "--ublkd-socket", socket, "--build-work-dir", filepath.Join(staging, "pack-work"), "cleanup-pack", "--bundle-dir", staging); err != nil {

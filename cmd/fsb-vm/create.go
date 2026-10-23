@@ -18,11 +18,12 @@ import (
 // createOptions holds the create-command flags (ADR-007/009/010). The machine
 // sizing is fixed by the snapshot, so create takes no vCPU/memory flags.
 type createOptions struct {
-	prepareOnly  bool
-	templateFile string
-	kernel       string
-	network      string
-	force        bool
+	prepareOnly    bool
+	shareSnapfiles bool
+	templateFile   string
+	kernel         string
+	network        string
+	force          bool
 }
 
 func newCreateCommand() *cobra.Command {
@@ -36,6 +37,7 @@ func newCreateCommand() *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.BoolVar(&options.prepareOnly, "prepare-only", false, "attach template disks for an external Firecracker lifecycle owner")
+	flags.BoolVar(&options.shareSnapfiles, "share-snapfiles", false, "reuse a read-only snapfiles device and mount within this state directory")
 	flags.StringVarP(&options.templateFile, "file", "f", "", "path to template.json (required)")
 	flags.StringVar(&options.kernel, "kernel", "", "override the resolved vmlinux path")
 	flags.StringVar(&options.network, "network", networkNone, "network provider (only 'none' is supported)")
@@ -153,6 +155,11 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 		if err := removeSandboxDirs(layout); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		}
+		if options.shareSnapfiles {
+			if err := pruneSharedSnapfiles(context.Background(), ublkd, false); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: prune shared snapfiles: %v\n", err)
+			}
+		}
 	}()
 	persist := func() error { return writeState(layout.home, state) }
 
@@ -182,16 +189,23 @@ func runCreate(ctx context.Context, options *createOptions) error { //nolint:goc
 	// which lives on it — supplies the disk size that sets the rootfs hybrid
 	// upper's virtual size. Attaching snapfiles read-only carries no such
 	// dependency, so it is the safe first step.
-	snapfilesConfig, err := writeSnapfilesConfig(layout.home, snapfilesImage)
-	if err != nil {
-		return err
-	}
-	snapfilesDevPath, err := addSandboxDevice(ctx, ublkd, snapfilesConfig, &state.Snapfiles, persist)
-	if err != nil {
-		return err
-	}
-	if err := mountReadOnly(snapfilesDevPath, layout.mountPoint); err != nil {
-		return err
+	if options.shareSnapfiles {
+		if err := acquireSharedSnapfiles(ctx, ublkd, layout.home, state, snapfilesImage, dockerAuth); err != nil {
+			return err
+		}
+		layout.mountPoint = state.MountPoint
+	} else {
+		snapfilesConfig, err := writeSnapfilesConfig(layout.home, snapfilesImage)
+		if err != nil {
+			return err
+		}
+		snapfilesDevPath, err := addSandboxDevice(ctx, ublkd, snapfilesConfig, &state.Snapfiles, persist)
+		if err != nil {
+			return err
+		}
+		if err := mountReadOnly(snapfilesDevPath, layout.mountPoint); err != nil {
+			return err
+		}
 	}
 
 	metadata, err := loadManifest(filepath.Join(layout.mountPoint, inDiskManifest))
