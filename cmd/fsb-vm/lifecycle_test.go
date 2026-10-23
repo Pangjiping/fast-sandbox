@@ -757,7 +757,7 @@ func TestManifestRequiresRelativeRootfsDrive(t *testing.T) {
 
 func TestCreateHasNoSpecOverrides(t *testing.T) {
 	flags := newCreateCommand().Flags()
-	for _, removed := range []string{"vcpu", "memory-mb", "rootfs-drive-id"} {
+	for _, removed := range []string{"vcpu", "memory-mb", "rootfs-drive-id", "share-snapfiles"} {
 		if flags.Lookup(removed) != nil {
 			t.Errorf("create must not expose --%s", removed)
 		}
