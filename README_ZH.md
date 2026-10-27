@@ -193,6 +193,7 @@ OverlayBD 按需加载当前通过主机侧的 [`fsb-vm` 路径](docs/guides/fsb
 ## 文档
 
 - [文档索引](docs/README.md)
+- [增强提案（FSEP）](fseps/README.md)
 - [Firecracker 部署与验证](docs/guides/firecracker-integration-env.md)
 - [Golden image 构建](docs/guides/sandboxtemplate-golden-images.md)
 - [运行中快照](docs/guides/sandbox-snapshots.md)
