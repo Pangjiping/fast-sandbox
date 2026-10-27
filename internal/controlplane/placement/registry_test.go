@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	fastletsandbox "fast-sandbox/internal/fastlet/sandbox"
@@ -16,6 +17,11 @@ import (
 )
 
 var registryNow = time.Unix(1000, 0)
+
+func TestFastletIDSeparatesNonDefaultNamespaces(t *testing.T) {
+	require.Equal(t, FastletID("fastlet-a"), NewFastletID("default", "fastlet-a"))
+	require.NotEqual(t, NewFastletID("tenant-a", "fastlet-a"), NewFastletID("tenant-b", "fastlet-a"))
+}
 
 func readyFastlet(id string, used, capacity int, images ...string) FastletInfo {
 	return FastletInfo{
@@ -37,6 +43,7 @@ func seedFastlet(tb testing.TB, registry *InMemoryRegistry, info FastletInfo) {
 		RuntimeName: info.RuntimeName, RuntimeProfileHash: info.RuntimeProfileHash,
 		ResourceProfileHash: info.ResourceProfileHash,
 		InfraRevision:       info.InfraRevision, PodReady: info.PodReady, PodObservedAt: info.PodObservedAt,
+		ResourceCapacity: info.ResourceCapacity,
 	}
 	registry.UpsertPod(pod)
 	sequence := info.HeartbeatSequence
@@ -79,6 +86,25 @@ func candidate(image, stableKey string) CandidateRequest {
 		RuntimeProfileHash: "runtime-hash", ResourceProfileHash: "resource-hash",
 		Image: image, StableKey: stableKey, Now: registryNow,
 	}
+}
+
+func resourceAwareFastlet(id string, used int, state fastletapi.AdmissionState, revision uint64, images ...string) FastletInfo {
+	info := readyFastlet(id, used, 10, images...)
+	info.ResourceCapacity = ResourceDemand{CPU: resource.MustParse("4"), Memory: resource.MustParse("8Gi")}
+	info.Admission.Resources = &fastletapi.ResourceAdmissionStatus{
+		Version: "v2", Epoch: "resource-epoch-a", Revision: revision,
+		Capacity:  fastletapi.SandboxResourceVector{CPU: "4", Memory: "8Gi"},
+		Committed: fastletapi.SandboxResourceVector{CPU: fmt.Sprintf("%d", used), Memory: fmt.Sprintf("%dGi", used*2)},
+		State:     state,
+	}
+	return info
+}
+
+func resourceAwareCandidate(image string) CandidateRequest {
+	request := candidate(image, "resource-request-a")
+	request.ResourceMode = apiv1alpha2.SandboxResourceModeResourceAware
+	request.Demand = ResourceDemand{CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi")}
+	return request
 }
 
 func TestTopKPrefersImageThenLoadAndDoesNotAllocate(t *testing.T) {
@@ -139,6 +165,78 @@ func TestTopKHardFiltersStaleDrainingProfilesAndCapacity(t *testing.T) {
 	require.Equal(t, FastletID("ready"), selected[0].ID)
 }
 
+func TestTopKResourceAwareFiltersCommitmentBeforeCacheRanking(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	cpuFull := resourceAwareFastlet("cpu-full-cache-hit", 4, fastletapi.AdmissionStateOpen, 1, "alpine:latest")
+	memoryFull := resourceAwareFastlet("memory-full-cache-hit", 2, fastletapi.AdmissionStateOpen, 1, "alpine:latest")
+	memoryFull.ResourceCapacity.Memory = resource.MustParse("4Gi")
+	eligible := resourceAwareFastlet("eligible-cache-miss", 1, fastletapi.AdmissionStateOpen, 1)
+	for _, info := range []FastletInfo{cpuFull, memoryFull, eligible} {
+		seedFastlet(t, registry, info)
+	}
+
+	selected := registry.TopK(resourceAwareCandidate("alpine:latest"), 3)
+	require.Len(t, selected, 1)
+	require.Equal(t, FastletID("eligible-cache-miss"), selected[0].ID)
+}
+
+func TestTopKResourceAwareRequiresFreshOpenState(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	open := resourceAwareFastlet("open-cache-miss", 1, fastletapi.AdmissionStateOpen, 1)
+	deprecated := resourceAwareFastlet("deprecated-degraded-cache-hit", 0, fastletapi.AdmissionState("DEGRADED"), 1, "alpine:latest")
+	blocked := resourceAwareFastlet("blocked", 0, fastletapi.AdmissionStateBlocked, 1)
+	unknown := resourceAwareFastlet("unknown", 0, fastletapi.AdmissionStateUnknown, 1)
+	stale := resourceAwareFastlet("stale", 0, fastletapi.AdmissionStateOpen, 1)
+	stale.LastHeartbeat = registryNow.Add(-time.Minute)
+	for _, info := range []FastletInfo{open, deprecated, blocked, unknown, stale} {
+		seedFastlet(t, registry, info)
+	}
+
+	selected := registry.TopK(resourceAwareCandidate("alpine:latest"), 10)
+	require.Len(t, selected, 1)
+	require.Equal(t, FastletID("open-cache-miss"), selected[0].ID)
+}
+
+func TestResourceSchedulabilityAppliesRejectionCooldownToEveryConsumer(t *testing.T) {
+	info := resourceAwareFastlet("cooldown", 1, fastletapi.AdmissionStateOpen, 2)
+	info.ResourceReceivedAt = registryNow
+	info.ResourceCommitted = ResourceDemand{CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi")}
+	info.RejectedUntil = registryNow.Add(5 * time.Second)
+
+	view := ResourceSchedulability(info, registryNow, DefaultObservationStaleAfter)
+	require.False(t, view.Schedulable)
+	require.Zero(t, view.FreeSlots)
+	require.Zero(t, view.FreeResources.CPU.Sign())
+	require.Zero(t, view.FreeResources.Memory.Sign())
+	require.Zero(t, EffectiveFreeCapacity(
+		info, ResourceDemand{CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi")},
+		registryNow, DefaultObservationStaleAfter,
+	))
+}
+
+func TestTopKPropagatesFreshNodeMemoryPressureAcrossFastlets(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	pressured := resourceAwareFastlet("pressured", 0, fastletapi.AdmissionStateBlocked, 2)
+	pressured.Admission.Resources.Reason = fastletapi.AdmissionReasonHostMemoryPressure
+	pressured.ResourceReceivedAt = registryNow
+	require.True(t, HasFreshHostMemoryPressure(pressured, registryNow, DefaultObservationStaleAfter))
+	legacy := pressured
+	legacy.Admission = cloneAdmission(pressured.Admission)
+	legacy.Admission.Resources.Reason = fastletapi.AdmissionReasonNodeMemoryPressure
+	require.True(t, HasFreshHostMemoryPressure(legacy, registryNow, DefaultObservationStaleAfter),
+		"rolling upgrades must preserve the previous wire reason")
+	sameNodeOpen := resourceAwareFastlet("same-node-open", 0, fastletapi.AdmissionStateOpen, 2)
+	otherNodeOpen := resourceAwareFastlet("other-node-open", 0, fastletapi.AdmissionStateOpen, 2)
+	otherNodeOpen.NodeName = "node-b"
+	for _, info := range []FastletInfo{pressured, sameNodeOpen, otherNodeOpen} {
+		seedFastlet(t, registry, info)
+	}
+
+	selected := registry.TopK(resourceAwareCandidate("alpine:latest"), 10)
+	require.Len(t, selected, 1)
+	require.Equal(t, FastletID("other-node-open"), selected[0].ID)
+}
+
 func TestStablePerturbationIsDeterministic(t *testing.T) {
 	registry := NewInMemoryRegistry()
 	for _, id := range []string{"fastlet-a", "fastlet-b", "fastlet-c"} {
@@ -149,6 +247,54 @@ func TestStablePerturbationIsDeterministic(t *testing.T) {
 	require.Equal(t, first, second)
 	other := registry.TopK(candidate("alpine:latest", "request-b"), 3)
 	require.NotEqual(t, []FastletID{first[0].ID, first[1].ID, first[2].ID}, []FastletID{other[0].ID, other[1].ID, other[2].ID})
+}
+
+func TestServerSeedCreatesStrongSoftPreferenceWithinLoadBucket(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	for _, id := range []string{"fastlet-a", "fastlet-b", "fastlet-c", "fastlet-d"} {
+		seedFastlet(t, registry, readyFastlet(id, 0, 10))
+	}
+
+	firstChoices := make(map[FastletID]struct{})
+	for index := 0; index < 32; index++ {
+		registry.SetServerSeed(fmt.Sprintf("server-%d", index))
+		selected := registry.TopK(candidate("alpine:latest", "same-sandbox"), 1)
+		require.Len(t, selected, 1)
+		firstChoices[selected[0].ID] = struct{}{}
+	}
+	require.Greater(t, len(firstChoices), 1, "different FastPath replicas should not all prefer the same Fastlet")
+
+	registry = NewInMemoryRegistry()
+	registry.SetServerSeed("server-with-soft-preference")
+	lessLoaded := readyFastlet("less-loaded", 0, 10)
+	moreLoaded := readyFastlet("more-loaded", 2, 10)
+	seedFastlet(t, registry, lessLoaded)
+	seedFastlet(t, registry, moreLoaded)
+	selected := registry.TopK(candidate("alpine:latest", "same-sandbox"), 1)
+	require.Equal(t, FastletID("less-loaded"), selected[0].ID,
+		"the seed must not override a different coarse load bucket")
+}
+
+func TestLocalReservationsCloseEventuallyConsistentResourceCapacity(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	info := resourceAwareFastlet("fastlet-a", 0, fastletapi.AdmissionStateOpen, 1)
+	seedFastlet(t, registry, info)
+	demand := ResourceDemand{CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi")}
+
+	for range 4 {
+		require.True(t, registry.ReserveLocal(info.ID, demand))
+	}
+	require.False(t, registry.ReserveLocal(info.ID, demand), "the fifth in-flight create exceeds the local commitment view")
+	require.Empty(t, registry.TopK(resourceAwareCandidate("alpine:latest"), 1))
+
+	registry.ReleaseLocal(info.ID, demand)
+	require.Len(t, registry.TopK(resourceAwareCandidate("alpine:latest"), 1), 1)
+	stored, ok := registry.GetFastletByID(info.ID)
+	require.True(t, ok)
+	require.Equal(t, 3, stored.InFlightSlots)
+	require.Equal(t, int64(3000), stored.InFlightResources.CPU.MilliValue())
+	expectedMemory := resource.MustParse("6Gi")
+	require.Equal(t, expectedMemory.Value(), stored.InFlightResources.Memory.Value())
 }
 
 func TestPodReplacementClearsOldHeartbeatState(t *testing.T) {
@@ -259,6 +405,73 @@ func TestLocalCapacityFeedbackSuppressesCandidateUntilHeartbeat(t *testing.T) {
 	require.Len(t, registry.TopK(request, 1), 1)
 }
 
+func TestResourceRejectionFeedbackFencesOlderHealthyHeartbeat(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	initial := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 1)
+	seedFastlet(t, registry, initial)
+
+	rejected := initial.Admission
+	rejectedResources := *initial.Admission.Resources
+	rejectedResources.Revision = 3
+	rejectedResources.State = fastletapi.AdmissionStateBlocked
+	rejectedResources.Reason = fastletapi.AdmissionReasonFastletMemoryHighWatermark
+	rejected.Resources = &rejectedResources
+	registry.RecordFeedback("fastlet-a", LocalFeedback{
+		Code: fastletapi.ErrorCapacityRejected, Reason: fastletapi.AdmissionReasonFastletMemoryHighWatermark,
+		Admission: &rejected, ObservedAt: registryNow.Add(time.Second), RetryAfter: time.Minute,
+	})
+
+	older := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 2)
+	older.HeartbeatSequence = 2
+	seedFastlet(t, registry, older)
+	stored, _ := registry.GetFastletByID("fastlet-a")
+	require.Equal(t, uint64(3), stored.Admission.Resources.Revision)
+	require.Equal(t, fastletapi.AdmissionStateBlocked, stored.Admission.Resources.State)
+
+	recovered := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 4)
+	recovered.HeartbeatSequence = 3
+	recovered.LastHeartbeat = registryNow.Add(2 * time.Second)
+	seedFastlet(t, registry, recovered)
+	stored, _ = registry.GetFastletByID("fastlet-a")
+	require.Equal(t, uint64(4), stored.Admission.Resources.Revision)
+	require.Equal(t, fastletapi.AdmissionStateOpen, stored.Admission.Resources.State)
+	require.True(t, stored.RejectedUntil.IsZero())
+}
+
+func TestSameResourceRevisionRefreshesLocalFreshness(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	info := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 7)
+	seedFastlet(t, registry, info)
+
+	refresh := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 7)
+	refresh.HeartbeatSequence = 2
+	refresh.LastHeartbeat = registryNow.Add(20 * time.Second)
+	seedFastlet(t, registry, refresh)
+	stored, _ := registry.GetFastletByID("fastlet-a")
+	require.Equal(t, registryNow.Add(20*time.Second), stored.ResourceReceivedAt)
+}
+
+func TestNewResourceEpochHeartbeatSupersedesRejectionFence(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	initial := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateBlocked, 8)
+	initial.Admission.Resources.Reason = fastletapi.AdmissionReasonFastletMemoryHighWatermark
+	seedFastlet(t, registry, initial)
+	registry.RecordFeedback("fastlet-a", LocalFeedback{
+		Code: fastletapi.ErrorCapacityRejected, Admission: &initial.Admission, ObservedAt: registryNow,
+	})
+
+	restarted := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 1)
+	restarted.Admission.Resources.Epoch = "resource-epoch-b"
+	restarted.HeartbeatSequence = 2
+	restarted.CacheEpoch = "boot-b"
+	restarted.LastHeartbeat = registryNow.Add(time.Second)
+	seedFastlet(t, registry, restarted)
+	stored, _ := registry.GetFastletByID("fastlet-a")
+	require.Equal(t, "resource-epoch-b", stored.Admission.Resources.Epoch)
+	require.Equal(t, fastletapi.AdmissionStateOpen, stored.Admission.Resources.State)
+	require.True(t, stored.RejectedUntil.IsZero())
+}
+
 func TestRegistryViewsConvergeWithoutSharedAllocationState(t *testing.T) {
 	left, right := NewInMemoryRegistry(), NewInMemoryRegistry()
 	left.clock = func() time.Time { return registryNow }
@@ -273,6 +486,107 @@ func TestRegistryViewsConvergeWithoutSharedAllocationState(t *testing.T) {
 		rightInfo, _ := right.GetFastletByID(id)
 		require.Equal(t, leftInfo, rightInfo, "selection does not create divergent slot ownership")
 	}
+}
+
+func TestCreateFeedbackPublishesExactSandboxObservation(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	info := resourceAwareFastlet("fastlet-a", 0, fastletapi.AdmissionStateOpen, 1)
+	seedFastlet(t, registry, info)
+	observation := fastletapi.SandboxStatus{
+		SandboxID: "sandbox-a", InstanceGeneration: 2, AssignmentAttempt: 3,
+		Runtime: fastletapi.RuntimeObservation{State: fastletapi.RuntimeStateCreating},
+	}
+	registry.RecordFeedback(info.ID, LocalFeedback{Sandbox: &observation, ObservedAt: registryNow.Add(time.Second)})
+
+	stored, ok := registry.GetFastletByID(info.ID)
+	require.True(t, ok)
+	require.Equal(t, observation, stored.SandboxStatuses[observation.SandboxID])
+}
+
+func TestFeedbackAcceptsNewEpochOnlyFromObservedBase(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	info := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 7)
+	seedFastlet(t, registry, info)
+
+	restarted := resourceAwareFastlet("fastlet-a", 2, fastletapi.AdmissionStateOpen, 1).Admission
+	restarted.Resources.Epoch = "resource-epoch-b"
+	registry.RecordFeedback(info.ID, LocalFeedback{
+		PodUID: info.PodUID, BaseResourceEpoch: "resource-epoch-a", BaseResourceRevision: 7,
+		Admission: &restarted, ObservedAt: registryNow.Add(time.Second),
+	})
+	stored, _ := registry.GetFastletByID(info.ID)
+	require.Equal(t, "resource-epoch-b", stored.Admission.Resources.Epoch)
+	require.Equal(t, 2, stored.Used())
+
+	delayedOldProcess := info.Admission
+	registry.RecordFeedback(info.ID, LocalFeedback{
+		PodUID: info.PodUID, BaseResourceEpoch: "resource-epoch-a", BaseResourceRevision: 7,
+		Admission: &delayedOldProcess, ObservedAt: registryNow.Add(2 * time.Second),
+	})
+	stored, _ = registry.GetFastletByID(info.ID)
+	require.Equal(t, "resource-epoch-b", stored.Admission.Resources.Epoch,
+		"a response based on the previous process cannot replace the accepted restart epoch")
+}
+
+func TestStaleRejectionCannotPenalizeNewerAdmission(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	info := resourceAwareFastlet("fastlet-a", 2, fastletapi.AdmissionStateOpen, 10)
+	seedFastlet(t, registry, info)
+
+	stale := resourceAwareFastlet("fastlet-a", 3, fastletapi.AdmissionStateBlocked, 9).Admission
+	registry.RecordFeedback(info.ID, LocalFeedback{
+		PodUID: info.PodUID, Code: fastletapi.ErrorCapacityRejected,
+		Admission: &stale, ObservedAt: registryNow.Add(time.Second), RetryAfter: time.Minute,
+	})
+	stored, _ := registry.GetFastletByID(info.ID)
+	require.Equal(t, uint64(10), stored.Admission.Resources.Revision)
+	require.True(t, stored.RejectedUntil.IsZero(), "a rejected stale snapshot cannot install a new cooldown")
+}
+
+func TestFeedbackFencesPodAndSandboxIdentity(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	info := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 3)
+	info.SandboxStatuses = map[string]fastletapi.SandboxStatus{
+		"sandbox-a": {SandboxID: "sandbox-a", InstanceGeneration: 2, AssignmentAttempt: 3, AcceptedGeneration: 5},
+	}
+	seedFastlet(t, registry, info)
+
+	newerAdmission := resourceAwareFastlet("fastlet-a", 2, fastletapi.AdmissionStateOpen, 4).Admission
+	registry.RecordFeedback(info.ID, LocalFeedback{
+		PodUID: "replacement-pod", Admission: &newerAdmission,
+		Sandbox:    &fastletapi.SandboxStatus{SandboxID: "sandbox-a", InstanceGeneration: 3, AssignmentAttempt: 1},
+		ObservedAt: registryNow.Add(time.Second),
+	})
+	registry.RecordFeedback(info.ID, LocalFeedback{
+		PodUID:     info.PodUID,
+		Sandbox:    &fastletapi.SandboxStatus{SandboxID: "sandbox-a", InstanceGeneration: 1, AssignmentAttempt: 9},
+		ObservedAt: registryNow.Add(2 * time.Second),
+	})
+
+	stored, _ := registry.GetFastletByID(info.ID)
+	require.Equal(t, uint64(3), stored.Admission.Resources.Revision)
+	require.Equal(t, int64(2), stored.SandboxStatuses["sandbox-a"].InstanceGeneration)
+	require.Equal(t, int64(3), stored.SandboxStatuses["sandbox-a"].AssignmentAttempt)
+}
+
+func TestSuccessfulFeedbackClearsAcceptedRejectionFence(t *testing.T) {
+	registry := NewInMemoryRegistry()
+	info := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 1)
+	seedFastlet(t, registry, info)
+	rejected := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateBlocked, 2).Admission
+	registry.RecordFeedback(info.ID, LocalFeedback{
+		PodUID: info.PodUID, Code: fastletapi.ErrorCapacityRejected,
+		Admission: &rejected, ObservedAt: registryNow, RetryAfter: time.Minute,
+	})
+
+	recovered := resourceAwareFastlet("fastlet-a", 1, fastletapi.AdmissionStateOpen, 3).Admission
+	registry.RecordFeedback(info.ID, LocalFeedback{
+		PodUID: info.PodUID, BaseResourceEpoch: "resource-epoch-a", BaseResourceRevision: 2,
+		Admission: &recovered, ObservedAt: registryNow.Add(time.Second),
+	})
+	stored, _ := registry.GetFastletByID(info.ID)
+	require.True(t, stored.RejectedUntil.IsZero())
+	require.Equal(t, uint64(3), stored.Admission.Resources.Revision)
 }
 
 func TestGetReturnsDeepCopy(t *testing.T) {
@@ -364,7 +678,7 @@ func TestStaleRegistryHintsCannotExceedFastletCapacity(t *testing.T) {
 		_, err = manager.CreateSandbox(context.Background(), &fastletapi.CreateSandboxRequest{
 			RequestID:      "request-" + sandboxUID,
 			Identity:       fastletapi.SandboxIdentity{SandboxUID: sandboxUID, Namespace: "default", Name: sandboxUID, InstanceGeneration: 1, RuntimeInstanceID: "runtime-" + sandboxUID, AssignmentAttempt: 1, FastletPodUID: "uid-fastlet-a"},
-			Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
+			Sandbox:        fastletapi.SandboxDesiredSpec{Image: "alpine:latest"},
 			SpecGeneration: 1,
 		})
 		if err == nil {

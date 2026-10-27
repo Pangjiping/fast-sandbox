@@ -27,6 +27,11 @@ const (
 
 const SandboxConditionReady = "Ready"
 
+// SandboxConditionResourceResolved reports whether the caller-owned runtime
+// limits can be compiled into one admissible request/limit pair under the
+// referenced Pool's immutable resource policy.
+const SandboxConditionResourceResolved = "ResourceResolved"
+
 // SandboxConditionSuspended reflects whether the Sandbox runtime is
 // checkpointed and released. It is True only while the pause is durably
 // complete (status.runtime.state == Paused); Pausing and Resuming are
@@ -58,6 +63,11 @@ type SandboxSpec struct {
 	Args       []string        `json:"args,omitempty"`
 	Envs       []corev1.EnvVar `json:"envs,omitempty"`
 	WorkingDir string          `json:"workingDir,omitempty"`
+
+	// Resources contains caller-owned per-Sandbox runtime limits. It is valid
+	// only for ResourceAware Pools and is immutable after creation. When it is
+	// omitted, the Pool's sandboxResources CPU and memory limits are used.
+	Resources *SandboxResourceRequirements `json:"resources,omitempty"`
 
 	// ExpireTime specifies when this sandbox should expire and be garbage collected.
 	// If not set, the sandbox will not expire automatically.
@@ -95,6 +105,12 @@ type SandboxSpec struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
 	ActionBindings []ActionBinding `json:"actionBindings,omitempty"`
+}
+
+// SandboxResourceRequirements deliberately exposes only runtime limits.
+// Admission requests are derived from the owning Pool's immutable policy.
+type SandboxResourceRequirements struct {
+	Limits SandboxComputeResources `json:"limits"`
 }
 
 type ActionBinding struct {

@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -63,12 +64,14 @@ type plannedCreate struct {
 	sandbox    *apiv1alpha2.Sandbox
 	candidates []placement.FastletInfo
 	assignment assignment.AssignmentEnvelope
+	parameters orchestration.RuntimeParameters
 }
 
 type acceptedCreate struct {
 	sandbox    *apiv1alpha2.Sandbox
 	candidates []placement.FastletInfo
 	assignment assignment.AssignmentEnvelope
+	parameters orchestration.RuntimeParameters
 	created    bool
 }
 
@@ -103,6 +106,10 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	if err != nil {
 		return nil, err
 	}
+	resources, err := apiSandboxResourceRequirements(request.Resources)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	// Inject identity before any downstream logging: helper calls on this
 	// path log through the ctx logger and must carry request_id/namespace.
 	ctx = observability.WithIdentity(ctx, observability.Identity{RequestID: request.RequestId, Namespace: request.Namespace, SandboxName: request.RequestId})
@@ -114,14 +121,48 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
-	sandbox := newSandboxCRD(request, bindings, createSpecHash)
+	sandbox := newSandboxCRD(request, bindings, resources, createSpecHash)
 	releaseCreate := orchestrator.BeginFastPathCreate(client.ObjectKeyFromObject(sandbox))
 	defer releaseCreate()
-	rankedFastlets, envelope, err := s.selectFastletsForPool(ctx, orchestrator, pool, sandbox, request.RequestId)
+	parameters, err := fastPathRuntimeParameters(pool, sandbox)
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.InvalidArgument, "resolve Sandbox resources: %v", err)
 	}
-	accepted, err := s.acceptCreateIntent(ctx, plannedCreate{sandbox: sandbox, candidates: rankedFastlets, assignment: envelope})
+	assignment.ProjectResolvedResourceAnnotations(sandbox, pool.Spec.SandboxResources.Hash(), parameters.ResolvedResources)
+	rankedFastlets, envelope, selectionErr := s.selectFastletsForPool(ctx, orchestrator, sandbox, request.RequestId, parameters)
+	if selectionErr != nil && status.Code(selectionErr) != codes.ResourceExhausted {
+		return nil, selectionErr
+	}
+	// A failed Create must not leave a new intent for the Controller to execute.
+	// Capacity exhaustion may still race with an earlier ambiguous attempt, so
+	// look up the same request ID and resume only that already-durable identity.
+	if selectionErr != nil {
+		accepted, found, existingErr := s.loadExistingCreateIntent(ctx, plannedCreate{sandbox: sandbox, parameters: parameters})
+		if existingErr != nil {
+			return nil, existingErr
+		}
+		if !found {
+			return nil, selectionErr
+		}
+		if len(accepted.candidates) == 0 {
+			return nil, selectionErr
+		}
+		observeCreateAccepted("idempotent", started, nil)
+		acceptedObserved = true
+		runtimeStarted := time.Now()
+		observed, provisionErr := s.provisionRuntime(ctx, accepted, completion.fastlet)
+		if provisionErr != nil {
+			return nil, provisionErr
+		}
+		klog.FromContext(ctx).Info("fastpath sandbox create retry completed",
+			"total", time.Since(started).String(), "runtime", time.Since(runtimeStarted).String())
+		return &fastpathv2.CreateSandboxResponse{
+			Sandbox: sandboxInfoFromFastlet(accepted.sandbox, observed), Generation: accepted.sandbox.Generation, Completion: completion.api,
+		}, nil
+	}
+	accepted, err := s.acceptCreateIntent(ctx, plannedCreate{
+		sandbox: sandbox, candidates: rankedFastlets, assignment: envelope, parameters: parameters,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +173,9 @@ func (s *Server) CreateSandbox(ctx context.Context, request *fastpathv2.CreateSa
 	}
 	acceptedObserved = true
 	prepDur := time.Since(prepStarted)
+	if len(accepted.candidates) == 0 {
+		return nil, status.Error(codes.Unavailable, "Sandbox intent is persisted but assignment is not ready")
+	}
 
 	runtimeStarted := time.Now()
 	observed, err := s.provisionRuntime(ctx, accepted, completion.fastlet)
@@ -179,13 +223,49 @@ func buildActionBindings(request *fastpathv2.CreateSandboxRequest, pool *apiv1al
 	return bindings, nil
 }
 
-func newSandboxCRD(request *fastpathv2.CreateSandboxRequest, bindings []apiv1alpha2.ActionBinding, createSpecHash string) *apiv1alpha2.Sandbox {
-	return sandboxFromCreateRequest(request, bindings, createSpecHash)
+func newSandboxCRD(request *fastpathv2.CreateSandboxRequest, bindings []apiv1alpha2.ActionBinding, resources *apiv1alpha2.SandboxResourceRequirements, createSpecHash string) *apiv1alpha2.Sandbox {
+	return sandboxFromCreateRequest(request, bindings, resources, createSpecHash)
 }
 
-func (s *Server) selectFastletsForPool(ctx context.Context, orchestrator *orchestration.Orchestrator, pool *apiv1alpha2.SandboxPool, sandbox *apiv1alpha2.Sandbox, stableKey string) ([]placement.FastletInfo, assignment.AssignmentEnvelope, error) {
+func apiSandboxResourceRequirements(resources *fastpathv2.SandboxResourceRequirements) (*apiv1alpha2.SandboxResourceRequirements, error) {
+	if resources == nil {
+		// A nil value means the Sandbox intentionally inherits the Pool defaults.
+		//nolint:nilnil
+		return nil, nil
+	}
+	if resources.Limits == nil || resources.Limits.Cpu == "" || resources.Limits.Memory == "" {
+		return nil, errors.New("resources.limits.cpu and resources.limits.memory are required")
+	}
+	cpu, err := resource.ParseQuantity(resources.Limits.Cpu)
+	if err != nil {
+		return nil, fmt.Errorf("invalid resources.limits.cpu: %w", err)
+	}
+	memory, err := resource.ParseQuantity(resources.Limits.Memory)
+	if err != nil {
+		return nil, fmt.Errorf("invalid resources.limits.memory: %w", err)
+	}
+	if cpu.Sign() <= 0 || memory.Sign() <= 0 || cpu.MilliValue() < 10 {
+		return nil, errors.New("resources limits must be positive and CPU must be at least 10m")
+	}
+	return &apiv1alpha2.SandboxResourceRequirements{Limits: apiv1alpha2.SandboxComputeResources{CPU: cpu, Memory: memory}}, nil
+}
+
+func fastPathRuntimeParameters(pool *apiv1alpha2.SandboxPool, sandbox *apiv1alpha2.Sandbox) (orchestration.RuntimeParameters, error) {
+	parameters := orchestration.RuntimeParameters{
+		FastletRevision: pool.Status.FastletRevision,
+		ResourceMode:    pool.Spec.SandboxResources.ResourceMode(),
+	}
+	resolved, demand, err := orchestration.ResolveSandboxResources(pool, sandbox)
+	if err != nil {
+		return orchestration.RuntimeParameters{}, err
+	}
+	parameters.ResolvedResources, parameters.ResourceDemand = resolved, demand
+	return parameters, nil
+}
+
+func (s *Server) selectFastletsForPool(ctx context.Context, orchestrator *orchestration.Orchestrator, sandbox *apiv1alpha2.Sandbox, stableKey string, parameters orchestration.RuntimeParameters) ([]placement.FastletInfo, assignment.AssignmentEnvelope, error) {
 	_, finishCandidates := startCreateStage(ctx, "candidate_selection")
-	rankedFastlets, err := orchestrator.FastPathCandidatesMatching(sandbox, stableKey, orchestration.RuntimeParameters{FastletRevision: pool.Status.FastletRevision}, nil)
+	rankedFastlets, err := orchestrator.FastPathCandidatesMatching(sandbox, stableKey, parameters, nil)
 	finishCandidates(err)
 	if err != nil {
 		if errors.Is(err, orchestration.ErrNoCandidate) {
@@ -193,7 +273,7 @@ func (s *Server) selectFastletsForPool(ctx context.Context, orchestrator *orches
 		}
 		return nil, assignment.AssignmentEnvelope{}, err
 	}
-	rankedFastlets = compatibleCandidates(rankedFastlets, pool.Status.FastletRevision)
+	rankedFastlets = compatibleCandidates(rankedFastlets, parameters.FastletRevision)
 	if len(rankedFastlets) == 0 {
 		return nil, assignment.AssignmentEnvelope{}, status.Error(codes.ResourceExhausted, "no Fastlet has the current Pool compatibility revision")
 	}
@@ -216,44 +296,76 @@ func (s *Server) acceptCreateIntent(ctx context.Context, plan plannedCreate) (*a
 	createErr := s.K8sClient.Create(crdContext, plan.sandbox)
 	finishCRDCreate(createErr)
 	if createErr == nil {
-		return &acceptedCreate{sandbox: plan.sandbox, candidates: plan.candidates, assignment: plan.assignment, created: true}, nil
+		return &acceptedCreate{sandbox: plan.sandbox, candidates: plan.candidates, assignment: plan.assignment, parameters: plan.parameters, created: true}, nil
 	}
+	accepted, found, err := s.loadExistingCreateIntent(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		return accepted, nil
+	}
+	return nil, grpcKubernetesError(createErr)
+}
+
+func (s *Server) loadExistingCreateIntent(ctx context.Context, plan plannedCreate) (*acceptedCreate, bool, error) {
 	var existing apiv1alpha2.Sandbox
 	getContext, finishRead := startCreateStage(ctx, "idempotency_read")
-	getErr := s.K8sClient.Get(getContext, client.ObjectKeyFromObject(plan.sandbox), &existing)
-	finishRead(getErr)
-	if getErr != nil {
-		return nil, grpcKubernetesError(errors.Join(createErr, getErr))
+	err := s.K8sClient.Get(getContext, client.ObjectKeyFromObject(plan.sandbox), &existing)
+	finishRead(err)
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, grpcKubernetesError(err)
 	}
 	if existing.Annotations[assignment.AnnotationRequestID] != plan.sandbox.Annotations[assignment.AnnotationRequestID] ||
 		existing.Annotations[assignment.AnnotationCreateSpecHash] != plan.sandbox.Annotations[assignment.AnnotationCreateSpecHash] {
-		return nil, status.Errorf(codes.AlreadyExists, "Sandbox name %q belongs to another create intent", plan.sandbox.Name)
+		return nil, true, status.Errorf(codes.AlreadyExists, "Sandbox name %q belongs to another create intent", plan.sandbox.Name)
 	}
 	if existing.Spec.State == apiv1alpha2.SandboxStatePaused || existing.Status.Runtime.State == apiv1alpha2.RuntimePaused {
 		// A paused Sandbox is resumed through ResumeSandbox (same identity,
 		// same checkpoint); creating it again would boot a fresh instance.
-		return nil, status.Errorf(codes.FailedPrecondition, "Sandbox %q is paused; call ResumeSandbox to resume it", plan.sandbox.Name)
+		return nil, true, status.Errorf(codes.FailedPrecondition, "Sandbox %q is paused; call ResumeSandbox to resume it", plan.sandbox.Name)
 	}
 	if existing.DeletionTimestamp != nil {
-		return nil, status.Error(codes.FailedPrecondition, assignment.ErrSandboxDeleting.Error())
+		return nil, true, status.Error(codes.FailedPrecondition, assignment.ErrSandboxDeleting.Error())
 	}
 	// An idempotent retry can encounter an intent written by an older server.
 	// Protect it before allowing another side-effecting runtime operation.
 	if !slices.Contains(existing.Finalizers, assignment.CleanupFinalizer) {
 		existing.Finalizers = append(existing.Finalizers, assignment.CleanupFinalizer)
 		if err := s.K8sClient.Update(ctx, &existing); err != nil {
-			return nil, grpcKubernetesError(err)
+			return nil, true, grpcKubernetesError(err)
 		}
 	}
 	existingEnvelope, err := assignment.AssignmentFromAnnotation(&existing)
-	if err != nil || existingEnvelope == nil {
-		return nil, status.Errorf(codes.Unavailable, "existing Sandbox assignment is not ready: %v", err)
+	if err != nil {
+		return nil, true, status.Errorf(codes.Unavailable, "read existing Sandbox assignment: %v", err)
 	}
-	selected, ok := s.Orchestrator.Registry.GetFastletByID(placement.FastletID(existingEnvelope.FastletName))
+	if existingEnvelope == nil && len(plan.candidates) > 0 {
+		initialized, _, initializeErr := assignment.InitializeAssignmentAnnotation(
+			ctx, s.K8sClient, client.ObjectKeyFromObject(&existing), plan.assignment,
+		)
+		if initializeErr != nil {
+			return nil, true, grpcKubernetesError(initializeErr)
+		}
+		existing = *initialized
+		existingEnvelope, err = assignment.AssignmentFromAnnotation(&existing)
+		if err != nil {
+			return nil, true, status.Errorf(codes.Unavailable, "read initialized Sandbox assignment: %v", err)
+		}
+	}
+	if existingEnvelope == nil {
+		return &acceptedCreate{sandbox: existing.DeepCopy(), parameters: plan.parameters}, true, nil
+	}
+	selected, ok := s.Orchestrator.Registry.GetFastletByID(placement.NewFastletID(existing.Namespace, existingEnvelope.FastletName))
 	if !ok {
-		return nil, status.Error(codes.Unavailable, orchestration.ErrAssignedFastletUnavailable.Error())
+		return nil, true, status.Error(codes.Unavailable, orchestration.ErrAssignedFastletUnavailable.Error())
 	}
-	return &acceptedCreate{sandbox: existing.DeepCopy(), candidates: []placement.FastletInfo{selected}, assignment: *existingEnvelope}, nil
+	return &acceptedCreate{
+		sandbox: existing.DeepCopy(), candidates: []placement.FastletInfo{selected}, assignment: *existingEnvelope, parameters: plan.parameters,
+	}, true, nil
 }
 
 func (s *Server) provisionRuntime(ctx context.Context, accepted *acceptedCreate, completion fastletapi.CreateCompletion) (*fastletapi.SandboxStatus, error) {
@@ -274,7 +386,7 @@ func (s *Server) provisionRuntime(ctx context.Context, accepted *acceptedCreate,
 			}
 		}
 		fastletContext, finishFastletCreate := startCreateStage(ctx, "fastlet_create")
-		response, callErr := s.Orchestrator.CreateRuntimeOnCandidateWithCompletion(fastletContext, accepted.sandbox, candidate, accepted.assignment, completion)
+		response, callErr := s.Orchestrator.CreateRuntimeOnCandidateWithCompletion(fastletContext, accepted.sandbox, candidate, accepted.assignment, completion, accepted.parameters)
 		finishFastletCreate(callErr)
 		if callErr == nil && response != nil && response.Sandbox != nil {
 			return response.Sandbox, nil
@@ -282,7 +394,12 @@ func (s *Server) provisionRuntime(ctx context.Context, accepted *acceptedCreate,
 		if callErr == nil {
 			return nil, status.Error(codes.Unavailable, "Fastlet Create returned no Sandbox observation; Sandbox intent is persisted for Controller recovery")
 		}
-		if !orchestration.IsCandidateRejection(callErr) {
+		// A local reservation conflict happens before the Fastlet RPC. It is a
+		// definitive rejection only while this call owns the newly created
+		// intent, so candidate retry or rollback cannot disrupt an idempotent
+		// replay that is already using the durable assignment.
+		ownedLocalRejection := accepted.created && errors.Is(callErr, orchestration.ErrLocalReservationConflict)
+		if !orchestration.IsCandidateRejection(callErr) && !ownedLocalRejection {
 			return nil, status.Errorf(codes.Unavailable, "Sandbox intent is persisted and Controller will retry: %v", callErr)
 		}
 		hasBudget := len(tried) < maxCreateCandidateAttempts
@@ -299,16 +416,24 @@ func (s *Server) provisionRuntime(ctx context.Context, accepted *acceptedCreate,
 				"fastlet", candidate.ID, "sandbox", accepted.sandbox.Name, "err", callErr)
 			continue
 		}
-		if err := s.rollbackRejectedCreate(ctx, accepted, callErr); err != nil {
-			return nil, err
-		}
-		return nil, status.Errorf(codes.ResourceExhausted, "all Fastlet candidates rejected admission: %v", callErr)
+		return s.finishRejectedCreate(ctx, accepted, callErr)
 	}
 	return nil, status.Error(codes.ResourceExhausted, orchestration.ErrNoCandidate.Error())
 }
 
-// Only an intent accepted by this call can be rolled back after all attempts
-// have proven absence of runtime side effects. Existing intents stay durable.
+func (s *Server) finishRejectedCreate(ctx context.Context, accepted *acceptedCreate, rejection error) (*fastletapi.SandboxStatus, error) {
+	if !accepted.created {
+		return nil, status.Errorf(codes.Unavailable, "existing Sandbox intent retained after assigned Fastlet rejection: %v", rejection)
+	}
+	if err := s.rollbackRejectedCreate(ctx, accepted, rejection); err != nil {
+		return nil, err
+	}
+	return nil, status.Errorf(codes.ResourceExhausted, "all Fastlet candidates rejected admission: %v", rejection)
+}
+
+// Only an intent created by this call can be rolled back after every attempted
+// Fastlet has proven that it performed no runtime side effects. The finalizer
+// keeps the deletion safe if the Controller observed the CRD concurrently.
 func (s *Server) rollbackRejectedCreate(ctx context.Context, accepted *acceptedCreate, rejection error) error {
 	if !accepted.created {
 		return nil
@@ -328,6 +453,8 @@ func (s *Server) refreshCreateCandidates(ctx context.Context, accepted *accepted
 		RuntimeName: candidate.RuntimeName, RuntimeProfileHash: accepted.assignment.RuntimeProfileHash,
 		ResourceProfileHash: accepted.assignment.ResourceProfileHash, InfraRevision: accepted.assignment.InfraRevision,
 		FastletRevision: candidate.FastletRevision,
+		ResourceMode:    accepted.parameters.ResourceMode,
+		ResourceDemand:  accepted.parameters.ResourceDemand,
 	}
 	_, finishSelection := startCreateStage(ctx, "candidate_selection")
 	more, selectionErr := s.Orchestrator.FastPathCandidatesMatching(accepted.sandbox, accepted.sandbox.Name, parameters, tried)
@@ -705,13 +832,35 @@ func (s *Server) ListPools(ctx context.Context, request *fastpathv2.ListPoolsReq
 }
 
 func poolInfo(pool *apiv1alpha2.SandboxPool) *fastpathv2.PoolInfo {
+	limits, _ := pool.Spec.SandboxResources.LimitResources()
+	resourceProfile := &fastpathv2.SandboxResourceProfileInfo{
+		Limits: &fastpathv2.ComputeResourceProfile{Cpu: limits.CPU.String(), Memory: limits.Memory.String()},
+		Pids:   pool.Spec.SandboxResources.PIDs,
+	}
+	switch pool.Spec.SandboxResources.ResourceMode() {
+	case apiv1alpha2.SandboxResourceModeLegacySlot:
+		resourceProfile.Mode = fastpathv2.SandboxResourceMode_SANDBOX_RESOURCE_MODE_LEGACY_SLOT
+	case apiv1alpha2.SandboxResourceModeResourceAware:
+		resourceProfile.Mode = fastpathv2.SandboxResourceMode_SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+		requests, _ := pool.Spec.SandboxResources.RequestResources()
+		resourceProfile.Requests = &fastpathv2.ComputeResourceProfile{
+			Cpu: requests.CPU.String(), Memory: requests.Memory.String(),
+		}
+		resourceProfile.OvercommitRatio = &fastpathv2.ComputeResourceProfile{
+			Cpu:    pool.Spec.SandboxResources.OvercommitRatio.CPU.String(),
+			Memory: pool.Spec.SandboxResources.OvercommitRatio.Memory.String(),
+		}
+	default:
+		resourceProfile.Mode = fastpathv2.SandboxResourceMode_SANDBOX_RESOURCE_MODE_UNSPECIFIED
+	}
 	info := &fastpathv2.PoolInfo{
 		Namespace: pool.Namespace, Name: pool.Name, Runtime: string(pool.Spec.Runtime),
-		SandboxCpu: pool.Spec.SandboxResources.CPU.String(), SandboxMemory: pool.Spec.SandboxResources.Memory.String(),
+		SandboxCpu: limits.CPU.String(), SandboxMemory: limits.Memory.String(),
 		SandboxPids: pool.Spec.SandboxResources.PIDs, MaxSandboxesPerPod: pool.Spec.MaxSandboxesPerPod,
 		TotalFastlets: pool.Status.CurrentPods, ReadyFastlets: pool.Status.ReadyPods, IdleFastlets: pool.Status.IdleFastlets,
 		RuntimeRevision: pool.Status.RuntimeRevision, InfraRevision: pool.Status.InfraRevision,
 		FastletRevision: pool.Status.FastletRevision, PreparedFastlets: pool.Status.PreparedFastlets,
+		SandboxResourceProfile: resourceProfile,
 	}
 	for _, component := range pool.Spec.InfraComponents {
 		healthKind := "TCP"
@@ -767,7 +916,7 @@ func (s *Server) GetSandboxDiagnostics(ctx context.Context, request *fastpathv2.
 		response.FastletError = appendDiagnosticError(response.FastletError, "Fastlet diagnostics client is not configured")
 		return response, nil
 	}
-	fastlet, found := s.Orchestrator.Registry.GetFastletByID(placement.FastletID(envelope.FastletName))
+	fastlet, found := s.Orchestrator.Registry.GetFastletByID(placement.NewFastletID(sandbox.Namespace, envelope.FastletName))
 	if !found || fastlet.PodUID != envelope.FastletPodUID {
 		response.FastletError = appendDiagnosticError(response.FastletError, "assigned Fastlet is unavailable or replaced")
 		return response, nil
@@ -799,7 +948,7 @@ func (s *Server) inspectAssignedSandbox(ctx context.Context, sandbox *apiv1alpha
 	if s.Orchestrator == nil || s.Orchestrator.Registry == nil || s.Orchestrator.FastletClient == nil {
 		return nil, nil, placement.FastletInfo{}, status.Error(codes.FailedPrecondition, "Fastlet inspect client is not configured")
 	}
-	fastlet, found := s.Orchestrator.Registry.GetFastletByID(placement.FastletID(envelope.FastletName))
+	fastlet, found := s.Orchestrator.Registry.GetFastletByID(placement.NewFastletID(sandbox.Namespace, envelope.FastletName))
 	if !found || fastlet.PodUID != envelope.FastletPodUID || fastlet.PodIP == "" {
 		return nil, nil, placement.FastletInfo{}, status.Error(codes.Unavailable, "assigned Fastlet is unavailable")
 	}
@@ -819,6 +968,7 @@ func sandboxInfoFromFastlet(sandbox *apiv1alpha2.Sandbox, observed *fastletapi.S
 		Runtime:   &fastpathv2.RuntimeInfo{State: protoRuntimeState(observed.Runtime.State)},
 		DataPlane: &fastpathv2.DataPlaneInfo{State: protoDataPlaneState(observed.DataPlane.State)},
 		State:     protoSandboxState(sandbox.Spec.State),
+		Resources: protoSandboxResources(sandbox.Spec.Resources),
 	}
 	if sandbox.Status.Runtime.CheckpointActive() {
 		info.Checkpoint = protoCheckpoint(sandbox.Status.Runtime.Checkpoint)
@@ -966,6 +1116,7 @@ func sandboxInfoFromCRD(sandbox *apiv1alpha2.Sandbox) *fastpathv2.SandboxInfo {
 		Runtime:           &fastpathv2.RuntimeInfo{State: protoCRDRuntimeState(sandbox.Status.Runtime.State)},
 		DataPlane:         &fastpathv2.DataPlaneInfo{State: protoCRDDataPlaneState(sandbox.Status.DataPlane.State)},
 		State:             protoSandboxState(sandbox.Spec.State),
+		Resources:         protoSandboxResources(sandbox.Spec.Resources),
 	}
 	if sandbox.Status.Runtime.CheckpointActive() {
 		info.Checkpoint = protoCheckpoint(sandbox.Status.Runtime.Checkpoint)
@@ -1000,6 +1151,15 @@ func sandboxInfoFromCRD(sandbox *apiv1alpha2.Sandbox) *fastpathv2.SandboxInfo {
 	}
 	info.Ready = apiMeta.IsStatusConditionTrue(sandbox.Status.Conditions, orchestration.ConditionReady)
 	return info
+}
+
+func protoSandboxResources(resources *apiv1alpha2.SandboxResourceRequirements) *fastpathv2.SandboxResourceRequirements {
+	if resources == nil {
+		return nil
+	}
+	return &fastpathv2.SandboxResourceRequirements{Limits: &fastpathv2.ComputeResourceProfile{
+		Cpu: resources.Limits.CPU.String(), Memory: resources.Limits.Memory.String(),
+	}}
 }
 
 func protoCRDDataPlaneState(state apiv1alpha2.DataPlaneState) fastpathv2.DataPlaneState {
@@ -1137,7 +1297,7 @@ func (s *Server) issueRouteCredential(ctx context.Context, sandbox *apiv1alpha2.
 	return credential, claims, nil
 }
 
-func sandboxFromCreateRequest(request *fastpathv2.CreateSandboxRequest, bindings []apiv1alpha2.ActionBinding, createSpecHash string) *apiv1alpha2.Sandbox {
+func sandboxFromCreateRequest(request *fastpathv2.CreateSandboxRequest, bindings []apiv1alpha2.ActionBinding, resources *apiv1alpha2.SandboxResourceRequirements, createSpecHash string) *apiv1alpha2.Sandbox {
 	environment := make([]corev1.EnvVar, 0, len(request.Envs))
 	for name, value := range request.Envs {
 		environment = append(environment, corev1.EnvVar{Name: name, Value: value})
@@ -1167,6 +1327,7 @@ func sandboxFromCreateRequest(request *fastpathv2.CreateSandboxRequest, bindings
 			Envs: environment, WorkingDir: request.WorkingDir, ExpireTime: expiresAt,
 			FailurePolicy: toFailurePolicy(request.FailurePolicy), RecoveryTimeoutSeconds: recoveryTimeout,
 			ActionBindings: bindings,
+			Resources:      resources,
 		},
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/placement"
+	"fast-sandbox/internal/fastletsettings"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 )
 
@@ -132,7 +133,7 @@ func (l *Loop) onPodUpdate(previous, current any) {
 	newPod, newOK := current.(*corev1.Pod)
 	if oldOK && oldPod.Labels["app"] == fastletAppLabelValue &&
 		(!newOK || newPod.Labels["app"] != fastletAppLabelValue || newPod.Name != oldPod.Name || newPod.UID != oldPod.UID) {
-		l.Registry.RemoveIfPodUID(placement.FastletID(oldPod.Name), string(oldPod.UID))
+		l.Registry.RemoveIfPodUID(placement.NewFastletID(oldPod.Namespace, oldPod.Name), string(oldPod.UID))
 	}
 	if newOK {
 		l.onPodAdd(newPod)
@@ -162,13 +163,20 @@ func (l *Loop) onPodDelete(object any) {
 		}
 	}
 	if ok && pod.Labels["app"] == fastletAppLabelValue {
-		l.Registry.RemoveIfPodUID(placement.FastletID(pod.Name), string(pod.UID))
+		l.Registry.RemoveIfPodUID(placement.NewFastletID(pod.Namespace, pod.Name), string(pod.UID))
 	}
 }
 
 func fastletInfoFromPod(pod *corev1.Pod) placement.FastletInfo {
+	resourceCapacity := placement.ResourceDemand{}
+	if encoded := pod.Annotations[fastletsettings.CommitmentCapacityAnnotation]; encoded != "" {
+		if decoded, err := fastletsettings.DecodeCommitmentCapacity(encoded); err == nil {
+			resourceCapacity.CPU = decoded.CPU
+			resourceCapacity.Memory = decoded.Memory
+		}
+	}
 	return placement.FastletInfo{
-		ID: placement.FastletID(pod.Name), Namespace: pod.Namespace,
+		ID: placement.NewFastletID(pod.Namespace, pod.Name), Namespace: pod.Namespace,
 		PodName: pod.Name, PodUID: string(pod.UID), PodIP: pod.Status.PodIP,
 		NodeName: pod.Spec.NodeName, PoolName: pod.Labels["fast-sandbox.io/pool"],
 		RuntimeName:         apiv1alpha2.RuntimeName(pod.Labels["fast-sandbox.io/runtime"]),
@@ -176,9 +184,10 @@ func fastletInfoFromPod(pod *corev1.Pod) placement.FastletInfo {
 		ResourceProfileHash: pod.Annotations["fast-sandbox.io/resource-profile-hash"],
 		InfraRevision:       pod.Annotations["fast-sandbox.io/infra-revision"],
 		FastletRevision:     pod.Annotations[placement.AnnotationPodTemplateHash],
+		ResourceCapacity:    resourceCapacity,
 		DrainRequested:      placement.PodDrainRequested(pod),
 		Draining:            placement.PodDrainRequested(pod),
-		PodReady:            pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && podConditionTrue(pod.Status.Conditions, corev1.PodReady),
+		PodReady:            pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && podConditionTrue(pod.Status.Conditions, corev1.PodReady),
 		PodObservedAt:       time.Now(),
 	}
 }
