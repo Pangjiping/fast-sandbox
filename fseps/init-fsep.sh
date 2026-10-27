@@ -39,7 +39,7 @@ Options:
 
 Examples:
   $(basename "$0") "Snapshot Distribution"
-  $(basename "$0") --author "@user" --slug snapshot-distribution "快照分发改进"
+  $(basename "$0") --author "@user" --slug snapshot-distribution "Improve Snapshot Distribution"
 
 The script creates NNNN-slug.md using the next available proposal number.
 Add the proposal to fseps/README.md before submitting a PR.

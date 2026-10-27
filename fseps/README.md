@@ -1,17 +1,17 @@
 ---
 title: Fast Sandbox Enhancement Proposals
-description: Fast Sandbox 正式增强提案的索引与贡献入口。
+description: Proposal index and contribution entry point for Fast Sandbox enhancements.
 ---
 
 # Fast Sandbox Enhancement Proposals
 
-FSEP（Fast Sandbox Enhancement Proposal）用于讨论和记录 Fast Sandbox 的重大功能、架构及公共接口变更。先用 Issue 简短讨论，需要完整设计时再写 FSEP；重点说明兼容性、测试和回滚。
+Fast Sandbox Enhancement Proposals (FSEPs) document major features, architectural changes, and public interface changes. Start with a short Issue discussion and write a full proposal when needed, focusing on compatibility, testing, and rollback.
 
-提案的适用范围、创建方式和评审流程见 [贡献指南](CONTRIBUTING.md)。
+See the [contributing guide](CONTRIBUTING.md) for scope, creation instructions, and the review process.
 
-## 提案索引
+## Proposal index
 
-目前尚无提案，首个提案从 `FSEP-0001` 开始。新增提案时，请在同一个 PR 中更新下表；状态或内容发生变化时，同步更新索引和提案的 `last-updated`。
+There are no proposals yet. The first proposal will be `FSEP-0001`. Add an entry in the same PR as a new proposal; when its content or status changes, update both this index and the proposal's `last-updated` field.
 
-| FSEP | 标题 | 状态 | 最后更新 |
-|:----:|------|------|:--------:|
+| FSEP | Title | Status | Last updated |
+|:----:|-------|--------|:------------:|
