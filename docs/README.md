@@ -56,6 +56,8 @@ Fast Sandbox documentation is organized by reader intent:
 
 ## Documentation policy
 
+Start major changes with a short GitHub Issue discussion; write a [Fast Sandbox Enhancement Proposal (FSEP)](../fseps/README.md) when a full design is needed. The [FSEP contributing guide](../fseps/CONTRIBUTING.md) keeps review focused on compatibility, testing, and rollback. Small fixes and local improvements can go directly to a PR.
+
 Published documentation describes the current product contract:
 
 - concepts explain why the system works this way;
@@ -68,9 +70,7 @@ directory is ignored by Git and is never a source of truth. When a design is
 implemented, its stable behavior must be incorporated into the relevant
 concept, guide, and reference pages in the same change.
 
-Designs that require review across contributors belong in a GitHub Issue,
-Pull Request, or the owning project's formal proposal process. They must not
-depend on ignored local files.
+Shared design decisions belong in GitHub Issues, Pull Requests, or FSEPs according to their scope. They must not depend on ignored local files. Proposals record planned changes and decisions; implemented behavior must still be documented in the relevant concept, guide, and reference pages.
 
 Documentation is maintained in U.S. English by default. Explicitly required
 localized companion guides may coexist with and link to their English version.
