@@ -78,17 +78,17 @@ type ReadinessSpec struct {
 }
 
 // ArtifactFormat selects the storage encoding of the produced snapshot set.
-// Both formats contain the full artifacts (rootfs.ext4, vmstate.snap,
-// memory.snap); a rootfs-only output is not supported.
+// Native publishes raw snapshots to object storage; OverlayBD publishes a
+// rootfs/snapfiles image pair to an OCI registry.
 // +kubebuilder:validation:Enum=native;overlaybd
 // +kubebuilder:default=overlaybd
 type ArtifactFormat string
 
 const (
-	// ArtifactFormatNative keeps the raw snapshot files as-is.
+	// ArtifactFormatNative keeps the raw snapshot files in object storage.
 	ArtifactFormatNative ArtifactFormat = "native"
-	// ArtifactFormatOverlayBD converts rootfs and memory into OverlayBD
-	// LSMT commit layers for lazy loading; vmstate.snap stays a plain file.
+	// ArtifactFormatOverlayBD publishes OverlayBD rootfs and snapfiles images
+	// to an OCI registry for lazy loading. Object storage is not supported.
 	ArtifactFormatOverlayBD ArtifactFormat = "overlaybd"
 )
 
@@ -104,6 +104,8 @@ type PrimeSpec struct {
 }
 
 // OutputSpec describes the artifacts to produce and where to publish them.
+// Cross-field validation runs in the controller so these CRDs ship without CEL
+// (x-kubernetes-validations) for legacy (< 1.25) API servers.
 type OutputSpec struct {
 	// RootfsSize is the logical size of the converted rootfs.ext4 — the
 	// capacity the guest sees as its root drive. A Kubernetes resource
@@ -112,11 +114,17 @@ type OutputSpec struct {
 	// +kubebuilder:default="30Gi"
 	RootfsSize string `json:"rootfsSize"`
 
-	// Format selects the storage encoding of the snapshot set.
+	// Format selects the storage encoding. Native requires object storage;
+	// OverlayBD requires an explicit oci:// publish target.
 	// +kubebuilder:default=overlaybd
 	Format ArtifactFormat `json:"format"`
 
-	// Publish is the S3-compatible object store target, e.g.
+	// Publish selects the destination. oci://registry/namespace/repo must
+	// omit the tag and digest; each build Pod receives a system-generated
+	// UUID and publishes <uuid>_rootfs and <uuid>_snapfiles. A new build
+	// uses a new UUID; retries of the same Pod reuse its UUID.
+	// PublishSecretRef then requires .dockerconfigjson.
+	// For format=native, Publish is the S3-compatible object store target, e.g.
 	// s3://bucket/sandbox-images/ (digest-addressed publication). When
 	// empty, the controller defaults it to the platform artifact store
 	// (the fast-sandbox-artifact-store ConfigMap); when set it must equal
@@ -143,6 +151,25 @@ type OutputSpec struct {
 	// Not yet implemented: reserved — the controller currently ignores it.
 	// +optional
 	Prime *PrimeSpec `json:"prime,omitempty"`
+}
+
+// MITMCertificateSpec selects the Secret entry holding the egress MITM
+// proxy CA certificate (OSEP-0022).
+type MITMCertificateSpec struct {
+	// SecretRef references the Secret carrying the certificate; it must
+	// live in the template's namespace.
+	// +kubebuilder:validation:Required
+	SecretRef corev1.LocalObjectReference `json:"secretRef"`
+	// Key is the Secret data entry holding the PEM certificate. Only this
+	// key is projected into the build Pod, so the CA private key never
+	// enters the build. The builder accepts entries consisting solely of
+	// PEM CERTIFICATE blocks — private keys, other PEM blocks, and trailing
+	// non-PEM data are rejected — and bakes them re-encoded; CA constraints
+	// (BasicConstraints CA:TRUE) are not verified.
+	// +kubebuilder:default=ca.crt
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Key string `json:"key"`
 }
 
 // SandboxTemplateSpec defines the desired golden-image build.
@@ -195,6 +222,15 @@ type SandboxTemplateSpec struct {
 	// the inherited value.
 	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
+
+	// EgressMITMCertificate bakes the egress MITM proxy CA certificate into
+	// the template: the builder places it at /opt/opensandbox/mitmproxy-ca-cert.pem
+	// (the execd bootstrap contract path) and enables the trust gate, so
+	// the bootstrap installs it into the guest trust store and client env
+	// vars at the snapshot boot. Restored sandboxes trust the CA from first
+	// boot; the CA is cluster-global, so the field is pool-agnostic.
+	// +optional
+	EgressMITMCertificate *MITMCertificateSpec `json:"egressMitmCertificate,omitempty"`
 
 	// Readiness defines when the guest is considered ready.
 	Readiness ReadinessSpec `json:"readiness"`

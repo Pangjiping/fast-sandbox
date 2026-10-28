@@ -2,6 +2,8 @@ package firecracker
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -104,16 +106,16 @@ func TestPullImageProxiesToPinImage(t *testing.T) {
 	agent := &fakeAgentClient{}
 	fixture.installAgent(agent)
 
-	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Spec.Image))
+	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Desired.Image))
 
 	pins, _, _ := agent.snapshot()
-	require.Equal(t, []string{fixture.sandboxSpec.Spec.Image}, pins)
+	require.Equal(t, []string{fixture.sandboxSpec.Desired.Image}, pins)
 	// The request id is the pod-scoped warm-pull key of the image, so
 	// retries of THIS fastlet replay the first pin instead of double-
 	// counting, while another fastlet pod on the same node keeps its own
 	// key (the agent journal rejects a request id committed by a different
 	// pod UID).
-	require.Equal(t, "warm-pull-pod-1-"+imageKey(fixture.sandboxSpec.Spec.Image), agent.pinReqs[0])
+	require.Equal(t, "warm-pull-pod-1-"+imageKey(fixture.sandboxSpec.Desired.Image), agent.pinReqs[0])
 }
 
 func TestPullImageIdempotentAcrossCalls(t *testing.T) {
@@ -121,8 +123,8 @@ func TestPullImageIdempotentAcrossCalls(t *testing.T) {
 	agent := &fakeAgentClient{}
 	fixture.installAgent(agent)
 
-	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Spec.Image))
-	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Spec.Image))
+	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Desired.Image))
+	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Desired.Image))
 
 	pins, _, _ := agent.snapshot()
 	require.Len(t, pins, 2)
@@ -131,17 +133,17 @@ func TestPullImageIdempotentAcrossCalls(t *testing.T) {
 
 func TestPullImageLocalModeWithoutAgent(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
-	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Spec.Image))
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Desired.Image)
+	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Desired.Image))
 
 	require.NoError(t, fixture.driver.Initialize(context.Background(), ""))
-	missing := fixture.sandboxSpec.Spec.Image + "-missing"
+	missing := fixture.sandboxSpec.Desired.Image + "-missing"
 	require.ErrorIs(t, fixture.driver.PullImage(context.Background(), missing), ErrImageNotReady)
 }
 
 func TestPullImageAgentUnreachableFallsBackToLocal(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Desired.Image)
 	// The agent socket exists but nothing listens: dial fails with
 	// errAgentUnreachable and the driver falls back to the local cache.
 	fixture.driver.newAgentClient = func(socket string) (AgentClient, error) {
@@ -149,7 +151,7 @@ func TestPullImageAgentUnreachableFallsBackToLocal(t *testing.T) {
 	}
 	fixture.driver.agentSocket = "/unused"
 
-	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Spec.Image))
+	require.NoError(t, fixture.driver.PullImage(context.Background(), fixture.sandboxSpec.Desired.Image))
 }
 
 func TestProbeCapabilitiesAgentHealthFailureDegrades(t *testing.T) {
@@ -181,7 +183,7 @@ func TestProbeCapabilitiesLocalModeUnchanged(t *testing.T) {
 
 func TestDeleteSandboxReleasesAndUnpins(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Desired.Image)
 	agent := &fakeAgentClient{}
 	fixture.installAgent(agent)
 	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
@@ -192,7 +194,7 @@ func TestDeleteSandboxReleasesAndUnpins(t *testing.T) {
 
 	pins, unpins, releases := agent.snapshot()
 	require.Empty(t, pins)
-	require.Equal(t, []string{fixture.sandboxSpec.Spec.Image}, unpins)
+	require.Equal(t, []string{fixture.sandboxSpec.Desired.Image}, unpins)
 	require.Equal(t, []string{"lease-1"}, releases)
 	_, ok := fixture.driver.leaseForSandbox(fixture.sandboxSpec.Identity.SandboxUID)
 	require.False(t, ok)
@@ -200,7 +202,7 @@ func TestDeleteSandboxReleasesAndUnpins(t *testing.T) {
 
 func TestDeleteSandboxLocalModeSkipsAgent(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Desired.Image)
 	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
 	require.NoError(t, err)
 	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), fixture.sandboxSpec.Identity.SandboxUID))
@@ -233,7 +235,7 @@ func TestEnsureSandboxColdCreateNeverDeliversSynchronously(t *testing.T) {
 
 func TestEnsureSandboxCachedImageNeverPins(t *testing.T) {
 	fixture := newDriverFixture(t)
-	fixture.prepareCachedImage(t, fixture.sandboxSpec.Spec.Image)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Desired.Image)
 	agent := &fakeAgentClient{}
 	fixture.installAgent(agent)
 
@@ -241,4 +243,38 @@ func TestEnsureSandboxCachedImageNeverPins(t *testing.T) {
 	require.NoError(t, err)
 	pins, _, _ := agent.snapshot()
 	require.Empty(t, pins, "a cached image must not pin on create (warm pull pins once, delete unpins once)")
+}
+
+func TestDeleteOCIResumeDoesNotUnpinAgentImages(t *testing.T) {
+	fixture := newDriverFixture(t)
+	fixture.prepareCachedImage(t, fixture.sandboxSpec.Desired.Image)
+	agent := &fakeAgentClient{}
+	fixture.installAgent(agent)
+	_, err := fixture.driver.EnsureSandbox(context.Background(), ensureInput(&fixture.sandboxSpec))
+	require.NoError(t, err)
+	directory := filepath.Join(fixture.driver.config.StateRoot, sandboxStateDir, fixture.sandboxSpec.Identity.SandboxUID)
+	state, err := loadState(directory)
+	require.NoError(t, err)
+	digest := strings.Repeat("a", 64)
+	checkpoint := "oci://registry.example/checkpoints@sha256:" + digest
+	state.Config.Desired.Restore = &fastletapi.RestoreSpec{ManifestRef: checkpoint, ArtifactDigest: digest}
+	require.NoError(t, saveState(directory, state))
+	require.NoError(t, fixture.driver.DeleteSandbox(context.Background(), fixture.sandboxSpec.Identity.SandboxUID))
+	_, unpins, _ := agent.snapshot()
+	require.Empty(t, unpins)
+}
+
+func TestReleaseAgentSandboxUnpinIDScopesEachResumeReference(t *testing.T) {
+	fixture := newDriverFixture(t)
+	agent := &fakeAgentClient{}
+	fixture.installAgent(agent)
+	for _, reference := range []string{"template", "checkpoint-1", "checkpoint-2", "checkpoint-2"} {
+		fixture.driver.releaseAgentSandbox(context.Background(), "same-sandbox", reference)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	require.Len(t, agent.unpinReqs, 4)
+	require.NotEqual(t, agent.unpinReqs[0], agent.unpinReqs[1])
+	require.NotEqual(t, agent.unpinReqs[1], agent.unpinReqs[2])
+	require.Equal(t, agent.unpinReqs[2], agent.unpinReqs[3], "retrying the same release remains idempotent")
 }

@@ -7,7 +7,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/internal/controlplane/assignment"
@@ -93,7 +92,7 @@ func (o *Orchestrator) snapshotIdentityOnAssigned(sandbox *apiv1alpha2.Sandbox, 
 	if envelope == nil {
 		return fastletapi.SnapshotIdentity{}, placement.FastletInfo{}, fmt.Errorf("%w: target Sandbox has no durable assignment", ErrAssignedFastletUnavailable)
 	}
-	fastlet, ok := o.Registry.GetFastletByID(placement.FastletID(envelope.FastletName))
+	fastlet, ok := o.Registry.GetFastletByID(placement.NewFastletID(sandbox.Namespace, envelope.FastletName))
 	if !ok || fastlet.PodUID != envelope.FastletPodUID || fastlet.PodIP == "" {
 		return fastletapi.SnapshotIdentity{}, placement.FastletInfo{}, fmt.Errorf("%w: assigned Fastlet is unavailable", ErrAssignedFastletUnavailable)
 	}
@@ -119,17 +118,6 @@ func (o *Orchestrator) CreateSnapshot(ctx context.Context, snapshot *apiv1alpha2
 		RequestID: snapshot.Annotations[assignment.AnnotationRequestID], Identity: identity,
 		Snapshot: fastletapi.SnapshotSpec{TemplateName: snapshot.Spec.TemplateName},
 	}
-	// The source Sandbox's bindings ride along: the driver records them in
-	// the published manifest, making the artifact set self-contained (the
-	// CR annotation is only the in-cluster auto-apply path and may be gone
-	// by restore time).
-	if bindings, bindErr := compileActionBindings(sandbox.Spec.ActionBindings); bindErr == nil {
-		request.ActionBindings = bindings
-	} else {
-		// Publishing without bindings breaks the self-contained artifact
-		// promise; never silent.
-		klog.FromContext(ctx).Error(bindErr, "Failed to compile snapshot action bindings; manifest will lack them", "snapshot", snapshot.Name)
-	}
 	response, callErr := o.FastletClient.CreateSnapshot(ctx, fastlet.PodIP, request)
 	if callErr == nil && response != nil &&
 		(response.Disposition == fastletapi.CreateDispositionCreated || response.Disposition == fastletapi.CreateDispositionExisting) &&
@@ -153,7 +141,7 @@ func (o *Orchestrator) CreateSnapshot(ctx context.Context, snapshot *apiv1alpha2
 // across a mid-flight Sandbox reassignment.
 func (o *Orchestrator) observeTarget(snapshot *apiv1alpha2.SandboxSnapshot, sandbox *apiv1alpha2.Sandbox) (fastletapi.SnapshotIdentity, placement.FastletInfo, error) {
 	if triggered := snapshot.Status.Triggered; triggered != nil && triggered.FastletName != "" {
-		fastlet, ok := o.Registry.GetFastletByID(placement.FastletID(triggered.FastletName))
+		fastlet, ok := o.Registry.GetFastletByID(placement.NewFastletID(snapshot.Namespace, triggered.FastletName))
 		if !ok || fastlet.PodUID != triggered.FastletPodUID || fastlet.PodIP == "" {
 			return fastletapi.SnapshotIdentity{}, placement.FastletInfo{},
 				fmt.Errorf("%w: pinned fastlet %s is unavailable", ErrAssignedFastletUnavailable, triggered.FastletName)

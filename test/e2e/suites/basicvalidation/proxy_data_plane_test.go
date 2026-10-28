@@ -119,7 +119,7 @@ func proxyPool(namespace, name string) *apiv1alpha2.SandboxPool {
 		Spec: apiv1alpha2.SandboxPoolSpec{
 			Capacity: apiv1alpha2.PoolCapacity{PoolMin: 2, PoolMax: 2}, MaxSandboxesPerPod: 1,
 			Runtime:          apiv1alpha2.RuntimeContainer,
-			SandboxResources: apiv1alpha2.SandboxResourceProfile{CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64},
+			SandboxResources: apiv1alpha2.NewLegacySandboxResourceProfile(resource.MustParse("50m"), resource.MustParse("64Mi"), 64),
 			FastletTemplate:  corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: suiteenv.FastletImage()}}}},
 		},
 	}
@@ -353,9 +353,7 @@ func assertSandboxProxyServiceSurvivesReplicaLoss(ctx context.Context, t *testin
 func restartFastletProxy(ctx context.Context, t *testing.T, k8sClient client.Client, namespace, podName string) {
 	t.Helper()
 	previous := containerRestartCount(ctx, t, k8sClient, namespace, podName, "fastlet-proxy")
-	if output, err := kubectl(ctx, "exec", "-n", namespace, podName, "-c", "fastlet-proxy", "--", "kill", "1"); err != nil {
-		t.Fatalf("restart Fastlet Proxy: %v: %s", err, output)
-	}
+	injectionOutput, injectionErr := kubectl(ctx, "exec", "-n", namespace, podName, "-c", "fastlet-proxy", "--", "kill", "1")
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	for {
@@ -369,7 +367,7 @@ func restartFastletProxy(ctx context.Context, t *testing.T, k8sClient client.Cli
 		}
 		select {
 		case <-waitCtx.Done():
-			t.Fatalf("wait for Fastlet Proxy restart: %v", waitCtx.Err())
+			t.Fatalf("wait for Fastlet Proxy restart: %v; kill result: err=%v output=%q", waitCtx.Err(), injectionErr, string(injectionOutput))
 		case <-time.After(250 * time.Millisecond):
 		}
 	}

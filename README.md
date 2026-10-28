@@ -218,6 +218,7 @@ integration uses fully cached native snapshot artifacts.
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [Enhancement proposals (FSEPs)](fseps/README.md)
 - [Firecracker deployment and verification](docs/guides/firecracker-integration-env.md)
 - [Golden-image builds](docs/guides/sandboxtemplate-golden-images.md)
 - [Live snapshots](docs/guides/sandbox-snapshots.md)

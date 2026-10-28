@@ -1,0 +1,34 @@
+---
+title: "{{title}}"
+authors:
+  - "{{author}}"
+creation-date: {{date}}
+last-updated: {{date}}
+status: {{status_metadata}}
+---
+
+# FSEP-{{proposal_id}}: {{heading}}
+
+## Problem and goals
+
+<!-- Briefly describe the current problem, goals, and scope boundaries. -->
+
+## Proposal and tradeoffs
+
+<!-- Describe the proposed behavior, affected components, and key interfaces. Explain the main risks and why this approach was chosen. Add design details or open questions as needed; extra sections are optional. -->
+
+## Compatibility
+
+<!-- How are existing APIs, CRDs, SDKs, CLI commands, configuration, and existing resources or snapshots affected? Describe supported version combinations where relevant. Breaking changes need a migration path. If there is no compatibility impact, explain why. -->
+
+## Test plan
+
+<!-- Provide validation steps and acceptance criteria. Cover normal operation, failure recovery, and compatibility according to risk. Choose relevant unit, integration, E2E, or performance tests. Performance checks must state the measurement boundary, environment, and cache state. If testing does not apply, explain why. -->
+
+## Rollout and rollback
+
+<!-- How is the change enabled or rolled out in stages? What signals are monitored, what triggers rollback, and how is it disabled or downgraded? How are existing resources, data, or snapshots handled after rollback? If safe rollback is unavailable, describe the limits and recovery plan. If runtime rollout or rollback does not apply, explain why. -->
+
+## Related links (optional)
+
+<!-- Link discussions, implementation PRs, related FSEPs/OSEPs, and resulting docs/ pages as needed. Record the reason when closing a proposal. -->

@@ -104,19 +104,27 @@ func testS3Client(t *testing.T, store *fakeStore) *s3Client {
 
 // testManifest assembles a manifest document in the publisher's shape for a
 // set of artifacts, returning the exact bytes a download would carry.
-func testManifest(artifacts map[string][]byte) []byte {
+func testManifest(contents map[string][]byte) []byte {
 	files := map[string]any{}
-	for name, content := range artifacts {
+	for name, content := range contents {
 		files[name] = map[string]any{
 			"sha256":    sha256Hex(content),
 			"sizeBytes": len(content),
 		}
 	}
-	document := map[string]any{
-		"schemaVersion": 1,
-		"runtime":       "firecracker",
-		"lineage":       map[string]any{"image": testImage},
-		"files":         files,
+	document := artifacts.NewVMManifest(artifacts.VMMachine{VCPUCount: 1, MemoryMiB: 1, RootfsSizeMiB: 1, RootfsDriveID: "rootfs", RootfsDrivePath: "rootfs.img"}, "6.1.177", "/missing/firecracker", artifacts.CPUTemplateNone)
+	document.Compatibility.FirecrackerVersion = "1.16.1"
+	document.Lineage = &artifacts.VMLineage{Image: testImage}
+	document.Files = map[string]artifacts.ManifestFile{}
+	document.Platform = &artifacts.VMPlatform{StateFiles: map[string]artifacts.ManifestFile{}}
+	for name, entry := range files {
+		fields := entry.(map[string]any)
+		file := artifacts.ManifestFile{SHA256: fields["sha256"].(string), SizeBytes: int64(fields["sizeBytes"].(int))}
+		if name == "policy.json" || name == "vault.json" {
+			document.Platform.StateFiles[name] = file
+		} else {
+			document.Files[name] = file
+		}
 	}
 	payload, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
@@ -182,6 +190,30 @@ func TestPullImageFullFlow(t *testing.T) {
 		sha256Hex(manifestPayload)[:16] + "/memory.snap",
 	}
 	require.ElementsMatch(t, expected, store.requested())
+}
+
+func TestPullImageRequiresNativeFileListBeforeDownloadingFiles(t *testing.T) {
+	store, client, original, _ := publishFixture(t)
+	var document map[string]any
+	require.NoError(t, json.Unmarshal(original, &document))
+	delete(document, "files")
+	payload, err := json.Marshal(document)
+	require.NoError(t, err)
+	manifestKey := sha256Hex(original)[:16] + "/manifest.json"
+	indexKey := "index/" + imageKey(testImage) + ".json"
+	var index imageIndex
+	require.NoError(t, json.Unmarshal(store.objects[indexKey], &index))
+	index.ArtifactDigest = sha256Hex(payload)
+	indexPayload, err := json.Marshal(index)
+	require.NoError(t, err)
+	store.objects[manifestKey] = payload
+	store.objects[indexKey] = indexPayload
+
+	root := t.TempDir()
+	err = (&Client{s3: client}).PullImage(context.Background(), root, testImage)
+	require.ErrorContains(t, err, "no native files")
+	require.ElementsMatch(t, []string{indexKey, manifestKey}, store.requested())
+	require.NoFileExists(t, filepath.Join(imageDir(root, testImage), manifestName))
 }
 
 func TestPullImageIdempotent(t *testing.T) {
@@ -443,6 +475,40 @@ func TestPullCheckpointFullFlowWithoutIndex(t *testing.T) {
 	before := len(store.requested())
 	require.NoError(t, (&Client{s3: client}).PullCheckpoint(t.Context(), root, reference, manifestRef, digest))
 	require.Len(t, store.requested(), before, "a committed checkpoint cache is not re-pulled")
+}
+
+func TestPullCheckpointMaterializesOptionalVaultBundle(t *testing.T) {
+	// A checkpoint manifest that lists the vault bundle: the pull materializes
+	// it next to the snapshot files so the restore path can hand it to egress.
+	vaultContent := []byte(`{"v":1,"revision":3,"vault":{"token":"t"}}`)
+	store, client, manifestPayload, nativeBodies := publishFixture(t)
+	delete(store.objects, "index/"+imageKey(testImage)+".json")
+	buildDir := sha256Hex(manifestPayload)[:16]
+	store.objects[buildDir+"/"+publishVaultName] = vaultContent
+	nativeBodies[publishVaultName] = vaultContent
+	withVault := testManifest(nativeBodies)
+	var err error
+	require.NoError(t, err)
+	digest := sha256Hex(withVault)
+	store.objects[buildDir+"/manifest.json"] = withVault
+	manifestRef := "s3://" + testBucket + "/" + testPrefix + "/" + buildDir + "/manifest.json"
+	root := t.TempDir()
+	reference := artifacts.CheckpointReference(digest)
+
+	require.NoError(t, (&Client{s3: client}).PullCheckpoint(t.Context(), root, reference, manifestRef, digest))
+	cached, statErr := os.Stat(filepath.Join(imageDir(root, reference), publishVaultName))
+	require.NoError(t, statErr)
+	require.Equal(t, int64(len(vaultContent)), cached.Size())
+
+	// A checkpoint manifest without a vault entry materializes none.
+	_, client2, manifestPayload2, _ := publishFixture(t)
+	digest2 := sha256Hex(manifestPayload2)
+	root2 := t.TempDir()
+	require.NoError(t, (&Client{s3: client2}).PullCheckpoint(t.Context(), root2,
+		artifacts.CheckpointReference(digest2),
+		"s3://"+testBucket+"/"+testPrefix+"/"+digest2[:16]+"/manifest.json", digest2))
+	_, statErr = os.Stat(filepath.Join(imageDir(root2, artifacts.CheckpointReference(digest2)), publishVaultName))
+	require.True(t, os.IsNotExist(statErr), "golden-image and vault-less checkpoints stage no vault bundle")
 }
 
 func TestPullCheckpointRejectsDigestMismatch(t *testing.T) {

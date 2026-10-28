@@ -7,6 +7,7 @@
 # external dependencies, Apache-2.0); the pin is recorded in the image
 # label com.fast-sandbox.dart-rev and the version file below.
 
+ARG OCI_TOOLS_IMAGE=fast-sandbox/oci-tools:dev
 ARG DART_REV=a85f39f13d81241b3d57f7f7fe7b7c84d58b7aa2
 
 # Firecracker assets baked in (fc-assets stage below): the hostready
@@ -14,6 +15,9 @@ ARG DART_REV=a85f39f13d81241b3d57f7f7fe7b7c84d58b7aa2
 # match hostready.DefaultFCVersion (asserted by assets_test.go). No guest
 # kernel: snapshots bake their own and restore never boots one (#84).
 ARG FC_VERSION=v1.16.1
+
+# --- shared OCI artifacts ------------------------------------------------
+FROM ${OCI_TOOLS_IMAGE} AS oci-tools
 
 # --- dart (P2P daemon, pinned) ------------------------------------------------
 FROM golang:1.25 AS dart-build
@@ -27,7 +31,11 @@ ENV GOPROXY=${GOPROXY}
 RUN git init /src/dart \
     && cd /src/dart \
     && git remote add origin https://github.com/data-accelerator/dart \
-    && git fetch --depth 1 origin "$DART_REV" \
+    && for attempt in 1 2 3; do \
+         git -c http.version=HTTP/1.1 fetch --depth 1 origin "$DART_REV" && break; \
+         [ "$attempt" -eq 3 ] && exit 1; \
+         sleep $((attempt * 2)); \
+       done \
     && git checkout --detach FETCH_HEAD \
     && CGO_ENABLED=0 go build -o /out/dart ./cmd/dart
 
@@ -39,7 +47,7 @@ FROM alpine:3.19 AS fc-assets
 ARG FC_VERSION
 RUN apk add --no-cache curl \
     && mkdir /bundle /stage \
-    && curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" -o /stage/fc.tgz \
+    && curl --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" -o /stage/fc.tgz \
     && tar -xzf /stage/fc.tgz -C /stage \
     && find /stage -type f -name "firecracker-${FC_VERSION}-x86_64" -exec mv {} /bundle/firecracker \; \
     && find /stage -type f -name "jailer-${FC_VERSION}-x86_64" -exec mv {} /bundle/jailer \; \
@@ -49,8 +57,13 @@ RUN apk add --no-cache curl \
     && sha256sum -c SHA256SUMS
 
 # --- runtime image -----------------------------------------------------------
-FROM alpine:3.19
-RUN apk add --no-cache curl
+FROM ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates curl util-linux coreutils libaio1 libcurl4 libssl3 libzstd1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=oci-tools /bundle /usr/local/share/fast-sandbox/oci-tools
+COPY build/oci/install-tools.sh /usr/local/bin/install-oci-tools
+COPY build/oci/node-daemon.sh /usr/local/bin/overlaybd-node
 
 ARG DART_REV
 COPY --from=dart-build /out/dart /usr/local/bin/dart

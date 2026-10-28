@@ -31,24 +31,6 @@ type Client struct {
 	peer *peerGateway
 }
 
-// ReadImageManifest fetches the published manifest document of an image
-// reference WITHOUT touching the node cache: the index (byte-verified
-// image field) then the manifest (digest-verified). The control plane
-// uses it to resolve snapshot-recorded policy at sandbox create time; the
-// document itself is immutable per digest, so callers may cache forever
-// keyed by the manifest's digest namespace.
-func (c *Client) ReadImageManifest(ctx context.Context, image string) ([]byte, error) {
-	index, err := fetchIndex(ctx, c.s3, image)
-	if err != nil {
-		return nil, err
-	}
-	manifestKey, err := c.s3.resolveRef(index.ManifestRef)
-	if err != nil {
-		return nil, err
-	}
-	return c.fetchManifest(ctx, manifestKey, index.ArtifactDigest)
-}
-
 // peerGateway routes artifact GETs through a P2P peer gateway (the
 // node-local DART daemon, or an external provider) speaking
 // GET <base><routePrefix><presigned-url>.
@@ -276,6 +258,19 @@ func (c *Client) materializeSet(ctx context.Context, dir, manifestKey, artifactD
 	files, err := document.nativeFiles()
 	if err != nil {
 		return err
+	}
+	// The optional state bundle files of a snapshot set (checkpoint vault,
+	// recorded policy) materialize next to the snapshot files so the restore
+	// path can hand them to egress. A malformed entry fails the pull like
+	// any native artifact.
+	for _, bundleFile := range []func() (nativeFile, bool, error){document.vaultFile, document.policyFile} {
+		file, ok, err := bundleFile()
+		if err != nil {
+			return err
+		}
+		if ok {
+			files = append(files, file)
+		}
 	}
 
 	// Artifacts live in the same per-build digest namespace as the

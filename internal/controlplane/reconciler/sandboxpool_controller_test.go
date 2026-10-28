@@ -2,7 +2,9 @@ package reconciler
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	runtimecatalog "fast-sandbox/internal/catalog/runtime"
@@ -29,6 +32,24 @@ import (
 	"fast-sandbox/internal/registryconfig"
 	"fast-sandbox/internal/runtimeenv"
 )
+
+func (r *SandboxPoolReconciler) planResourceAwareScale(
+	pool *apiv1alpha2.SandboxPool,
+	pods []corev1.Pod,
+	pendingSandboxes int32,
+	commitmentCapacity apiv1alpha2.SandboxComputeResources,
+	observed map[string]placement.FastletInfo,
+	now time.Time,
+) resourceAwareScalePlan {
+	requests, _ := pool.Spec.SandboxResources.RequestResources()
+	pendingDemands := make([]placement.ResourceDemand, 0, pendingSandboxes)
+	for range pendingSandboxes {
+		pendingDemands = append(pendingDemands, placement.ResourceDemand{
+			CPU: requests.CPU.DeepCopy(), Memory: requests.Memory.DeepCopy(),
+		})
+	}
+	return r.planResourceAwareScaleWithDemand(pool, pods, nil, pendingDemands, commitmentCapacity, observed, nil, now)
+}
 
 func TestRegistryConfigCompilesSameNamespaceSecretsAndPreservesLastValidRevision(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -76,6 +97,147 @@ registries:
 		Namespace: "tenant-a", Name: registrySecretName("pool-a"),
 	}, &projected))
 	require.Equal(t, previous, projected.Data[registryconfig.SecretKey], "an invalid update must retain the last compiled Secret")
+}
+
+func TestPoolRegistryConditionConvergesWithoutRepeatedStatusWrites(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		fastlet              bool
+		applied              bool
+		infraInvalid         bool
+		initialRegistryValid bool
+	}{
+		{name: "empty pool"},
+		{name: "configuration propagating", fastlet: true},
+		{name: "configuration applied", fastlet: true, applied: true},
+		{name: "registry recovered with invalid infra", infraInvalid: true, fastlet: true},
+		{name: "new pool with invalid infra", infraInvalid: true, initialRegistryValid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			pool := &apiv1alpha2.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: "pool-a-uid", Generation: 1},
+				Spec: apiv1alpha2.SandboxPoolSpec{
+					Runtime: apiv1alpha2.RuntimeContainer, MaxSandboxesPerPod: 5,
+					SandboxResources: testSandboxResources(),
+					FastletTemplate:  corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}}}},
+				},
+				Status: apiv1alpha2.SandboxPoolStatus{Conditions: []metav1.Condition{{
+					Type: apiv1alpha2.PoolConditionInfraReady, Status: metav1.ConditionFalse,
+					Reason: apiv1alpha2.ReasonInfraComponentsInvalid, Message: "previous invalid configuration",
+				}}},
+			}
+			if test.fastlet {
+				pool.Spec.Capacity.PoolMin = 1
+			}
+			if test.infraInvalid {
+				component := testInlineComponent()
+				component.Artifact = nil
+				component.Delivery = apiv1alpha2.InfraDeliveryHostProcess
+				pool.Spec.InfraComponents = []apiv1alpha2.InfraComponent{component}
+				// The declaration is valid, but the container runtime cannot
+				// deliver host-process components.
+				require.NoError(t, pool.Spec.ValidateInfraComponents())
+			}
+			source := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: registryconfig.ConfigMapName, Namespace: pool.Namespace},
+				Data:       map[string]string{registryconfig.ConfigMapKey: "registries: ["},
+			}
+			if test.initialRegistryValid {
+				source.Data[registryconfig.ConfigMapKey] = "registries: []"
+			}
+			statusWrites := 0
+			k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&apiv1alpha2.SandboxPool{}).
+				WithObjects(pool, source).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceUpdate: func(ctx context.Context, c client.Client, name string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+						err := c.SubResource(name).Update(ctx, obj, opts...)
+						if _, ok := obj.(*apiv1alpha2.SandboxPool); err == nil && ok && name == "status" {
+							statusWrites++
+						}
+						return err
+					},
+				}).Build()
+			registry := placement.NewInMemoryRegistry()
+			reconciler := &SandboxPoolReconciler{Client: k8sClient, Scheme: scheme, Catalog: runtimecatalog.Builtin(), Registry: registry}
+			if test.fastlet {
+				plan, err := runtimeenv.ResolveDefault(reconciler.Catalog, pool.Spec.Runtime)
+				require.NoError(t, err)
+				// Existing Fastlets can outlive a later invalid infra update.
+				podPool := pool.DeepCopy()
+				if test.infraInvalid {
+					podPool.Spec.InfraComponents = nil
+				}
+				pod, err := reconciler.constructPodWithRuntimePlan(podPool, plan)
+				require.NoError(t, err)
+				pod.Name, pod.GenerateName, pod.UID = "fastlet-a", "", "pod-a"
+				pod.Status.Phase = corev1.PodRunning
+				pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+				require.NoError(t, k8sClient.Create(ctx, pod))
+				revision := "previous-revision"
+				if test.applied {
+					compiled, err := registryconfig.NewCompiled(nil)
+					require.NoError(t, err)
+					revision = compiled.Revision
+				}
+				seedControllerRegistry(t, registry, placement.FastletInfo{
+					ID: "default/fastlet-a", Namespace: pool.Namespace, PoolName: pool.Name,
+					PodName: pod.Name, PodUID: string(pod.UID), PodReady: true, RuntimeReady: true,
+					LastHeartbeat: time.Now(), RegistryRevision: revision,
+				})
+			}
+
+			// Registry validation and rollout must reflect the current
+			// configuration independently of infra validation.
+			_, err := reconciler.Reconcile(ctx, poolRequest(pool))
+			require.NoError(t, err)
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), pool))
+			condition := apiMeta.FindStatusCondition(pool.Status.Conditions, apiv1alpha2.PoolConditionRegistryReady)
+			require.NotNil(t, condition)
+			if test.initialRegistryValid {
+				require.Equal(t, metav1.ConditionTrue, condition.Status)
+				require.Equal(t, apiv1alpha2.ReasonRegistryAvailable, condition.Reason)
+			} else {
+				require.Equal(t, metav1.ConditionFalse, condition.Status)
+				require.Equal(t, apiv1alpha2.ReasonRegistryInvalid, condition.Reason)
+			}
+			// Removing the source selects the valid anonymous-registry default.
+			require.NoError(t, k8sClient.Delete(ctx, source))
+			_, err = reconciler.Reconcile(ctx, poolRequest(pool))
+			require.NoError(t, err)
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), pool))
+			condition = apiMeta.FindStatusCondition(pool.Status.Conditions, apiv1alpha2.PoolConditionRegistryReady)
+			require.NotNil(t, condition)
+			if test.fastlet && !test.applied {
+				require.Equal(t, metav1.ConditionFalse, condition.Status)
+				require.Equal(t, "RegistryPropagating", condition.Reason)
+			} else {
+				require.Equal(t, metav1.ConditionTrue, condition.Status)
+				require.Equal(t, apiv1alpha2.ReasonRegistryAvailable, condition.Reason)
+			}
+			infraCondition := apiMeta.FindStatusCondition(pool.Status.Conditions, apiv1alpha2.PoolConditionInfraReady)
+			require.NotNil(t, infraCondition)
+			if test.infraInvalid {
+				require.Equal(t, metav1.ConditionFalse, infraCondition.Status)
+				require.Equal(t, apiv1alpha2.ReasonInfraComponentsInvalid, infraCondition.Reason)
+			} else {
+				require.Equal(t, metav1.ConditionTrue, infraCondition.Status)
+			}
+
+			// Check actual writes: comparing only final status would miss a
+			// condition that flips twice and ends each reconcile unchanged.
+			statusWrites = 0
+			for range 3 {
+				_, err = reconciler.Reconcile(ctx, poolRequest(pool))
+				require.NoError(t, err)
+			}
+			require.Zero(t, statusWrites, "stable reconciles must not publish intermediate conditions")
+		})
+	}
 }
 
 func TestRegistryWriteCredentialCompilesFromWriteSecretRef(t *testing.T) {
@@ -261,6 +423,762 @@ func TestRuntimeCapabilityConditionWaitsForHeartbeat(t *testing.T) {
 	require.Equal(t, apiv1alpha2.ReasonRuntimeCapabilityPending, condition.Reason)
 }
 
+func TestResourceAwareDesiredPodsUsesEffectiveFreeCapacityAndInFlightOnce(t *testing.T) {
+	now := time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	planned := resourceAwareCommitmentCapacity(pool)
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-open", "uid-open", "10.0.0.1"),
+		*fastletPod("fastlet-blocked", "uid-blocked", "10.0.0.2"),
+	}
+	registry := placement.NewInMemoryRegistry()
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-open", "uid-open", 2, fastletapi.AdmissionStateOpen, now))
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-blocked", "uid-blocked", 1, fastletapi.AdmissionStateBlocked, now))
+	reconciler := &SandboxPoolReconciler{Registry: registry, Now: func() time.Time { return now }}
+
+	observed := resourceFastletsForPoolChildren(registry, pool, pods)
+	require.Equal(t, int32(3), reconciler.planResourceAwareScale(pool, pods, 2, planned, observed, now).desiredPods,
+		"two pending Sandboxes plus buffer require one replacement Fastlet when a peer is blocked")
+
+	inFlight := fastletPod("fastlet-starting", "uid-starting", "")
+	inFlight.Status.Phase = corev1.PodPending
+	inFlight.CreationTimestamp = metav1.NewTime(now.Add(-time.Minute))
+	pods = append(pods, *inFlight)
+	observed = resourceFastletsForPoolChildren(registry, pool, pods)
+	require.Equal(t, int32(3), reconciler.planResourceAwareScale(pool, pods, 2, planned, observed, now).desiredPods,
+		"the starting Pod contributes nominal capacity exactly once")
+}
+
+func TestResourceAwareDesiredPodsUsesBufferMaxForEmptyScaleDown(t *testing.T) {
+	now := time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.Capacity.BufferMin = 2
+	pool.Spec.Capacity.BufferMax = 4
+	planned := resourceAwareCommitmentCapacity(pool)
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-a", "uid-a", "10.0.0.1"),
+		*fastletPod("fastlet-b", "uid-b", "10.0.0.2"),
+	}
+	registry := placement.NewInMemoryRegistry()
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-a", "uid-a", 0, fastletapi.AdmissionStateOpen, now))
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-b", "uid-b", 0, fastletapi.AdmissionStateOpen, now))
+	reconciler := &SandboxPoolReconciler{Registry: registry, Now: func() time.Time { return now }}
+
+	observed := resourceFastletsForPoolChildren(registry, pool, pods)
+	require.Equal(t, int32(1), reconciler.planResourceAwareScale(pool, pods, 0, planned, observed, now).desiredPods)
+}
+
+func TestResourceAwareScalePlanKeepsSelectedFastletIdentity(t *testing.T) {
+	now := time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.Capacity.BufferMin = 0
+	pool.Spec.Capacity.BufferMax = 0
+	planned := resourceAwareCommitmentCapacity(pool)
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-healthy", "uid-healthy", "10.0.0.1"),
+		*fastletPod("fastlet-blocked", "uid-blocked", "10.0.0.2"),
+	}
+	registry := placement.NewInMemoryRegistry()
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-healthy", "uid-healthy", 0, fastletapi.AdmissionStateOpen, now))
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-blocked", "uid-blocked", 0, fastletapi.AdmissionStateBlocked, now))
+	reconciler := &SandboxPoolReconciler{Registry: registry, Now: func() time.Time { return now }}
+
+	observed := resourceFastletsForPoolChildren(registry, pool, pods)
+	plan := reconciler.planResourceAwareScale(pool, pods, 0, planned, observed, now)
+	require.Equal(t, int32(1), plan.desiredPods)
+	require.Equal(t, []string{"fastlet-blocked/uid-blocked"}, plan.drainCandidates,
+		"the Pod that contributed zero effective capacity must remain the drain target")
+}
+
+func TestResourceAwareScalePlanPreservesActiveDrainTarget(t *testing.T) {
+	now := time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	planned := resourceAwareCommitmentCapacity(pool)
+	draining := fastletPod("fastlet-draining", "uid-draining", "10.0.0.1")
+	draining.Annotations = map[string]string{
+		placement.AnnotationDraining:    "true",
+		placement.AnnotationDrainReason: placement.DrainReasonScaleDown,
+	}
+	open := fastletPod("fastlet-open", "uid-open", "10.0.0.2")
+	registry := placement.NewInMemoryRegistry()
+	drainingInfo := resourceAwareControllerFastlet("fastlet-draining", "uid-draining", 0, fastletapi.AdmissionStateOpen, now)
+	seedControllerRegistry(t, registry, drainingInfo)
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-open", "uid-open", 2, fastletapi.AdmissionStateOpen, now))
+	reconciler := &SandboxPoolReconciler{Registry: registry, Now: func() time.Time { return now }}
+
+	pods := []corev1.Pod{*draining, *open}
+	observed := resourceFastletsForPoolChildren(registry, pool, pods)
+	plan := reconciler.planResourceAwareScale(pool, pods, 0, planned, observed, now)
+	require.Equal(t, int32(1), plan.desiredPods)
+	require.Equal(t, int32(1), plan.activeScaleDownDrains)
+
+	desired, condition := reconciler.stabilizeResourceAwareScaleDown(pool, int32(2)-plan.activeScaleDownDrains, plan.desiredPods)
+	require.Equal(t, int32(1), desired, "an active drain must not be canceled by a fresh stabilization window")
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+}
+
+func TestReconcileDrainingUsesResourceScalePlanIdentity(t *testing.T) {
+	reconciler, k8sClient, _, pool := newDrainHarness(t, nil)
+	const desiredHash = "desired-template"
+	for _, name := range []string{"fastlet-a", "fastlet-b"} {
+		pod := getFastletPod(t, k8sClient, name)
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[placement.AnnotationPodTemplateHash] = desiredHash
+		require.NoError(t, k8sClient.Update(context.Background(), pod))
+	}
+	fastletA := getFastletPod(t, k8sClient, "fastlet-a")
+	fastletB := getFastletPod(t, k8sClient, "fastlet-b")
+
+	_, handled, err := reconciler.reconcileDraining(
+		context.Background(), pool, []corev1.Pod{*fastletA, *fastletB}, nil, 1, desiredHash, true,
+		[]string{"fastlet-b/pod-b"}, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.False(t, placement.PodDrainRequested(getFastletPod(t, k8sClient, "fastlet-a")))
+	require.True(t, placement.PodDrainRequested(getFastletPod(t, k8sClient, "fastlet-b")),
+		"draining must consume the exact candidate selected by the resource calculation")
+}
+
+func TestResourceAwareDesiredPodsExpiresNominalCapacityWithoutHeartbeat(t *testing.T) {
+	now := time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	planned := resourceAwareCommitmentCapacity(pool)
+	pod := fastletPod("fastlet-starting", "uid-starting", "")
+	pod.Status.Phase = corev1.PodPending
+	reconciler := &SandboxPoolReconciler{Now: func() time.Time { return now }, FastletStartupGrace: 2 * time.Minute}
+
+	pod.CreationTimestamp = metav1.NewTime(now.Add(-time.Minute))
+	pods := []corev1.Pod{*pod}
+	require.Equal(t, int32(1), reconciler.planResourceAwareScale(pool, pods, 2, planned, nil, now).desiredPods,
+		"a newly created Pod contributes its nominal capacity once")
+
+	pod.CreationTimestamp = metav1.NewTime(now.Add(-3 * time.Minute))
+	pods[0] = *pod
+	require.Equal(t, int32(2), reconciler.planResourceAwareScale(pool, pods, 2, planned, nil, now).desiredPods,
+		"a Pod without a heartbeat stops hiding replacement demand after startup grace")
+}
+
+func TestResourceAwareScaleDownRequiresContinuousStabilization(t *testing.T) {
+	now := time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	reconciler := &SandboxPoolReconciler{
+		Now: func() time.Time { return now }, ResourceScaleDownStabilization: time.Minute,
+	}
+
+	desired, condition := reconciler.stabilizeResourceAwareScaleDown(pool, 2, 1)
+	require.Equal(t, int32(2), desired)
+	require.Equal(t, now, condition.LastTransitionTime.Time)
+	apiMeta.SetStatusCondition(&pool.Status.Conditions, *condition)
+
+	now = now.Add(30 * time.Second)
+	desired, condition = reconciler.stabilizeResourceAwareScaleDown(pool, 2, 1)
+	require.Equal(t, int32(2), desired)
+	require.Equal(t, metav1.ConditionTrue, condition.Status)
+
+	now = now.Add(31 * time.Second)
+	desired, condition = reconciler.stabilizeResourceAwareScaleDown(pool, 2, 1)
+	require.Equal(t, int32(1), desired)
+	require.Equal(t, metav1.ConditionTrue, condition.Status)
+
+	desired, condition = reconciler.stabilizeResourceAwareScaleDown(pool, 2, 2)
+	require.Equal(t, int32(2), desired)
+	require.Equal(t, metav1.ConditionFalse, condition.Status, "recovered demand resets the stabilization window")
+}
+
+func TestSandboxNeedsResourceCapacityKeepsRejectedAssignmentPending(t *testing.T) {
+	pending := &apiv1alpha2.Sandbox{
+		Status: apiv1alpha2.SandboxStatus{
+			Placement: apiv1alpha2.PlacementStatus{FastletName: "fastlet-full", FastletPodUID: "uid-full"},
+			Runtime:   apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending},
+		},
+	}
+	require.True(t, sandboxNeedsResourceCapacity(pending, nil, time.Time{}),
+		"a rejected Sandbox still needs capacity even though its durable assignment is present")
+
+	creating := pending.DeepCopy()
+	creating.Status.Runtime.State = apiv1alpha2.RuntimeCreating
+	require.False(t, sandboxNeedsResourceCapacity(creating, nil, time.Time{}),
+		"creation already holds a Fastlet commitment reservation")
+
+	ready := pending.DeepCopy()
+	ready.Status.Runtime.State = apiv1alpha2.RuntimeReady
+	require.False(t, sandboxNeedsResourceCapacity(ready, nil, time.Time{}))
+
+	paused := pending.DeepCopy()
+	paused.Status.Runtime.State = apiv1alpha2.RuntimePaused
+	require.False(t, sandboxNeedsResourceCapacity(paused, nil, time.Time{}))
+
+	failed := pending.DeepCopy()
+	failed.Status.Runtime.State = apiv1alpha2.RuntimeFailed
+	require.False(t, sandboxNeedsResourceCapacity(failed, nil, time.Time{}),
+		"terminal failure needs an explicit recovery operation, not additional Pool capacity")
+}
+
+func TestSandboxNeedsResourceCapacityUsesExactResumeReservation(t *testing.T) {
+	now := time.Date(2026, 10, 18, 8, 0, 0, 0, time.UTC)
+	resume := &apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("sandbox-a"), Generation: 7},
+		Status: apiv1alpha2.SandboxStatus{
+			Placement: apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: types.UID("uid-a"), Attempt: 3},
+			Runtime:   apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeResuming, Generation: 2},
+		},
+	}
+	fastlet := resourceAwareControllerFastlet("fastlet-a", "uid-a", 1, fastletapi.AdmissionStateOpen, now)
+	fastlet.ResourceReceivedAt = now
+	fastlet.SandboxStatuses = map[string]fastletapi.SandboxStatus{
+		"sandbox-a": {
+			SandboxID: "sandbox-a", InstanceGeneration: 2, AssignmentAttempt: 3, AcceptedGeneration: 7,
+		},
+	}
+	observed := map[string]placement.FastletInfo{"fastlet-a/uid-a": fastlet}
+
+	require.True(t, sandboxNeedsResourceCapacity(resume, nil, now),
+		"a resume without Fastlet reservation evidence still needs capacity")
+	require.False(t, sandboxNeedsResourceCapacity(resume, observed, now),
+		"an accepted resume is already represented in Admission.Used")
+
+	newSpecGeneration := resume.DeepCopy()
+	newSpecGeneration.Generation++
+	require.False(t, sandboxNeedsResourceCapacity(newSpecGeneration, observed, now),
+		"an unrelated Spec update does not release the existing Fastlet reservation")
+
+	oldGeneration := fastlet
+	oldGeneration.SandboxStatuses = map[string]fastletapi.SandboxStatus{
+		"sandbox-a": {
+			SandboxID: "sandbox-a", InstanceGeneration: 1, AssignmentAttempt: 3, AcceptedGeneration: 7,
+		},
+	}
+	require.True(t, sandboxNeedsResourceCapacity(resume, map[string]placement.FastletInfo{"fastlet-a/uid-a": oldGeneration}, now),
+		"an old runtime generation must not suppress pending demand")
+
+	oldAttempt := fastlet
+	oldAttempt.SandboxStatuses = map[string]fastletapi.SandboxStatus{
+		"sandbox-a": {
+			SandboxID: "sandbox-a", InstanceGeneration: 2, AssignmentAttempt: 2, AcceptedGeneration: 7,
+		},
+	}
+	require.True(t, sandboxNeedsResourceCapacity(resume, map[string]placement.FastletInfo{"fastlet-a/uid-a": oldAttempt}, now),
+		"an old assignment attempt must not suppress pending demand")
+
+	stale := fastlet
+	stale.LastHeartbeat = now.Add(-placement.DefaultObservationStaleAfter - time.Second)
+	require.True(t, sandboxNeedsResourceCapacity(resume, map[string]placement.FastletInfo{"fastlet-a/uid-a": stale}, now),
+		"a stale reservation must return to conservative pending demand")
+}
+
+func TestAcceptedResumeDoesNotCreateReplacementFastlet(t *testing.T) {
+	now := time.Date(2026, 10, 18, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.Capacity.BufferMin = 3
+	pod := fastletPod("fastlet-a", "uid-a", "10.0.0.1")
+	fastlet := resourceAwareControllerFastlet("fastlet-a", "uid-a", 1, fastletapi.AdmissionStateOpen, now)
+	fastlet.SandboxStatuses = map[string]fastletapi.SandboxStatus{
+		"sandbox-a": {
+			SandboxID: "sandbox-a", InstanceGeneration: 2, AssignmentAttempt: 3, AcceptedGeneration: 7,
+		},
+	}
+	registry := placement.NewInMemoryRegistry()
+	seedControllerRegistry(t, registry, fastlet)
+	reconciler := &SandboxPoolReconciler{Registry: registry, Now: func() time.Time { return now }}
+	observed := resourceFastletsForPoolChildren(registry, pool, []corev1.Pod{*pod})
+	sandbox := apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("sandbox-a"), Generation: 7},
+		Spec:       apiv1alpha2.SandboxSpec{PoolRef: "pool-a"},
+		Status: apiv1alpha2.SandboxStatus{
+			Placement: apiv1alpha2.PlacementStatus{FastletName: "fastlet-a", FastletPodUID: types.UID("uid-a"), Attempt: 3},
+			Runtime:   apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeResuming, Generation: 2},
+		},
+	}
+	resolution, err := resolvePoolPendingResources(pool, []apiv1alpha2.Sandbox{sandbox}, observed, now)
+	require.NoError(t, err)
+	require.Empty(t, resolution.admissible, "the accepted resume is already charged to the Fastlet ledger")
+	plan := reconciler.planResourceAwareScale(
+		pool, []corev1.Pod{*pod}, int32(len(resolution.admissible)), resourceAwareCommitmentCapacity(pool), observed, now,
+	)
+	require.Equal(t, int32(1), plan.desiredPods,
+		"the accepted resume must not create a replacement Fastlet")
+	require.Equal(t, int32(2), reconciler.planResourceAwareScale(
+		pool, []corev1.Pod{*pod}, 1, resourceAwareCommitmentCapacity(pool), observed, now,
+	).desiredPods, "recounting the accepted resume would create an unnecessary Fastlet")
+}
+
+func TestPoolSlotDemandCountsRetainsLegacySlotDemand(t *testing.T) {
+	pending := apiv1alpha2.Sandbox{
+		Spec: apiv1alpha2.SandboxSpec{PoolRef: "pool-a"},
+		Status: apiv1alpha2.SandboxStatus{
+			Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending},
+		},
+	}
+
+	active, pendingCount := poolSlotDemandCounts([]apiv1alpha2.Sandbox{pending}, "pool-a", nil)
+	require.Zero(t, active)
+	require.Equal(t, int32(1), pendingCount,
+		"disabling ResourceAware scaling must retain the existing slot-based demand path")
+}
+
+func TestResourceAwareScaleUsesHeterogeneousPendingCommitments(t *testing.T) {
+	now := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.MaxSandboxesPerPod = 4
+	pool.Spec.Capacity.BufferMin = 0
+	pool.Spec.Capacity.BufferMax = 0
+	planned := resourceAwareCommitmentCapacity(pool)
+	pod := fastletPod("fastlet-a", "uid-a", "10.0.0.1")
+	registry := placement.NewInMemoryRegistry()
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-a", "uid-a", 0, fastletapi.AdmissionStateOpen, now))
+	reconciler := &SandboxPoolReconciler{Registry: registry, Now: func() time.Time { return now }}
+	observed := resourceFastletsForPoolChildren(registry, pool, []corev1.Pod{*pod})
+
+	sandboxes := make([]apiv1alpha2.Sandbox, 3)
+	for index := range sandboxes {
+		sandboxes[index] = apiv1alpha2.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("large-%d", index)},
+			Spec: apiv1alpha2.SandboxSpec{
+				PoolRef: "pool-a",
+				Resources: &apiv1alpha2.SandboxResourceRequirements{Limits: apiv1alpha2.SandboxComputeResources{
+					CPU: resource.MustParse("4"), Memory: resource.MustParse("4Gi"),
+				}},
+			},
+			Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending}},
+		}
+	}
+	resolution, err := resolvePoolPendingResources(pool, sandboxes, observed, now)
+	require.NoError(t, err)
+	pending := resolution.admissible
+	totalPending := placement.ResourceDemand{CPU: resource.MustParse("0"), Memory: resource.MustParse("0")}
+	for _, demand := range pending {
+		totalPending.CPU.Add(demand.CPU)
+		totalPending.Memory.Add(demand.Memory)
+	}
+	require.Equal(t, int64(6000), totalPending.CPU.MilliValue())
+	expectedMemory := resource.MustParse("6Gi")
+	require.Equal(t, expectedMemory.Value(), totalPending.Memory.Value())
+
+	plan := reconciler.planResourceAwareScaleWithDemand(
+		pool, []corev1.Pod{*pod}, sandboxes, pending, planned, observed, nil, now,
+	)
+	require.Equal(t, int32(2), plan.desiredPods,
+		"three Sandboxes fit the four-slot count but their six-CPU commitment needs two Fastlets")
+}
+
+func TestResourceAwareScaleAddsFastletWhenAggregateCapacityIsFragmented(t *testing.T) {
+	now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.MaxSandboxesPerPod = 4
+	pool.Spec.Capacity.BufferMin = 0
+	pool.Spec.Capacity.BufferMax = 0
+	planned := resourceAwareCommitmentCapacity(pool)
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-a", "uid-a", "10.0.0.1"),
+		*fastletPod("fastlet-b", "uid-b", "10.0.0.2"),
+	}
+	observed := make(map[string]placement.FastletInfo, len(pods))
+	for index, pod := range pods {
+		uid := string(pod.UID)
+		info := resourceAwareControllerFastlet(pod.Name, uid, 3, fastletapi.AdmissionStateOpen, now)
+		info.Admission.Capacity = 4
+		info.ResourceCommitted = placement.ResourceDemand{
+			CPU: resource.MustParse("3"), Memory: resource.MustParse("6Gi"),
+		}
+		info.ResourceReceivedAt = now
+		observed[pod.Name+"/"+uid] = info
+		if pods[index].Annotations == nil {
+			pods[index].Annotations = make(map[string]string)
+		}
+		pods[index].Annotations[fastletsettings.CommitmentCapacityAnnotation] = `{"cpu":"4","memory":"8Gi"}`
+	}
+	sandbox := apiv1alpha2.Sandbox{
+		Spec: apiv1alpha2.SandboxSpec{
+			PoolRef: pool.Name,
+			Resources: &apiv1alpha2.SandboxResourceRequirements{Limits: apiv1alpha2.SandboxComputeResources{
+				CPU: resource.MustParse("4"), Memory: resource.MustParse("4Gi"),
+			}},
+		},
+		Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending}},
+	}
+	resolution, err := resolvePoolPendingResources(pool, []apiv1alpha2.Sandbox{sandbox}, observed, now)
+	require.NoError(t, err)
+	pending := resolution.admissible
+	require.Len(t, pending, 1)
+	require.Equal(t, int64(2000), pending[0].CPU.MilliValue())
+
+	plan := (&SandboxPoolReconciler{}).planResourceAwareScaleWithDemand(
+		pool, pods, []apiv1alpha2.Sandbox{sandbox}, pending, planned, observed, nil, now,
+	)
+	require.Equal(t, int32(3), plan.desiredPods,
+		"aggregate free CPU is sufficient, but neither existing Fastlet can fit the two-CPU request")
+}
+
+func TestResourceAwareScaleDoesNotAddFastletWhenSmallOverridesFit(t *testing.T) {
+	now := time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.MaxSandboxesPerPod = 4
+	pool.Spec.Capacity.BufferMin = 0
+	pool.Spec.Capacity.BufferMax = 0
+	planned := resourceAwareCommitmentCapacity(pool)
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-a", "uid-a", "10.0.0.1"),
+		*fastletPod("fastlet-b", "uid-b", "10.0.0.2"),
+	}
+	observed := make(map[string]placement.FastletInfo, len(pods))
+	for index, pod := range pods {
+		uid := string(pod.UID)
+		info := resourceAwareControllerFastlet(pod.Name, uid, 3, fastletapi.AdmissionStateOpen, now)
+		info.Admission.Capacity = 4
+		info.ResourceCommitted = placement.ResourceDemand{
+			CPU: resource.MustParse("3500m"), Memory: resource.MustParse("7Gi"),
+		}
+		info.ResourceReceivedAt = now
+		observed[pod.Name+"/"+uid] = info
+		if pods[index].Annotations == nil {
+			pods[index].Annotations = make(map[string]string)
+		}
+		pods[index].Annotations[fastletsettings.CommitmentCapacityAnnotation] = `{"cpu":"4","memory":"8Gi"}`
+	}
+	sandboxes := make([]apiv1alpha2.Sandbox, 2)
+	for index := range sandboxes {
+		sandboxes[index] = apiv1alpha2.Sandbox{
+			Spec: apiv1alpha2.SandboxSpec{
+				PoolRef: pool.Name,
+				Resources: &apiv1alpha2.SandboxResourceRequirements{Limits: apiv1alpha2.SandboxComputeResources{
+					CPU: resource.MustParse("1"), Memory: resource.MustParse("2Gi"),
+				}},
+			},
+			Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending}},
+		}
+	}
+	resolution, err := resolvePoolPendingResources(pool, sandboxes, observed, now)
+	require.NoError(t, err)
+	pending := resolution.admissible
+	require.Len(t, pending, 2)
+	require.Equal(t, int64(500), pending[0].CPU.MilliValue())
+
+	plan := (&SandboxPoolReconciler{}).planResourceAwareScaleWithDemand(
+		pool, pods, sandboxes, pending, planned, observed, nil, now,
+	)
+	require.Equal(t, int32(2), plan.desiredPods,
+		"each small request fits one physical slot even though neither remainder fits a default Sandbox")
+}
+
+func TestUnadmittableDemandDoesNotSuppressValidScaleOutOrBuffer(t *testing.T) {
+	now := time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.MaxSandboxesPerPod = 4
+	pool.Spec.Capacity.BufferMin = 1
+	pool.Spec.Capacity.BufferMax = 1
+	planned := resourceAwareCommitmentCapacity(pool)
+	pod := fastletPod("fastlet-full", "uid-full", "10.0.0.1")
+	full := resourceAwareControllerFastlet("fastlet-full", "uid-full", 4, fastletapi.AdmissionStateOpen, now)
+	full.Admission.Capacity = 4
+	full.ResourceCommitted = placement.ResourceDemand{CPU: resource.MustParse("4"), Memory: resource.MustParse("8Gi")}
+	full.ResourceReceivedAt = now
+	observed := map[string]placement.FastletInfo{"fastlet-full/uid-full": full}
+
+	valid := apiv1alpha2.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "valid", Namespace: pool.Namespace},
+		Spec: apiv1alpha2.SandboxSpec{
+			PoolRef: pool.Name,
+			Resources: &apiv1alpha2.SandboxResourceRequirements{Limits: apiv1alpha2.SandboxComputeResources{
+				CPU: resource.MustParse("2"), Memory: resource.MustParse("4Gi"),
+			}},
+		},
+		Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending}},
+	}
+	oversized := valid.DeepCopy()
+	oversized.Name = "oversized"
+	oversized.Spec.Resources.Limits = apiv1alpha2.SandboxComputeResources{
+		CPU: resource.MustParse("10"), Memory: resource.MustParse("20Gi"),
+	}
+
+	resolution, err := resolvePoolPendingResources(pool, []apiv1alpha2.Sandbox{valid, *oversized}, observed, now)
+	require.NoError(t, err)
+	require.Len(t, resolution.admissible, 1)
+	require.Len(t, resolution.unadmittable, 1)
+	require.Equal(t, "oversized", resolution.unadmittable[0].key.Name)
+	require.Equal(t, orchestration.ReasonLimitExceedsFastletBudget, resolution.unadmittable[0].reason)
+
+	plan := (&SandboxPoolReconciler{}).planResourceAwareScaleWithDemand(
+		pool, []corev1.Pod{*pod}, []apiv1alpha2.Sandbox{valid, *oversized}, resolution.admissible, planned, observed, nil, now,
+	)
+	require.Equal(t, int32(2), plan.desiredPods,
+		"the valid pending Sandbox and buffer must still create one fresh Fastlet")
+
+	resolution, err = resolvePoolPendingResources(pool, []apiv1alpha2.Sandbox{*oversized}, observed, now)
+	require.NoError(t, err)
+	require.Empty(t, resolution.admissible)
+	plan = (&SandboxPoolReconciler{}).planResourceAwareScaleWithDemand(
+		pool, []corev1.Pod{*pod}, []apiv1alpha2.Sandbox{*oversized}, resolution.admissible, planned, observed, nil, now,
+	)
+	require.Equal(t, int32(2), plan.desiredPods,
+		"an unadmittable Sandbox must not suppress the independent Pool buffer")
+}
+
+func TestResourceAwareScaleExcludesEveryFastletOnPressuredNode(t *testing.T) {
+	now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	planned := resourceAwareCommitmentCapacity(pool)
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-pressured", "uid-pressured", "10.0.0.1"),
+		*fastletPod("fastlet-sibling", "uid-sibling", "10.0.0.2"),
+	}
+	pressured := resourceAwareControllerFastlet("fastlet-pressured", "uid-pressured", 0, fastletapi.AdmissionStateBlocked, now)
+	pressured.NodeName = "node-a"
+	pressured.ResourceReceivedAt = now
+	pressured.Admission.Resources.Reason = fastletapi.AdmissionReasonNodeMemoryPressure
+	sibling := resourceAwareControllerFastlet("fastlet-sibling", "uid-sibling", 0, fastletapi.AdmissionStateOpen, now)
+	sibling.NodeName = "node-a"
+	sibling.ResourceReceivedAt = now
+	observed := map[string]placement.FastletInfo{
+		"fastlet-pressured/uid-pressured": pressured,
+		"fastlet-sibling/uid-sibling":     sibling,
+	}
+
+	plan := (&SandboxPoolReconciler{}).planResourceAwareScale(pool, pods, 0, planned, observed, now)
+	require.Equal(t, int32(3), plan.desiredPods,
+		"node pressure must remove sibling Fastlets from the same scaler view used by placement")
+}
+
+func TestResourceAwareScaleExcludesStartingFastletOnPressuredNode(t *testing.T) {
+	now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	planned := resourceAwareCommitmentCapacity(pool)
+	pressuredPod := fastletPod("fastlet-pressured", "uid-pressured", "10.0.0.1")
+	pressuredPod.Spec.NodeName = "node-a"
+	startingPod := fastletPod("fastlet-starting", "uid-starting", "")
+	startingPod.Spec.NodeName = "node-a"
+	startingPod.CreationTimestamp = metav1.NewTime(now.Add(-time.Minute))
+	pods := []corev1.Pod{*pressuredPod, *startingPod}
+
+	pressured := resourceAwareControllerFastlet("fastlet-pressured", "uid-pressured", 0, fastletapi.AdmissionStateBlocked, now)
+	pressured.NodeName = "node-a"
+	pressured.ResourceReceivedAt = now
+	pressured.Admission.Resources.Reason = fastletapi.AdmissionReasonNodeMemoryPressure
+	observed := map[string]placement.FastletInfo{
+		"fastlet-pressured/uid-pressured": pressured,
+	}
+	reconciler := &SandboxPoolReconciler{FastletStartupGrace: 2 * time.Minute}
+
+	plan := reconciler.planResourceAwareScale(pool, pods, 0, planned, observed, now)
+	require.Equal(t, int32(3), plan.desiredPods,
+		"a starting sibling on the pressured node must not contribute nominal startup-grace capacity")
+}
+
+func TestResourceAwareScaleAppliesPressureObservedByAnotherPool(t *testing.T) {
+	now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	planned := resourceAwareCommitmentCapacity(pool)
+	pod := fastletPod("fastlet-current-pool", "uid-current", "10.0.0.2")
+	pod.Spec.NodeName = "node-a"
+	open := resourceAwareControllerFastlet("fastlet-current-pool", "uid-current", 0, fastletapi.AdmissionStateOpen, now)
+	open.NodeName = "node-a"
+	open.ResourceReceivedAt = now
+	observed := map[string]placement.FastletInfo{"fastlet-current-pool/uid-current": open}
+
+	plan := (&SandboxPoolReconciler{}).planResourceAwareScaleWithDemand(
+		pool, []corev1.Pod{*pod}, nil, nil, planned, observed, map[string]struct{}{"node-a": {}}, now,
+	)
+	require.Equal(t, int32(2), plan.desiredPods,
+		"fresh node pressure reported by a different Pool must remove this Pool's sibling capacity")
+}
+
+func TestResourceAwareScaleKeepsPlannedUpgradeRemovalTarget(t *testing.T) {
+	now := time.Date(2026, 10, 27, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.MaxSandboxesPerPod = 4
+	pool.Spec.Capacity.BufferMin = 1
+	pool.Spec.Capacity.BufferMax = 1
+	planned := resourceAwareCommitmentCapacity(pool)
+	const desiredHash = "desired-template"
+
+	oldPod := fastletPod("fastlet-old", "uid-old", "10.0.0.1")
+	oldPod.Annotations = map[string]string{
+		placement.AnnotationPodTemplateHash: "old-template",
+		placement.AnnotationDraining:        "true",
+		placement.AnnotationDrainReason:     placement.DrainReasonPlannedUpgrade,
+	}
+	newPod := fastletPod("fastlet-new", "uid-new", "10.0.0.2")
+	newPod.Annotations = map[string]string{
+		placement.AnnotationPodTemplateHash:          desiredHash,
+		fastletsettings.CommitmentCapacityAnnotation: `{"cpu":"4","memory":"8Gi"}`,
+	}
+	newInfo := resourceAwareControllerFastlet("fastlet-new", "uid-new", 0, fastletapi.AdmissionStateOpen, now)
+	newInfo.ResourceReceivedAt = now
+
+	plan := (&SandboxPoolReconciler{}).planResourceAwareScaleWithDemand(
+		pool, []corev1.Pod{*oldPod, *newPod}, nil, nil, planned,
+		map[string]placement.FastletInfo{"fastlet-new/uid-new": newInfo}, nil, now,
+	)
+	require.Equal(t, int32(1), plan.activeDrains)
+	require.Equal(t, int32(1), plan.desiredPods,
+		"an upgrade drain is already a committed removal and must not trigger another surge")
+}
+
+func TestResourceAwareScaleDownExcludesFastletAwaitingAdmission(t *testing.T) {
+	now := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pool.Spec.MaxSandboxesPerPod = 4
+	pool.Spec.Capacity.BufferMin = 0
+	pool.Spec.Capacity.BufferMax = 0
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-a", "uid-a", "10.0.0.1"),
+		*fastletPod("fastlet-b", "uid-b", "10.0.0.2"),
+	}
+	observed := make(map[string]placement.FastletInfo, len(pods))
+	for _, pod := range pods {
+		info := resourceAwareControllerFastlet(pod.Name, string(pod.UID), 0, fastletapi.AdmissionStateOpen, now)
+		info.Admission.Capacity = 4
+		info.ResourceReceivedAt = now
+		observed[podIdentity(&pod)] = info
+	}
+	sandbox := assignedSandbox("sandbox-a", "fastlet-a", "uid-a")
+	sandbox.Generation = 1
+	sandbox.Status.Runtime.State = apiv1alpha2.RuntimePending
+
+	plan := (&SandboxPoolReconciler{}).planResourceAwareScaleWithDemand(
+		pool, pods, []apiv1alpha2.Sandbox{sandbox}, nil, resourceAwareCommitmentCapacity(pool), observed, nil, now,
+	)
+	require.Equal(t, int32(1), plan.desiredPods)
+	require.Equal(t, []string{"fastlet-b/uid-b"}, plan.drainCandidates,
+		"a durable assignment not present in the Fastlet ledger must keep its target out of scale-down")
+}
+
+func TestResourceAwareDrainDoesNotFallbackPastExactCandidates(t *testing.T) {
+	pods := []*corev1.Pod{
+		fastletPod("fastlet-a", "uid-a", "10.0.0.1"),
+		fastletPod("fastlet-b", "uid-b", "10.0.0.2"),
+		fastletPod("fastlet-c", "uid-c", "10.0.0.3"),
+	}
+	selections := selectDrainTargets(
+		pods, 2, []string{"fastlet-b/uid-b"}, "desired-template", false, true, nil,
+	)
+	require.Len(t, selections, 1)
+	require.Equal(t, "fastlet-b", selections[0].pod.Name)
+	require.Equal(t, placement.DrainReasonScaleDown, selections[0].reason)
+}
+
+func TestPoolCapacityConditionReportsPoolMaxLimit(t *testing.T) {
+	pool := resourceAwareScalingPool()
+	pool.Spec.Capacity.PoolMax = 2
+
+	condition := poolCapacityCondition(pool, 3, true)
+	require.Equal(t, apiv1alpha2.PoolConditionCapacityAvailable, condition.Type)
+	require.Equal(t, metav1.ConditionFalse, condition.Status)
+	require.Equal(t, apiv1alpha2.ReasonPoolMaxReached, condition.Reason)
+	require.Contains(t, condition.Message, "requires 3 Fastlet Pods")
+	require.Contains(t, condition.Message, "poolMax limits the Pool to 2")
+
+	condition = poolCapacityCondition(pool, 2, false)
+	require.Equal(t, metav1.ConditionTrue, condition.Status)
+	require.Equal(t, apiv1alpha2.ReasonCapacityAvailable, condition.Reason)
+}
+
+func TestPoolSummarySeparatesFastletsResourcesAndSandboxes(t *testing.T) {
+	now := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	pool := resourceAwareScalingPool()
+	pods := []corev1.Pod{
+		*fastletPod("fastlet-open", "uid-open", "10.0.0.1"),
+		*fastletPod("fastlet-blocked", "uid-blocked", "10.0.0.2"),
+	}
+	for index := range pods {
+		if pods[index].Annotations == nil {
+			pods[index].Annotations = make(map[string]string)
+		}
+		pods[index].Annotations[fastletsettings.CommitmentCapacityAnnotation] = `{"cpu":"4","memory":"8Gi"}`
+	}
+	registry := placement.NewInMemoryRegistry()
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-open", "uid-open", 1, fastletapi.AdmissionStateOpen, now))
+	seedControllerRegistry(t, registry, resourceAwareControllerFastlet("fastlet-blocked", "uid-blocked", 2, fastletapi.AdmissionStateBlocked, now))
+	observed := resourceFastletsForPoolChildren(registry, pool, pods)
+
+	fastlets, resources := summarizePoolFastlets(pool, pods, 2, 2, 0, 2, observed, nil, now)
+	require.Equal(t, &apiv1alpha2.SandboxPoolFastletSummary{Desired: 2, Current: 2, Ready: 2, Busy: 2}, fastlets)
+	require.Equal(t, "8", resources.Capacity.CPU.String())
+	require.Equal(t, "16Gi", resources.Capacity.Memory.String())
+	require.Equal(t, "3", resources.Committed.CPU.String())
+	require.Equal(t, "6Gi", resources.Committed.Memory.String())
+	require.Equal(t, "3", resources.Free.CPU.String())
+	require.Equal(t, "6Gi", resources.Free.Memory.String())
+
+	open := observed["fastlet-open/uid-open"]
+	open.RejectedUntil = now.Add(time.Minute)
+	observed["fastlet-open/uid-open"] = open
+	_, resources = summarizePoolFastlets(pool, pods, 2, 2, 0, 2, observed, nil, now)
+	require.Zero(t, resources.Free.CPU.Sign(), "Pool summary must use the same rejection cooldown as placement")
+	require.Zero(t, resources.Free.Memory.Sign(), "Pool summary must use the same rejection cooldown as placement")
+
+	terminatingAt := metav1.NewTime(now)
+	sandboxes := []apiv1alpha2.Sandbox{
+		{Spec: apiv1alpha2.SandboxSpec{PoolRef: "pool-a"}, Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeReady}}},
+		{Spec: apiv1alpha2.SandboxSpec{PoolRef: "pool-a"}, Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePaused}}},
+		{Spec: apiv1alpha2.SandboxSpec{PoolRef: "pool-a"}, Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimePending}}},
+		{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &terminatingAt}, Spec: apiv1alpha2.SandboxSpec{PoolRef: "pool-a"}},
+		{Spec: apiv1alpha2.SandboxSpec{PoolRef: "pool-a"}, Status: apiv1alpha2.SandboxStatus{Runtime: apiv1alpha2.RuntimeStatus{State: apiv1alpha2.RuntimeFailed}}},
+	}
+	summary := summarizePoolSandboxes(sandboxes, "pool-a")
+	require.Equal(t, &apiv1alpha2.SandboxPoolSandboxSummary{Total: 5, Pending: 1, Running: 1, Paused: 1, Terminating: 1, Failed: 1}, summary)
+}
+
+func TestPoolStructuredSummaryUpdatesAtLowFrequency(t *testing.T) {
+	observedAt := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	pool := &apiv1alpha2.SandboxPool{}
+	first := poolObservation{
+		currentPods: 1, observedAt: observedAt,
+		fastlets:  &apiv1alpha2.SandboxPoolFastletSummary{Current: 1},
+		sandboxes: &apiv1alpha2.SandboxPoolSandboxSummary{Total: 1},
+	}
+	require.True(t, first.apply(pool))
+	require.Equal(t, int32(1), pool.Status.Sandboxes.Total)
+
+	withinWindow := first
+	withinWindow.observedAt = observedAt.Add(30 * time.Second)
+	withinWindow.sandboxes = &apiv1alpha2.SandboxPoolSandboxSummary{Total: 2}
+	require.False(t, withinWindow.apply(pool), "summary-only changes are intentionally rate limited")
+	require.Equal(t, int32(1), pool.Status.Sandboxes.Total)
+
+	afterWindow := withinWindow
+	afterWindow.observedAt = observedAt.Add(time.Minute + time.Second)
+	require.True(t, afterWindow.apply(pool))
+	require.Equal(t, int32(2), pool.Status.Sandboxes.Total)
+}
+
+func resourceAwareScalingPool() *apiv1alpha2.SandboxPool {
+	return &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			MaxSandboxesPerPod: 10,
+			Capacity:           apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 10, BufferMin: 2, BufferMax: 4},
+			SandboxResources: apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+				resource.MustParse("2"), resource.MustParse("4Gi"), resource.MustParse("2"), resource.MustParse("2"), 256,
+			),
+		},
+	}
+}
+
+func resourceAwareCommitmentCapacity(pool *apiv1alpha2.SandboxPool) apiv1alpha2.SandboxComputeResources {
+	capacity, _, err := pool.Spec.SandboxResources.ResolveFastletCapacity(pool.Spec.MaxSandboxesPerPod)
+	if err != nil {
+		panic(err)
+	}
+	return capacity
+}
+
+func resourceAwareControllerFastlet(name, uid string, used int, state fastletapi.AdmissionState, now time.Time) placement.FastletInfo {
+	return placement.FastletInfo{
+		ID: placement.FastletID(name), Namespace: "default", PoolName: "pool-a", PodName: name, PodUID: uid,
+		PodReady: true, RuntimeReady: true, InfraReady: true, LastHeartbeat: now,
+		Admission: fastletapi.AdmissionStatus{Capacity: 10, Used: used, Running: used, Resources: &fastletapi.ResourceAdmissionStatus{
+			Version: "v2", Epoch: "epoch-" + name, Revision: 1,
+			Capacity:  fastletapi.SandboxResourceVector{CPU: "4", Memory: "8Gi"},
+			Committed: fastletapi.SandboxResourceVector{CPU: fmt.Sprintf("%d", used), Memory: fmt.Sprintf("%dGi", used*2)},
+			State:     state,
+		}},
+		ResourceCapacity: placement.ResourceDemand{CPU: resource.MustParse("4"), Memory: resource.MustParse("8Gi")},
+	}
+}
+
 func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
@@ -278,9 +1196,9 @@ func TestConstructPodUsesRuntimeProfileAndFixedResources(t *testing.T) {
 			MaxSandboxesPerPod: 5,
 			InfraComponents:    []apiv1alpha2.InfraComponent{testInlineComponent()},
 			WarmImages:         []string{"alpine:latest", "ubuntu:24.04"},
-			SandboxResources: apiv1alpha2.SandboxResourceProfile{
-				CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 256,
-			},
+			SandboxResources: apiv1alpha2.NewLegacySandboxResourceProfile(
+				resource.MustParse("1"), resource.MustParse("1Gi"), 256,
+			),
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				RuntimeClassName:             &runtimeClass,
 				AutomountServiceAccountToken: &automount,
@@ -382,15 +1300,38 @@ func TestApplyFastletResourcesAllowsExplicitAggregateOvercommit(t *testing.T) {
 		corev1.ResourceCPU:    resource.MustParse("100m"),
 		corev1.ResourceMemory: resource.MustParse("128Mi"),
 	}
-	sandbox := apiv1alpha2.SandboxResourceProfile{
-		CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 128,
-	}
+	sandbox := apiv1alpha2.NewLegacySandboxResourceProfile(
+		resource.MustParse("1"), resource.MustParse("1Gi"), 128,
+	)
 
 	require.NoError(t, applyFastletResources(&container, overhead, sandbox, 10))
 	require.Equal(t, "5", container.Resources.Limits.Cpu().String())
 	require.Equal(t, "5Gi", container.Resources.Limits.Memory().String())
 	require.Equal(t, "5", container.Resources.Requests.Cpu().String())
 	require.Equal(t, "5Gi", container.Resources.Requests.Memory().String())
+}
+
+func TestApplyFastletResourcesPreservesLegacyLimitBelowOneSandbox(t *testing.T) {
+	container := corev1.Container{
+		Name: "fastlet",
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		}},
+	}
+	overhead := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("128Mi"),
+	}
+	sandbox := apiv1alpha2.NewLegacySandboxResourceProfile(
+		resource.MustParse("1"), resource.MustParse("1Gi"), 128,
+	)
+
+	require.NoError(t, applyFastletResources(&container, overhead, sandbox, 10))
+	require.Equal(t, "500m", container.Resources.Limits.Cpu().String())
+	require.Equal(t, "512Mi", container.Resources.Limits.Memory().String())
+	require.Equal(t, "500m", container.Resources.Requests.Cpu().String())
+	require.Equal(t, "512Mi", container.Resources.Requests.Memory().String())
 }
 
 func TestApplyFastletResourcesRejectsLimitBelowRuntimeOverhead(t *testing.T) {
@@ -405,12 +1346,106 @@ func TestApplyFastletResourcesRejectsLimitBelowRuntimeOverhead(t *testing.T) {
 		corev1.ResourceCPU:    resource.MustParse("100m"),
 		corev1.ResourceMemory: resource.MustParse("128Mi"),
 	}
-	sandbox := apiv1alpha2.SandboxResourceProfile{
-		CPU: resource.MustParse("1"), Memory: resource.MustParse("1Gi"), PIDs: 128,
-	}
+	sandbox := apiv1alpha2.NewLegacySandboxResourceProfile(
+		resource.MustParse("1"), resource.MustParse("1Gi"), 128,
+	)
 
 	err := applyFastletResources(&container, overhead, sandbox, 10)
 	require.ErrorContains(t, err, "below runtime overhead")
+}
+
+func TestCompileFastletResourcesDerivesCommitmentAndEnvelope(t *testing.T) {
+	pool := &apiv1alpha2.SandboxPool{Spec: apiv1alpha2.SandboxPoolSpec{
+		MaxSandboxesPerPod: 10,
+		SandboxResources: apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+			resource.MustParse("2"), resource.MustParse("10Gi"), resource.MustParse("2"), resource.MustParse("2"), 256,
+		),
+		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet"}}}},
+	}}
+	overhead := corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi"),
+	}
+
+	resolved, err := compileFastletResources(pool, overhead)
+	require.NoError(t, err)
+	require.Equal(t, "10", resolved.CommitmentCapacity.CPU.String())
+	require.Equal(t, "50Gi", resolved.CommitmentCapacity.Memory.String())
+	require.Equal(t, "10", resolved.SandboxRuntimeBudget.CPU.String())
+	require.Equal(t, "50Gi", resolved.SandboxRuntimeBudget.Memory.String())
+	require.Equal(t, int64(10_100), resolved.RuntimeEnvelope.CPU.MilliValue())
+	expectedEnvelopeMemory := resource.MustParse("51328Mi")
+	require.Equal(t, expectedEnvelopeMemory.Value(), resolved.RuntimeEnvelope.Memory.Value())
+}
+
+func TestCompileFastletResourcesEnvelopeFitsOneSandboxLimit(t *testing.T) {
+	pool := &apiv1alpha2.SandboxPool{Spec: apiv1alpha2.SandboxPoolSpec{
+		MaxSandboxesPerPod: 1,
+		SandboxResources: apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+			resource.MustParse("2"), resource.MustParse("10Gi"), resource.MustParse("2"), resource.MustParse("2"), 256,
+		),
+		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet"}}}},
+	}}
+
+	resolved, err := compileFastletResources(pool, nil)
+	require.NoError(t, err)
+	require.Equal(t, "1", resolved.CommitmentCapacity.CPU.String())
+	require.Equal(t, "5Gi", resolved.CommitmentCapacity.Memory.String())
+	require.Equal(t, "2", resolved.SandboxRuntimeBudget.CPU.String())
+	require.Equal(t, "10Gi", resolved.SandboxRuntimeBudget.Memory.String())
+	require.Equal(t, "2", resolved.RuntimeEnvelope.CPU.String())
+	require.Equal(t, "10Gi", resolved.RuntimeEnvelope.Memory.String())
+}
+
+func TestCompileFastletResourcesRejectsResourceAwareRuntimeOwnerOverrides(t *testing.T) {
+	pool := &apiv1alpha2.SandboxPool{Spec: apiv1alpha2.SandboxPoolSpec{
+		MaxSandboxesPerPod: 10,
+		SandboxResources: apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+			resource.MustParse("2"), resource.MustParse("10Gi"), resource.MustParse("2"), resource.MustParse("2"), 256,
+		),
+		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"),
+			},
+		}}}}},
+	}}
+
+	_, err := compileFastletResources(pool, nil)
+	require.ErrorContains(t, err, "must not set resources.requests.cpu")
+}
+
+func TestConstructResourceAwarePodProjectsOneResolvedCapacity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	reconciler := &SandboxPoolReconciler{
+		Scheme: scheme, Catalog: runtimecatalog.Builtin(), FastletProxyImage: "fastlet-proxy:test",
+	}
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", UID: types.UID("pool-uid")},
+		Spec: apiv1alpha2.SandboxPoolSpec{
+			Runtime: apiv1alpha2.RuntimeContainer, MaxSandboxesPerPod: 10,
+			SandboxResources: apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+				resource.MustParse("2"), resource.MustParse("5Gi"), resource.MustParse("8"), resource.MustParse("1.25"), 256,
+			),
+			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: "fastlet", Image: "fastlet:test"},
+				{Name: "metrics", Image: "metrics:test", Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("16Mi")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("20m"), corev1.ResourceMemory: resource.MustParse("32Mi")},
+				}},
+			}}},
+		},
+	}
+
+	pod, err := reconciler.constructPod(pool, runtimecatalog.RuntimeProfile{Name: apiv1alpha2.RuntimeContainer})
+	require.NoError(t, err)
+	capacity, err := fastletsettings.DecodeCommitmentCapacity(pod.Annotations[fastletsettings.CommitmentCapacityAnnotation])
+	require.NoError(t, err)
+	require.Equal(t, "2500m", capacity.CPU.String())
+	require.Equal(t, "40Gi", capacity.Memory.String())
+	require.Equal(t, "2600m", pod.Spec.Containers[0].Resources.Requests.Cpu().String())
+	require.Equal(t, "41088Mi", pod.Spec.Containers[0].Resources.Requests.Memory().String())
+	require.Equal(t, pod.Spec.Containers[0].Resources.Requests, pod.Spec.Containers[0].Resources.Limits)
+	require.Equal(t, "20m", pod.Spec.Containers[1].Resources.Limits.Cpu().String(), "sidecar resources remain independent")
 }
 
 func TestEnsureBoundedPodContainersRejectsUnboundedUserSidecar(t *testing.T) {
@@ -470,7 +1505,7 @@ func TestScaleDownDrainsEmptyFastletBeforeDeletion(t *testing.T) {
 	require.NotEmpty(t, drainer.requests)
 }
 
-func TestLoadedFastletWaitsUntilDrainTimeout(t *testing.T) {
+func TestLoadedScaleDownFastletCancelsAtDrainTimeout(t *testing.T) {
 	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
 	reconciler, k8sClient, _, pool := newDrainHarness(t, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
@@ -490,9 +1525,8 @@ func TestLoadedFastletWaitsUntilDrainTimeout(t *testing.T) {
 	now = now.Add(6 * time.Minute)
 	_, err = reconciler.Reconcile(context.Background(), poolRequest(pool))
 	require.NoError(t, err)
-	var deleted corev1.Pod
-	err = k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "fastlet-a"}, &deleted)
-	require.True(t, client.IgnoreNotFound(err) == nil && err != nil)
+	remaining := getFastletPod(t, k8sClient, "fastlet-a")
+	require.False(t, placement.PodDrainRequested(remaining), "ordinary scale-down must not force-delete a loaded Fastlet")
 }
 
 func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
@@ -515,7 +1549,7 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 	newPod = getFastletPod(t, k8sClient, "fastlet-b")
 	result, handled, err := reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
-	}, 1, desiredHash)
+	}, 1, desiredHash, false, nil, nil)
 	require.NoError(t, err)
 	require.True(t, handled)
 	require.Equal(t, drainRequeue, result.RequeueAfter)
@@ -529,7 +1563,7 @@ func TestPlannedUpgradeWaitsForReadySurgeThenDrainsOldTemplate(t *testing.T) {
 	})
 	_, handled, err = reconciler.reconcileDraining(context.Background(), pool, []corev1.Pod{*oldPod, *newPod}, []apiv1alpha2.Sandbox{
 		assignedSandbox("sandbox-a", "fastlet-a", "pod-a"),
-	}, 1, desiredHash)
+	}, 1, desiredHash, false, nil, nil)
 	require.NoError(t, err)
 	require.True(t, handled)
 	draining := getFastletPod(t, k8sClient, "fastlet-a")
@@ -617,6 +1651,46 @@ func getFastletPod(t *testing.T, k8sClient client.Client, name string) *corev1.P
 
 func poolRequest(pool *apiv1alpha2.SandboxPool) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}}
+}
+
+func TestConstructPodSharesNodeOCIToolsAndSocket(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiv1alpha2.AddToScheme(scheme))
+	reconciler := &SandboxPoolReconciler{Scheme: scheme, Catalog: runtimecatalog.Builtin()}
+	for _, runtimeName := range []apiv1alpha2.RuntimeName{apiv1alpha2.RuntimeContainer, apiv1alpha2.RuntimeFirecracker} {
+		t.Run(string(runtimeName), func(t *testing.T) {
+			pool := &apiv1alpha2.SandboxPool{
+				ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: types.UID("pool-uid")},
+				Spec: apiv1alpha2.SandboxPoolSpec{Runtime: runtimeName, MaxSandboxesPerPod: 1, SandboxResources: testSandboxResources(),
+					FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}}}},
+				},
+			}
+			plan, err := runtimeenv.ResolveDefault(reconciler.Catalog, runtimeName)
+			require.NoError(t, err)
+			pod, err := reconciler.constructPodWithRuntimePlan(pool, plan)
+			require.NoError(t, err)
+			require.Nil(t, volumeMountForContainer(pod, 0, "firecracker-overlaybd-cache"))
+			for name, path := range map[string]string{"oci-tools": runtimecatalog.OCIToolsDir, "oci-socket": runtimecatalog.OCISocketDir} {
+				mount := volumeMountForContainer(pod, 0, name)
+				if runtimeName != apiv1alpha2.RuntimeFirecracker {
+					require.Nil(t, mount)
+					continue
+				}
+				require.NotNil(t, mount)
+				require.Equal(t, path, mount.MountPath)
+				require.Equal(t, name == "oci-tools", mount.ReadOnly)
+				found := false
+				for _, volume := range pod.Spec.Volumes {
+					if volume.Name == name {
+						require.NotNil(t, volume.HostPath)
+						require.Equal(t, path, volume.HostPath.Path)
+						found = true
+					}
+				}
+				require.True(t, found)
+			}
+		})
+	}
 }
 
 func TestConstructPodAddsKVMWithoutRuntimeClass(t *testing.T) {
@@ -719,6 +1793,45 @@ func TestUniqueWarmImagesPreservesFirstOccurrence(t *testing.T) {
 	require.Equal(t, []string{"alpine:latest", "ubuntu:24.04"}, uniqueWarmImages([]string{
 		"alpine:latest", "", "ubuntu:24.04", "alpine:latest",
 	}))
+}
+
+type warmImageStatusRegistry struct {
+	placement.FastletRegistry
+	fastlets []placement.FastletInfo
+}
+
+func (r *warmImageStatusRegistry) GetAllFastlets() []placement.FastletInfo {
+	return r.fastlets
+}
+
+func TestPoolWarmImageFailuresConvergeRegardlessOfFastletOrder(t *testing.T) {
+	pool := &apiv1alpha2.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default", Generation: 1},
+		Spec:       apiv1alpha2.SandboxPoolSpec{WarmImages: []string{"alpine:latest"}},
+	}
+	registry := &warmImageStatusRegistry{}
+	var pods []corev1.Pod
+	for _, report := range []struct{ name, message string }{
+		{"fastlet-a", "pull denied"}, {"fastlet-b", "connection refused"},
+	} {
+		uid := report.name + "-uid"
+		pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: report.name, UID: types.UID(uid)}})
+		registry.fastlets = append(registry.fastlets, placement.FastletInfo{
+			Namespace: pool.Namespace, PoolName: pool.Name, PodName: report.name, PodUID: uid,
+			WarmImages: []fastletapi.WarmImageState{{Image: "alpine:latest", State: "Failed", Message: report.message}},
+		})
+	}
+	reconciler := &SandboxPoolReconciler{Registry: registry}
+	warm := reconciler.aggregateWarmImageStatus(pool, pods)
+	require.Len(t, warm, 1)
+	require.Equal(t, int32(2), warm[0].FailedFastlets)
+	require.Equal(t, "connection refused", warm[0].LastError)
+	require.True(t, (poolObservation{warmImages: warm}).apply(pool))
+
+	// The same reports in reverse order must not require another status write.
+	slices.Reverse(registry.fastlets)
+	warm = reconciler.aggregateWarmImageStatus(pool, pods)
+	require.False(t, (poolObservation{warmImages: warm}).apply(pool))
 }
 
 func TestPoolObservabilityAggregatesOnlyCurrentPodIdentities(t *testing.T) {
@@ -870,8 +1983,11 @@ func TestEnsureFastletSettingsConfigMapIsContentAddressed(t *testing.T) {
 		Client: k8sClient, Scheme: scheme, Catalog: runtimecatalog.Builtin(),
 		FastletProxyImage: "fastlet-proxy:test",
 	}
+	profile, err := reconciler.Catalog.Resolve(pool.Spec.Runtime)
+	require.NoError(t, err)
 
-	settings := buildFastletSettings(pool)
+	settings, err := buildFastletSettings(pool, profile)
+	require.NoError(t, err)
 	require.NoError(t, reconciler.ensureFastletSettingsConfigMap(context.Background(), pool, settings))
 	require.NoError(t, reconciler.ensureFastletSettingsConfigMap(context.Background(), pool, settings))
 
@@ -884,12 +2000,14 @@ func TestEnsureFastletSettingsConfigMapIsContentAddressed(t *testing.T) {
 	require.Equal(t, `["alpine:latest"]`, projected.Data[fastletsettings.WarmImagesKey])
 	require.JSONEq(t, `[]`, projected.Data[fastletsettings.ActionHandlersKey])
 	require.JSONEq(t, `{"cpu":"1","memory":"512Mi","pids":256}`, projected.Data[fastletsettings.ResourceProfileKey])
+	require.NotContains(t, projected.Data, fastletsettings.ResourceAdmissionKey)
 	require.Equal(t, revision, projected.Annotations["fast-sandbox.io/settings-revision"])
 	require.NotNil(t, projected.Immutable)
 	require.True(t, *projected.Immutable)
 
 	pool.Spec.WarmImages = append(pool.Spec.WarmImages, "busybox:latest")
-	updated := buildFastletSettings(pool)
+	updated, err := buildFastletSettings(pool, profile)
+	require.NoError(t, err)
 	updatedRevision, err := updated.Revision()
 	require.NoError(t, err)
 	require.NotEqual(t, revision, updatedRevision)
@@ -901,10 +2019,78 @@ func TestEnsureFastletSettingsConfigMapIsContentAddressed(t *testing.T) {
 	require.Equal(t, `["alpine:latest","busybox:latest"]`, rolled.Data[fastletsettings.WarmImagesKey])
 }
 
+func TestBuildFastletSettingsProjectsResourceAwareCapacity(t *testing.T) {
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeContainer)
+	require.NoError(t, err)
+	pool := &apiv1alpha2.SandboxPool{Spec: apiv1alpha2.SandboxPoolSpec{
+		Runtime:            apiv1alpha2.RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources: apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+			resource.MustParse("100m"), resource.MustParse("128Mi"), resource.MustParse("2"), resource.MustParse("2"), 64,
+		),
+		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fastlet"}}}},
+	}}
+
+	settings, err := buildFastletSettings(pool, profile)
+	require.NoError(t, err)
+	require.NotNil(t, settings.ResourceAdmission)
+	require.Equal(t, "v2", settings.ResourceAdmission.Version)
+	require.Equal(t, apiv1alpha2.SandboxResourceModeResourceAware, settings.ResourceAdmission.Mode)
+	require.Equal(t, pool.Spec.SandboxResources.Hash(), settings.ResourceAdmission.ResourceProfileHash)
+
+	require.Equal(t, "100m", settings.ResourceAdmission.Capacity.CPU.String())
+	require.Equal(t, "128Mi", settings.ResourceAdmission.Capacity.Memory.String())
+	require.Equal(t, "100m", settings.ResourceAdmission.SandboxRuntimeBudget.CPU.String())
+	require.Equal(t, "128Mi", settings.ResourceAdmission.SandboxRuntimeBudget.Memory.String())
+	require.Equal(t, "200m", settings.ResourceAdmission.RuntimeEnvelope.CPU.String())
+	require.Equal(t, "256Mi", settings.ResourceAdmission.RuntimeEnvelope.Memory.String())
+	require.Equal(t, "512Mi", settings.ResourceAdmission.PodMemoryBudget.String())
+	require.True(t, settings.ResourceAdmission.StaticAdmission)
+	require.True(t, settings.ResourceAdmission.MemoryAdmission)
+
+	files, err := settings.Files()
+	require.NoError(t, err)
+	require.Contains(t, files, fastletsettings.ResourceAdmissionKey)
+	require.JSONEq(t, `{"version":"v2","mode":"ResourceAware","staticAdmission":true,"memoryAdmission":true,"capacity":{"cpu":"100m","memory":"128Mi"},"sandboxRuntimeBudget":{"cpu":"100m","memory":"128Mi"},"runtimeEnvelope":{"cpu":"200m","memory":"256Mi"},"podMemoryBudget":"512Mi","resourceProfileHash":"`+pool.Spec.SandboxResources.Hash()+`"}`, files[fastletsettings.ResourceAdmissionKey])
+}
+
+func TestBuildFastletSettingsIncludesSidecarsInPodMemoryBudget(t *testing.T) {
+	profile, err := runtimecatalog.Builtin().Resolve(apiv1alpha2.RuntimeContainer)
+	require.NoError(t, err)
+	always := corev1.ContainerRestartPolicyAlways
+	pool := &apiv1alpha2.SandboxPool{Spec: apiv1alpha2.SandboxPoolSpec{
+		Runtime:            apiv1alpha2.RuntimeContainer,
+		MaxSandboxesPerPod: 2,
+		SandboxResources: apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+			resource.MustParse("100m"), resource.MustParse("128Mi"), resource.MustParse("2"), resource.MustParse("2"), 64,
+		),
+		FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "fastlet"},
+			{Name: "metrics", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("2Gi"),
+			}}},
+		}, InitContainers: []corev1.Container{
+			{Name: "steady-sidecar", RestartPolicy: &always, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("512Mi"),
+			}}},
+			{Name: "one-shot-init", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("1Gi"),
+			}}},
+		}}},
+	}}
+
+	settings, err := buildFastletSettings(pool, profile)
+	require.NoError(t, err)
+	require.Equal(t, "3Gi", settings.ResourceAdmission.PodMemoryBudget.String(),
+		"the aggregate Pod observer includes the runtime owner, long-running sidecars, and platform proxy but not one-shot init containers")
+	require.Equal(t, "256Mi", settings.ResourceAdmission.RuntimeEnvelope.Memory.String(),
+		"sidecars never increase Sandbox commitment or the runtime-owner envelope")
+}
+
 func testSandboxResources() apiv1alpha2.SandboxResourceProfile {
-	return apiv1alpha2.SandboxResourceProfile{
-		CPU: resource.MustParse("1"), Memory: resource.MustParse("512Mi"), PIDs: 256,
-	}
+	return apiv1alpha2.NewLegacySandboxResourceProfile(
+		resource.MustParse("1"), resource.MustParse("512Mi"), 256,
+	)
 }
 
 func envValue(env []corev1.EnvVar, name string) string {

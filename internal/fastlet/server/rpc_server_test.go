@@ -110,7 +110,7 @@ func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 		RequestID:      "request-a",
 		Identity:       identity,
 		SpecGeneration: 1,
-		Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
+		Sandbox:        fastletapi.SandboxDesiredSpec{Image: "alpine:latest"},
 	}, &created)
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, fastletapi.CreateDispositionCreated, created.Disposition)
@@ -136,7 +136,7 @@ func TestV2AdmissionProtocolAndHeartbeat(t *testing.T) {
 	recorder = postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
 		RequestID:      "request-b",
 		Identity:       fastletapi.SandboxIdentity{SandboxUID: "sandbox-b", Namespace: "default", Name: "sandbox-b", InstanceGeneration: 1, RuntimeInstanceID: "runtime-b", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
-		Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
+		Sandbox:        fastletapi.SandboxDesiredSpec{Image: "alpine:latest"},
 		SpecGeneration: 1,
 	}, &rejected)
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
@@ -175,7 +175,7 @@ func TestSetDrainingRejectsNewCreates(t *testing.T) {
 	recorder = postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
 		RequestID:      "request-a",
 		Identity:       fastletapi.SandboxIdentity{SandboxUID: "sandbox-a", Namespace: "default", Name: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
-		Sandbox:        fastletapi.SandboxSpec{Image: "alpine:latest"},
+		Sandbox:        fastletapi.SandboxDesiredSpec{Image: "alpine:latest"},
 		SpecGeneration: 1,
 	}, &rejected)
 	require.Equal(t, http.StatusConflict, recorder.Code)
@@ -206,4 +206,33 @@ func TestHeartbeatUsesCacheCursor(t *testing.T) {
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v2/fastlet/heartbeat?cacheRevision=invalid", nil))
 	require.Equal(t, http.StatusBadRequest, recorder.Code)
+}
+
+func TestInvokeHandlerRouteDispatchesToFallback(t *testing.T) {
+	manager := newServerManager(t, newServerRuntime(), false)
+	handler := NewFastletServer(":0", manager).Handler()
+	identity := fastletapi.SandboxIdentity{SandboxUID: "sandbox-a", Namespace: "default", Name: "sandbox-a", InstanceGeneration: 1, RuntimeInstanceID: "runtime-a", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"}
+	var created fastletapi.CreateSandboxResponse
+	recorder := postJSON(t, handler, "/api/v2/fastlet/create", fastletapi.CreateSandboxRequest{
+		RequestID: "request-a", Identity: identity, SpecGeneration: 1,
+		Sandbox: fastletapi.SandboxDesiredSpec{Image: "alpine:latest"},
+	}, &created)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	// A managed Sandbox without Action configuration surfaces a relay failure.
+	var missingConfig fastletapi.InvokeHandlerResponse
+	recorder = postJSON(t, handler, "/api/v2/fastlet/handlers/invoke", fastletapi.InvokeHandlerRequest{
+		Identity: identity, Handler: "egress", Method: http.MethodPut, Path: "/vault/sandbox-a", Payload: []byte(`{}`),
+	}, &missingConfig)
+	require.Equal(t, http.StatusConflict, recorder.Code)
+	require.Equal(t, fastletapi.ErrorActionUnavailable, missingConfig.Error.Code)
+
+	// An unmanaged Sandbox is a NotFound, never a silent swallow.
+	var unknown fastletapi.InvokeHandlerResponse
+	recorder = postJSON(t, handler, "/api/v2/fastlet/handlers/invoke", fastletapi.InvokeHandlerRequest{
+		Identity: fastletapi.SandboxIdentity{SandboxUID: "sandbox-x", Namespace: "default", Name: "sandbox-x", InstanceGeneration: 1, RuntimeInstanceID: "runtime-x", AssignmentAttempt: 1, FastletPodUID: "pod-uid-a"},
+		Handler:  "egress", Path: "/vault/sandbox-x",
+	}, &unknown)
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.Equal(t, fastletapi.ErrorNotFound, unknown.Error.Code)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
@@ -15,7 +16,6 @@ import (
 	"fast-sandbox/internal/observability"
 	actionapi "fast-sandbox/internal/protocol/action"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
-	runtimecontract "fast-sandbox/internal/runtime/contract"
 )
 
 type Clock interface {
@@ -38,9 +38,34 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	ctx = withCreateIdentity(ctx, req)
 	ctx, span := observability.Start(ctx, "fastlet.create Sandbox")
 	started := time.Now()
+	var (
+		tAdmitted time.Time
+		tBindings time.Time
+		tRuntime  time.Time
+		tCommit   time.Time
+		tHooks    time.Time
+		bindings  int
+	)
 	defer func() {
 		observability.End(span, resultErr)
 		recordAdmission("create", resultErr)
+		if req == nil {
+			return
+		}
+		phase := func(from, to time.Time) int64 {
+			if from.IsZero() || to.IsZero() || to.Before(from) {
+				return 0
+			}
+			return to.Sub(from).Milliseconds()
+		}
+		readyWait := int64(0)
+		if !tHooks.IsZero() {
+			readyWait = time.Since(tHooks).Milliseconds()
+		}
+		klog.Infof("fastlet create timing: sandbox=%s/%s ok=%t total=%dms admission=%dms registerBindings=%dms runtimeEnsure=%dms commitRuntime=%dms dispatchHooks=%dms readyWait=%dms bindings=%d",
+			req.Identity.Namespace, req.Identity.Name, resultErr == nil, time.Since(started).Milliseconds(),
+			phase(started, tAdmitted), phase(tAdmitted, tBindings), phase(tBindings, tRuntime),
+			phase(tRuntime, tCommit), phase(tCommit, tHooks), readyWait, bindings)
 	}()
 	_, finishValidation := startFastletCreateStage(ctx, m.runtimeName, "validation")
 	input, validationFailure := m.prepareCreateInput(req)
@@ -69,12 +94,15 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	if reservation.existing != nil {
 		return m.finishCreate(ctx, req, reservation.existing)
 	}
+	tAdmitted = time.Now()
 	placeholder := reservation.placeholder
 	sandboxUID := input.Sandbox.Identity.SandboxUID
 	m.recordDiagnostic(sandboxUID, "info", "admission", sandboxStateCreating, "Fastlet admission accepted; atomic runtime creation started")
 	if bindingFailure, currentAdmission := m.registerDesiredBindings(placeholder, req); bindingFailure != nil {
 		return createFailureWithDisposition(bindingFailure, currentAdmission, fastletapi.CreateDispositionRejectedBeforeSideEffects)
 	}
+	tBindings = time.Now()
+	bindings = len(req.ActionBindings)
 	// Async artifact delivery: when the runtime supports it (Firecracker),
 	// a missing image — or, for a resume, a missing checkpoint set — is
 	// delivered in the background instead of blocking this create on the
@@ -93,11 +121,14 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, req *fastletapi.Crea
 	if err != nil {
 		return m.handleRuntimeCreateFailure(ctx, &input, placeholder, err)
 	}
+	tRuntime = time.Now()
 	status, admission, dataPlaneReady, commitFailure := m.commitRuntimeCreate(req, input, placeholder, metadata)
 	if commitFailure != nil {
 		return createFailure(commitFailure, admission)
 	}
+	tCommit = time.Now()
 	m.recordRuntimeReadyAndDispatchHooks(metadata, req, dataPlaneReady)
+	tHooks = time.Now()
 	m.continueDataPlaneCreation(metadata, started, dataPlaneReady)
 	return m.finishCreate(ctx, req, &fastletapi.CreateSandboxResponse{Disposition: fastletapi.CreateDispositionCreated, Sandbox: &status, Admission: admission})
 }
@@ -122,12 +153,20 @@ func (m *SandboxManager) prepareCreateInput(req *fastletapi.CreateSandboxRequest
 	if identity.RouteGeneration <= 0 {
 		identity.RouteGeneration = 1
 	}
+	if err := m.validateProfiles(&req.Sandbox); err != nil {
+		return fastletapi.EnsureSandboxInput{}, fastletError(fastletapi.ErrorProfileMismatch, err.Error(), false)
+	}
+	limits, err := m.resolveCreateResources(req.Resources)
+	if err != nil {
+		return fastletapi.EnsureSandboxInput{}, fastletError(fastletapi.ErrorProfileMismatch, err.Error(), false)
+	}
 	input := fastletapi.EnsureSandboxInput{
 		RequestID: req.RequestID,
-		Sandbox:   fastletapi.RuntimeSandboxConfig{Identity: identity, Spec: req.Sandbox},
-	}
-	if err := m.validateProfiles(&input.Sandbox.Spec); err != nil {
-		return fastletapi.EnsureSandboxInput{}, fastletError(fastletapi.ErrorProfileMismatch, err.Error(), false)
+		Sandbox: fastletapi.RuntimeSandboxConfig{
+			Identity: identity,
+			Desired:  req.Sandbox.DeepCopy(),
+			Limits:   limits,
+		},
 	}
 	return input, nil
 }
@@ -170,23 +209,19 @@ func (m *SandboxManager) reserveSandboxForCreate(req *fastletapi.CreateSandboxRe
 	if m.draining {
 		return reject(fastletError(fastletapi.ErrorDraining, m.drainReason, true), fastletapi.CreateDispositionRejectedBeforeSideEffects)
 	}
-	if len(m.sandboxes) >= m.capacity {
-		// A terminal create-failed Sandbox is projected but occupies no
-		// capacity: it must not block new creates.
-		active := 0
-		for _, managed := range m.sandboxes {
-			if managed.Phase != sandboxStateCreateFailed {
-				active++
-			}
-		}
-		if active >= m.capacity {
-			return reject(fastletError(fastletapi.ErrorCapacityRejected, "Fastlet admission capacity is exhausted", true), fastletapi.CreateDispositionRejectedBeforeSideEffects)
+	// A terminal create-failed Sandbox is projected but occupies no slot or
+	// resource commitment: it must not block new creates.
+	active := 0
+	for _, managed := range m.sandboxes {
+		if managed.Phase != sandboxStateCreateFailed {
+			active++
 		}
 	}
-	if checker, ok := m.runtime.(runtimecontract.ResourceAdmissionChecker); ok {
-		if err := checker.CheckRuntimeResourceAdmission(); err != nil {
-			return reject(fastletError(fastletapi.ErrorCapacityRejected, err.Error(), true), fastletapi.CreateDispositionRejectedBeforeSideEffects)
-		}
+	if active >= m.capacity {
+		return reject(admissionError(fastletapi.AdmissionReasonSlotFull, "Fastlet admission capacity is exhausted"), fastletapi.CreateDispositionRejectedBeforeSideEffects)
+	}
+	if failure := m.resourceCapacityFailureLocked(&input.Sandbox); failure != nil {
+		return reject(failure, fastletapi.CreateDispositionRejectedBeforeSideEffects)
 	}
 	if !m.runtimeResourceAvailable() {
 		return reject(fastletError(fastletapi.ErrorNetworkUnavailable, "Fastlet has no clean runtime/network resource available", true), fastletapi.CreateDispositionRejectedBeforeSideEffects)
@@ -226,7 +261,7 @@ func (m *SandboxManager) ensureRuntimeForCreate(ctx context.Context, createStart
 
 func (m *SandboxManager) handleRuntimeCreateFailure(ctx context.Context, input *fastletapi.EnsureSandboxInput, placeholder *SandboxMetadata, runtimeErr error) (*fastletapi.CreateSandboxResponse, error) {
 	sandboxUID := input.Sandbox.Identity.SandboxUID
-	m.cacheProtection.ProtectHotUntil(input.Sandbox.Spec.Image, m.clock.Now().Add(time.Hour))
+	m.cacheProtection.ProtectHotUntil(input.Sandbox.Desired.Image, m.clock.Now().Add(time.Hour))
 	cleanupErr := m.runtime.DeleteSandbox(ctx, sandboxUID)
 	if m.actionManager != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -272,7 +307,7 @@ func (m *SandboxManager) commitRuntimeCreate(req *fastletapi.CreateSandboxReques
 	if len(req.ActionBindings) == 0 {
 		metadata.AppliedGeneration = req.SpecGeneration
 	}
-	m.cacheProtection.Protect(input.Sandbox.Spec.Image, fastletcache.ProtectActive)
+	m.cacheProtection.Protect(input.Sandbox.Desired.Image, fastletcache.ProtectActive)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sandboxUID := input.Sandbox.Identity.SandboxUID
@@ -447,19 +482,22 @@ func (m *SandboxManager) DeleteSandbox(req *fastletapi.DeleteSandboxRequest) (*f
 // only and cannot block deletion or finalizer completion.
 func (m *SandboxManager) DeleteSandboxContext(ctx context.Context, req *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error) {
 	if failure := m.validateIdentityTarget(deleteIdentity(req)); failure != nil {
-		return &fastletapi.DeleteSandboxResponse{Error: failure}, failure
+		admission, _, _ := m.State()
+		return &fastletapi.DeleteSandboxResponse{Admission: admission, Error: failure}, failure
 	}
 	m.mu.Lock()
 	metadata := m.sandboxes[req.Identity.SandboxUID]
 	wasCreating := false
 	if metadata != nil {
 		if failure := validateIdentityFence(m.fastletPodUID, metadata, req.Identity); failure != nil {
+			admission := m.admissionStatusLocked()
 			m.mu.Unlock()
-			return &fastletapi.DeleteSandboxResponse{Error: failure}, failure
+			return &fastletapi.DeleteSandboxResponse{Admission: admission, Error: failure}, failure
 		}
 		if metadata.Phase == sandboxStateTerminating || metadata.Phase == sandboxStateDeleting {
+			admission := m.admissionStatusLocked()
 			m.mu.Unlock()
-			return &fastletapi.DeleteSandboxResponse{}, nil
+			return &fastletapi.DeleteSandboxResponse{Admission: admission}, nil
 		}
 		wasCreating = metadata.Phase == sandboxStateCreating || metadata.Phase == sandboxStateImagePending
 		m.cancelImageBootWorkerLocked(metadata)
@@ -489,7 +527,8 @@ func (m *SandboxManager) DeleteSandboxContext(ctx context.Context, req *fastleta
 	if metadata != nil && !wasCreating {
 		go m.asyncDelete(req.Identity.SandboxUID, metadata)
 	}
-	return &fastletapi.DeleteSandboxResponse{}, nil
+	admission, _, _ := m.State()
+	return &fastletapi.DeleteSandboxResponse{Admission: admission}, nil
 }
 
 func (m *SandboxManager) Recover(ctx context.Context) error { //nolint:gocognit // pre-existing recovery sequence; refactor tracked separately
@@ -537,7 +576,7 @@ func (m *SandboxManager) Recover(ctx context.Context) error { //nolint:gocognit 
 			metadata.Phase = sandboxStateUnknown
 		}
 		if m.infraManager != nil {
-			if metadata.Config.Spec.InfraRevision != m.infraRevision {
+			if metadata.Config.Desired.InfraRevision != m.infraRevision {
 				return fmt.Errorf("recovered Sandbox %s Infra revision does not match Fastlet", identity.SandboxUID)
 			}
 			metadata.Phase = sandboxStateInfraPending
@@ -571,7 +610,7 @@ func (m *SandboxManager) Recover(ctx context.Context) error { //nolint:gocognit 
 	}
 	activeImages := make([]string, 0, len(recovered))
 	for _, metadata := range recovered {
-		activeImages = append(activeImages, metadata.Config.Spec.Image)
+		activeImages = append(activeImages, metadata.Config.Desired.Image)
 	}
 	m.cacheProtection.Replace(fastletcache.ProtectActive, activeImages)
 	m.mu.Lock()
@@ -698,8 +737,8 @@ func validateIdentityFence(expectedPodUID string, existing *SandboxMetadata, req
 
 func sameSandboxClaim(existing *SandboxMetadata, requested *fastletapi.RuntimeSandboxConfig) bool {
 	return existing.Config.Identity.Namespace == requested.Identity.Namespace && existing.Config.Identity.Name == requested.Identity.Name &&
-		existing.Config.Spec.RuntimeProfileHash == requested.Spec.RuntimeProfileHash && existing.Config.Spec.ResourceProfileHash == requested.Spec.ResourceProfileHash &&
-		existing.Config.Spec.InfraRevision == requested.Spec.InfraRevision
+		existing.Config.Desired.RuntimeProfileHash == requested.Desired.RuntimeProfileHash && existing.Config.Desired.ResourceProfileHash == requested.Desired.ResourceProfileHash &&
+		existing.Config.Desired.InfraRevision == requested.Desired.InfraRevision && existing.Config.Limits == requested.Limits
 }
 
 func identityAtOrBefore(generation, attempt int64, highWater fastletapi.SandboxIdentity) bool {
@@ -741,8 +780,150 @@ func (m *SandboxManager) admissionStatusLocked() fastletapi.AdmissionStatus {
 		}
 	}
 	status.Used = status.Creating + status.Running + status.Deleting
+	if m.resourceAdmission != nil {
+		state, reason := m.resourceAdmissionStateLocked()
+		committed, valid := m.resourceCommittedLocked()
+		if !valid {
+			state, reason = fastletapi.AdmissionStateUnknown, fastletapi.AdmissionReasonUnsupportedProtocol
+		}
+		committedCPU, committedMemory := committed.CPU.String(), committed.Memory.String()
+		if status.Used != m.resourceLastUsed || committedCPU != m.resourceLastCommittedCPU || committedMemory != m.resourceLastCommittedMemory || state != m.resourceLastState || reason != m.resourceLastReason {
+			m.resourceRevision++
+			m.resourceLastUsed = status.Used
+			m.resourceLastCommittedCPU = committedCPU
+			m.resourceLastCommittedMemory = committedMemory
+			m.resourceLastState = state
+			m.resourceLastReason = reason
+		}
+		status.Resources = &fastletapi.ResourceAdmissionStatus{
+			Version: "v2", Epoch: m.resourceEpoch, Revision: m.resourceRevision,
+			Capacity: fastletapi.SandboxResourceVector{
+				CPU: m.resourceAdmission.Capacity.CPU.String(), Memory: m.resourceAdmission.Capacity.Memory.String(),
+			},
+			Committed: fastletapi.SandboxResourceVector{CPU: committedCPU, Memory: committedMemory},
+			State:     state, Reason: reason,
+		}
+	}
 	recordAdmissionStatus(status)
 	return status
+}
+
+func (m *SandboxManager) resourceAdmissionStateLocked() (fastletapi.AdmissionState, fastletapi.AdmissionReason) {
+	if m.recovering {
+		return fastletapi.AdmissionStateUnknown, fastletapi.AdmissionReasonRecoveryIncomplete
+	}
+	return m.resourceState, m.resourceReason
+}
+
+func (m *SandboxManager) resourceCapacityFailureLocked(candidate *fastletapi.RuntimeSandboxConfig) *fastletapi.FastletError {
+	if m.resourceAdmission == nil || m.resourceProfile == nil {
+		return nil
+	}
+	requests, err := m.requestsForRuntimeConfig(candidate)
+	if err != nil {
+		return admissionError(fastletapi.AdmissionReasonUnsupportedProtocol, "Fastlet resource admission profile is unavailable")
+	}
+	if m.staticResourceAdmission {
+		committed, valid := m.resourceCommittedLocked()
+		if !valid {
+			return admissionError(fastletapi.AdmissionReasonUnsupportedProtocol, "Fastlet committed resource ledger is invalid")
+		}
+		nextCPU := committed.CPU.DeepCopy()
+		nextCPU.Add(requests.CPU)
+		if nextCPU.Cmp(m.resourceAdmission.Capacity.CPU) > 0 {
+			return admissionError(fastletapi.AdmissionReasonStaticCPUExhausted, "Fastlet CPU commitment capacity is exhausted")
+		}
+		nextMemory := committed.Memory.DeepCopy()
+		nextMemory.Add(requests.Memory)
+		if nextMemory.Cmp(m.resourceAdmission.Capacity.Memory) > 0 {
+			return admissionError(fastletapi.AdmissionReasonStaticMemoryExhausted, "Fastlet memory commitment capacity is exhausted")
+		}
+	}
+	if !m.resourceAdmission.MemoryAdmission {
+		return nil
+	}
+	state, reason := m.resourceAdmissionStateLocked()
+	if state == fastletapi.AdmissionStateBlocked || state == fastletapi.AdmissionStateUnknown {
+		if reason == "" {
+			reason = fastletapi.AdmissionReasonTelemetryMissing
+		}
+		return admissionError(reason, "Fastlet resource admission is "+string(state))
+	}
+	return nil
+}
+
+func (m *SandboxManager) resolveCreateResources(resolved *fastletapi.ResolvedSandboxResources) (fastletapi.SandboxRuntimeLimits, error) {
+	if m.resourceProfile == nil {
+		if resolved != nil {
+			return fastletapi.SandboxRuntimeLimits{}, fmt.Errorf("%w: Fastlet has no resource profile", ErrSandboxProfileMismatch)
+		}
+		return fastletapi.SandboxRuntimeLimits{}, nil
+	}
+	if m.resourceProfile.ResourceMode() != apiv1alpha2.SandboxResourceModeResourceAware {
+		if resolved != nil {
+			return fastletapi.SandboxRuntimeLimits{}, fmt.Errorf("%w: per-Sandbox resources require ResourceAware mode", ErrSandboxProfileMismatch)
+		}
+		return m.resolvedRuntimeLimits()
+	}
+	if resolved == nil {
+		return fastletapi.SandboxRuntimeLimits{}, fmt.Errorf("%w: resolved per-Sandbox resources are required", ErrSandboxProfileMismatch)
+	}
+	limits, err := computeResourcesFromRuntimeLimits(resolved.Limits)
+	if err != nil || resolved.Limits.PIDs != m.resourceProfile.PIDs {
+		return fastletapi.SandboxRuntimeLimits{}, fmt.Errorf("%w: invalid resolved runtime limits", ErrSandboxProfileMismatch)
+	}
+	requests, err := m.resourceProfile.DeriveRequests(limits)
+	if err != nil {
+		return fastletapi.SandboxRuntimeLimits{}, fmt.Errorf("%w: %w", ErrSandboxProfileMismatch, err)
+	}
+	requestCPU, errCPU := resource.ParseQuantity(resolved.Requests.CPU)
+	requestMemory, errMemory := resource.ParseQuantity(resolved.Requests.Memory)
+	if errCPU != nil || errMemory != nil || requestCPU.Cmp(requests.CPU) != 0 || requestMemory.Cmp(requests.Memory) != 0 {
+		return fastletapi.SandboxRuntimeLimits{}, fmt.Errorf("%w: resolved requests do not match the Pool overcommit policy", ErrSandboxProfileMismatch)
+	}
+	if m.resourceAdmission == nil || limits.CPU.Cmp(m.resourceAdmission.SandboxRuntimeBudget.CPU) > 0 || limits.Memory.Cmp(m.resourceAdmission.SandboxRuntimeBudget.Memory) > 0 {
+		return fastletapi.SandboxRuntimeLimits{}, fmt.Errorf("%w: Sandbox limits exceed the Fastlet Sandbox runtime budget", ErrSandboxProfileMismatch)
+	}
+	return resolved.Limits, nil
+}
+
+func (m *SandboxManager) resourceCommittedLocked() (apiv1alpha2.SandboxComputeResources, bool) {
+	committed := apiv1alpha2.SandboxComputeResources{CPU: resource.MustParse("0"), Memory: resource.MustParse("0")}
+	for _, metadata := range m.sandboxes {
+		if metadata.Phase == sandboxStateCreateFailed {
+			continue
+		}
+		requests, err := m.requestsForRuntimeConfig(&metadata.Config)
+		if err != nil {
+			return apiv1alpha2.SandboxComputeResources{}, false
+		}
+		committed.CPU.Add(requests.CPU)
+		committed.Memory.Add(requests.Memory)
+	}
+	return committed, true
+}
+
+func (m *SandboxManager) requestsForRuntimeConfig(config *fastletapi.RuntimeSandboxConfig) (apiv1alpha2.SandboxComputeResources, error) {
+	if config == nil || m.resourceProfile == nil {
+		return apiv1alpha2.SandboxComputeResources{}, errors.New("runtime config and resource profile are required")
+	}
+	limits, err := computeResourcesFromRuntimeLimits(config.Limits)
+	if err != nil {
+		return apiv1alpha2.SandboxComputeResources{}, err
+	}
+	return m.resourceProfile.DeriveRequests(limits)
+}
+
+func computeResourcesFromRuntimeLimits(limits fastletapi.SandboxRuntimeLimits) (apiv1alpha2.SandboxComputeResources, error) {
+	cpu, err := resource.ParseQuantity(limits.CPU)
+	if err != nil || cpu.Sign() <= 0 {
+		return apiv1alpha2.SandboxComputeResources{}, fmt.Errorf("invalid cpu limit %q", limits.CPU)
+	}
+	memory, err := resource.ParseQuantity(limits.Memory)
+	if err != nil || memory.Sign() <= 0 {
+		return apiv1alpha2.SandboxComputeResources{}, fmt.Errorf("invalid memory limit %q", limits.Memory)
+	}
+	return apiv1alpha2.SandboxComputeResources{CPU: cpu, Memory: memory}, nil
 }
 
 // sandboxStatusLocked returns the point-in-time Fastlet observation. Callers
@@ -828,6 +1009,12 @@ func apiInfraDiagnostics(
 
 func fastletError(code fastletapi.FastletErrorCode, message string, retryable bool) *fastletapi.FastletError {
 	return &fastletapi.FastletError{Code: code, Message: message, Retryable: retryable}
+}
+
+func admissionError(reason fastletapi.AdmissionReason, message string) *fastletapi.FastletError {
+	return &fastletapi.FastletError{
+		Code: fastletapi.ErrorCapacityRejected, Reason: reason, Message: message, Retryable: true,
+	}
 }
 
 func fastletErrorWithCause(code fastletapi.FastletErrorCode, message string, retryable bool, cause error) *fastletapi.FastletError {

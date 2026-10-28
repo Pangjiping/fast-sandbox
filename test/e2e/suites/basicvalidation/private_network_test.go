@@ -21,6 +21,7 @@ import (
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	"fast-sandbox/test/e2e/support/fixtures"
+	"fast-sandbox/test/e2e/support/netprobe"
 	"fast-sandbox/test/e2e/support/suiteenv"
 )
 
@@ -123,9 +124,9 @@ func privateNetworkPool(namespace, name string) *apiv1alpha2.SandboxPool {
 		Spec: apiv1alpha2.SandboxPoolSpec{
 			Capacity: apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1}, MaxSandboxesPerPod: 2,
 			Runtime: apiv1alpha2.RuntimeContainer,
-			SandboxResources: apiv1alpha2.SandboxResourceProfile{
-				CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"), PIDs: 64,
-			},
+			SandboxResources: apiv1alpha2.NewLegacySandboxResourceProfile(
+				resource.MustParse("50m"), resource.MustParse("64Mi"), 64,
+			),
 			FastletTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 				Name: "fastlet", Image: suiteenv.FastletImage(),
 			}}}},
@@ -229,7 +230,9 @@ func waitForSandboxHTTP(ctx context.Context, t *testing.T, namespace, pod, ip, w
 	defer cancel()
 	var last string
 	for {
-		output, err := kubectl(waitCtx, "exec", "-n", namespace, pod, "-c", "fastlet", "--", "wget", "-q", "-O", "-", "http://"+ip+":8080/")
+		args := []string{"exec", "-n", namespace, pod, "-c", "fastlet", "--"}
+		args = append(args, netprobe.HTTPGetCommand(ip, 8080)...)
+		output, err := kubectl(waitCtx, args...)
 		last = string(output)
 		if err == nil && strings.Contains(last, want) {
 			return
@@ -246,8 +249,9 @@ func assertSandboxCannotReach(ctx context.Context, t *testing.T, namespace, pod,
 	t.Helper()
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := kubectl(checkCtx, "exec", "-n", namespace, pod, "-c", "fastlet", "--",
-		"ip", "netns", "exec", netns, "wget", "-q", "-O", "-", "http://"+peerIP+":8080/")
+	args := []string{"exec", "-n", namespace, pod, "-c", "fastlet", "--"}
+	args = append(args, netprobe.HTTPGetInNetNSCommand(netns, peerIP, 8080)...)
+	output, err := kubectl(checkCtx, args...)
 	if err == nil {
 		t.Fatalf("sandbox netns %s unexpectedly reached peer %s: %q", netns, peerIP, string(output))
 	}

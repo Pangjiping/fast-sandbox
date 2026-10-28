@@ -29,6 +29,7 @@ Fast Sandbox documentation is organized by reader intent:
 - [OpenSandbox integration](guides/opensandbox-integration.md)
 - [OpenSandbox Execd](guides/opensandbox-execd.md)
 - [SandboxTemplate golden images](guides/sandboxtemplate-golden-images.md)
+- [OverlayBD OCI quick start](guides/overlaybd-oci-sandboxes.md)
 - [Sandbox Snapshots](guides/sandbox-snapshots.md)
 - [Pause, resume, and snapshot integration](guides/pause-resume-snapshot-integration.md)
 - [Artifact manifest reference](guides/artifact-manifest-reference.md)
@@ -38,6 +39,8 @@ Fast Sandbox documentation is organized by reader intent:
 - [Runtime node installation](guides/runtime-node-installation.md)
 - [Runtime environments](guides/runtime-environments.md)
 - [Sandbox Actions](guides/sandbox-actions.md)
+- [Resource-aware overcommit tuning](guides/resource-aware-overcommit-tuning.md)
+- [Resource-aware capacity validation](guides/resource-aware-capacity-validation.md)
 - [Observability](guides/observability.md)
 - [Performance](guides/performance.md)
 - [Testing](guides/testing.md)
@@ -54,7 +57,18 @@ Fast Sandbox documentation is organized by reader intent:
 - [Configuration](reference/configuration.md)
 - [Runtime support](reference/runtime-support.md)
 
+## Design proposals and decisions
+
+These documents record proposed or accepted architecture decisions. A proposed
+design does not replace the current concept or reference contract until its
+implementation is complete.
+
+- [Resource-aware overcommit placement](design/resource-aware-overcommit-placement.md)
+  — implemented from [Issue #115](https://github.com/opensandbox-group/fast-sandbox/issues/115)
+
 ## Documentation policy
+
+Start major changes with a short GitHub Issue discussion; write a [Fast Sandbox Enhancement Proposal (FSEP)](../fseps/README.md) when a full design is needed. The [FSEP contributing guide](../fseps/CONTRIBUTING.md) keeps review focused on compatibility, testing, and rollback. Small fixes and local improvements can go directly to a PR.
 
 Published documentation describes the current product contract:
 
@@ -68,9 +82,7 @@ directory is ignored by Git and is never a source of truth. When a design is
 implemented, its stable behavior must be incorporated into the relevant
 concept, guide, and reference pages in the same change.
 
-Designs that require review across contributors belong in a GitHub Issue,
-Pull Request, or the owning project's formal proposal process. They must not
-depend on ignored local files.
+Shared design decisions belong in GitHub Issues, Pull Requests, or FSEPs according to their scope. They must not depend on ignored local files. Proposals record planned changes and decisions; implemented behavior must still be documented in the relevant concept, guide, and reference pages.
 
 Documentation is maintained in U.S. English by default. Explicitly required
 localized companion guides may coexist with and link to their English version.

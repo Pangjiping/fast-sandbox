@@ -33,6 +33,7 @@ const (
 	FastPathService_DeleteSandboxSnapshot_FullMethodName = "/fastpath.v2.FastPathService/DeleteSandboxSnapshot"
 	FastPathService_PauseSandbox_FullMethodName          = "/fastpath.v2.FastPathService/PauseSandbox"
 	FastPathService_ResumeSandbox_FullMethodName         = "/fastpath.v2.FastPathService/ResumeSandbox"
+	FastPathService_InvokeHandlerAction_FullMethodName   = "/fastpath.v2.FastPathService/InvokeHandlerAction"
 )
 
 // FastPathServiceClient is the client API for FastPathService service.
@@ -49,7 +50,7 @@ type FastPathServiceClient interface {
 	GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*PoolInfo, error)
 	ListPools(ctx context.Context, in *ListPoolsRequest, opts ...grpc.CallOption) (*ListPoolsResponse, error)
 	// CreateSandboxSnapshot snapshots a running Sandbox and publishes the
-	// artifact set to the artifact store under the snapshot's template name.
+	// artifact set to the native artifact store or an OCI registry.
 	// It returns after the intent is persisted and the snapshot is triggered;
 	// completion is observed via GetSandboxSnapshot.
 	CreateSandboxSnapshot(ctx context.Context, in *CreateSandboxSnapshotRequest, opts ...grpc.CallOption) (*CreateSandboxSnapshotResponse, error)
@@ -65,6 +66,13 @@ type FastPathServiceClient interface {
 	// checkpointed Sandbox again, possibly on another Fastlet. Completion
 	// (runtime_state READY) is observed via GetSandbox.
 	ResumeSandbox(ctx context.Context, in *ResumeSandboxRequest, opts ...grpc.CallOption) (*ResumeSandboxResponse, error)
+	// InvokeHandlerAction relays an opaque payload to a Pool-declared Action
+	// Handler of the Sandbox's Pool through the hosting Fastlet, and returns
+	// the handler's HTTP status and body verbatim as the per-handler result.
+	// The control plane validates the tenant-scoped sandbox ownership and the
+	// handler declaration, but never interprets the payload or the handler's
+	// response: the handler's response is the synchronous ack.
+	InvokeHandlerAction(ctx context.Context, in *InvokeHandlerActionRequest, opts ...grpc.CallOption) (*InvokeHandlerActionResponse, error)
 }
 
 type fastPathServiceClient struct {
@@ -215,6 +223,16 @@ func (c *fastPathServiceClient) ResumeSandbox(ctx context.Context, in *ResumeSan
 	return out, nil
 }
 
+func (c *fastPathServiceClient) InvokeHandlerAction(ctx context.Context, in *InvokeHandlerActionRequest, opts ...grpc.CallOption) (*InvokeHandlerActionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InvokeHandlerActionResponse)
+	err := c.cc.Invoke(ctx, FastPathService_InvokeHandlerAction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FastPathServiceServer is the server API for FastPathService service.
 // All implementations must embed UnimplementedFastPathServiceServer
 // for forward compatibility.
@@ -229,7 +247,7 @@ type FastPathServiceServer interface {
 	GetPool(context.Context, *GetPoolRequest) (*PoolInfo, error)
 	ListPools(context.Context, *ListPoolsRequest) (*ListPoolsResponse, error)
 	// CreateSandboxSnapshot snapshots a running Sandbox and publishes the
-	// artifact set to the artifact store under the snapshot's template name.
+	// artifact set to the native artifact store or an OCI registry.
 	// It returns after the intent is persisted and the snapshot is triggered;
 	// completion is observed via GetSandboxSnapshot.
 	CreateSandboxSnapshot(context.Context, *CreateSandboxSnapshotRequest) (*CreateSandboxSnapshotResponse, error)
@@ -245,6 +263,13 @@ type FastPathServiceServer interface {
 	// checkpointed Sandbox again, possibly on another Fastlet. Completion
 	// (runtime_state READY) is observed via GetSandbox.
 	ResumeSandbox(context.Context, *ResumeSandboxRequest) (*ResumeSandboxResponse, error)
+	// InvokeHandlerAction relays an opaque payload to a Pool-declared Action
+	// Handler of the Sandbox's Pool through the hosting Fastlet, and returns
+	// the handler's HTTP status and body verbatim as the per-handler result.
+	// The control plane validates the tenant-scoped sandbox ownership and the
+	// handler declaration, but never interprets the payload or the handler's
+	// response: the handler's response is the synchronous ack.
+	InvokeHandlerAction(context.Context, *InvokeHandlerActionRequest) (*InvokeHandlerActionResponse, error)
 	mustEmbedUnimplementedFastPathServiceServer()
 }
 
@@ -296,6 +321,9 @@ func (UnimplementedFastPathServiceServer) PauseSandbox(context.Context, *PauseSa
 }
 func (UnimplementedFastPathServiceServer) ResumeSandbox(context.Context, *ResumeSandboxRequest) (*ResumeSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResumeSandbox not implemented")
+}
+func (UnimplementedFastPathServiceServer) InvokeHandlerAction(context.Context, *InvokeHandlerActionRequest) (*InvokeHandlerActionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InvokeHandlerAction not implemented")
 }
 func (UnimplementedFastPathServiceServer) mustEmbedUnimplementedFastPathServiceServer() {}
 func (UnimplementedFastPathServiceServer) testEmbeddedByValue()                         {}
@@ -570,6 +598,24 @@ func _FastPathService_ResumeSandbox_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FastPathService_InvokeHandlerAction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InvokeHandlerActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FastPathServiceServer).InvokeHandlerAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FastPathService_InvokeHandlerAction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FastPathServiceServer).InvokeHandlerAction(ctx, req.(*InvokeHandlerActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // FastPathService_ServiceDesc is the grpc.ServiceDesc for FastPathService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -632,6 +678,10 @@ var FastPathService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResumeSandbox",
 			Handler:    _FastPathService_ResumeSandbox_Handler,
+		},
+		{
+			MethodName: "InvokeHandlerAction",
+			Handler:    _FastPathService_InvokeHandlerAction_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

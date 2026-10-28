@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,8 +24,10 @@ import (
 	infracontract "fast-sandbox/internal/infra/contract"
 	"fast-sandbox/internal/nodecleanup"
 	"fast-sandbox/internal/observability"
+	"fast-sandbox/internal/ocitemplate"
 	fastletapi "fast-sandbox/internal/protocol/fastlet"
 	runtimecontract "fast-sandbox/internal/runtime/contract"
+	"fast-sandbox/internal/runtime/firecracker/agent/hostready"
 )
 
 // bootPollInterval is the VM state polling interval after start/resume.
@@ -34,16 +37,14 @@ const bootPollInterval = 250 * time.Millisecond
 // restored from the golden snapshot set (or an instance checkpoint on
 // resume). The VM runs in the Fastlet Pod; nothing is pre-warmed.
 type Driver struct {
-	mu                   sync.RWMutex
-	memoryPressure       *memoryPressureGate
-	memoryPressureCancel context.CancelFunc
-	profile              runtimecatalog.RuntimeProfile
-	config               runtimecatalog.FirecrackerConfig
-	namespace            string
-	podUID               string
-	initialized          bool
-	runner               fastletnetwork.CommandRunner
-	launcher             ProcessRunner
+	mu          sync.RWMutex
+	profile     runtimecatalog.RuntimeProfile
+	config      runtimecatalog.FirecrackerConfig
+	namespace   string
+	podUID      string
+	initialized bool
+	runner      fastletnetwork.CommandRunner
+	launcher    ProcessRunner
 	// alignJailKVM rebinds the jailed /dev/kvm inode to the host device
 	// numbers before the first restore API call (jailer mode only; see
 	// kvm_device.go; tests stub it).
@@ -56,8 +57,12 @@ type Driver struct {
 	checkStorage   func(context.Context, string) error
 	networkManager *fastletnetwork.Manager
 	infraMgr       *fastletinfra.Manager
-	prepareInfra   func(ctx context.Context, config *fastletapi.RuntimeSandboxConfig) (fastletinfra.PreparedInstance, error)
-	processes      map[string]Process
+	// stateMover carries the egress-owned state files (credential vault,
+	// recorded network policy) across pause/resume; nil disables the
+	// transfers.
+	stateMover   runtimecontract.StateMover
+	prepareInfra func(ctx context.Context, config *fastletapi.RuntimeSandboxConfig) (fastletinfra.PreparedInstance, error)
+	processes    map[string]Process
 	// agentSocket, newAgentClient, and agentClient wire the node-level
 	// runtime-agent (agent_wiring.go): an empty socket means local mode, a
 	// nil newAgentClient disables the agent client, and agentClient is the
@@ -139,13 +144,17 @@ func (d *Driver) Initialize(ctx context.Context, _ string) error {
 		d.mu.Unlock()
 		return fmt.Errorf("prepare Firecracker StateRoot: %w", err)
 	}
-	checkStorage := d.checkStorage
-	if checkStorage == nil {
-		checkStorage = checkStateRootStorage
-	}
-	if err := checkStorage(ctx, d.config.StateRoot); err != nil {
-		d.mu.Unlock()
-		return fmt.Errorf("validate Firecracker StateRoot storage: %w", err)
+	if os.Getenv("FAST_SANDBOX_OCI_ENABLED") == ociEnabled {
+		klog.Warningf("FAST_SANDBOX_OCI_ENABLED=true: skipping XFS/reflink validation for StateRoot %q; native template rootfs copies may take longer and extend snapshot pause windows", d.config.StateRoot)
+	} else {
+		checkStorage := d.checkStorage
+		if checkStorage == nil {
+			checkStorage = checkStateRootStorage
+		}
+		if err := checkStorage(ctx, d.config.StateRoot); err != nil {
+			d.mu.Unlock()
+			return fmt.Errorf("validate Firecracker StateRoot storage: %w", err)
+		}
 	}
 	d.initialized = true
 	interval := d.imageGCInterval
@@ -265,6 +274,16 @@ func (d *Driver) SetNetworkManager(manager *fastletnetwork.Manager) {
 	d.mu.Unlock()
 }
 
+// SetStateMover wires the driver-invoked egress state transfers: checkpoints
+// stage the subject's vault and policy files into the bundle before the
+// runtime release purges them, and restores import them before the data
+// plane becomes ready. A nil mover (the default) disables the transfers.
+func (d *Driver) SetStateMover(mover runtimecontract.StateMover) {
+	d.mu.Lock()
+	d.stateMover = mover
+	d.mu.Unlock()
+}
+
 // RuntimeResourceAvailable implements runtimecontract.ResourceAdmission:
 // admission is gated on a clean network slot. Released slots are replaced by
 // Replenish asynchronously (netns + rules take ~15 ms), so burst creates
@@ -379,6 +398,16 @@ func (d *Driver) ProbeCapabilities(ctx context.Context) CapabilityReport {
 			return report
 		}
 	}
+	if os.Getenv("FAST_SANDBOX_OCI_ENABLED") == ociEnabled {
+		healthCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if err := hostready.CheckOCI(healthCtx); err != nil {
+			report.State = runtimecatalog.CapabilityDegraded
+			report.Reason = "OCIRuntimeUnavailable"
+			report.Message = err.Error()
+			return report
+		}
+	}
 	report.Reason = "RuntimeDriverReady"
 	report.Message = "firecracker runtime host dependencies are ready"
 	return report
@@ -394,7 +423,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	}
 	config := &input.Sandbox
 	identity := config.Identity
-	spec := config.Spec
+	spec := config.Desired
 	if identity.SandboxUID == "" || identity.FastletPodUID == "" ||
 		identity.InstanceGeneration <= 0 || identity.RuntimeInstanceID == "" || identity.AssignmentAttempt <= 0 {
 		return nil, fmt.Errorf("%w: complete Firecracker Sandbox identity is required", ErrInvalidConfig)
@@ -421,6 +450,9 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	// path below is shared between the two.
 	restoreRef, err := restoreReference(spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateOCISupport(restoreRef); err != nil {
 		return nil, err
 	}
 
@@ -478,8 +510,34 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		}
 	}
 
-	owner := d.networkOwner(config)
 	createStarted := time.Now()
+	isOCI := strings.HasPrefix(restoreRef, ocitemplate.Prefix)
+	var ociRootfs, vmstatePath, memoryPath string
+	var ociMetadata ociRestoreMetadata
+	var ociPrepareDur time.Duration
+	ociAttached := false
+	createdComplete := false
+	defer func() {
+		if ociAttached && !createdComplete {
+			d.removeJailRoot(identity.SandboxUID)
+			if releaseErr := d.releaseOCI(context.Background(), identity.SandboxUID); releaseErr != nil {
+				resultErr = errors.Join(resultErr, releaseErr)
+			}
+		}
+	}()
+	if isOCI {
+		// Let fsb-vm resolve/cache the OCI envelope before allocating networking.
+		attachment, prepareErr := d.prepareOCIRestore(ctx, directory, restoreRef, config)
+		ociAttached = prepareErr == nil
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		ociRootfs, vmstatePath, memoryPath = attachment.rootfs, attachment.vmstate, attachment.memory
+		ociMetadata, ociPrepareDur = attachment.metadata, attachment.duration
+	}
+
+	owner := d.networkOwner(config)
+	acquireStarted := time.Now()
 	acquireCtx, acquireSpan := observability.Start(ctx, "fastlet.firecracker.acquire")
 	slot, err := manager.Acquire(acquireCtx, owner)
 	observability.End(acquireSpan, err)
@@ -492,7 +550,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			"bound", snapshot.Bound, "destroying", snapshot.Destroying)
 		return nil, fmt.Errorf("%w: acquire Firecracker network slot: %w", ErrNetworkUnavailable, err)
 	}
-	acquireDur := time.Since(createStarted)
+	acquireDur := time.Since(acquireStarted)
 	releaseSlot := func() {
 		_ = manager.Release(context.Background(), owner)
 	}
@@ -502,7 +560,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	// comes from the cached manifest guestNetwork; the BakedGuestIP
 	// convention is the fallback for hand-seeded caches. Slots are prepared
 	// before the image is known, so the NAT rules are applied now.
-	guestIP, guestMTU, err := resolveBakedGuestIP(stateRoot, restoreRef, slot)
+	guestIP, guestMTU, err := resolveRestoreGuestIP(stateRoot, restoreRef, slot, ociMetadata)
 	if err != nil {
 		releaseSlot()
 		return nil, err
@@ -523,25 +581,31 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 
 	rootfsStarted := time.Now()
 	_, rootfsSpan := observability.Start(ctx, "fastlet.firecracker.rootfs")
-	vmstatePath, memoryPath, err := resolveRestoreSnapshotFiles(stateRoot, restoreRef)
+	if !isOCI {
+		vmstatePath, memoryPath, err = resolveRestoreSnapshotFiles(stateRoot, restoreRef)
+	}
 	// The machine tuple of the golden snapshot is baked in the vmstate
 	// (v1.16 restores it from the snapshot); the manifest values are only
 	// validated here, not applied via the API (any machine-config call
 	// before snapshot/load is rejected).
-	if err == nil {
-		err = validateRestoreMachineConfig(spec, d.config, stateRoot, restoreRef)
+	if err == nil && !isOCI {
+		err = validateRestoreMachineConfig(config.Limits, d.config, stateRoot, restoreRef)
 	}
 	// Compatibility admission before any staging: a snapshot whose CPU
 	// provenance or Firecracker version mismatches this node must fail with
 	// a structured error, not at snapshot/load with an MSR/XSTATE fault.
-	if err == nil {
+	if err == nil && !isOCI {
 		err = d.validateRestoreCompatibility(stateRoot, restoreRef)
 	}
 	var instanceRootfs, jailRoot, apiAddress string
 	if err == nil {
-		instanceRootfs, jailRoot, apiAddress, err = d.prepareInstance(
-			stateRoot, identity.SandboxUID, restoreRef, directory, vmstatePath, memoryPath,
-		)
+		if isOCI {
+			instanceRootfs, jailRoot, apiAddress, err = d.prepareOCIInstance(identity.SandboxUID, directory, ociRootfs, vmstatePath, memoryPath)
+		} else {
+			instanceRootfs, jailRoot, apiAddress, err = d.prepareInstance(
+				stateRoot, identity.SandboxUID, restoreRef, directory, vmstatePath, memoryPath,
+			)
+		}
 	}
 	observability.End(rootfsSpan, err)
 	if err != nil {
@@ -552,7 +616,6 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	// directories created above: every failure between here and the
 	// successful return removes them (the VMM is killed on each failure
 	// path before this defer runs, which removeJailRoot requires).
-	createdComplete := false
 	defer func() {
 		if createdComplete {
 			return
@@ -565,7 +628,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 			"sandboxID", identity.SandboxUID, "jailRoot", jailRoot)
 	}()
 	d.touchImage(restoreRef)
-	rootfsDur := time.Since(rootfsStarted)
+	rootfsDur := time.Since(rootfsStarted) + ociPrepareDur
 	rootfsMiB := float64(0)
 	if info, statErr := os.Stat(instanceRootfs); statErr == nil {
 		rootfsMiB = float64(info.Size()) / (1024 * 1024)
@@ -581,7 +644,7 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 		infraCtx, infraSpan := observability.Start(ctx, "fastlet.firecracker.infra")
 		instance, prepareErr := d.prepareInfra(infraCtx, config)
 		if prepareErr == nil {
-			prepareErr = deliverGuestInfra(infraCtx, d.runner, instanceRootfs, instance)
+			prepareErr = deliverGuestInfra(infraCtx, d.runner, instanceRootfs, instance, isOCI)
 		}
 		observability.End(infraSpan, prepareErr)
 		if prepareErr != nil {
@@ -703,6 +766,21 @@ func (d *Driver) EnsureSandbox(ctx context.Context, input *fastletapi.EnsureSand
 	}
 	bootDur := time.Since(bootStarted)
 
+	// A resumed checkpoint may carry the egress-owned vault and policy
+	// files: import them into egress here — before EnsureSandbox returns, so
+	// strictly before the Fastlet dispatches the data-plane-ready hook
+	// (OSEP-0022 import ordering). A failure degrades the subject's state
+	// (fail-closed vault, binding-input fallback policy; observable on the
+	// handler) and must not fail the restore — the same posture as a corrupt
+	// state file at registration.
+	d.importRestoreVault(ctx, spec, restoreRef, vmstatePath, identity.SandboxUID)
+	d.importRestorePolicy(ctx, spec, restoreRef, vmstatePath, identity.SandboxUID)
+	// A fresh boot from a template whose bundle carries state files starts
+	// with the template's state: land the records for the clone's first
+	// registration (re-stamped to the clone's fence) — same pre-
+	// data-plane-ready ordering, same degrade-don't-fail posture.
+	d.importTemplateCarry(ctx, spec, restoreRef, filepath.Dir(vmstatePath), identity.SandboxUID)
+
 	state.Phase = PhaseRunning
 	state.StageDurations = map[string]time.Duration{
 		"acquire": acquireDur, "rootfs": rootfsDur, "infra": infraDur,
@@ -771,7 +849,8 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 	state, err := loadState(directory)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			d.removeJailRoot(sandboxID)
+			return d.releaseOCI(ctx, sandboxID)
 		}
 		return err
 	}
@@ -795,9 +874,16 @@ func (d *Driver) DeleteSandbox(ctx context.Context, sandboxID string) (resultErr
 			klog.V(2).InfoS("infra instance cleanup on delete leaked resources", "sandboxID", sandboxID, "err", removeErr)
 		}
 	}
-	d.releaseAgentSandbox(ctx, sandboxID, state.Config.Spec.Image)
+	reference, err := restoreReference(state.Config.Desired)
+	if err != nil {
+		return err
+	}
+	d.releaseAgentSandbox(ctx, sandboxID, reference)
 	d.removeJailRoot(sandboxID)
 	d.ensureResidualProcessAbsent(ctx, sandboxID)
+	if err := d.releaseOCI(ctx, sandboxID); err != nil {
+		return err
+	}
 	if removeErr := removeSandboxDir(directory); removeErr != nil {
 		klog.ErrorS(removeErr, "Failed to remove sandbox state directory", "sandboxID", sandboxID)
 	}
@@ -849,9 +935,6 @@ func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 			klog.ErrorS(err, "Firecracker recovery skipped a sandbox with unreadable state", "stateDirectory", directory)
 			continue
 		}
-		// StateRoot is shared by all Fastlets on the node, while PID
-		// numbers are pod-local. Probing a foreign PID can misclassify a
-		// live VM and remove its state or jail. Its owner/janitor handles it.
 		if podUID != "" && state.Config.Identity.FastletPodUID != podUID {
 			continue
 		}
@@ -868,6 +951,9 @@ func (d *Driver) RecoverRuntimeResources(ctx context.Context, managed []*Sandbox
 			}
 			d.killAndForget(state.Config.Identity.SandboxUID, state.PID)
 			d.removeJailRoot(state.Config.Identity.SandboxUID)
+			if err := d.releaseOCI(ctx, state.Config.Identity.SandboxUID); err != nil {
+				return err
+			}
 			if removeErr := removeSandboxDir(directory); removeErr != nil {
 				klog.ErrorS(removeErr, "Firecracker recovery failed to remove the sandbox state directory", "stateDirectory", directory)
 			}
@@ -934,9 +1020,6 @@ func (d *Driver) GetAccessDescriptor(sandboxID string) (dataplane.AccessDescript
 func (d *Driver) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.memoryPressureCancel != nil {
-		d.memoryPressureCancel()
-	}
 	for sandboxID, process := range d.processes {
 		_ = process.Kill()
 		delete(d.processes, sandboxID)
@@ -1060,9 +1143,25 @@ func netmaskBits(mask string) (int, bool) {
 // hand-seeded caches without a manifest guest network (such caches carry no
 // MTU and are inherently derived from the runtime CIDR).
 func resolveBakedGuestIP(stateRoot, image string, slot *fastletnetwork.Slot) (string, int, error) {
-	if guestNetwork, ok, err := readCachedManifestGuestNetwork(stateRoot, image); err != nil {
+	guestNetwork, ok, err := readCachedManifestGuestNetwork(stateRoot, image)
+	if err != nil {
 		return "", 0, fmt.Errorf("%w: read cached manifest guest network: %w", ErrImageNotReady, err)
-	} else if ok {
+	}
+	return bakedGuestIP(slot, guestNetwork, ok)
+}
+
+func resolveRestoreGuestIP(stateRoot, image string, slot *fastletnetwork.Slot, metadata ociRestoreMetadata) (string, int, error) {
+	if strings.HasPrefix(image, ocitemplate.Prefix) {
+		if metadata.GuestNetwork == nil {
+			return "", 0, fmt.Errorf("%w: missing guestNetwork", ErrInvalidConfig)
+		}
+		return bakedGuestIP(slot, *metadata.GuestNetwork, true)
+	}
+	return resolveBakedGuestIP(stateRoot, image, slot)
+}
+
+func bakedGuestIP(slot *fastletnetwork.Slot, guestNetwork manifestGuestNetwork, ok bool) (string, int, error) {
+	if ok {
 		if err := validateManifestGuestNetwork(slot, guestNetwork); err != nil {
 			return "", 0, err
 		}
@@ -1092,23 +1191,7 @@ func (d *Driver) prepareInstance(stateRoot, sandboxID, image, stateDir, vmstateP
 		if prepareErr := prepareJailRoot(jailRoot, cached, vmstatePath, memoryPath); prepareErr != nil {
 			return "", "", "", prepareErr
 		}
-		// Bind the snapshot spill root into the jail BEFORE the VMM starts:
-		// the jailer clones its mount namespace at process start, so a dump
-		// window bind would be invisible to the running VMM. A failed bind
-		// only disables spilling for this sandbox (the dump falls back to
-		// the staging directory).
-		if spillRoot := d.snapshotSpillRoot(); spillRoot != "" {
-			spillMount := filepath.Join(jailRoot, jailerSpillDirName)
-			// The bind target must exist before MS_BIND (the jail root only
-			// carries snapshots/ from prepareJailRoot).
-			if err := os.MkdirAll(spillRoot, 0o750); err != nil {
-				klog.InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
-			} else if err := os.MkdirAll(spillMount, 0o750); err != nil {
-				klog.InfoS("create the jail spill mount point failed; spilling disabled", "err", err)
-			} else if err := bindMount(spillRoot, spillMount); err != nil {
-				klog.InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
-			}
-		}
+		d.prepareSnapshotSpill(jailRoot)
 		return instanceRootfs, jailRoot, apiAddress, nil
 	}
 	instanceRootfs, err = prepareInstanceRootfs(stateRoot, image, stateDir)
@@ -1129,6 +1212,9 @@ func (d *Driver) removeJailRoot(sandboxID string) {
 	// otherwise descend into the SHARED spill root and delete other
 	// sandboxes' dumps.
 	_ = unmountPath(filepath.Join(root, jailerSpillDirName))
+	for _, target := range []string{"rootfs.dev", filepath.Join(jailerChrootSnapshotsDir, vmstateSnapshotName), filepath.Join(jailerChrootSnapshotsDir, memorySnapshotName)} {
+		_ = unmountPath(filepath.Join(root, target))
+	}
 	if err := os.RemoveAll(filepath.Dir(root)); err != nil {
 		klog.V(2).InfoS("remove firecracker jail root failed", "sandboxID", sandboxID, "err", err)
 	}
@@ -1205,7 +1291,7 @@ func waitVMRunning(ctx context.Context, client *Client, timeoutSeconds int32) (i
 
 // resolveMachineConfig maps the Sandbox resource profile to Firecracker
 // machine configuration, falling back to runtime defaults.
-func resolveMachineConfig(spec fastletapi.SandboxSpec, config runtimecatalog.FirecrackerConfig) (MachineConfigRequest, error) {
+func resolveMachineConfig(spec fastletapi.SandboxRuntimeLimits, config runtimecatalog.FirecrackerConfig) (MachineConfigRequest, error) {
 	request := MachineConfigRequest{VCPUs: int(config.DefaultVCPUs), MemSizeMiB: defaultMemoryMiB(config.DefaultMemory)}
 	if spec.CPU != "" {
 		quantity, err := resource.ParseQuantity(spec.CPU)
@@ -1323,6 +1409,9 @@ func (d *Driver) cleanupStale(ctx context.Context, directory string, state *Sand
 		}
 	}
 	d.removeJailRoot(sandboxUID)
+	if err := d.releaseOCI(ctx, sandboxUID); err != nil {
+		return err
+	}
 	return removeSandboxDir(directory)
 }
 
@@ -1350,3 +1439,19 @@ func pidAlive(pid int) error {
 }
 
 var _ runtimecontract.Driver = (*Driver)(nil)
+
+// prepareSnapshotSpill binds the spill area before the jailer clones its mount namespace.
+func (d *Driver) prepareSnapshotSpill(jailRoot string) {
+	if spillRoot := d.snapshotSpillRoot(); spillRoot != "" {
+		spillMount := filepath.Join(jailRoot, jailerSpillDirName)
+		// The bind target must exist before MS_BIND (the jail root only
+		// carries snapshots/ from prepareJailRoot).
+		if err := os.MkdirAll(spillRoot, 0o750); err != nil {
+			klog.InfoS("prepare snapshot spill root failed; spilling disabled", "spillRoot", spillRoot, "err", err)
+		} else if err := os.MkdirAll(spillMount, 0o750); err != nil {
+			klog.InfoS("create the jail spill mount point failed; spilling disabled", "err", err)
+		} else if err := bindMount(spillRoot, spillMount); err != nil {
+			klog.InfoS("bind the snapshot spill root into the jail root failed; spilling disabled", "err", err)
+		}
+	}
+}

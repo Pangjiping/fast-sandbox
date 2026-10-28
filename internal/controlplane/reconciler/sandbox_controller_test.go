@@ -42,20 +42,21 @@ func (r *controllerRegistry) GetFastletByID(id placement.FastletID) (placement.F
 func (*controllerRegistry) RecordFeedback(placement.FastletID, placement.LocalFeedback) {}
 
 type controllerFastlet struct {
-	mu                   sync.Mutex
-	ensureErr            error
-	inspectErr           error
-	deleteErr            error
-	ensurePhase          string
-	runtimes             map[string]string
-	ensureCall           int
-	deleteCall           int
-	lastCreateRequest    *fastletapi.CreateSandboxRequest
-	snapshotCreateErr    error
-	snapshotInspectErr   error
-	snapshotInspectPhase fastletapi.SnapshotPhase
-	snapshotDeleteCall   int
-	lastSnapshotInspect  *fastletapi.SnapshotIdentity
+	mu                    sync.Mutex
+	ensureErr             error
+	inspectErr            error
+	deleteErr             error
+	ensurePhase           string
+	runtimes              map[string]string
+	ensureCall            int
+	deleteCall            int
+	lastCreateRequest     *fastletapi.CreateSandboxRequest
+	snapshotCreateErr     error
+	snapshotInspectErr    error
+	snapshotInspectPhase  fastletapi.SnapshotPhase
+	snapshotInspectStatus *fastletapi.SnapshotStatus
+	snapshotDeleteCall    int
+	lastSnapshotInspect   *fastletapi.SnapshotIdentity
 }
 
 func (f *controllerFastlet) CreateSandbox(_ context.Context, _ string, request *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error) {
@@ -139,6 +140,10 @@ func (f *controllerFastlet) InspectSnapshot(_ context.Context, _ string, request
 	if f.snapshotInspectErr != nil {
 		return &fastletapi.InspectSnapshotResponse{}, f.snapshotInspectErr
 	}
+	if f.snapshotInspectStatus != nil {
+		observed := *f.snapshotInspectStatus
+		return &fastletapi.InspectSnapshotResponse{Snapshot: &observed}, nil
+	}
 	phase := f.snapshotInspectPhase
 	if phase == "" {
 		phase = fastletapi.SnapshotPhaseSucceeded
@@ -184,6 +189,43 @@ func TestDeclarativeCreateWithoutCapacityStaysPending(t *testing.T) {
 	require.Equal(t, apiv1alpha2.RuntimePending, current.Status.Runtime.State)
 }
 
+func TestDeclarativeCreateReportsUnadmittableResourcesAndRecovers(t *testing.T) {
+	reconciler, _, _, sandbox := newControllerHarness(t)
+	var pool apiv1alpha2.SandboxPool
+	require.NoError(t, reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "pool-a"}, &pool))
+	pool.Spec.MaxSandboxesPerPod = 4
+	pool.Spec.SandboxResources = apiv1alpha2.NewResourceAwareSandboxResourceProfile(
+		resource.MustParse("2"), resource.MustParse("4Gi"), resource.MustParse("2"), resource.MustParse("2"), 256,
+	)
+	pool.Spec.FastletTemplate.Spec.Containers = []corev1.Container{{Name: "fastlet", Image: "fastlet:test"}}
+	require.NoError(t, reconciler.Update(context.Background(), &pool))
+
+	current := getControllerSandbox(t, reconciler, sandbox.Name)
+	current.Spec.Resources = &apiv1alpha2.SandboxResourceRequirements{Limits: apiv1alpha2.SandboxComputeResources{
+		CPU: resource.MustParse("10"), Memory: resource.MustParse("20Gi"),
+	}}
+	require.NoError(t, reconciler.Update(context.Background(), current))
+	reconcileTwice(t, reconciler, sandbox.Name)
+
+	current = getControllerSandbox(t, reconciler, sandbox.Name)
+	require.Empty(t, current.Status.Placement.FastletName)
+	require.Equal(t, apiv1alpha2.RuntimePending, current.Status.Runtime.State)
+	require.True(t, current.Status.HasCondition(
+		apiv1alpha2.SandboxConditionResourceResolved, metav1.ConditionFalse, orchestration.ReasonLimitExceedsFastletBudget,
+	))
+
+	current.Spec.Resources.Limits = apiv1alpha2.SandboxComputeResources{
+		CPU: resource.MustParse("2"), Memory: resource.MustParse("4Gi"),
+	}
+	require.NoError(t, reconciler.Update(context.Background(), current))
+	_, err := reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
+	require.NoError(t, err)
+	current = getControllerSandbox(t, reconciler, sandbox.Name)
+	require.True(t, current.Status.HasCondition(
+		apiv1alpha2.SandboxConditionResourceResolved, metav1.ConditionTrue, "Resolved",
+	))
+}
+
 func TestDeclarativeCreateUsesSharedV2Orchestrator(t *testing.T) {
 	reconciler, _, fastlet, sandbox := newControllerHarness(t)
 	reconcileTwice(t, reconciler, sandbox.Name)
@@ -193,6 +235,7 @@ func TestDeclarativeCreateUsesSharedV2Orchestrator(t *testing.T) {
 	require.Equal(t, int64(1), current.Status.Placement.Attempt)
 	require.Equal(t, apiv1alpha2.RuntimeReady, current.Status.Runtime.State)
 	require.Equal(t, apiv1alpha2.DataPlaneReady, current.Status.DataPlane.State)
+	require.True(t, current.Status.HasCondition(apiv1alpha2.SandboxConditionResourceResolved, metav1.ConditionTrue, "Resolved"))
 	fastlet.mu.Lock()
 	require.Equal(t, 1, fastlet.ensureCall)
 	fastlet.mu.Unlock()
@@ -473,9 +516,9 @@ func newControllerHarness(t *testing.T) (*SandboxReconciler, *controllerRegistry
 		Spec: apiv1alpha2.SandboxPoolSpec{
 			Runtime: apiv1alpha2.RuntimeContainer, Capacity: apiv1alpha2.PoolCapacity{PoolMin: 1, PoolMax: 1},
 			MaxSandboxesPerPod: 8,
-			SandboxResources: apiv1alpha2.SandboxResourceProfile{
-				CPU: resource.MustParse("1"), Memory: resource.MustParse("512Mi"), PIDs: 256,
-			},
+			SandboxResources: apiv1alpha2.NewLegacySandboxResourceProfile(
+				resource.MustParse("1"), resource.MustParse("512Mi"), 256,
+			),
 			FastletTemplate: corev1.PodTemplateSpec{},
 		},
 	}
@@ -828,4 +871,11 @@ func TestDeletionRetriesFailedDeleteWithoutReleasingFinalizer(t *testing.T) {
 	_, err = reconciler.Reconcile(context.Background(), requestFor(sandbox.Name))
 	require.NoError(t, err)
 	require.Empty(t, fastlet.runtimes)
+}
+
+func (*controllerRegistry) ApplyHeartbeat(placement.FastletID, string, *fastletapi.HeartbeatResponse, time.Time) error {
+	return nil
+}
+func (*controllerFastlet) Heartbeat(context.Context, string, *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error) {
+	return &fastletapi.HeartbeatResponse{}, nil
 }

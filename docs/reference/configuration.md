@@ -20,6 +20,16 @@ and platform-owned runtime implementation details.
 | `--sandbox-proxy-base-url` | cluster Service URL | Client-visible proxy base URL |
 | `--runtime-environment-namespace` | `fast-sandbox-system` | Namespace of the platform runtime environment ConfigMap |
 | `--runtime-environment-configmap` | `fast-sandbox-runtime-environments` | Platform runtime environment ConfigMap name |
+| `--resource-aware-static-admission` | `true` | Enable Fastlet CPU and memory commitment admission for ResourceAware Pools |
+| `--resource-aware-memory-admission` | `true` | Enable the Fastlet dynamic memory-pressure gate |
+| `--resource-aware-placement` | `true` | Enable FastPath resource eligibility and ranking |
+| `--resource-aware-pool-scaling` | `true` | Enable ResourceAware effective-capacity Pool scaling |
+| `--resource-aware-fastlet-startup-grace` | `2m` | Time a new Fastlet without a heartbeat contributes nominal capacity |
+| `--resource-aware-scale-down-stabilization` | `1m` | Continuous excess-capacity period required before scale-down |
+
+Resource-aware placement requires static admission. Resource-aware Pool
+scaling requires placement. These constraints prevent a downstream component
+from acting on capacity that an upstream authority does not enforce.
 
 Image and route-key flags can also be supplied by environment:
 
@@ -58,7 +68,8 @@ Fastlet configuration is delivered by level:
   sandboxResources) travel in an immutable, content-addressed
   `<pool>-settings-<revision>` ConfigMap mounted at
   `/etc/fast-sandbox/settings` as `warm-images.json`,
-  `action-handlers.json`, and `resource-profile.json`. The ConfigMap name is
+  `action-handlers.json`, `resource-profile.json`, and, for ResourceAware
+  Pools, `resource-admission.json`. The ConfigMap name is
   embedded in the Pod template hash, so any settings change rolls Fastlet
   Pods. The `FAST_SANDBOX_SETTINGS_DIR` environment variable points the
   Fastlet at the mount; when the mount is absent (local runs without the
@@ -78,6 +89,32 @@ Fastlet configuration is delivered by level:
 - **Registry credentials** stay in the compiled Secret.
 
 The Pool Controller injects the remaining platform-owned environment groups:
+
+For ResourceAware Pools, `resource-admission.json` is the single resolved
+contract shared by Fastlet admission and the runtime boundary. Its `capacity`
+is the pure Sandbox commitment capacity; `sandboxRuntimeBudget` is the maximum
+aggregate child-runtime budget and cannot be consumed by fixed Fastlet cost;
+`runtimeEnvelope` adds the runtime profile's one-per-Pod `fastletOverhead`;
+`podMemoryBudget` adds all long-running regular sidecar and restartable
+init-sidecar memory limits for runtimes whose pressure observer reads the
+aggregate Pod cgroup. One-shot init containers are excluded. This
+observer-only budget never changes Sandbox commitment capacity.
+The Controller passes the compiled capacity directly to the Pool scaler and
+projects that same value through a platform-owned Pod annotation for Registry
+bootstrap, FastPath placement, and status. No consumer re-derives capacity
+from the first container's Kubernetes request.
+
+Per-Sandbox limits are compiled through the same resolver for FastPath,
+declarative reconciliation, and Pool scaling. A direct CRD whose limits exceed
+one Fastlet's `sandboxRuntimeBudget` remains visible with
+`ResourceResolved=False`, but is excluded from admissible pending demand so it
+cannot suppress scale-out for valid Sandboxes or the configured buffer.
+
+Each runtime binding in `fast-sandbox-runtime-environments` may configure
+`fastletOverhead.cpu` and `.memory`. The Controller adds it exactly once when
+deriving the first Fastlet container's equal Kubernetes requests and limits.
+Node-level runtime-agent, OverlayBD, and janitor DaemonSet resources are
+separate workload budgets and never enter a SandboxPool commitment ledger.
 
 ### Runtime
 

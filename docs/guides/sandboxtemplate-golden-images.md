@@ -6,7 +6,16 @@ object store. The Firecracker runtime consumes the artifacts on demand
 (`SandboxSpec.Image` → index → manifest → digest-verified pull → restore), so
 the template is the build-time half of on-demand loading.
 
-This guide covers operating the resource end to end.
+This guide covers the `format: native` object-store pipeline. OverlayBD templates
+require a repository-only `output.publish: oci://registry/repository`, without a
+tag or digest. The system generates a UUID per build; see the
+[OverlayBD OCI guide](overlaybd-oci-sandboxes.md#rebuilds-and-generated-tags).
+
+Only two combinations are supported: `native` + S3-compatible storage, and
+`overlaybd` + OCI registry. The default format remains `overlaybd`, so S3
+templates must explicitly set `format: native`. OverlayBD + S3 builds and
+artifacts are rejected. Rebuild an old S3 template as native, or rebuild and
+publish it to OCI; changing a format label does not convert its artifacts.
 
 ## End-to-end workflow
 
@@ -16,7 +25,6 @@ SandboxTemplate CR (spec)
   → convert: OCI layers → sparse ext4 rootfs + runtime injection (execd/init/envs)
   → validate-boot: cold boot + guest readiness
   → snapshot: pause → full snapshot (vmstate.snap + memory.snap) → restore validation
-  → package (format=overlaybd): rootfs/memory → LSMT layers
   → manifest.json + SHA256SUMS (content-addressed)
   → publish: s3://<publish>/<sha256(manifest)[:16]>/… + index/<sha256(image)>.json
   → status.manifestRef / status.artifactDigest recorded on the CR
@@ -36,6 +44,8 @@ SandboxTemplate CR (spec)
 
 The builder image is `build/Dockerfile.sandboxtemplate-builder` (oci2rootfs,
 firecracker v1.16.1, embedded guest kernel, OverlayBD toolchain, aws CLI v2).
+
+Build it with `make images COMPONENT=sandboxtemplate-builder`. Builder and runtime-agent copy OCI tools from the same artifact image; set `OCI_TOOLS_IMAGE` to the same published digest for both. See [OCI image builds](overlaybd-oci-sandboxes.md#1-prepare-the-pool) for the commands.
 
 ## Example
 
@@ -63,7 +73,7 @@ spec:
     warmupSeconds: 60
   output:
     rootfsSize: "30Gi"
-    format: overlaybd
+    format: native
     # publish is optional when the platform artifact store is configured
     publish: s3://sandbox-images/publish
     publishSecretRef:
@@ -136,6 +146,62 @@ container runtime would; an env here with the same name overrides the
 inherited value. Do not place secrets here — they are published
 verbatim in the manifest; use `publishSecretRef` for credentials.
 
+### `spec.egressMitmCertificate`
+
+Optional. Bakes the **egress MITM proxy CA certificate** into the golden
+image (OSEP-0022), so guest HTTPS verifies against the pinned CA from first
+boot — nothing is delivered at sandbox create time.
+
+```yaml
+spec:
+  egressMitmCertificate:
+    secretRef:
+      name: opensandbox-mitm-ca   # Secret in the template's namespace
+    key: ca.crt                   # default; the certificate entry only
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `egressMitmCertificate.secretRef.name` | — (required) | Secret carrying the certificate; must live in the template's namespace |
+| `egressMitmCertificate.key` | `ca.crt` | Secret data entry holding the PEM certificate; **only this key** is mounted into the build Pod |
+
+Behavior:
+
+- The controller projects the single configured key (volume `Items`) into the
+  build Pod; the rest of the Secret — e.g. the CA private key — never enters
+  the build. The builder accepts entries consisting solely of PEM
+  `CERTIFICATE` blocks — private keys, other PEM blocks, and trailing
+  non-PEM data are rejected — and bakes them re-encoded (canonical PEM), so
+  the published bytes are exactly what the lineage fingerprints cover. It
+  does not verify CA constraints (`BasicConstraints CA:TRUE`), so the entry
+  must hold a properly issued CA certificate.
+- The builder writes the certificates into the rootfs at
+  `/opt/opensandbox/mitmproxy-ca-cert.pem` — the path the execd bootstrap
+  script watches — and sets the trust gate
+  (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`, after `spec.envs`, so it
+  wins).
+- The builder records the baked CA's public-key identity into the manifest
+  lineage (`platform.egressMitmCA`): per `CERTIFICATE` block, `certSha256`
+  (SHA-256 of the certificate DER — matched byte-for-byte against the egress
+  pinned-CA fingerprint exposed on `/healthz`, which is how a template↔pool
+  pinning mismatch becomes checkable), `spkiSha256` (the key identity,
+  stable across re-issuance with the same key), and `notAfter`. Fingerprints
+  only — never the Secret reference, the private key, or certificate bytes;
+  absent when this field is unset (consumers treat that as "unknown" and
+  skip the comparison). See the
+  [artifact manifest reference](artifact-manifest-reference.md).
+- At the build's snapshot boot the bootstrap installs the CA into the guest
+  trust store (`update-ca-certificates` / `update-ca-trust`, plus NSS and JDK
+  keystores), builds the merged bundle (roots + MITM CA), and exports
+  `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`. These rootfs
+  writes and process envs are part of the golden image, so restored sandboxes
+  trust the CA across egress restart and pause/resume.
+- The CA is cluster-global (one Secret per deployment): one baked template
+  works with every pool's egress — the field is pool-agnostic.
+- Requires `spec.execd` (the trust installation lives in the bootstrap
+  script); without it the build fails — the certificate could be baked but
+  never trusted.
+
 ### `spec.readiness`
 
 Defines when the guest is considered ready for the snapshot.
@@ -154,8 +220,8 @@ Precedence: custom `probe` → execd `/ping` (when execd is injected) →
 | Field | Required | Default | Meaning |
 | --- | ---: | --- | --- |
 | `output.rootfsSize` | Yes | `"30Gi"` | Logical capacity of the produced `rootfs.ext4` (Kubernetes quantity). Rounded **up** to SI GiB for oci2rootfs (`30Gi` → 33G → ~30.7 GiB sparse file) |
-| `output.format` | Yes | `overlaybd` | `native` (raw snapshot files only) or `overlaybd` (plus LSMT layers for on-demand range reads); both contain the full artifact set |
-| `output.publish` | No | platform store | S3-compatible target, e.g. `s3://sandbox-images/publish`. Empty defaults to the platform artifact store (`fast-sandbox-artifact-store` ConfigMap); a non-empty value must equal that store or the build fails with an `InvalidOutput` condition, so a template cannot silently publish where no node agent reads. Digest-addressed publication; the builder itself refuses to run with an empty target unless `SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1` |
+| `output.format` | Yes | `overlaybd` | `native` for S3-compatible storage; `overlaybd` requires an explicit `oci://` target |
+| `output.publish` | No for native; yes for OCI | platform store for native | S3-compatible target for `format: native`, e.g. `s3://sandbox-images/publish`. OverlayBD requires `oci://registry/repository` without a tag or digest (the system generates a UUID per build) and a registry credential Secret. For native output, empty defaults to the platform artifact store (`fast-sandbox-artifact-store` ConfigMap); a non-empty value must equal that store or the build fails with an `InvalidOutput` condition, so a template cannot silently publish where no node agent reads. Digest-addressed publication; the builder itself refuses to run with an empty target unless `SANDBOX_TEMPLATE_ALLOW_NO_PUBLISH=1` |
 | `output.publishSecretRef` | No | — | Name of the write-credential Secret in the template's namespace (`accessKeyId`/`secretAccessKey`/`endpoint`/`region`); the controller mounts it into the build Pod and the builder reads the keys as files (never env-injected). Without it the build relies on platform-level credentials (IRSA/node metadata). Runtime nodes read with a **separate** read-only credential — write keys never reach them |
 | `output.prime` | No | — | Reserved: seed-node cache priming after a successful build; not yet implemented |
 
@@ -174,6 +240,11 @@ what the node agents pull.
 - **Rebuild**: edit the spec — the generation bump triggers a new build. A
   mid-build spec change deletes the stale build Pod immediately (concurrent
   privileged builds cannot stack up).
+  Reapplying an unchanged spec does not start another build. For OCI output,
+  each new build Pod publishes a new UUID pair in the declared repository;
+  controller retries reuse the UUID already stored in that Pod. Use the new
+  `status.manifestRef` after the build succeeds; earlier published pairs remain
+  intact.
 - **Build Pods** run in the template's own namespace as
   `<template>-build-<generation>`, owned by the template (deleting the
   template cascades to its Pods via the garbage collector), pinned to
@@ -184,7 +255,7 @@ what the node agents pull.
 - **Diagnostics**: failed builds surface the container exit reason/message in
   the condition; the Pod logs (`kubectl -n <namespace> logs <build-pod>`)
   carry per-stage timings (`pullMs`, `bootToReadyMs`, `snapshotCreateMs`,
-  `restoreToHeartbeatMs`, `importRootfsMs`, …).
+  `restoreToHeartbeatMs`, `manifestMs`, …).
 
 ## Published artifacts
 
@@ -194,7 +265,6 @@ s3://sandbox-images/publish/
 │   ├── rootfs.ext4                   # sparse ext4 (native filename: rootfs.img)
 │   ├── vmstate.snap
 │   ├── memory.snap
-│   ├── overlaybd/{rootfs,memory}/layer.lsmt   # format=overlaybd only
 │   ├── SHA256SUMS                    # audit copy
 │   └── manifest.json                 # uploaded last (commit point)
 └── index/<sha256(image)>.json        # image → latest manifestRef, last-writer-wins
@@ -202,18 +272,14 @@ s3://sandbox-images/publish/
 
 `manifest.json` records (among others):
 
-- `machine` — the vcpu/memory/rootfs tuple restore validates against;
-- `guestNetwork` — the NIC baked into the snapshot (`eth0` + static
-  guest IP/MAC); the runtime replaces only the host tap via
-  `network_overrides`;
-- `files` — publish filename → `{sha256, sizeBytes}` for digest-verified pull;
-- `compatibility` — the structured CPU identity (vendor/cpuFamily/cpuModel)
-  of the build host, the pinned CPU template (`T2`/`T2A`, or `none` when a
-  host refused it and the raw CPUID was baked in), firecracker version and
-  host kernel;
-- `lineage` — build provenance carried by every derived snapshot: `image`,
-  `imageDigest`, `execd`, `kernel`, `entrypoint`, `init`, `envs`;
-- `validation` — build gates.
+- `schemaVersion: 1`, `runtime`, `machine` and `kernel.version` — the shared VM contract; CPU count and MiB sizes use integers.
+- `guestNetwork` — the baked NIC and static network; restore replaces only the host tap.
+- `files` — native VM artifact names with digest and size; optional state files are described once under `platform.stateFiles`.
+- `compatibility` — CPU architecture, capture CPU identity/template, Firecracker version and optional host diagnostics.
+- `lineage` — optional source image, original digest and creation time.
+- `platform` — optional execd, entrypoint, init, literal environment values, public MITM CA fingerprints, private checkpoint ownership and state-file records.
+
+The full schema and upgrade requirements are in [Artifact manifest reference](artifact-manifest-reference.md).
 
 The consumer-side cache layout is
 `<StateRoot>/images/<sha256(image)>/{rootfs.img, vmstate.snap, memory.snap,

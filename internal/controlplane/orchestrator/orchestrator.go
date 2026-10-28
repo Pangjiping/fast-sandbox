@@ -31,15 +31,42 @@ var (
 	ErrInvalidActionDesiredState  = errors.New("Sandbox Action desired state is invalid")
 	ErrAssignedFastletUnavailable = errors.New("assigned Fastlet is unavailable or was replaced")
 	ErrUnknownFastletOutcome      = errors.New("Fastlet operation outcome is unknown")
+	ErrLocalReservationConflict   = errors.New("FastPath local in-flight reservation conflicts with the durable assignment")
 )
 
 const (
 	ConditionReady       = apiv1alpha2.SandboxConditionReady
 	ReasonFastletPodLost = "FastletPodLost"
 	ReasonExpired        = "Expired"
+
+	ReasonInvalidSandboxResources   = "InvalidSandboxResources"
+	ReasonLimitExceedsFastletBudget = "LimitExceedsFastletBudget"
 )
 
+// SandboxResourceResolutionError is a caller-owned resource intent that
+// cannot be admitted under an otherwise valid Pool policy. Callers may isolate
+// this Sandbox without treating the Pool or controller as unhealthy.
+type SandboxResourceResolutionError struct {
+	Reason string
+	Err    error
+}
+
+func (e *SandboxResourceResolutionError) Error() string {
+	if e == nil || e.Err == nil {
+		return "Sandbox resources are not admissible"
+	}
+	return e.Err.Error()
+}
+
+func (e *SandboxResourceResolutionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type FastletClient interface {
+	Heartbeat(context.Context, string, *fastletapi.HeartbeatRequest) (*fastletapi.HeartbeatResponse, error)
 	CreateSandbox(context.Context, string, *fastletapi.CreateSandboxRequest) (*fastletapi.CreateSandboxResponse, error)
 	InspectSandbox(context.Context, string, *fastletapi.InspectSandboxRequest) (*fastletapi.InspectSandboxResponse, error)
 	DeleteSandbox(context.Context, string, *fastletapi.DeleteSandboxRequest) (*fastletapi.DeleteSandboxResponse, error)
@@ -49,20 +76,27 @@ type FastletClient interface {
 }
 
 type Registry interface {
+	ApplyHeartbeat(placement.FastletID, string, *fastletapi.HeartbeatResponse, time.Time) error
 	TopK(placement.CandidateRequest, int) []placement.FastletInfo
 	GetFastletByID(placement.FastletID) (placement.FastletInfo, bool)
 	RecordFeedback(placement.FastletID, placement.LocalFeedback)
 }
 
+type localReservationRegistry interface {
+	ReserveLocal(placement.FastletID, placement.ResourceDemand) bool
+	ReleaseLocal(placement.FastletID, placement.ResourceDemand)
+}
+
 type Orchestrator struct {
-	Client          client.Client
-	Registry        Registry
-	FastletClient   FastletClient
-	Catalog         *runtimecatalog.Catalog
-	TopK            int
-	Now             func() time.Time
-	activeCreatesMu sync.Mutex
-	activeCreates   map[types.NamespacedName]int
+	Client                        client.Client
+	Registry                      Registry
+	FastletClient                 FastletClient
+	Catalog                       *runtimecatalog.Catalog
+	TopK                          int
+	Now                           func() time.Time
+	DisableResourceAwarePlacement bool
+	activeCreatesMu               sync.Mutex
+	activeCreates                 map[types.NamespacedName]int
 }
 
 // RuntimeParameters are used only by the declarative Controller to validate a
@@ -74,6 +108,9 @@ type RuntimeParameters struct {
 	ResourceProfileHash string
 	InfraRevision       string
 	FastletRevision     string
+	ResourceMode        apiv1alpha2.SandboxResourceMode
+	ResourceDemand      placement.ResourceDemand
+	ResolvedResources   *fastletapi.ResolvedSandboxResources
 }
 
 func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.Sandbox) (RuntimeParameters, error) {
@@ -101,7 +138,7 @@ func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.
 	if err != nil {
 		return RuntimeParameters{}, fmt.Errorf("resolve runtime profile: %w", err)
 	}
-	if err := apiv1alpha2.ValidateSandboxResourceProfile(pool.Spec.SandboxResources); err != nil {
+	if err := pool.Spec.ValidateResourceContract(); err != nil {
 		return RuntimeParameters{}, fmt.Errorf("resolve Sandbox resources: %w", err)
 	}
 	infraPlan, err := infracatalog.Compile(pool.Spec.InfraComponents, profile)
@@ -115,12 +152,59 @@ func (o *Orchestrator) ResolveRuntime(ctx context.Context, sandbox *apiv1alpha2.
 		// a compatibility fallback for unit tests and pre-v1alpha2 objects.
 		runtimeProfileHash = profile.ProfileHash
 	}
-	return RuntimeParameters{
+	parameters := RuntimeParameters{
 		RuntimeName: pool.Spec.Runtime, RuntimeProfileHash: runtimeProfileHash,
 		ResourceProfileHash: pool.Spec.SandboxResources.Hash(),
 		InfraRevision:       infraPlan.Revision,
 		FastletRevision:     pool.Status.FastletRevision,
-	}, nil
+		ResourceMode:        pool.Spec.SandboxResources.ResourceMode(),
+	}
+	resolved, demand, err := ResolveSandboxResources(&pool, sandbox)
+	if err != nil {
+		return RuntimeParameters{}, fmt.Errorf("resolve Sandbox resources: %w", err)
+	}
+	parameters.ResolvedResources, parameters.ResourceDemand = resolved, demand
+	if err := validateResolvedResourceAnnotations(sandbox, parameters); err != nil {
+		return RuntimeParameters{}, err
+	}
+	return parameters, nil
+}
+
+// ResolveSandboxResources compiles the caller limit and Pool policy into the
+// one request/limit contract consumed by placement and Fastlet admission.
+func ResolveSandboxResources(pool *apiv1alpha2.SandboxPool, sandbox *apiv1alpha2.Sandbox) (*fastletapi.ResolvedSandboxResources, placement.ResourceDemand, error) {
+	if pool == nil || sandbox == nil {
+		return nil, placement.ResourceDemand{}, errors.New("Pool and Sandbox are required")
+	}
+	if err := apiv1alpha2.ValidateSandboxResourceProfile(pool.Spec.SandboxResources); err != nil {
+		return nil, placement.ResourceDemand{}, err
+	}
+	mode := pool.Spec.SandboxResources.ResourceMode()
+	limits, err := pool.Spec.SandboxResources.ResolveLimits(sandbox.Spec.Resources)
+	if err != nil {
+		return nil, placement.ResourceDemand{}, &SandboxResourceResolutionError{Reason: ReasonInvalidSandboxResources, Err: err}
+	}
+	if mode != apiv1alpha2.SandboxResourceModeResourceAware {
+		return nil, placement.ResourceDemand{}, nil
+	}
+	requests, err := pool.Spec.SandboxResources.DeriveRequests(limits)
+	if err != nil {
+		return nil, placement.ResourceDemand{}, &SandboxResourceResolutionError{Reason: ReasonInvalidSandboxResources, Err: err}
+	}
+	_, runtimeBudget, err := pool.Spec.SandboxResources.ResolveFastletCapacity(pool.Spec.MaxSandboxesPerPod)
+	if err != nil {
+		return nil, placement.ResourceDemand{}, err
+	}
+	if limits.CPU.Cmp(runtimeBudget.CPU) > 0 || limits.Memory.Cmp(runtimeBudget.Memory) > 0 {
+		return nil, placement.ResourceDemand{}, &SandboxResourceResolutionError{
+			Reason: ReasonLimitExceedsFastletBudget,
+			Err:    fmt.Errorf("Sandbox limits %s/%s exceed Fastlet Sandbox runtime budget %s/%s", limits.CPU.String(), limits.Memory.String(), runtimeBudget.CPU.String(), runtimeBudget.Memory.String()),
+		}
+	}
+	return &fastletapi.ResolvedSandboxResources{
+		Requests: fastletapi.SandboxResourceVector{CPU: requests.CPU.String(), Memory: requests.Memory.String()},
+		Limits:   fastletapi.SandboxRuntimeLimits{CPU: limits.CPU.String(), Memory: limits.Memory.String(), PIDs: pool.Spec.SandboxResources.PIDs},
+	}, placement.ResourceDemand{CPU: requests.CPU, Memory: requests.Memory}, nil
 }
 
 func (o *Orchestrator) Candidates(ctx context.Context, sandbox *apiv1alpha2.Sandbox, stableKey string) ([]placement.FastletInfo, RuntimeParameters, error) {
@@ -133,7 +217,8 @@ func (o *Orchestrator) Candidates(ctx context.Context, sandbox *apiv1alpha2.Sand
 		RuntimeName: parameters.RuntimeName, RuntimeProfileHash: parameters.RuntimeProfileHash,
 		ResourceProfileHash: parameters.ResourceProfileHash, InfraRevision: parameters.InfraRevision,
 		FastletRevision: parameters.FastletRevision,
-		Image:           sandbox.Spec.Image, StableKey: stableKey,
+		ResourceMode:    o.placementResourceMode(parameters.ResourceMode), Demand: parameters.ResourceDemand,
+		Image: sandbox.Spec.Image, StableKey: stableKey,
 	})
 	if len(candidates) == 0 {
 		return nil, parameters, ErrNoCandidate
@@ -159,11 +244,19 @@ func (o *Orchestrator) FastPathCandidatesMatching(sandbox *apiv1alpha2.Sandbox, 
 		RuntimeName: parameters.RuntimeName, RuntimeProfileHash: parameters.RuntimeProfileHash,
 		ResourceProfileHash: parameters.ResourceProfileHash, InfraRevision: parameters.InfraRevision,
 		FastletRevision: parameters.FastletRevision, ExcludedFastlets: excluded,
+		ResourceMode: o.placementResourceMode(parameters.ResourceMode), Demand: parameters.ResourceDemand,
 	})
 	if len(candidates) == 0 {
 		return nil, ErrNoCandidate
 	}
 	return candidates, nil
+}
+
+func (o *Orchestrator) placementResourceMode(mode apiv1alpha2.SandboxResourceMode) apiv1alpha2.SandboxResourceMode {
+	if o.DisableResourceAwarePlacement && mode == apiv1alpha2.SandboxResourceModeResourceAware {
+		return apiv1alpha2.SandboxResourceModeLegacySlot
+	}
+	return mode
 }
 
 func (o *Orchestrator) topK(request placement.CandidateRequest) []placement.FastletInfo {
@@ -219,6 +312,17 @@ func (o *Orchestrator) AssignDeclarativePreferring(ctx context.Context, sandbox 
 	if sandbox == nil || sandbox.UID == "" {
 		return nil, false, errors.New("persisted Sandbox UID is required")
 	}
+	// Reconciles read from the informer cache, which may still contain the
+	// released assignment's fences after ClearAssignment writes to the API.
+	// Use the durable object before selecting a new runtime identity.
+	var current apiv1alpha2.Sandbox
+	if err := o.Client.Get(ctx, client.ObjectKeyFromObject(sandbox), &current); err != nil {
+		return nil, false, err
+	}
+	if current.UID != sandbox.UID {
+		return nil, false, assignment.ErrAssignmentAnnotationChanged
+	}
+	sandbox = &current
 	envelope, err := assignment.AssignmentFromAnnotation(sandbox)
 	if err != nil {
 		return nil, false, err
@@ -228,7 +332,7 @@ func (o *Orchestrator) AssignDeclarativePreferring(ctx context.Context, sandbox 
 		return projected, false, err
 	}
 
-	candidates, _, err := o.Candidates(ctx, sandbox, stableKey)
+	candidates, parameters, err := o.Candidates(ctx, sandbox, stableKey)
 	if err != nil {
 		return nil, false, err
 	}
@@ -244,12 +348,27 @@ func (o *Orchestrator) AssignDeclarativePreferring(ctx context.Context, sandbox 
 	if err != nil {
 		return nil, false, err
 	}
-	_, won, err := assignment.InitializeAssignmentAnnotation(ctx, o.Client, client.ObjectKeyFromObject(sandbox), desired)
+	_, won, err := assignment.InitializeAssignmentAnnotationWithMetadata(
+		ctx, o.Client, client.ObjectKeyFromObject(sandbox), desired,
+		assignment.ResolvedResourceAnnotations(parameters.ResourceProfileHash, parameters.ResolvedResources),
+	)
 	if err != nil {
 		return nil, false, err
 	}
 	projected, err := assignment.ProjectAssignmentToStatus(ctx, o.Client, client.ObjectKeyFromObject(sandbox))
 	return projected, won, err
+}
+
+func validateResolvedResourceAnnotations(sandbox *apiv1alpha2.Sandbox, parameters RuntimeParameters) error {
+	if sandbox == nil || parameters.ResolvedResources == nil || len(sandbox.Annotations) == 0 {
+		return nil
+	}
+	for name, want := range assignment.ResolvedResourceAnnotations(parameters.ResourceProfileHash, parameters.ResolvedResources) {
+		if got, recorded := sandbox.Annotations[name]; recorded && got != want {
+			return fmt.Errorf("Sandbox resource intent changed after assignment: annotation %s=%q, resolved value=%q", name, got, want)
+		}
+	}
+	return nil
 }
 
 // preferFastlet moves the candidate matching (PodName, PodUID) to the front
@@ -335,17 +454,25 @@ func (o *Orchestrator) CreateRuntime(ctx context.Context, sandbox *apiv1alpha2.S
 	if err != nil {
 		return nil, err
 	}
-	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity, "")
+	parameters, err := o.ResolveRuntime(ctx, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity, "", parameters, true)
 }
 
 // CreateRuntimeOnCandidate is used immediately after FastPath wins an
 // annotation Create/CAS. The annotation is revalidated, while a concurrently
 // stale status projection is deliberately ignored.
 func (o *Orchestrator) CreateRuntimeOnCandidate(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope) (*fastletapi.CreateSandboxResponse, error) {
-	return o.CreateRuntimeOnCandidateWithCompletion(ctx, sandbox, fastlet, envelope, "")
+	parameters, err := o.ResolveRuntime(ctx, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	return o.CreateRuntimeOnCandidateWithCompletion(ctx, sandbox, fastlet, envelope, "", parameters)
 }
 
-func (o *Orchestrator) CreateRuntimeOnCandidateWithCompletion(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, completion fastletapi.CreateCompletion) (*fastletapi.CreateSandboxResponse, error) {
+func (o *Orchestrator) CreateRuntimeOnCandidateWithCompletion(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, completion fastletapi.CreateCompletion, parameters RuntimeParameters) (*fastletapi.CreateSandboxResponse, error) {
 	current, err := assignment.AssignmentFromAnnotation(sandbox)
 	if err != nil {
 		return nil, err
@@ -363,15 +490,31 @@ func (o *Orchestrator) CreateRuntimeOnCandidateWithCompletion(ctx context.Contex
 		InstanceGeneration: envelope.InstanceGeneration, RuntimeInstanceID: envelope.RuntimeInstanceID,
 		AssignmentAttempt: envelope.Attempt, RouteGeneration: envelope.RouteGeneration, FastletPodUID: envelope.FastletPodUID,
 	}
-	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity, completion)
+	return o.createRuntimeOnTarget(ctx, sandbox, fastlet, envelope, identity, completion, parameters, false)
 }
 
-func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, identity fastletapi.SandboxIdentity, completion fastletapi.CreateCompletion) (*fastletapi.CreateSandboxResponse, error) {
+func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, envelope assignment.AssignmentEnvelope, identity fastletapi.SandboxIdentity, completion fastletapi.CreateCompletion, parameters RuntimeParameters, declarative bool) (*fastletapi.CreateSandboxResponse, error) {
+	if local, ok := o.Registry.(localReservationRegistry); ok && createNeedsLocalReservation(sandbox, fastlet, identity) {
+		if !local.ReserveLocal(fastlet.ID, parameters.ResourceDemand) {
+			if declarative {
+				// A Sandbox reconciler owns one serialized durable operation. No
+				// Fastlet RPC has started, so it may safely select another target.
+				failure := &fastletapi.FastletError{Code: fastletapi.ErrorCapacityRejected, Reason: fastletapi.AdmissionReasonSlotFull, Message: "Controller local capacity view rejects the assigned Fastlet", Retryable: true}
+				return nil, &fastletapi.CreateCallError{Disposition: fastletapi.CreateDispositionRejectedBeforeSideEffects, Failure: failure}
+			}
+			// This is a conflict in one FastPath replica's eventually-consistent
+			// cache, not a rejection reported by the assigned Fastlet. Treating it
+			// as a candidate rejection would allow a concurrent idempotent Create
+			// to move the durable assignment while another call is already using it.
+			return nil, fmt.Errorf("%w: fastlet=%s", ErrLocalReservationConflict, fastlet.ID)
+		}
+		defer local.ReleaseLocal(fastlet.ID, parameters.ResourceDemand)
+	}
 	bindings, err := compileActionBindings(sandbox.Spec.ActionBindings)
 	if err != nil {
 		return nil, err
 	}
-	spec := fastletapi.SandboxSpec{
+	spec := fastletapi.SandboxDesiredSpec{
 		Image:              sandbox.Spec.Image,
 		RuntimeProfileHash: envelope.RuntimeProfileHash, ResourceProfileHash: envelope.ResourceProfileHash,
 		InfraRevision: envelope.InfraRevision,
@@ -390,7 +533,8 @@ func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1
 	request := &fastletapi.CreateSandboxRequest{
 		RequestID: sandbox.Annotations[assignment.AnnotationRequestID], Identity: identity,
 		SpecGeneration: sandbox.Generation, ActionBindings: bindings, Completion: completion,
-		Sandbox: spec,
+		Sandbox:   spec,
+		Resources: parameters.ResolvedResources,
 	}
 	response, createErr := o.FastletClient.CreateSandbox(ctx, fastlet.PodIP, request)
 	// A Created observation may be runtime-Creating: the Fastlet parks cold
@@ -401,6 +545,7 @@ func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1
 		(response.Disposition == fastletapi.CreateDispositionCreated || response.Disposition == fastletapi.CreateDispositionExisting) &&
 		response.Sandbox != nil &&
 		(response.Sandbox.Runtime.State == fastletapi.RuntimeStateReady || response.Sandbox.Runtime.State == fastletapi.RuntimeStateCreating) {
+		o.recordAdmissionSnapshot(fastlet, response)
 		return response, nil
 	}
 	if createErr == nil {
@@ -411,8 +556,29 @@ func (o *Orchestrator) createRuntimeOnTarget(ctx context.Context, sandbox *apiv1
 			createErr = fmt.Errorf("%w: %w", ErrUnknownFastletOutcome, createErr)
 		}
 	}
-	o.recordFeedback(fastlet.ID, createErr)
+	o.recordFeedback(fastlet, response, createErr)
 	return response, createErr
+}
+
+func (o *Orchestrator) recordAdmissionSnapshot(fastlet placement.FastletInfo, response *fastletapi.CreateSandboxResponse) {
+	if response == nil {
+		return
+	}
+	admission := response.Admission
+	feedback := localFeedbackForFastlet(fastlet)
+	feedback.Admission, feedback.Sandbox, feedback.ObservedAt = &admission, response.Sandbox, o.now()
+	o.Registry.RecordFeedback(fastlet.ID, feedback)
+}
+
+func createNeedsLocalReservation(sandbox *apiv1alpha2.Sandbox, fastlet placement.FastletInfo, identity fastletapi.SandboxIdentity) bool {
+	if sandbox != nil {
+		switch sandbox.Status.Runtime.State {
+		case apiv1alpha2.RuntimeCreating, apiv1alpha2.RuntimeReady:
+			return false
+		}
+	}
+	status, found := fastlet.SandboxStatuses[identity.SandboxUID]
+	return !found || status.InstanceGeneration != identity.InstanceGeneration || status.AssignmentAttempt != identity.AssignmentAttempt
 }
 
 // EnsureRuntime performs the side-effecting create/ensure operation. A
@@ -488,7 +654,17 @@ func (o *Orchestrator) DeleteRuntime(ctx context.Context, sandbox *apiv1alpha2.S
 	if err != nil {
 		return err
 	}
-	_, err = o.FastletClient.DeleteSandbox(ctx, fastlet.PodIP, &fastletapi.DeleteSandboxRequest{Identity: identity})
+	response, err := o.FastletClient.DeleteSandbox(ctx, fastlet.PodIP, &fastletapi.DeleteSandboxRequest{Identity: identity})
+	if response != nil {
+		admission := response.Admission
+		feedback := localFeedbackForFastlet(fastlet)
+		feedback.Admission, feedback.ObservedAt = &admission, o.now()
+		var failure *fastletapi.FastletError
+		if errors.As(err, &failure) {
+			feedback.Code, feedback.Reason = failure.Code, failure.Reason
+		}
+		o.Registry.RecordFeedback(fastlet.ID, feedback)
+	}
 	return err
 }
 
@@ -501,6 +677,23 @@ func (o *Orchestrator) RuntimeGone(ctx context.Context, sandbox *apiv1alpha2.San
 	if err != nil {
 		var failure *fastletapi.FastletError
 		if errors.As(err, &failure) && failure.Code == fastletapi.ErrorNotFound {
+			// Release the scheduler's stale full-capacity observation before a
+			// paused Sandbox can resume. Delete is asynchronous, so refresh only
+			// after Inspect confirms absence, using the normal heartbeat fences.
+			refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			heartbeat, refreshErr := o.FastletClient.Heartbeat(refreshCtx, fastlet.PodIP, &fastletapi.HeartbeatRequest{
+				Cache: fastletapi.CacheCursor{Epoch: fastlet.CacheEpoch, Revision: fastlet.CacheRevision},
+			})
+			if refreshErr == nil {
+				refreshErr = o.Registry.ApplyHeartbeat(fastlet.ID, fastlet.PodUID, heartbeat, time.Now())
+			}
+			// A newer periodic heartbeat may have won the race. On other failures,
+			// retain the existing observation and let periodic probing recover;
+			// a failed refresh must not undo confirmed runtime deletion.
+			if refreshErr != nil && !errors.Is(refreshErr, placement.ErrStaleHeartbeat) {
+				klog.ErrorS(refreshErr, "Refresh Fastlet capacity after runtime deletion", "fastlet", fastlet.ID, "podUID", fastlet.PodUID)
+			}
 			return true, nil
 		}
 		return false, err
@@ -717,7 +910,7 @@ func (o *Orchestrator) assignedTarget(sandbox *apiv1alpha2.Sandbox) (placement.F
 	if envelope == nil {
 		return placement.FastletInfo{}, assignment.AssignmentEnvelope{}, fastletapi.SandboxIdentity{}, ErrAssignedFastletUnavailable
 	}
-	fastlet, ok := o.Registry.GetFastletByID(placement.FastletID(envelope.FastletName))
+	fastlet, ok := o.Registry.GetFastletByID(placement.NewFastletID(sandbox.Namespace, envelope.FastletName))
 	if !ok || fastlet.PodUID != envelope.FastletPodUID || fastlet.PodIP == "" ||
 		fastlet.RuntimeProfileHash != envelope.RuntimeProfileHash || fastlet.ResourceProfileHash != envelope.ResourceProfileHash ||
 		fastlet.InfraRevision != envelope.InfraRevision {
@@ -752,19 +945,38 @@ func IsCandidateRejection(err error) bool {
 	}
 }
 
-func (o *Orchestrator) recordFeedback(id placement.FastletID, err error) {
+func (o *Orchestrator) recordFeedback(fastlet placement.FastletInfo, response *fastletapi.CreateSandboxResponse, err error) {
 	var failure *fastletapi.FastletError
 	if !errors.As(err, &failure) {
 		return
 	}
 	// The feedback blacklists the fastlet for a short window (scheduling-
 	// visible via RejectedUntil); leave one line explaining why.
-	klog.V(2).InfoS("recording fastlet rejection feedback; candidate penalized", "fastlet", id, "code", failure.Code)
-	now := time.Now()
-	if o.Now != nil {
-		now = o.Now()
+	klog.V(2).InfoS("recording fastlet rejection feedback; candidate penalized", "fastlet", fastlet.ID, "code", failure.Code)
+	feedback := localFeedbackForFastlet(fastlet)
+	feedback.Code, feedback.Reason, feedback.ObservedAt = failure.Code, failure.Reason, o.now()
+	if response != nil {
+		admission := response.Admission
+		feedback.Admission = &admission
+		feedback.Sandbox = response.Sandbox
 	}
-	o.Registry.RecordFeedback(id, placement.LocalFeedback{Code: failure.Code, ObservedAt: now})
+	o.Registry.RecordFeedback(fastlet.ID, feedback)
+}
+
+func localFeedbackForFastlet(fastlet placement.FastletInfo) placement.LocalFeedback {
+	feedback := placement.LocalFeedback{PodUID: fastlet.PodUID}
+	if resources := fastlet.Admission.Resources; resources != nil {
+		feedback.BaseResourceEpoch = resources.Epoch
+		feedback.BaseResourceRevision = resources.Revision
+	}
+	return feedback
+}
+
+func (o *Orchestrator) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
 }
 
 func setReadyCondition(status *apiv1alpha2.SandboxStatus, generation int64, ready bool, reason, message string) {
