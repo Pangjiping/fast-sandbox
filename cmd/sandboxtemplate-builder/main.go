@@ -133,7 +133,7 @@ func buildObjectStoreTemplate(ctx context.Context, spec apiv1alpha2.SandboxTempl
 	// Stage 4: manifest + checksums, recording the CPU template the
 	// snapshot stage actually booted with.
 	manifestStarted := time.Now()
-	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, workdir, phases, mitmCA)
+	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, workdir, phases.CPUTemplate, mitmCA)
 	if err != nil {
 		return err
 	}

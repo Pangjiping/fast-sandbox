@@ -33,8 +33,6 @@ type snapshotPhaseTimings struct {
 	// CPUTemplate is the tier in effect ("T2"/"T2A"/"none"), normalized by
 	// compatibilityCPUTemplate.
 	CPUTemplate string `json:"cpuTemplate"`
-	// FreePageReporting records guest support, not merely device configuration.
-	FreePageReporting bool `json:"freePageReporting"`
 }
 
 // buildTap is the host tap backing the baked NIC while the snapshot VM
@@ -203,7 +201,6 @@ func runSnapshotStage(args []string) error {
 		SnapshotCreateMs:     snapshotCreateMs,
 		RestoreToHeartbeatMs: restoreToHeartbeatMs,
 		CPUTemplate:          compatibilityCPUTemplate(cpuTemplate),
-		FreePageReporting:    freePageReporting,
 	}
 	if payload, err := json.Marshal(phases); err != nil {
 		return fmt.Errorf("marshal snapshot stage report: %w", err)
@@ -216,7 +213,7 @@ func runSnapshotStage(args []string) error {
 	klog.InfoS("snapshot stage phases",
 		"format", spec.Output.Format,
 		"cpuTemplate", phases.CPUTemplate,
-		"freePageReporting", phases.FreePageReporting,
+		"freePageReporting", freePageReporting,
 		"bootToReadyMs", phases.BootToReadyMs,
 		"snapshotCreateMs", phases.SnapshotCreateMs,
 		"restoreToHeartbeatMs", phases.RestoreToHeartbeatMs)
@@ -353,7 +350,7 @@ func configureVM(vm *vmm, kernel, rootfs, bootArgs string, spec apiv1alpha2.Sand
 	}
 	if err := api(vm.socket, "PUT", "/balloon", map[string]any{
 		"amount_mib": 0, "deflate_on_oom": true,
-		"stats_polling_interval_s": 1, "free_page_reporting": true,
+		"stats_polling_interval_s": 0, "free_page_reporting": true,
 	}); err != nil {
 		return fmt.Errorf("configure free-page reporting: %w", err)
 	}

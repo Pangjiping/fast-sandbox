@@ -128,8 +128,6 @@ OCI uses `rootfs.dev`, `vmstate.bin` and `memfile`, with no `files` list. Reusab
 
 ## Optional shared records
 
-The optional `freePageReporting` boolean records whether the builder observed guest support for the default reporting device. A custom kernel without the required interfaces records `false`. It is inherited unchanged by live snapshots and checkpoints; restore uses the saved balloon device and guest state. Older manifests omit it, which does not establish reporting support. See [Memory reclamation](memory-reclamation.md).
-
 `guestNetwork` describes a NIC baked into vmstate: `iface` and `mac`, plus optional `ip`, `gateway`, `netmask` and `mtu`. A standalone VM without a NIC omits it. Fastlet's static guest networking requires the complete network record. Host tap names are allocated on restore and are not persisted here.
 
 `lineage` records optional `image`, `imageDigest` and `createdAt`. Template builds record their source and creation time. Snapshots preserve the original digest and capture compatibility, updating only the source reference for the running Sandbox. `compatibility.cpuModelName` and `hostKernel` are optional diagnostics.

@@ -34,16 +34,16 @@ const (
 // and SHA256SUMS in the workdir. Checksums are computed once and shared
 // between the two outputs via the cache. The serialization and checksum
 // conventions live in internal/artifacts so every producer (builder, live
-// snapshot driver, runtime-agent) emits byte-identical layouts. phases records
-// the CPU template and observed guest capabilities; mitmCA
+// snapshot driver, runtime-agent) emits byte-identical layouts. cpuTemplate
+// is what the snapshot stage reported (see compatibilityCPUTemplate); mitmCA
 // carries the baked egress MITM CA lineage (nil when none).
-func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory, workdir string, phases snapshotPhaseTimings, mitmCA []mitmCALineage) ([]byte, error) {
+func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory, workdir, cpuTemplate string, mitmCA []mitmCALineage) ([]byte, error) {
 	cache := map[string]string{}
 	rootfsGiB, err := sizeGiB(spec.Output.RootfsSize)
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := buildManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, cache, rootfsGiB, phases, mitmCA)
+	manifest, err := buildManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, cache, rootfsGiB, cpuTemplate, mitmCA)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func stageManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 // declared minimum with the real artifact size. The lineage object records
 // where the set came from and what was baked in at build time; snapshot
 // and checkpoint producers carry it forward verbatim across generations.
-func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, cache map[string]string, rootfsGiB int, phases snapshotPhaseTimings, mitmCA []mitmCALineage) (artifacts.VMManifest, error) {
+func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, rootfs, vmstate, memory string, cache map[string]string, rootfsGiB int, cpuTemplate string, mitmCA []mitmCALineage) (artifacts.VMManifest, error) {
 	var empty artifacts.VMManifest
 	cpu, err := resource.ParseQuantity(spec.Machine.VCPU)
 	if err != nil {
@@ -76,8 +76,7 @@ func buildManifest(spec apiv1alpha2.SandboxTemplateSpec, sourceDigest, kernel, r
 	if err != nil {
 		return empty, err
 	}
-	document := artifacts.NewVMManifest(artifacts.VMMachine{VCPUCount: int(cpu.Value()), MemoryMiB: (mem.Value() + (1 << 20) - 1) >> 20, RootfsSizeMiB: int64(rootfsGiB) << 10, RootfsDriveID: rootfsDirName, RootfsDrivePath: snapshotDriveName}, strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), firecrackerBin, compatibilityCPUTemplate(phases.CPUTemplate))
-	document.FreePageReporting = &phases.FreePageReporting
+	document := artifacts.NewVMManifest(artifacts.VMMachine{VCPUCount: int(cpu.Value()), MemoryMiB: (mem.Value() + (1 << 20) - 1) >> 20, RootfsSizeMiB: int64(rootfsGiB) << 10, RootfsDriveID: rootfsDirName, RootfsDrivePath: snapshotDriveName}, strings.TrimPrefix(filepath.Base(kernel), "vmlinux-"), firecrackerBin, compatibilityCPUTemplate(cpuTemplate))
 	document.Lineage = &artifacts.VMLineage{Image: spec.Image, ImageDigest: sourceDigest, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
 	document.Platform = templatePlatform(spec, mitmCA)
 	document.GuestNetwork = &artifacts.VMGuestNetwork{Iface: "eth0", MAC: bakedGuestMAC, IP: bakedGuestIP, Gateway: bakedGuestGateway, Netmask: bakedGuestNetmask, MTU: bakedGuestMTU}

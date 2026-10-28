@@ -119,7 +119,7 @@ func TestFreePageReportingDeviceConfiguration(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "/balloon", paths[1], "device must be installed before boot")
 			require.Equal(t, map[string]any{"amount_mib": float64(0), "deflate_on_oom": true,
-				"stats_polling_interval_s": float64(1), "free_page_reporting": true}, balloon)
+				"stats_polling_interval_s": float64(0), "free_page_reporting": true}, balloon)
 		})
 	}
 }

@@ -12,22 +12,6 @@ import (
 	"fast-sandbox/internal/artifacts"
 )
 
-func TestManifestRecordsObservedFreePageReporting(t *testing.T) {
-	for _, enabled := range []bool{true, false} {
-		t.Run(map[bool]string{true: "supported guest", false: "unsupported guest"}[enabled], func(t *testing.T) {
-			spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
-			phases := snapshotPhaseTimings{CPUTemplate: "T2", FreePageReporting: enabled}
-			payload, err := stageManifest(spec, "sha256:test", kernel, rootfs, vmstate, memory, filepath.Dir(rootfs), phases, nil)
-			require.NoError(t, err)
-			var manifest map[string]any
-			require.NoError(t, json.Unmarshal(payload, &manifest))
-			require.Equal(t, enabled, manifest["freePageReporting"])
-			require.NotContains(t, manifest, "memoryReclaim")
-			require.Equal(t, "T2", manifest["compatibility"].(map[string]any)["cpuTemplate"])
-		})
-	}
-}
-
 func TestNativeManifestExcludesStaleOverlayBDLayers(t *testing.T) {
 	spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
 	workdir := filepath.Dir(rootfs)
@@ -36,7 +20,7 @@ func TestNativeManifestExcludesStaleOverlayBDLayers(t *testing.T) {
 		require.NoError(t, os.MkdirAll(dir, 0755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "layer.lsmt"), []byte("stale-layer"), 0600))
 	}
-	raw, err := stageManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory, workdir, snapshotPhaseTimings{}, nil)
+	raw, err := stageManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory, workdir, "", nil)
 	require.NoError(t, err)
 	var manifest struct {
 		Format string         `json:"format"`
@@ -103,7 +87,7 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 	spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
 
 	manifest, err := buildManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory,
-		map[string]string{}, 1, snapshotPhaseTimings{}, nil)
+		map[string]string{}, 1, "", nil)
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}
@@ -115,7 +99,7 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 		NotAfter:   "2036-01-01T00:00:00Z",
 	}
 	manifest, err = buildManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory,
-		map[string]string{}, 1, snapshotPhaseTimings{}, []mitmCALineage{wantEntry})
+		map[string]string{}, 1, "", []mitmCALineage{wantEntry})
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}

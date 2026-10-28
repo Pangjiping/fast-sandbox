@@ -321,7 +321,6 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 	sourceDocument["machine"].(map[string]any)["vcpuCount"] = 1
 	sourceDocument["machine"].(map[string]any)["memoryMiB"] = 512
 
-	sourceDocument["freePageReporting"] = true
 	lineage, err := json.Marshal(sourceDocument)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "manifest.json"), lineage, 0o644))
@@ -338,7 +337,6 @@ func TestAssembleSnapshotManifestPrefersCheckpointLineage(t *testing.T) {
 	require.NoError(t, err)
 	var document map[string]any
 	require.NoError(t, json.Unmarshal(payload, &document))
-	require.Equal(t, true, document["freePageReporting"], "reporting capability must survive checkpoint generations")
 	require.Equal(t, "10.0.0.2", document["guestNetwork"].(map[string]any)["ip"],
 		"the checkpoint lineage facts ride forward into the new checkpoint")
 	require.Equal(t, fixture.sandboxSpec.Desired.Image,

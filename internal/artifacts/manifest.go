@@ -27,16 +27,15 @@ const (
 // Platform is optional for standalone fsb-vm use. Files lists native VM
 // artifacts only; platform state is described once in Platform.StateFiles.
 type VMManifest struct {
-	SchemaVersion     int                     `json:"schemaVersion"`
-	Runtime           string                  `json:"runtime"`
-	Machine           VMMachine               `json:"machine"`
-	Kernel            VMKernel                `json:"kernel"`
-	Compatibility     SnapshotCompatibility   `json:"compatibility"`
-	FreePageReporting *bool                   `json:"freePageReporting,omitempty"`
-	GuestNetwork      *VMGuestNetwork         `json:"guestNetwork,omitempty"`
-	Lineage           *VMLineage              `json:"lineage,omitempty"`
-	Platform          *VMPlatform             `json:"platform,omitempty"`
-	Files             map[string]ManifestFile `json:"files,omitempty"`
+	SchemaVersion int                     `json:"schemaVersion"`
+	Runtime       string                  `json:"runtime"`
+	Machine       VMMachine               `json:"machine"`
+	Kernel        VMKernel                `json:"kernel"`
+	Compatibility SnapshotCompatibility   `json:"compatibility"`
+	GuestNetwork  *VMGuestNetwork         `json:"guestNetwork,omitempty"`
+	Lineage       *VMLineage              `json:"lineage,omitempty"`
+	Platform      *VMPlatform             `json:"platform,omitempty"`
+	Files         map[string]ManifestFile `json:"files,omitempty"`
 }
 
 type VMMachine struct {

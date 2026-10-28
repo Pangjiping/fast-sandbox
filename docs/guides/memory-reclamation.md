@@ -7,15 +7,15 @@ description: Default free-page reporting with existing Fastlet memory observatio
 
 Free-page reporting (FPR) returns unused guest pages to the host while the sandbox keeps running. It does not change configured RAM, static resource commitments, or checkpoint pause/resume. New object-store golden snapshots enable FPR by default without a SandboxTemplate field. Existing snapshots retain their saved device state; rebuild a template to acquire reporting. OCI templates currently use the separate fsb-vm build path, which does not configure FPR.
 
-The object-store builder installs a zero-sized balloon with statistics before boot. The Firecracker binary must support `free_page_reporting`; an unsupported VMM fails the build. The guest needs built-in VIRTIO_BALLOON and PAGE_REPORTING. A custom kernel without either interface can still boot: its console reports `SANDBOX_FREE_PAGE_REPORTING_UNAVAILABLE`, and the manifest records `freePageReporting: false`.
+The object-store builder installs a zero-sized balloon with FPR before boot. Balloon statistics polling is disabled; Fastlet continues to observe host cgroup memory usage. The Firecracker binary must support `free_page_reporting`; an unsupported VMM fails the build. The guest needs built-in VIRTIO_BALLOON and PAGE_REPORTING. A custom kernel without either interface can still boot: its console reports `SANDBOX_FREE_PAGE_REPORTING_UNAVAILABLE`, and the builder logs a warning.
 
-The builder records the observed guest capability as the optional `freePageReporting` boolean in the immutable manifest. Snapshots and checkpoints inherit it along with the saved balloon device and guest state. Older manifests omit the field, which does not establish reporting support. Reporting cannot be disabled on a live VM; rollback selects an older template.
+The builder logs the detected guest kernel support. Snapshots and checkpoints preserve the balloon device and guest state. Reporting cannot be disabled on a live VM; rollback selects an older template.
 
 ## Feedback to Fastlet and FastPath
 
 FPR releases backing pages from the Firecracker process, so its effect is reflected in the runtime owner's cgroup memory usage. Fastlet's existing resource admission observer reads `memory.current`, `memory.max`, memory PSI, OOM events, and host available memory. It uses the existing watermarks and recovery hysteresis to update resource admission state. Fastlet reports that state and its revision to FastPath through the existing heartbeat and Create responses.
 
-This feature adds no separate pressure policy, admission gate, or Fastlet-to-FastPath protocol. Configure ResourceAware Pools and the existing memory observer as described in [Resource-aware overcommit tuning](resource-aware-overcommit-tuning.md). LegacySlot Pools retain their existing admission behavior. Guest free-memory statistics and the `freePageReporting` capability flag are not admission headroom and do not change the static commitment ledger.
+This feature adds no separate pressure policy, admission gate, or Fastlet-to-FastPath protocol. Configure ResourceAware Pools and the existing memory observer as described in [Resource-aware overcommit tuning](resource-aware-overcommit-tuning.md). LegacySlot Pools retain their existing admission behavior. Guest free-memory statistics are not admission headroom and do not change the static commitment ledger.
 
 Compare old snapshots and reporting snapshots at identical density. Measure cgroup usage, PSI, OOMs, aggregate VMM PSS, CPU cost, and tail latency after idle. Verify process and file state through snapshot and cross-host resume. Do not raise overcommit merely because a guest reports free pages or a single reclaim sample succeeds.
 
