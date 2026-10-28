@@ -43,4 +43,10 @@ Write docs and proposals in U.S. English. Keep paragraphs on one source line. Pu
 
 Follow the [FSEP guide](fseps/CONTRIBUTING.md): discuss major changes first, write proposals when needed, and cover compatibility, testing, and rollback. Small fixes go directly to a PR.
 
+## Pull requests and issues
+
+- Write PR and Issue titles and descriptions in English; keep them concise and specific.
+- Keep each PR focused on one problem. Explain the reason for the change, report validation results, and link existing Issues or FSEPs.
+- For bugs, include the environment, reproduction steps, and expected versus actual behavior. For feature requests, describe the problem, use case, and desired behavior.
+
 Before handoff, review the diff and summarize the change, validation results, and any remaining limitations.
