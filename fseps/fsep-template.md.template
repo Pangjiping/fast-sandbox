@@ -9,26 +9,26 @@ status: {{status_metadata}}
 
 # FSEP-{{proposal_id}}: {{heading}}
 
-## 问题与目标
+## Problem and goals
 
-<!-- 用几句话说明当前问题、目标和范围边界。 -->
+<!-- Briefly describe the current problem, goals, and scope boundaries. -->
 
-## 方案与取舍
+## Proposal and tradeoffs
 
-<!-- 说明拟议行为、受影响组件及关键接口，列出主要风险和为何选择该方案。详细设计或待解决问题按需补充，不要求额外章节。 -->
+<!-- Describe the proposed behavior, affected components, and key interfaces. Explain the main risks and why this approach was chosen. Add design details or open questions as needed; extra sections are optional. -->
 
-## 兼容性
+## Compatibility
 
-<!-- 现有 API、CRD、SDK、CLI、配置及已有资源或快照受到什么影响？涉及混合版本时说明兼容范围。破坏性变更需明确迁移路径；无兼容性影响时说明原因。 -->
+<!-- How are existing APIs, CRDs, SDKs, CLI commands, configuration, and existing resources or snapshots affected? Describe supported version combinations where relevant. Breaking changes need a migration path. If there is no compatibility impact, explain why. -->
 
-## 测试计划
+## Test plan
 
-<!-- 给出验证方法和验收标准，按风险覆盖正常路径、失败恢复及兼容性；按需选择单元、集成、E2E 或性能测试。性能验证需注明测量边界、环境和缓存状态。不适用时说明原因。 -->
+<!-- Provide validation steps and acceptance criteria. Cover normal operation, failure recovery, and compatibility according to risk. Choose relevant unit, integration, E2E, or performance tests. Performance checks must state the measurement boundary, environment, and cache state. If testing does not apply, explain why. -->
 
-## 发布与回滚
+## Rollout and rollback
 
-<!-- 如何启用或分步上线、观察哪些信号、何时回滚、怎样禁用或降级？回滚后已有资源、数据或快照如何处理？无法安全回滚时说明限制与恢复方案；无需运行时上线或回滚时说明原因。 -->
+<!-- How is the change enabled or rolled out in stages? What signals are monitored, what triggers rollback, and how is it disabled or downgraded? How are existing resources, data, or snapshots handled after rollback? If safe rollback is unavailable, describe the limits and recovery plan. If runtime rollout or rollback does not apply, explain why. -->
 
-## 相关链接（可选）
+## Related links (optional)
 
-<!-- 按需关联讨论 Issue、实现 PR、FSEP/OSEP 和落地后的 docs/ 文档。关闭提案时记录原因。 -->
+<!-- Link discussions, implementation PRs, related FSEPs/OSEPs, and resulting docs/ pages as needed. Record the reason when closing a proposal. -->
