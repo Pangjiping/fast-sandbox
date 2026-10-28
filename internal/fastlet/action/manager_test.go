@@ -283,7 +283,7 @@ func TestFailedInvocationIsReadyBarrierAndRetryReusesIdentity(t *testing.T) {
 }
 
 func TestStatusesDoNotWaitForSlowHandlerIO(t *testing.T) {
-	caller := &blockingCaller{entered: make(chan struct{}), release: make(chan struct{})}
+	caller := &blockingCaller{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	manager, err := NewManager([]apiv1alpha2.ActionHandler{handler("egress", 18080)}, caller)
 	require.NoError(t, err)
 	manager.probe(context.Background())
