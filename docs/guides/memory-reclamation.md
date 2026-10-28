@@ -19,6 +19,12 @@ This feature adds no separate pressure policy, admission gate, or Fastlet-to-Fas
 
 Compare old snapshots and reporting snapshots at identical density. Measure cgroup usage, PSI, OOMs, aggregate VMM PSS, CPU cost, and tail latency after idle. Verify process and file state through snapshot and cross-host resume. Do not raise overcommit merely because a guest reports free pages or a single reclaim sample succeeds.
 
+## FPR and deployment density
+
+FPR is enabled by default for supported new object-store snapshots, but it does not automatically increase deployment density. It reduces physical memory use without changing VM memory limits, Kubernetes requests, static commitments, or available slots. To place more VMs per node while retaining larger per-VM limits, explicitly tune the Pool's memory overcommit ratio and slot count, then verify the derived runtime budget. A fully committed Pool cannot admit another VM merely because FPR returned pages to the host.
+
+Whether to enable memory overcommit depends on the workload's concurrent memory demand. FPR can help workloads that release memory between independent bursts, but it cannot reclaim live working sets when many VMs grow at the same time. Follow the [workload selection and OOM precautions](resource-aware-overcommit-tuning.md#choose-memory-overcommit-by-workload) before increasing density; default FPR does not make a particular overcommit ratio safe.
+
 ## Compatibility and limits
 
 Upgrade the object-store builder and rebuild templates; no new CRD field is required. Existing Firecracker runtimes that support reporting restore the saved balloon device state. Verify the deployed Firecracker version and storage backend before rollout. Existing Fastlet memory admission and FastPath feedback remain responsible for placement and admission decisions.

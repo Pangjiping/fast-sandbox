@@ -83,6 +83,23 @@ watermarks, PSI, new OOM events, host memory pressure, or stale telemetry can
 block new creates. The gate does not reclaim, pause, migrate, or evict an
 existing Sandbox.
 
+## Choose memory overcommit by workload
+
+Higher VM density with larger per-VM limits requires an explicit memory overcommit policy. Tune `sandboxResources.overcommitRatio.memory` together with `maxSandboxesPerPod`, and recompute the derived runtime budget and Kubernetes envelope using the formulas above. FPR can return guest-freed pages, but it does not change these settings or release static commitments.
+
+Choose whether to enable memory overcommit from measured working sets and simultaneous peaks, rather than idle averages:
+
+| Workload | Memory overcommit guidance |
+|---|---|
+| Independent, intermittent commands or builds that release memory between bursts | Consider a conservative ratio above 1 after validating concurrent peaks and repeated allocation/free cycles. FPR can reduce memory retained between bursts. |
+| Synchronized builds, scheduled batches, or traffic bursts that affect many VMs together | Keep the ratio at 1 unless concurrency controls and measurements bound aggregate peak demand within the runtime budget. |
+| Long-lived JVM heaps, application caches, databases, or resident models | Do not assume an idle process releases memory. Keep the ratio at 1 unless measured headroom supports overcommit. FPR cannot reclaim live or application-retained memory. |
+| Unknown workloads or workloads requiring guaranteed simultaneous growth to their limits | Use a memory ratio of 1 and provision sufficient runtime and node capacity, including overhead. CPU overcommit can still be tuned independently. |
+
+An overcommitted Pool does not reserve the sum of VM memory limits. For example, a Pool with `maxSandboxesPerPod: 4`, default 4 GiB VM limits, and a memory ratio of 4 derives 1 GiB requests and a 4 GiB Sandbox runtime budget, plus fixed Fastlet overhead. Two already admitted VMs can exceed that budget by simultaneously needing 3 GiB each. FPR cannot return those live pages, so cgroup OOM can terminate VMs or the runtime owner and affect other VMs in the same Fastlet.
+
+The dynamic admission gate blocks new creates under pressure; it does not reserve headroom for future growth of existing VMs or guarantee that they avoid OOM. Leave headroom for simultaneous bursts, guest/runtime overhead, and host file cache, including snapshot cache. Validate pool-wide peak demand, cgroup usage, PSI, OOM events, and latency under realistic concurrency before increasing the ratio. If those bounds cannot be established, leave memory overcommit disabled with `sandboxResources.overcommitRatio.memory: "1"`.
+
 ## Worked example
 
 ```text
