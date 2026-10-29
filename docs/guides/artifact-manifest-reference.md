@@ -52,6 +52,7 @@ All current fields are shown below using a native/S3 checkpoint. Values are illu
   "kernel": { // Guest kernel.
     "version": "6.1.177"
   },
+  "freePageReporting": true, // Build-time guest support detection for the configured FPR device; optional.
   "compatibility": { // CPU and VMM restore constraints.
     "cpuArch": "x86_64",
     "firecrackerVersion": "1.16.1",
@@ -131,6 +132,8 @@ OCI uses `rootfs.dev`, `vmstate.bin` and `memfile`, with no `files` list. Reusab
 `guestNetwork` describes a NIC baked into vmstate: `iface` and `mac`, plus optional `ip`, `gateway`, `netmask` and `mtu`. A standalone VM without a NIC omits it. Fastlet's static guest networking requires the complete network record. Host tap names are allocated on restore and are not persisted here.
 
 `lineage` records optional `image`, `imageDigest` and `createdAt`. Template builds record their source and creation time. Snapshots preserve the original digest and capture compatibility, updating only the source reference for the running Sandbox. `compatibility.cpuModelName` and `hostKernel` are optional diagnostics.
+
+`freePageReporting` records the object-store builder's guest support detection for its configured FPR device. `true` means the guest reported the required kernel interfaces; `false` means support was not detected, although the configured device can still be present. An absent field means the result was not recorded, as with older snapshots or producers that do not report it. Snapshot and checkpoint manifests inherit this value. It is build provenance, not a runtime switch, proof of successful reclamation, or an admission condition; Firecracker's saved device state remains authoritative.
 
 ## Platform extension
 

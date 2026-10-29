@@ -9,7 +9,7 @@ Free-page reporting (FPR) returns unused guest pages to the host while the sandb
 
 The object-store builder installs a zero-sized balloon with FPR before boot. Balloon statistics polling is disabled; Fastlet continues to observe host cgroup memory usage. The Firecracker binary must support `free_page_reporting`; an unsupported VMM fails the build. The guest needs built-in VIRTIO_BALLOON and PAGE_REPORTING. A custom kernel without either interface can still boot: its console reports `SANDBOX_FREE_PAGE_REPORTING_UNAVAILABLE`, and the builder logs a warning.
 
-The builder logs the detected guest kernel support. Snapshots and checkpoints preserve the balloon device and guest state. Reporting cannot be disabled on a live VM; rollback selects an older template.
+The builder logs the detected guest kernel support and records it in `snapshot-phases.json` and the manifest's optional `freePageReporting` field. New object-store builds record `true` when the required guest kernel interfaces are detected and `false` otherwise; an absent field means the result was not recorded. This is build provenance, not a runtime toggle or a reclamation metric. Snapshot and checkpoint manifests inherit it, while Firecracker preserves the balloon device and guest state. Reporting cannot be disabled on a live VM; rollback selects an older template.
 
 ## Feedback to Fastlet and FastPath
 

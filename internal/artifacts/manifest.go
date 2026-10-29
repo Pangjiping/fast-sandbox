@@ -36,6 +36,11 @@ type VMManifest struct {
 	Lineage       *VMLineage              `json:"lineage,omitempty"`
 	Platform      *VMPlatform             `json:"platform,omitempty"`
 	Files         map[string]ManifestFile `json:"files,omitempty"`
+
+	// FreePageReporting records guest support detected for the builder's
+	// configured FPR device. Nil means unrecorded, not disabled. It is
+	// capture-time provenance, not a runtime switch or admission condition.
+	FreePageReporting *bool `json:"freePageReporting,omitempty"`
 }
 
 type VMMachine struct {
