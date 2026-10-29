@@ -300,6 +300,8 @@ tags are `<uuid>_rootfs` and `<uuid>_snapfiles`; `status.manifestRef` points to
 the latest successful build. Applying an unchanged spec does not rebuild.
 
 
+New object-store golden snapshots configure free-page reporting by default; no template field is required. Existing snapshots need rebuilding to acquire it. See [Memory reclamation](../guides/memory-reclamation.md) for guest kernel support and compatibility.
+
 See the [SandboxTemplate guide](../guides/sandboxtemplate-golden-images.md)
 for the end-to-end workflow, artifact layout, and consumption contract.
 

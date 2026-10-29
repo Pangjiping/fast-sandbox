@@ -24,8 +24,8 @@ import (
 )
 
 // snapshotPhaseTimings is the outcome report the snapshot stage writes to
-// the workdir for the pipeline: sub-phase durations and the effective CPU
-// template.
+// the workdir for the pipeline: sub-phase durations, the effective CPU
+// template, and detected guest FPR support.
 type snapshotPhaseTimings struct {
 	BootToReadyMs        int64 `json:"bootToReadyMs"`
 	SnapshotCreateMs     int64 `json:"snapshotCreateMs"`
@@ -33,6 +33,9 @@ type snapshotPhaseTimings struct {
 	// CPUTemplate is the tier in effect ("T2"/"T2A"/"none"), normalized by
 	// compatibilityCPUTemplate.
 	CPUTemplate string `json:"cpuTemplate"`
+	// FreePageReporting is guest support detection for the configured FPR
+	// device, not the device's enable flag.
+	FreePageReporting bool `json:"freePageReporting"`
 }
 
 // buildTap is the host tap backing the baked NIC while the snapshot VM
@@ -135,6 +138,14 @@ func runSnapshotStage(args []string) error {
 		return fmt.Errorf("guest init startup failed: %s", lastMarkerLine(bootLog, startupFailedMarker))
 	}
 	bootToReadyMs := time.Since(phaseStarted).Milliseconds()
+	freePageReporting, err := readFreePageReportingSupport(bootLog)
+	if err != nil {
+		vm.stop()
+		return err
+	}
+	if !freePageReporting {
+		klog.Warning("guest free-page reporting unavailable; snapshot will retain legacy memory behavior")
+	}
 
 	// Pause and create the full snapshot.
 	snapshotStarted := time.Now()
@@ -193,6 +204,7 @@ func runSnapshotStage(args []string) error {
 		SnapshotCreateMs:     snapshotCreateMs,
 		RestoreToHeartbeatMs: restoreToHeartbeatMs,
 		CPUTemplate:          compatibilityCPUTemplate(cpuTemplate),
+		FreePageReporting:    freePageReporting,
 	}
 	if payload, err := json.Marshal(phases); err != nil {
 		return fmt.Errorf("marshal snapshot stage report: %w", err)
@@ -205,6 +217,7 @@ func runSnapshotStage(args []string) error {
 	klog.InfoS("snapshot stage phases",
 		"format", spec.Output.Format,
 		"cpuTemplate", phases.CPUTemplate,
+		"freePageReporting", phases.FreePageReporting,
 		"bootToReadyMs", phases.BootToReadyMs,
 		"snapshotCreateMs", phases.SnapshotCreateMs,
 		"restoreToHeartbeatMs", phases.RestoreToHeartbeatMs)
@@ -338,6 +351,12 @@ func configureVM(vm *vmm, kernel, rootfs, bootArgs string, spec apiv1alpha2.Sand
 	}
 	if err := api(vm.socket, "PUT", "/machine-config", machineConfig); err != nil {
 		return err
+	}
+	if err := api(vm.socket, "PUT", "/balloon", map[string]any{
+		"amount_mib": 0, "deflate_on_oom": true,
+		"stats_polling_interval_s": 0, "free_page_reporting": true,
+	}); err != nil {
+		return fmt.Errorf("configure free-page reporting: %w", err)
 	}
 	// Entropy device (virtio-rng): the microVM has no other entropy source —
 	// the T2 CPU template masks RDRAND/RDSEED (snapshot determinism) and no

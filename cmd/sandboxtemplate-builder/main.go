@@ -130,10 +130,10 @@ func buildObjectStoreTemplate(ctx context.Context, spec apiv1alpha2.SandboxTempl
 	}
 	bootMs := time.Since(bootStarted).Milliseconds()
 
-	// Stage 4: manifest + checksums, recording the CPU template the
-	// snapshot stage actually booted with.
+	// Stage 4: manifest + checksums, recording the effective CPU template
+	// and the guest FPR support detected by the snapshot stage.
 	manifestStarted := time.Now()
-	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, workdir, phases.CPUTemplate, mitmCA)
+	manifestBytes, err := stageManifest(spec, sourceDigest, kernel, rootfs, vmstate, memory, workdir, phases.CPUTemplate, phases.FreePageReporting, mitmCA)
 	if err != nil {
 		return err
 	}

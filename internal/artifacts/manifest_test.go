@@ -254,8 +254,23 @@ func TestVMManifestContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Machine != valid.Machine || decoded.Platform != nil {
+	if decoded.Machine != valid.Machine || decoded.Platform != nil || decoded.FreePageReporting != nil {
 		t.Fatalf("standalone contract changed: %+v", decoded)
+	}
+	for _, supported := range []bool{true, false} {
+		document := valid
+		document.FreePageReporting = &supported
+		raw, err := MarshalVMManifest(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeVMManifest(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.FreePageReporting == nil || *decoded.FreePageReporting != supported {
+			t.Fatalf("freePageReporting = %v, want recorded %t", decoded.FreePageReporting, supported)
+		}
 	}
 	for _, test := range []struct {
 		name   string

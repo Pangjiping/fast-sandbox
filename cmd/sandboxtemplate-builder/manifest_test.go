@@ -20,7 +20,7 @@ func TestNativeManifestExcludesStaleOverlayBDLayers(t *testing.T) {
 		require.NoError(t, os.MkdirAll(dir, 0755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "layer.lsmt"), []byte("stale-layer"), 0600))
 	}
-	raw, err := stageManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory, workdir, "", nil)
+	raw, err := stageManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory, workdir, "", false, nil)
 	require.NoError(t, err)
 	var manifest struct {
 		Format string         `json:"format"`
@@ -49,6 +49,38 @@ func TestCompatibilityCPUTemplate(t *testing.T) {
 	}
 	if got, want := compatibilityCPUTemplate(""), "none"; got != want {
 		t.Fatalf("compatibilityCPUTemplate = %q, want %q", got, want)
+	}
+}
+
+func TestManifestRecordsFreePageReporting(t *testing.T) {
+	for _, test := range []struct {
+		name, log string
+		want      bool
+	}{
+		{name: "supported guest", log: freePageReportingReadyMarker + "\n", want: true},
+		{name: "unsupported guest", log: "SANDBOX_FREE_PAGE_REPORTING_UNAVAILABLE missing_guest_kernel_support\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
+			workdir := filepath.Dir(rootfs)
+			bootLog := filepath.Join(workdir, "boot.console.log")
+			require.NoError(t, os.WriteFile(bootLog, []byte(test.log), 0o600))
+			supported, err := readFreePageReportingSupport(bootLog)
+			require.NoError(t, err)
+			report, err := json.Marshal(snapshotPhaseTimings{CPUTemplate: "none", FreePageReporting: supported})
+			require.NoError(t, err)
+			var fields map[string]any
+			require.NoError(t, json.Unmarshal(report, &fields))
+			require.Equal(t, test.want, fields["freePageReporting"], "the stage report must include false explicitly")
+			var phases snapshotPhaseTimings
+			require.NoError(t, json.Unmarshal(report, &phases))
+			raw, err := stageManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory, workdir, phases.CPUTemplate, phases.FreePageReporting, nil)
+			require.NoError(t, err)
+			manifest, err := artifacts.DecodeVMManifest(raw)
+			require.NoError(t, err)
+			require.NotNil(t, manifest.FreePageReporting)
+			require.Equal(t, test.want, *manifest.FreePageReporting)
+		})
 	}
 }
 
@@ -87,7 +119,7 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 	spec, kernel, rootfs, vmstate, memory := buildManifestFixture(t)
 
 	manifest, err := buildManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory,
-		map[string]string{}, 1, "", nil)
+		map[string]string{}, 1, "", false, nil)
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}
@@ -99,7 +131,7 @@ func TestBuildManifestMitmCALineage(t *testing.T) {
 		NotAfter:   "2036-01-01T00:00:00Z",
 	}
 	manifest, err = buildManifest(spec, "sha256:source", kernel, rootfs, vmstate, memory,
-		map[string]string{}, 1, "", []mitmCALineage{wantEntry})
+		map[string]string{}, 1, "", false, []mitmCALineage{wantEntry})
 	if err != nil {
 		t.Fatalf("buildManifest: %v", err)
 	}
