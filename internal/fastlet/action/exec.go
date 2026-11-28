@@ -24,6 +24,7 @@ const (
 	defaultExecTimeout     = 15 * time.Second
 	defaultExecInitialWait = 50 * time.Millisecond
 	defaultExecMaxWait     = time.Second
+	runtimeInitMaxWait     = 100 * time.Millisecond
 	defaultExecWaitDelay   = time.Second
 	maxExecCapturedBytes   = 8 << 10
 
@@ -321,6 +322,19 @@ type execInvocationSpec struct {
 	execution    time.Duration
 }
 
+func (spec *execInvocationSpec) runtimeInitRetryBudget(backoff, maxBackoff time.Duration) time.Duration {
+	if spec.handler.Name != "runtime-init" || spec.maxAttempts <= 1 {
+		return 0
+	}
+	// Preserve the old execution-plus-backoff ceiling, not its attempt limit.
+	budget := time.Duration(spec.maxAttempts) * spec.timeout
+	for range spec.maxAttempts - 1 {
+		budget += backoff
+		backoff = min(backoff*2, maxBackoff)
+	}
+	return budget
+}
+
 func (m *Manager) runExecAction(
 	ctx context.Context,
 	state *sandboxState,
@@ -358,10 +372,29 @@ func (m *Manager) runExecAction(
 		timeout: effectiveExecTimeout(cfg), maxAttempts: maxAttempts,
 	}
 	backoff, maxBackoff := m.execBackoffBounds()
+	retryCtx := ctx
+	retryBudget := spec.runtimeInitRetryBudget(backoff, maxBackoff)
+	var retryDeadline time.Time
+	if retryBudget > 0 {
+		var cancel context.CancelFunc
+		retryDeadline = time.Now().Add(retryBudget)
+		retryCtx, cancel = context.WithDeadline(ctx, retryDeadline)
+		defer cancel()
+		spec.maxAttempts = 0
+		backoff = min(backoff, defaultExecInitialWait)
+		maxBackoff = min(maxBackoff, runtimeInitMaxWait)
+	}
 	preparation := time.Since(started)
 	var retryWait time.Duration
 	attempts := 0
 	defer func() {
+		if resultErr != nil && retryBudget > 0 && !time.Now().Before(retryDeadline) && ctx.Err() == nil {
+			resultErr = fmt.Errorf("exec action %s retry budget exhausted after %s (%d attempts)", handler.Name, retryBudget, attempts)
+			klog.ErrorS(resultErr, "fastlet action exec retry budget exhausted",
+				"sandboxUID", attachment.SandboxUID, "handler", handler.Name, "attempts", attempts)
+			m.recordExecFailureStatus(&spec, attempts, -1, true, resultErr)
+			m.notifyTerminalFailure(attachment.SandboxUID, attachment, handler.Name, resultErr.Error())
+		}
 		outcome := execResultSuccess
 		if resultErr != nil {
 			outcome = execResultError
@@ -377,21 +410,25 @@ func (m *Manager) runExecAction(
 	}()
 
 	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := 1; spec.maxAttempts == 0 || attempt <= spec.maxAttempts; attempt++ {
 		if attempt > 1 {
 			waitStarted := time.Now()
-			err := sleepWithContext(ctx, backoff)
+			err := sleepWithContext(retryCtx, backoff)
 			retryWait += time.Since(waitStarted)
 			if err != nil {
 				return err
 			}
 			backoff = min(backoff*2, maxBackoff)
-		} else if ctx.Err() != nil {
-			return ctx.Err()
+		}
+		if retryCtx.Err() != nil {
+			return retryCtx.Err()
+		}
+		if retryBudget > 0 && !time.Now().Before(retryDeadline) {
+			return context.DeadlineExceeded
 		}
 
 		attempts = attempt
-		attemptErr, stop := m.runExecAttempt(ctx, &spec, attempt)
+		attemptErr, stop := m.runExecAttempt(retryCtx, &spec, attempt)
 		if attemptErr == nil {
 			return nil
 		}
@@ -451,11 +488,9 @@ func (m *Manager) runExecAttempt(ctx context.Context, spec *execInvocationSpec, 
 		return nil, true
 	}
 
-	// If the caller's parent context was canceled or expired, abort this
-	// reconcile without tripping terminal failure or discarding sensitiveInput
-	// so a subsequent reconcile with a fresh context can resume cleanly.
+	// The invocation handles budget exhaustion; caller cancellation must remain resumable.
 	if ctx.Err() != nil {
-		klog.V(2).InfoS("fastlet action exec interrupted by caller context",
+		klog.V(2).InfoS("fastlet action exec interrupted by context",
 			"sandboxUID", att.SandboxUID, "namespace", att.Namespace, "sandboxName", att.SandboxName,
 			"handler", spec.handler.Name, "op", spec.op, "hook", spec.hookName, "attempt", attempt,
 			"durationMs", duration.Milliseconds(), "err", ctx.Err())
@@ -483,17 +518,25 @@ func (m *Manager) runExecAttempt(ctx context.Context, spec *execInvocationSpec, 
 	return attemptErr, false
 }
 
+func (spec *execInvocationSpec) attemptLabel(attempt int) string {
+	if spec.maxAttempts == 0 {
+		return fmt.Sprintf("attempt %d", attempt)
+	}
+	return fmt.Sprintf("attempt %d/%d", attempt, spec.maxAttempts)
+}
+
 func formatExecAttemptError(spec *execInvocationSpec, attempt int, res ExecResult, output string) error {
+	label := spec.attemptLabel(attempt)
 	if res.TimedOut {
 		if output == "" {
-			return fmt.Errorf("exec action %s timed out after %s (attempt %d/%d)", spec.handler.Name, spec.timeout, attempt, spec.maxAttempts)
+			return fmt.Errorf("exec action %s timed out after %s (%s)", spec.handler.Name, spec.timeout, label)
 		}
-		return fmt.Errorf("exec action %s timed out after %s (attempt %d/%d): %s", spec.handler.Name, spec.timeout, attempt, spec.maxAttempts, output)
+		return fmt.Errorf("exec action %s timed out after %s (%s): %s", spec.handler.Name, spec.timeout, label, output)
 	}
 	if output == "" {
-		return fmt.Errorf("exec action %s failed (attempt %d/%d, exit=%d)", spec.handler.Name, attempt, spec.maxAttempts, res.ExitCode)
+		return fmt.Errorf("exec action %s failed (%s, exit=%d)", spec.handler.Name, label, res.ExitCode)
 	}
-	return fmt.Errorf("exec action %s failed (attempt %d/%d, exit=%d): %s", spec.handler.Name, attempt, spec.maxAttempts, res.ExitCode, output)
+	return fmt.Errorf("exec action %s failed (%s, exit=%d): %s", spec.handler.Name, label, res.ExitCode, output)
 }
 
 func logExecFailure(spec *execInvocationSpec, attempt int, res ExecResult, terminal bool, duration time.Duration, resultLabel, output string, attemptErr error) {
@@ -560,8 +603,8 @@ func (m *Manager) recordExecFailureStatus(spec *execInvocationSpec, attempt, exi
 			binding.terminalFailed = true
 			clearSensitiveInputLocked(spec.state, spec.handler.Name)
 			setBindingStatus(binding, apiv1alpha2.ActionFailed, attemptErr.Error())
-		case attempt < spec.maxAttempts:
-			setBindingStatus(binding, apiv1alpha2.ActionApplying, fmt.Sprintf("exec attempt %d/%d failed (exit=%d), retrying", attempt, spec.maxAttempts, exitCode))
+		case spec.maxAttempts == 0 || attempt < spec.maxAttempts:
+			setBindingStatus(binding, apiv1alpha2.ActionApplying, fmt.Sprintf("exec %s failed (exit=%d), retrying", spec.attemptLabel(attempt), exitCode))
 		default:
 			setBindingStatus(binding, apiv1alpha2.ActionFailed, attemptErr.Error())
 		}

@@ -194,7 +194,7 @@ const (
 // ExecActionHandler declares a Fastlet-local command template executed directly
 // via execve without invoking a shell. Binding input is piped to stdin,
 // checkpoint restores and Fastlet recoveries skip re-execution, and exhausting
-// maxRetries fails the Sandbox.
+// the retry limit or runtime-init time budget fails the Sandbox.
 type ExecActionHandler struct {
 	// Command is the argv template executed directly via execve.
 	// +kubebuilder:validation:MinItems=1
@@ -207,7 +207,7 @@ type ExecActionHandler struct {
 	// +kubebuilder:validation:Maximum=300
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 
-	// MaxRetries limits retries after the initial attempt.
+	// MaxRetries limits retries after the initial attempt; for runtime-init, positive values instead derive a total time budget from the original attempts and backoff, with retry waits capped at 100ms.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	MaxRetries int32 `json:"maxRetries,omitempty"`

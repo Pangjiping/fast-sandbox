@@ -32,12 +32,12 @@ func TestCreateSandboxExecActionFailSandboxWakesWaiterWithActionFailed(t *testin
 		Name:  "runtime-init",
 		Hooks: []apiv1alpha2.LifecycleHook{apiv1alpha2.LifecycleHookDataPlaneReady},
 		Exec: &apiv1alpha2.ExecActionHandler{
-			MaxRetries: 2,
-			Command:    []string{"/usr/bin/curl", "http://{{.Attachment.Network.IP}}:44772/internal/init"},
+			TimeoutSeconds: 1,
+			MaxRetries:     1,
+			Command:        []string{"/usr/bin/curl", "http://{{.Attachment.Network.IP}}:44772/internal/init"},
 		},
 	}}, nil)
 	require.NoError(t, err)
-	actionManager.SetExecBackoff(time.Millisecond, 2*time.Millisecond)
 	actionManager.SetExecRunner(stubExecRunner{
 		fn: func(_ context.Context, _ fastletaction.ExecRequest) fastletaction.ExecResult {
 			return fastletaction.ExecResult{ExitCode: 22, Stdout: `{"error":"bad init"}`, Err: errors.New("exit status 22")}
@@ -49,7 +49,7 @@ func TestCreateSandboxExecActionFailSandboxWakesWaiterWithActionFailed(t *testin
 	})
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, createErr := manager.CreateSandbox(ctx, &fastletapi.CreateSandboxRequest{
 		RequestID:      "req-fail-sandbox",
@@ -69,7 +69,7 @@ func TestCreateSandboxExecActionFailSandboxWakesWaiterWithActionFailed(t *testin
 	require.ErrorAs(t, createErr, &failure)
 	require.Equal(t, fastletapi.ErrorActionFailed, failure.Code)
 	require.False(t, failure.Retryable)
-	require.Contains(t, failure.Message, "bad init")
+	require.Contains(t, failure.Message, "retry budget exhausted after 2.05s")
 
 	// Verify cleanup transitions to RuntimeFailed after DeleteSandbox finishes.
 	require.Eventually(t, func() bool {

@@ -243,6 +243,7 @@ func TestExecActionTimingSummary(t *testing.T) {
 				var logs []string
 				klog.SetLogger(funcr.NewJSON(func(line string) { logs = append(logs, line) }, funcr.Options{}))
 				handler := runtimeInitHandler()
+				handler.Name = "custom-init"
 				handler.Exec.MaxRetries = 2
 				manager, err := NewManager([]apiv1alpha2.ActionHandler{handler}, nil)
 				require.NoError(t, err)
@@ -285,7 +286,7 @@ func TestExecActionTimingSummary(t *testing.T) {
 					}
 					summaries++
 					require.Equal(t, "sb-timing", fields["sandboxUID"])
-					require.Equal(t, "runtime-init", fields["handler"])
+					require.Equal(t, handler.Name, fields["handler"])
 					require.Equal(t, tc.outcome, fields["outcome"])
 					require.Equal(t, float64(tc.attempts), fields["attempts"])
 					require.Equal(t, float64(tc.execution), fields["execDurationMs"])
@@ -299,6 +300,133 @@ func TestExecActionTimingSummary(t *testing.T) {
 	}
 }
 
+func TestRuntimeInitRetryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		handler    string
+		retries    int32
+		timeout    int32
+		readyAfter time.Duration
+		runTime    time.Duration
+		firstRun   time.Duration
+		cancelAt   time.Duration
+		attempts   int
+		elapsed    time.Duration
+		wantError  string
+	}{
+		{name: "immediate success", retries: 10, timeout: 15, attempts: 1},
+		{name: "short capped waits", retries: 10, timeout: 15, readyAfter: 325 * time.Millisecond, attempts: 5, elapsed: 350 * time.Millisecond},
+		{name: "slow boot exceeds old attempt count", retries: 10, timeout: 15, readyAfter: 5 * time.Second, attempts: 52, elapsed: 5050 * time.Millisecond},
+		{name: "ready near old worst case ceiling", retries: 10, timeout: 15, readyAfter: 170 * time.Second, attempts: 1702, elapsed: 170050 * time.Millisecond},
+		{name: "default budget expires", retries: 10, timeout: 15, readyAfter: 172 * time.Second, attempts: 1716, elapsed: 171550 * time.Millisecond, wantError: "retry budget exhausted after 2m51.55s"},
+		{name: "budget expires during wait", retries: 1, timeout: 1, readyAfter: 3 * time.Second, attempts: 21, elapsed: 2050 * time.Millisecond, wantError: "retry budget exhausted after 2.05s"},
+		{name: "budget clips inflight execution", retries: 1, timeout: 1, readyAfter: 3 * time.Second, runTime: 700 * time.Millisecond, attempts: 3, elapsed: 2050 * time.Millisecond, wantError: "retry budget exhausted after 2.05s"},
+		{name: "single attempt timeout still retries", retries: 10, timeout: 15, firstRun: 20 * time.Second, runTime: 10 * time.Millisecond, attempts: 2, elapsed: 15060 * time.Millisecond},
+		{name: "zero retries remains one attempt", timeout: 15, readyAfter: time.Second, attempts: 1, wantError: "exit=7"},
+		{name: "other handler retains exponential waits", handler: "custom-init", retries: 10, timeout: 15, readyAfter: 10 * time.Second, attempts: 11, elapsed: 6550 * time.Millisecond, wantError: "attempt 11/11"},
+		{name: "caller cancels during wait", retries: 10, timeout: 15, readyAfter: time.Second, cancelAt: 35 * time.Millisecond, attempts: 1, elapsed: 35 * time.Millisecond},
+		{name: "caller cancels during execution", retries: 10, timeout: 15, runTime: 10 * time.Millisecond, cancelAt: 5 * time.Millisecond, attempts: 1, elapsed: 5 * time.Millisecond},
+		{name: "caller already canceled", retries: 10, timeout: 15, cancelAt: -time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				logging := klog.CaptureState()
+				defer logging.Restore()
+				var logs []string
+				klog.SetLogger(funcr.NewJSON(func(line string) { logs = append(logs, line) }, funcr.Options{}))
+				handler := runtimeInitHandler()
+				if tc.handler != "" {
+					handler.Name = tc.handler
+				}
+				handler.Exec.MaxRetries = tc.retries
+				handler.Exec.TimeoutSeconds = tc.timeout
+				manager, err := NewManager([]apiv1alpha2.ActionHandler{handler}, nil)
+				require.NoError(t, err)
+				started := time.Now()
+				var starts []time.Duration
+				forceSuccess := false
+				runner := &recordingExecRunner{fn: func(ctx context.Context, attempt int, _ ExecRequest) ExecResult {
+					starts = append(starts, time.Since(started))
+					if forceSuccess {
+						return ExecResult{}
+					}
+					duration := tc.runTime
+					if attempt == 1 && tc.firstRun > 0 {
+						duration = tc.firstRun
+					}
+					if duration > 0 {
+						select {
+						case <-ctx.Done():
+							return ExecResult{ExitCode: -1, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Err: ctx.Err()}
+						case <-time.After(duration):
+						}
+					}
+					if time.Since(started) < tc.readyAfter {
+						return ExecResult{ExitCode: 7, Err: errors.New("private-error"), Stdout: "private-output", Stderr: "private-output"}
+					}
+					return ExecResult{}
+				}}
+				manager.SetExecRunner(runner)
+				var failures []string
+				manager.SetTerminalFailureCallback(func(_ string, _ Attachment, _ string, message string) {
+					failures = append(failures, message)
+				})
+				att := attachment("sb-budget")
+				desired := []DesiredInput{{Handler: handler.Name, Input: "private-input", SensitiveInput: "private-header"}}
+				_, _, err = manager.Reconcile(context.Background(), att, 1, desired)
+				require.NoError(t, err)
+				ctx := context.Background()
+				if tc.cancelAt != 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.cancelAt)
+					defer cancel()
+				}
+				state := manager.getState(att.SandboxUID)
+				checkpoint := HookCheckpoint{Name: actionapi.LifecycleHookDataPlaneReady, Sequence: 1}
+				err = manager.invokeExecHook(ctx, state, handler, 1, att, checkpoint)
+				synctest.Wait()
+				require.Equal(t, tc.elapsed, time.Since(started))
+				require.Equal(t, tc.attempts, runner.count())
+				if tc.name == "short capped waits" {
+					require.Equal(t, []time.Duration{0, 50 * time.Millisecond, 150 * time.Millisecond, 250 * time.Millisecond, 350 * time.Millisecond}, starts)
+				}
+				binding := state.bindings[handler.Name]
+				switch {
+				case tc.cancelAt != 0:
+					require.ErrorIs(t, err, context.DeadlineExceeded)
+					require.Empty(t, failures)
+					require.False(t, binding.terminalFailed)
+					require.Equal(t, "private-header", binding.sensitiveInput)
+					forceSuccess = true
+					require.NoError(t, manager.invokeExecHook(context.Background(), state, handler, 1, att, checkpoint))
+					synctest.Wait()
+					require.Empty(t, binding.sensitiveInput)
+				case tc.wantError != "":
+					require.ErrorContains(t, err, tc.wantError)
+					require.Len(t, failures, 1)
+					require.NotContains(t, failures[0], "private-")
+					require.True(t, binding.terminalFailed)
+					require.Empty(t, binding.sensitiveInput)
+					require.Empty(t, state.desired[0].SensitiveInput)
+					require.Equal(t, string(apiv1alpha2.ActionFailed), binding.status.State)
+					_, _, err = manager.Reconcile(context.Background(), att, 1, desired)
+					require.Error(t, err)
+					require.Equal(t, tc.attempts, runner.count())
+					require.Len(t, failures, 1)
+				default:
+					require.NoError(t, err)
+					require.Empty(t, failures)
+					require.Empty(t, binding.sensitiveInput)
+					require.Equal(t, string(apiv1alpha2.ActionReady), binding.status.State)
+				}
+				for _, line := range logs {
+					require.NotContains(t, line, "private-")
+				}
+			})
+		})
+	}
+}
+
 func TestExecActionExhaustedRetriesFailSandboxTriggersCallback(t *testing.T) {
 	execRunner := &recordingExecRunner{
 		fn: func(_ context.Context, _ int, _ ExecRequest) ExecResult {
@@ -306,6 +434,7 @@ func TestExecActionExhaustedRetriesFailSandboxTriggersCallback(t *testing.T) {
 		},
 	}
 	handler := runtimeInitHandler()
+	handler.Name = "custom-init"
 	handler.Exec.MaxRetries = 1
 	manager, err := NewManager([]apiv1alpha2.ActionHandler{handler}, nil)
 	require.NoError(t, err)
@@ -318,7 +447,7 @@ func TestExecActionExhaustedRetriesFailSandboxTriggersCallback(t *testing.T) {
 	})
 
 	att := attachment("sb-fail-22")
-	_, _, err = manager.Reconcile(context.Background(), att, 1, []DesiredInput{{Handler: "runtime-init", Input: `{}`}})
+	_, _, err = manager.Reconcile(context.Background(), att, 1, []DesiredInput{{Handler: handler.Name, Input: `{}`}})
 	require.NoError(t, err)
 	err = manager.ReachHook(context.Background(), att.SandboxUID, att, actionapi.LifecycleHookDataPlaneReady, 1)
 	require.ErrorContains(t, err, "exit=22")
@@ -326,14 +455,14 @@ func TestExecActionExhaustedRetriesFailSandboxTriggersCallback(t *testing.T) {
 
 	select {
 	case msg := <-failCh:
-		require.Contains(t, msg, "sb-fail-22:runtime-init:")
+		require.Contains(t, msg, "sb-fail-22:custom-init:")
 		require.Contains(t, msg, "invalid token hash")
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected FailSandbox terminal failure callback")
 	}
 
 	// Subsequent converge must not re-run a terminally failed exec binding.
-	_, _, err = manager.Reconcile(context.Background(), att, 1, []DesiredInput{{Handler: "runtime-init", Input: `{}`}})
+	_, _, err = manager.Reconcile(context.Background(), att, 1, []DesiredInput{{Handler: handler.Name, Input: `{}`}})
 	require.Error(t, err)
 	require.Equal(t, 2, execRunner.count())
 }
