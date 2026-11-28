@@ -318,6 +318,7 @@ type execInvocationSpec struct {
 	hasSensitive bool
 	timeout      time.Duration
 	maxAttempts  int
+	execution    time.Duration
 }
 
 func (m *Manager) runExecAction(
@@ -331,7 +332,8 @@ func (m *Manager) runExecAction(
 	input string,
 	sensitiveInput string,
 	argvTemplate []string,
-) error {
+) (resultErr error) {
+	started := time.Now()
 	cfg := handler.Exec
 	sensitiveFile := ""
 	if sensitiveInput != "" || argvUsesSensitive(argvTemplate) {
@@ -356,11 +358,31 @@ func (m *Manager) runExecAction(
 		timeout: effectiveExecTimeout(cfg), maxAttempts: maxAttempts,
 	}
 	backoff, maxBackoff := m.execBackoffBounds()
+	preparation := time.Since(started)
+	var retryWait time.Duration
+	attempts := 0
+	defer func() {
+		outcome := execResultSuccess
+		if resultErr != nil {
+			outcome = execResultError
+			if ctx.Err() != nil {
+				outcome = "canceled"
+			}
+		}
+		klog.InfoS("fastlet action exec finished",
+			"sandboxUID", attachment.SandboxUID, "namespace", attachment.Namespace, "sandboxName", attachment.SandboxName,
+			"handler", handler.Name, "op", op, "hook", hookName, "attempts", attempts,
+			"totalDurationMs", time.Since(started).Milliseconds(), "preparationDurationMs", preparation.Milliseconds(),
+			"execDurationMs", spec.execution.Milliseconds(), "backoffDurationMs", retryWait.Milliseconds(), "outcome", outcome)
+	}()
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			if err := sleepWithContext(ctx, backoff); err != nil {
+			waitStarted := time.Now()
+			err := sleepWithContext(ctx, backoff)
+			retryWait += time.Since(waitStarted)
+			if err != nil {
 				return err
 			}
 			backoff = min(backoff*2, maxBackoff)
@@ -368,6 +390,7 @@ func (m *Manager) runExecAction(
 			return ctx.Err()
 		}
 
+		attempts = attempt
 		attemptErr, stop := m.runExecAttempt(ctx, &spec, attempt)
 		if attemptErr == nil {
 			return nil
@@ -417,6 +440,7 @@ func (m *Manager) runExecAttempt(ctx context.Context, spec *execInvocationSpec, 
 		Stdin:   spec.stdin,
 	})
 	duration := time.Since(started)
+	spec.execution += duration
 	cancel()
 
 	if res.Err == nil {

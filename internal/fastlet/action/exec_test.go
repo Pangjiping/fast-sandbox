@@ -2,15 +2,19 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
+	"k8s.io/klog/v2"
 
 	apiv1alpha2 "fast-sandbox/api/v1alpha2"
 	actionapi "fast-sandbox/internal/protocol/action"
@@ -213,6 +217,86 @@ func TestExecActionRetriesUntilSuccess(t *testing.T) {
 	require.NoError(t, manager.ReachHook(context.Background(), att.SandboxUID, att, actionapi.LifecycleHookDataPlaneReady, 1))
 
 	require.Equal(t, 3, execRunner.count())
+}
+
+func TestExecActionTimingSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failures  int
+		deadline  time.Duration
+		attempts  int
+		execution int
+		backoff   int
+		outcome   string
+	}{
+		{name: "first success", attempts: 1, execution: 10, outcome: "success"},
+		{name: "retried success", failures: 2, attempts: 3, execution: 30, backoff: 150, outcome: "success"},
+		{name: "exhausted", failures: 3, attempts: 3, execution: 30, backoff: 150, outcome: "error"},
+		{name: "canceled during wait", failures: 3, deadline: 35 * time.Millisecond, attempts: 1, execution: 10, backoff: 25, outcome: "canceled"},
+		{name: "canceled during exec", failures: 3, deadline: 5 * time.Millisecond, attempts: 1, execution: 5, outcome: "canceled"},
+		{name: "already canceled", deadline: -time.Millisecond, outcome: "canceled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				logging := klog.CaptureState()
+				defer logging.Restore()
+				var logs []string
+				klog.SetLogger(funcr.NewJSON(func(line string) { logs = append(logs, line) }, funcr.Options{}))
+				handler := runtimeInitHandler()
+				handler.Exec.MaxRetries = 2
+				manager, err := NewManager([]apiv1alpha2.ActionHandler{handler}, nil)
+				require.NoError(t, err)
+				runner := &recordingExecRunner{fn: func(ctx context.Context, attempt int, _ ExecRequest) ExecResult {
+					select {
+					case <-ctx.Done():
+						return ExecResult{Err: ctx.Err(), ExitCode: -1}
+					case <-time.After(10 * time.Millisecond):
+					}
+					if attempt <= tc.failures {
+						return ExecResult{ExitCode: 7, Err: errors.New("exit status 7"), Stdout: "private-output", Stderr: "private-output"}
+					}
+					return ExecResult{Stdout: "private-output"}
+				}}
+				manager.SetExecRunner(runner)
+				ctx := context.Background()
+				if tc.deadline != 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+					defer cancel()
+				}
+				err = manager.runExecAction(ctx, nil, handler, execOpApply, string(actionapi.LifecycleHookDataPlaneReady),
+					1, attachment("sb-timing"), "private-input", "private-header", []string{"private-argv"})
+				if tc.outcome == "success" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+				if tc.outcome == "canceled" {
+					require.ErrorIs(t, err, context.DeadlineExceeded)
+				}
+				require.Equal(t, tc.attempts, runner.count())
+				summaries := 0
+				for _, line := range logs {
+					require.NotContains(t, line, "private-")
+					var fields map[string]any
+					require.NoError(t, json.Unmarshal([]byte(line), &fields))
+					if fields["msg"] != "fastlet action exec finished" {
+						continue
+					}
+					summaries++
+					require.Equal(t, "sb-timing", fields["sandboxUID"])
+					require.Equal(t, "runtime-init", fields["handler"])
+					require.Equal(t, tc.outcome, fields["outcome"])
+					require.Equal(t, float64(tc.attempts), fields["attempts"])
+					require.Equal(t, float64(tc.execution), fields["execDurationMs"])
+					require.Equal(t, float64(tc.backoff), fields["backoffDurationMs"])
+					require.Equal(t, float64(0), fields["preparationDurationMs"])
+					require.Equal(t, float64(tc.execution+tc.backoff), fields["totalDurationMs"])
+				}
+				require.Equal(t, 1, summaries)
+			})
+		})
+	}
 }
 
 func TestExecActionExhaustedRetriesFailSandboxTriggersCallback(t *testing.T) {
